@@ -42,7 +42,6 @@ futures-timer = "3.0.2"
 
 # Internal dependencies
 plaza-core = { path = "common", package = "plaza-core", default-features = true }
-river = { path = "cli", package = "river" }
 
 # Freenet dependencies
 freenet-scaffold = "0.2.2"
