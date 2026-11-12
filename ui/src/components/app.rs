@@ -81,6 +81,10 @@ pub static READ_ONLY_BOARDS: GlobalSignal<
 /// Read-only fetches in flight.
 pub static READ_ONLY_FETCHES: GlobalSignal<std::collections::HashSet<VerifyingKey>> =
     Global::new(std::collections::HashSet::new);
+
+/// Boards whose read-only fetch came back empty or undecodable.
+pub static READ_ONLY_UNAVAILABLE: GlobalSignal<std::collections::HashSet<VerifyingKey>> =
+    Global::new(std::collections::HashSet::new);
 pub static CURRENT_BOARD: GlobalSignal<CurrentBoard> =
     Global::new(|| CurrentBoard { owner_key: None });
 pub static MEMBER_INFO_MODAL: GlobalSignal<MemberInfoModalSignal> =
@@ -373,6 +377,11 @@ fn WaitingForBoard(board_id: String) -> Element {
         parsed.and_then(|key| crate::components::app::READ_ONLY_BOARDS.read().get(&key).cloned())
     });
     let mut requested = use_signal(|| false);
+    let unavailable = use_memo(move || {
+        parsed
+            .map(|key| crate::components::app::READ_ONLY_UNAVAILABLE.read().contains(&key))
+            .unwrap_or(false)
+    });
 
     use_effect(move || {
         if *ready.read() {
@@ -397,7 +406,11 @@ fn WaitingForBoard(board_id: String) -> Element {
             if boards_loaded {
                 p { class: "text-xl text-text-muted mb-2", "Board not found" }
                 p { class: "text-text-muted mb-6 text-sm",
-                    "This board is not stored on this device. You can open it read-only, or open the invitation link again if you have one."
+                    if *unavailable.read() {
+                        "The network does not have this board either. Check the link, or open the invitation again."
+                    } else {
+                        "This board is not stored on this device. You can open it read-only, or open the invitation link again if you have one."
+                    }
                 }
             } else {
                 p { class: "text-xl text-text-muted mb-2", "Loading board…" }
@@ -416,11 +429,15 @@ fn WaitingForBoard(board_id: String) -> Element {
                     },
                     "Go to Home"
                 }
-                if boards_loaded {
+                if boards_loaded && !*unavailable.read() {
                     button {
                         r#type: "button",
                         class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white rounded-lg transition-colors inline-block disabled:opacity-50",
-                        disabled: *requested.read(),
+                        disabled: *requested.read()
+                            || crate::components::app::READ_ONLY_FETCHES
+                                .read()
+                                .iter()
+                                .any(|key| Some(*key) == parsed),
                         onclick: move |_| {
                             if let Some(key) = parsed {
                                 requested.set(true);

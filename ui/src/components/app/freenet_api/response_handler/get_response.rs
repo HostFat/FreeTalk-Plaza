@@ -38,17 +38,27 @@ pub async fn handle_get_response(
     let read_only_requests: Vec<VerifyingKey> = READ_ONLY_FETCHES.read().iter().copied().collect();
     for owner_vk in read_only_requests {
         if owner_vk_to_contract_key(&owner_vk).id() == key.id() {
-            match ciborium::de::from_reader::<ChatBoardStateV1, _>(&state[..]) {
-                Ok(decoded) => {
+            let decoded = if state.is_empty() {
+                None
+            } else {
+                ciborium::de::from_reader::<ChatBoardStateV1, _>(&state[..]).ok()
+            };
+            match decoded {
+                Some(decoded) => {
                     READ_ONLY_BOARDS.with_mut(|boards| {
                         boards.insert(owner_vk, decoded);
                     });
-                    READ_ONLY_FETCHES.with_mut(|pending| {
-                        pending.remove(&owner_vk);
+                }
+                None => {
+                    warn!("Read-only board {:?} is not available", MemberId::from(owner_vk));
+                    crate::components::app::READ_ONLY_UNAVAILABLE.with_mut(|failed| {
+                        failed.insert(owner_vk);
                     });
                 }
-                Err(e) => warn!("Read-only state decode failed: {}", e),
             }
+            READ_ONLY_FETCHES.with_mut(|pending| {
+                pending.remove(&owner_vk);
+            });
             return Ok(());
         }
     }
