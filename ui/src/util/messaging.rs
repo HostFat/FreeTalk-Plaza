@@ -8,6 +8,7 @@ use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::ReadableExt;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
+use plaza_core::board_state::admin::{AdminsDelta, AuthorizedAdminRevocation};
 use plaza_core::board_state::content::{
     CategoryContentV1, ReplyContentV1, TextContentV1, CATEGORY_CONTENT_VERSION,
     CONTENT_TYPE_CATEGORY, CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT, REPLY_CONTENT_VERSION,
@@ -250,6 +251,65 @@ pub async fn send_message(
             }
         }
     });
+}
+
+/// Remove an admin's rights.
+///
+/// Only the board owner can do this: the revocation is signed with the owner's
+/// key and is permanent for that member.
+pub async fn revoke_admin(member_id: MemberId) -> Result<(), String> {
+    use crate::components::app::CURRENT_BOARD;
+
+    let (current_board, owner_sk, board_state_clone) = {
+        let current_board_read = CURRENT_BOARD.read();
+        let boards_read = BOARDS.read();
+
+        let current_board = current_board_read
+            .owner_key
+            .ok_or("No board selected")?;
+        let board_data = boards_read
+            .map
+            .get(&current_board)
+            .ok_or("Board not found")?;
+
+        let self_id = MemberId::from(&board_data.self_sk.verifying_key());
+        if self_id != MemberId::from(current_board) {
+            return Err("Only the board owner can remove an admin".to_string());
+        }
+
+        (
+            current_board,
+            board_data.self_sk.clone(),
+            board_data.board_state.clone(),
+        )
+    };
+
+    let revocation = AuthorizedAdminRevocation::new(member_id, &owner_sk);
+    let delta = ChatBoardStateV1Delta {
+        admin: Some(AdminsDelta::revocation(vec![revocation])),
+        ..Default::default()
+    };
+
+    let mut apply_error: Option<String> = None;
+    BOARDS.with_mut(|boards| {
+        if let Some(board_data) = boards.map.get_mut(&current_board) {
+            match board_data.board_state.apply_delta(
+                &board_state_clone,
+                &ChatBoardParametersV1 {
+                    owner: current_board,
+                },
+                &Some(delta),
+            ) {
+                Ok(_) => mark_needs_sync(current_board),
+                Err(e) => apply_error = Some(e),
+            }
+        }
+    });
+
+    match apply_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// Send a category message to the current board.

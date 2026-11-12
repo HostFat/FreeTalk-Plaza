@@ -151,6 +151,10 @@ impl ChatBoardStateV1 {
         bans.enforce_cap(self, parameters);
         self.bans = bans;
 
+        // 5c. Revocations win over admin records, so drop any admin the owner
+        // has revoked. Running it here keeps merged states normalized.
+        self.admin.prune_revoked();
+
         // 6. Re-sort for deterministic ordering
         self.members.members.sort_by_key(|m| m.member.id());
         self.member_info

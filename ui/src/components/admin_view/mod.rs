@@ -8,6 +8,7 @@ use crate::board_data::BoardData;
 use crate::components::app::{BOARDS, CURRENT_BOARD, EDIT_BOARD_MODAL};
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
+use wasm_bindgen_futures::spawn_local;
 
 #[component]
 pub fn AdminView() -> Element {
@@ -20,6 +21,7 @@ pub fn AdminView() -> Element {
     });
 
     let mut show_add_admin_modal = use_signal(|| false);
+    let mut admin_error = use_signal(|| None::<String>);
 
     // Check if current user is the owner
     let is_owner = use_memo(move || {
@@ -106,6 +108,12 @@ pub fn AdminView() -> Element {
             div { class: "mb-6",
                 h2 { class: "text-lg font-semibold text-text mb-3", "Current Admins" }
 
+                if let Some(err) = admin_error.read().as_ref() {
+                    div { class: "bg-red-500/10 border border-red-500/30 rounded-lg p-3 mb-3 text-red-300 text-sm",
+                        "{err}"
+                    }
+                }
+
                 if admins.read().is_empty() {
                     div { class: "bg-surface rounded-lg p-4 text-text-muted",
                         "No admins have been added yet. The board owner has full admin privileges by default."
@@ -113,14 +121,39 @@ pub fn AdminView() -> Element {
                 } else {
                     div { class: "space-y-2",
                         for admin in admins.read().iter() {
+                            {
+                            let member_id = admin.admin.member_id;
+                            let nickname = get_nickname(member_id);
+                            let initial = nickname.chars().next().unwrap_or('?').to_string();
+                            rsx! {
                             div { class: "bg-surface rounded-lg p-3 flex items-center gap-3",
                                 div { class: "w-8 h-8 bg-accent/20 rounded-full flex items-center justify-center text-accent text-sm",
-                                    {get_nickname(admin.admin.member_id).chars().next().unwrap_or('?').to_string()}
+                                    "{initial}"
                                 }
-                                div {
-                                    p { class: "text-text font-medium", "{get_nickname(admin.admin.member_id)}" }
-                                    p { class: "text-text-muted text-xs", "{admin.admin.member_id}" }
+                                div { class: "flex-1",
+                                    p { class: "text-text font-medium", "{nickname}" }
+                                    p { class: "text-text-muted text-xs", "{member_id}" }
                                 }
+                                if *is_owner.read() {
+                                    button {
+                                        r#type: "button",
+                                        class: "px-3 py-1.5 text-xs text-red-400 hover:bg-red-500/10 rounded-lg transition-colors",
+                                        onclick: move |_| {
+                                            spawn_local(async move {
+                                                if let Err(e) =
+                                                    crate::util::messaging::revoke_admin(member_id).await
+                                                {
+                                                    admin_error.set(Some(e));
+                                                } else {
+                                                    admin_error.set(None);
+                                                }
+                                            });
+                                        },
+                                        "Remove"
+                                    }
+                                }
+                            }
+                            }
                             }
                         }
                     }

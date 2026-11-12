@@ -147,10 +147,9 @@ pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
                         div { class: "flex items-start gap-3",
                             span { class: "text-amber-500 text-xl", "⚠" }
                             div {
-                                p { class: "text-amber-200 font-semibold", "Admins cannot be removed" }
+                                p { class: "text-amber-200 font-semibold", "Admins get board-wide powers" }
                                 p { class: "text-amber-200/80 text-sm mt-1",
-                                    "Once a member is made an admin, this action cannot be undone. "
-                                    "Please carefully consider before adding someone as an admin."
+                                    "Admins can create and edit categories, moderate posts and manage bans. The owner can remove an admin later; the removal is signed by the owner and is permanent for that member."
                                 }
                             }
                         }
