@@ -1450,6 +1450,12 @@ pub fn MessageCard(
     max_title_size: usize,
     /// Maximum message length (from board configuration)
     max_message_size: usize,
+    /// Number of direct replies, shown as a summary in the post list
+    #[props(default)]
+    reply_count: usize,
+    /// Last reply author and local time, shown next to the count
+    #[props(default)]
+    last_reply: Option<(String, String)>,
 ) -> Element {
     let msg = message.clone();
     let is_self = msg.is_self;
@@ -1714,6 +1720,22 @@ pub fn MessageCard(
                             on_edit: on_edit.clone(),
                             on_request_delete: on_request_delete.clone(),
                             size: size,
+                        }
+
+                        // Reply summary for the post list
+                        if reply_count > 0 || last_reply.is_some() {
+                            div { class: "px-6 py-2 border-t border-border bg-surface/20 flex flex-wrap items-center gap-2 text-xs text-text-muted",
+                                span {
+                                    if reply_count == 1 {
+                                        "1 reply"
+                                    } else {
+                                        "{reply_count} replies"
+                                    }
+                                }
+                                if let Some((author, time)) = last_reply.clone() {
+                                    span { "· last reply {time} by {author}" }
+                                }
+                            }
                         }
                     }
 

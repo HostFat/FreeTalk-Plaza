@@ -32,6 +32,23 @@ pub fn PostInput(
         }
     });
 
+    // Other pages can ask the shared composer to open, for example the
+    // "New post" button inside a category.
+    let default_reply_for_request = default_reply_to.clone();
+    let mut last_compose_request = use_signal(|| *crate::components::app::COMPOSE_REQUEST.read());
+    use_effect(move || {
+        let request = *crate::components::app::COMPOSE_REQUEST.read();
+        if request != *last_compose_request.read() {
+            last_compose_request.set(request);
+            if replying_to.peek().is_none() {
+                if let Some(default) = default_reply_for_request.clone() {
+                    replying_to.set(Some(default));
+                }
+            }
+            show_modal.set(true);
+        }
+    });
+
     // Handler for opening the modal via Compose button
     let open_modal = {
         let default_reply = default_reply_to.clone();

@@ -6,10 +6,12 @@ use crate::components::conversation::{
     get_all_messages, get_category_posts, get_subcategories, get_top_level_categories,
     get_top_level_posts, MessageCard, MessageCardVariant, MessageData,
 };
+use crate::util::format_utc_as_local_time;
 use crate::util::message_actions::{self, ActionContext};
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
+use std::collections::HashMap;
 use wasm_bindgen_futures::spawn_local;
 
 /// Breadcrumb item for category navigation
@@ -87,6 +89,37 @@ fn get_content(
     let categories = get_top_level_categories(all_messages);
     let posts = get_top_level_posts(all_messages);
     (categories, posts)
+}
+
+/// Count every reply below `id` and find the newest one.
+fn thread_stats(
+    id: &MessageId,
+    children: &HashMap<MessageId, Vec<&MessageData>>,
+) -> (usize, Option<(String, String)>) {
+    let mut count = 0usize;
+    let mut latest: Option<(String, String, i64)> = None;
+    let mut stack: Vec<&MessageId> = vec![id];
+    while let Some(parent) = stack.pop() {
+        let Some(replies) = children.get(parent) else {
+            continue;
+        };
+        for reply in replies {
+            count += 1;
+            let timestamp = reply.time.timestamp_millis();
+            if latest
+                .as_ref()
+                .map_or(true, |(_, _, newest)| timestamp > *newest)
+            {
+                latest = Some((
+                    reply.author_name.clone(),
+                    format_utc_as_local_time(timestamp),
+                    timestamp,
+                ));
+            }
+            stack.push(&reply.message_id);
+        }
+    }
+    (count, latest.map(|(author, time, _)| (author, time)))
 }
 
 #[component]
@@ -314,6 +347,18 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                         p { class: "text-text-muted mt-1", "{desc}" }
                                                     }
                                                 }
+                                                if !category_is_locked {
+                                                    button {
+                                                        r#type: "button",
+                                                        class: "flex-shrink-0 flex items-center gap-2 px-4 py-2 bg-accent hover:bg-accent/80 text-white text-sm font-medium rounded-lg transition-colors",
+                                                        title: "Write a new post in this category",
+                                                        onclick: move |_| {
+                                                            *crate::components::app::COMPOSE_REQUEST.write() += 1;
+                                                        },
+                                                        span { "✏️" }
+                                                        span { "New post" }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -355,6 +400,29 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
 
                             let has_categories = !categories.is_empty();
                             let has_posts = !posts.is_empty();
+
+                            // Whole-thread reply count and latest reply per post,
+                            // so the list can show activity without opening it.
+                            let post_stats: HashMap<MessageId, (usize, Option<(String, String)>)> = {
+                                let mut children: HashMap<MessageId, Vec<&MessageData>> =
+                                    HashMap::new();
+                                for message in &all_messages {
+                                    if let Some(parent) = message.reply_to_message_id.as_ref() {
+                                        children
+                                            .entry(parent.clone())
+                                            .or_default()
+                                            .push(message);
+                                    }
+                                }
+                                posts.iter()
+                                    .map(|post| {
+                                        (
+                                            post.message_id.clone(),
+                                            thread_stats(&post.message_id, &children),
+                                        )
+                                    })
+                                    .collect()
+                            };
 
                             if let Some((self_member_id, max_title_size, max_message_size, is_owner, is_admin)) = board_info {
                                 if !has_categories && !has_posts {
@@ -427,6 +495,8 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                         let nav = navigator();
                                                         let handle_toggle_reaction = handle_toggle_reaction.clone();
                                                         let handle_edit_message = handle_edit_message.clone();
+                                                        let (reply_count, last_reply) =
+                                                            post_stats.get(&post.message_id).cloned().unwrap_or_default();
                                                         rsx! {
                                                             div { key: "{post_id}",
                                                                 MessageCard {
@@ -437,6 +507,8 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                     show_replies: false,
                                                                     max_title_size: max_title_size,
                                                                     max_message_size: max_message_size,
+                                                                    reply_count: reply_count,
+                                                                    last_reply: last_reply,
                                                                     on_click: move |_| {
                                                                         nav.push(Route::Post {
                                                                             board_id: board_id.clone(),

@@ -85,7 +85,9 @@ pub fn RolesSection() -> Element {
                     value: "{role_name}",
                     oninput: move |evt| role_name.set(evt.value()),
                 }
-                label { class: "flex items-center gap-2 text-sm text-text-muted",
+                label {
+                    class: "flex items-center gap-2 text-sm text-text-muted",
+                    title: "Members with this role can create invite links and assign roles to other members.",
                     input {
                         r#type: "checkbox",
                         checked: *role_manages.read(),
@@ -93,7 +95,9 @@ pub fn RolesSection() -> Element {
                     }
                     "can manage access"
                 }
-                label { class: "flex items-center gap-2 text-sm text-text-muted",
+                label {
+                    class: "flex items-center gap-2 text-sm text-text-muted",
+                    title: "Members with this role can send the keys of restricted categories to members who lack them, even when the owner is offline.",
                     input {
                         r#type: "checkbox",
                         checked: *role_distributes.read(),
@@ -148,7 +152,9 @@ pub fn RolesSection() -> Element {
                                         "{assigned.len()} members"
                                     }
                                     if is_owner {
-                                        label { class: "ml-auto flex items-center gap-1 text-xs text-text-muted",
+                                        label {
+                                            class: "ml-auto flex items-center gap-1 text-xs text-text-muted",
+                                            title: "Allow this role's members to distribute the keys of restricted categories to new members. The owner can always do it.",
                                             input {
                                                 r#type: "checkbox",
                                                 checked: distributes,
@@ -284,7 +290,9 @@ pub fn InviteLinksSection() -> Element {
                 value: "{link_max}",
                 oninput: move |evt| link_max.set(evt.value()),
             }
-            label { class: "flex items-center gap-2 text-sm text-text-muted w-full",
+            label {
+                class: "flex items-center gap-2 text-sm text-text-muted w-full",
+                title: "Put the keys of the restricted categories this role can read into the link itself. The new member can open them even if no key holder is online; anyone with the link can read them.",
                 input {
                     r#type: "checkbox",
                     checked: *link_includes_keys.read(),
@@ -336,6 +344,10 @@ pub fn InviteLinksSection() -> Element {
             }
         }
 
+        p { class: "text-text-muted text-xs mb-2",
+            "The full link is shown only right after you create it. The board stores the token, not the link: if you lose a link, revoke it and create a new one."
+        }
+
         if tokens.is_empty() {
             p { class: "text-text-muted text-sm", "No invite links yet." }
         } else {
@@ -343,6 +355,8 @@ pub fn InviteLinksSection() -> Element {
                 for token in tokens.iter() {
                     {
                         let token_id = token.id;
+                        let token_code = bs58::encode(token_id).into_string();
+                        let short_id = token_code.chars().take(8).collect::<String>();
                         let role_name = data.board_state.roles.role(&token.role_id)
                             .map(|r| r.name.clone())
                             .unwrap_or_else(|| "(role deleted)".to_string());
@@ -354,10 +368,14 @@ pub fn InviteLinksSection() -> Element {
                             .map(|m| m.to_string())
                             .unwrap_or_else(|| "∞".to_string());
                         rsx! {
-                            div { class: "bg-surface rounded-lg p-3 flex items-center gap-3",
+                            div {
+                                class: "bg-surface rounded-lg p-3 flex items-center gap-3",
+                                title: "Link {token_code}: the board stores only this token, not the URL with its signing key.",
                                 div { class: "flex-1",
                                     p { class: "text-text text-sm", "Role: {role_name}" }
-                                    p { class: "text-text-muted text-xs", "{uses} / {max_text} uses" }
+                                    p { class: "text-text-muted text-xs",
+                                        "Link #{short_id} · {uses} / {max_text} uses"
+                                    }
                                 }
                                 button {
                                     r#type: "button",

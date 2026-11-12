@@ -103,6 +103,10 @@ pub static NEEDS_SYNC: GlobalSignal<std::collections::HashSet<VerifyingKey>> =
 pub static CURRENT_CATEGORY: GlobalSignal<CurrentCategoryContext> =
     Global::new(|| CurrentCategoryContext::default());
 
+/// Bumped by "New post" buttons elsewhere in the app to open the shared
+/// composer in the top bar (which already knows the current category).
+pub static COMPOSE_REQUEST: GlobalSignal<u64> = Global::new(|| 0);
+
 /// Context for the currently viewed category
 #[derive(Clone, Default)]
 pub struct CurrentCategoryContext {

@@ -1,4 +1,4 @@
-mod ban_button;
+pub mod ban_button;
 mod invited_by_field;
 mod nickname_field;
 
@@ -279,7 +279,7 @@ pub fn MemberInfoModal() -> Element {
                                 rsx! {
                                     BanButton {
                                         member_to_ban: member_id,
-                                        is_downstream: is_downstream,
+                                        show_trigger: is_downstream,
                                         nickname: member_info.member_info.preferred_nickname.clone()
                                     }
                                     ""

@@ -7,6 +7,7 @@ use add_admin_modal::AddAdminModal;
 use crate::board_data::BoardData;
 use crate::components::access_section::{InviteLinksSection, RolesSection};
 use crate::components::app::{BOARDS, CURRENT_BOARD, EDIT_BOARD_MODAL};
+use crate::components::members::member_info_modal::ban_button::BanButton;
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
 use wasm_bindgen_futures::spawn_local;
@@ -46,6 +47,7 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
 
     let mut show_add_admin_modal = use_signal(|| false);
     let mut admin_error = use_signal(|| None::<String>);
+    let mut ban_index = use_signal(|| 0usize);
 
     // Check if current user is the owner
     let is_owner = use_memo(move || {
@@ -72,6 +74,44 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
             .read()
             .as_ref()
             .map(|board_data| board_data.board_state.bans.0.clone())
+            .unwrap_or_default()
+    });
+
+    // Members that can still be banned: everyone except the owner and the
+    // already-banned users.
+    let ban_candidates = use_memo(move || {
+        current_board_data
+            .read()
+            .as_ref()
+            .map(|board_data| {
+                let owner_id = MemberId::from(&board_data.owner_vk);
+                let banned: std::collections::HashSet<MemberId> = board_data
+                    .board_state
+                    .bans
+                    .0
+                    .iter()
+                    .map(|ban| ban.ban.banned_user)
+                    .collect();
+                board_data
+                    .board_state
+                    .members
+                    .members
+                    .iter()
+                    .map(|member| member.member.id())
+                    .filter(|id| *id != owner_id && !banned.contains(id))
+                    .map(|id| {
+                        let name = board_data
+                            .board_state
+                            .member_info
+                            .member_info
+                            .iter()
+                            .find(|info| info.member_info.member_id == id)
+                            .map(|info| info.member_info.preferred_nickname.to_string_lossy())
+                            .unwrap_or_else(|| format!("{id}"));
+                        (id, name)
+                    })
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default()
     });
 
@@ -247,6 +287,49 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                 }
             }
             } else if active == "bans" {
+                {
+                    let candidates = ban_candidates.read().clone();
+                    let selected = candidates
+                        .get(*ban_index.read())
+                        .cloned()
+                        .or_else(|| candidates.first().cloned());
+                    rsx! {
+                        div { class: "bg-surface rounded-lg p-3 mb-6",
+                            h2 { class: "text-lg font-semibold text-text mb-1", "Ban a member" }
+                            p { class: "text-text-muted text-sm mb-3",
+                                "Choose one of the members currently on this board. Banned members lose access immediately."
+                            }
+                            if candidates.is_empty() {
+                                p { class: "text-text-muted text-sm",
+                                    "No members are available to ban. The owner cannot be banned, and already-banned members are not listed."
+                                }
+                            } else {
+                                div { class: "flex flex-wrap items-center gap-2",
+                                    select {
+                                        class: "flex-1 min-w-48 px-3 py-2 bg-panel border border-border rounded-lg text-text text-sm",
+                                        value: "{(*ban_index.read()).min(candidates.len().saturating_sub(1))}",
+                                        onchange: move |evt| {
+                                            if let Ok(index) = evt.value().parse::<usize>() {
+                                                ban_index.set(index);
+                                            }
+                                        },
+                                        for (index, (member_id, name)) in candidates.iter().enumerate() {
+                                            option { value: "{index}", "{name} ({member_id})" }
+                                        }
+                                    }
+                                    if let Some((member_id, name)) = selected {
+                                        BanButton {
+                                            member_to_ban: member_id,
+                                            show_trigger: true,
+                                            nickname: name,
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 div { class: "mb-6",
                     h2 { class: "text-lg font-semibold text-text mb-3", "Banned Users" }
 

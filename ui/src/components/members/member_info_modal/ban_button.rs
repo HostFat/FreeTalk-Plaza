@@ -1,4 +1,3 @@
-use crate::board_data::BoardData;
 use crate::components::app::{mark_needs_sync, BOARDS, CURRENT_BOARD, MEMBER_INFO_MODAL};
 use crate::util::get_current_system_time;
 use dioxus::logger::tracing::{error, info};
@@ -9,115 +8,111 @@ use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 use wasm_bindgen_futures::spawn_local;
 
-#[component]
-pub fn BanButton(member_to_ban: MemberId, is_downstream: bool, nickname: String) -> Element {
-    // Memos
-    let current_board_data_signal: Memo<Option<BoardData>> = use_memo(move || {
-        CURRENT_BOARD
-            .read()
-            .owner_key
-            .as_ref()
-            .and_then(|key| BOARDS.read().map.get(key).cloned())
+/// Ban a member and, on a private board owned by us, rotate the board secret.
+pub async fn ban_member(member_to_ban: MemberId) -> Result<(), String> {
+    let (current_board, board_data) = {
+        let current = CURRENT_BOARD.read().owner_key.ok_or("No board selected")?;
+        let boards = BOARDS.read();
+        let data = boards.map.get(&current).ok_or("Board not found")?.clone();
+        (current, data)
+    };
+
+    let board_key = board_data.board_key();
+    let self_sk = board_data.self_sk.clone();
+    let board_state_clone = board_data.board_state.clone();
+    let banned_by = MemberId::from(&self_sk.verifying_key());
+    let params = ChatBoardParametersV1 {
+        owner: current_board,
+    };
+
+    let ban = UserBan {
+        owner_member_id: MemberId::from(&current_board),
+        banned_at: get_current_system_time(),
+        banned_user: member_to_ban,
+    };
+
+    let mut ban_bytes = Vec::new();
+    ciborium::ser::into_writer(&ban, &mut ban_bytes)
+        .map_err(|e| format!("Failed to serialize ban for signing: {:?}", e))?;
+
+    let signature = crate::signing::sign_ban_with_fallback(board_key, ban_bytes, &self_sk).await;
+    let authorized_ban = AuthorizedUserBan::with_signature(ban, banned_by, signature);
+    let delta = ChatBoardStateV1Delta {
+        bans: Some(vec![authorized_ban]),
+        ..Default::default()
+    };
+
+    let mut apply_error: Option<String> = None;
+    BOARDS.with_mut(|boards| {
+        let Some(data) = boards.map.get_mut(&current_board) else {
+            return;
+        };
+        if let Err(e) = data
+            .board_state
+            .apply_delta(&board_state_clone, &params, &Some(delta))
+        {
+            apply_error = Some(format!("Failed to apply ban: {:?}", e));
+            return;
+        }
+        info!(
+            "Successfully applied ban delta for member {:?}",
+            member_to_ban
+        );
+
+        // On a private board, rotate the secret so the banned member cannot
+        // decrypt messages sent after the ban.
+        if data.is_private() && data.owner_vk == data.self_sk.verifying_key() {
+            match data.rotate_secret() {
+                Ok(secrets_delta) => {
+                    let current_state = data.board_state.clone();
+                    let rotation_delta = ChatBoardStateV1Delta {
+                        secrets: Some(secrets_delta),
+                        ..Default::default()
+                    };
+                    if let Err(e) =
+                        data.board_state
+                            .apply_delta(&current_state, &params, &Some(rotation_delta))
+                    {
+                        apply_error = Some(format!("Failed to apply secret rotation: {:?}", e));
+                    }
+                }
+                Err(e) => error!("Failed to rotate secret after ban: {}", e),
+            }
+        }
     });
 
+    if let Some(e) = apply_error {
+        return Err(e);
+    }
+    mark_needs_sync(current_board);
+    info!("Marked board for synchronization after ban");
+    Ok(())
+}
+
+#[component]
+pub fn BanButton(
+    member_to_ban: MemberId,
+    /// Whether to render the trigger. The member modal hides it for members
+    /// that are not downstream of the viewer.
+    #[props(default = true)]
+    show_trigger: bool,
+    nickname: String,
+) -> Element {
     let mut show_confirmation = use_signal(|| false);
 
     let execute_ban = move |_| {
-        if let (Some(current_board), Some(board_data)) = (
-            CURRENT_BOARD.read().owner_key,
-            current_board_data_signal.read().as_ref(),
-        ) {
-            let board_key = board_data.board_key();
-            let self_sk = board_data.self_sk.clone();
-            let board_state_clone = board_data.board_state.clone();
-            let banned_by = MemberId::from(&self_sk.verifying_key());
-
-            let ban = UserBan {
-                owner_member_id: MemberId::from(&current_board),
-                banned_at: get_current_system_time(),
-                banned_user: member_to_ban,
-            };
-
-            // Close modal immediately for better UX
-            MEMBER_INFO_MODAL.with_mut(|modal| {
-                modal.member = None;
-            });
-
-            spawn_local(async move {
-                // Serialize ban to CBOR for signing
-                let mut ban_bytes = Vec::new();
-                if let Err(e) = ciborium::ser::into_writer(&ban, &mut ban_bytes) {
-                    error!("Failed to serialize ban for signing: {:?}", e);
-                    return;
-                }
-
-                // Sign using delegate with fallback to local signing
-                let signature =
-                    crate::signing::sign_ban_with_fallback(board_key, ban_bytes, &self_sk).await;
-
-                let authorized_ban = AuthorizedUserBan::with_signature(ban, banned_by, signature);
-
-                let delta = ChatBoardStateV1Delta {
-                    bans: Some(vec![authorized_ban]),
-                    ..Default::default()
-                };
-
-                BOARDS.with_mut(|boards| {
-                    if let Some(board_data_mut) = boards.map.get_mut(&current_board) {
-                        if let Err(e) = board_data_mut.board_state.apply_delta(
-                            &board_state_clone,
-                            &ChatBoardParametersV1 {
-                                owner: current_board,
-                            },
-                            &Some(delta),
-                        ) {
-                            error!("Failed to apply ban delta: {:?}", e);
-                        } else {
-                            info!("Successfully applied ban delta for member {:?}", member_to_ban);
-
-                            // If this is a private board and we're the owner, rotate the secret
-                            // This ensures the banned member cannot decrypt future messages
-                            if board_data_mut.is_private() && board_data_mut.owner_vk == board_data_mut.self_sk.verifying_key() {
-                                info!("Private board - rotating secret after ban to ensure forward secrecy");
-
-                                match board_data_mut.rotate_secret() {
-                                    Ok(secrets_delta) => {
-                                        info!("Secret rotated successfully after ban, applying delta");
-
-                                        // Apply the secrets delta
-                                        let current_state = board_data_mut.board_state.clone();
-                                        let rotation_delta = ChatBoardStateV1Delta {
-                                            secrets: Some(secrets_delta),
-                                            ..Default::default()
-                                        };
-
-                                        if let Err(e) = board_data_mut.board_state.apply_delta(
-                                            &current_state,
-                                            &ChatBoardParametersV1 { owner: current_board },
-                                            &Some(rotation_delta),
-                                        ) {
-                                            error!("Failed to apply rotation delta after ban: {}", e);
-                                        } else {
-                                            info!("Secret rotation applied after ban");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to rotate secret after ban: {}", e);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-
-                // Mark board as needing sync to propagate ban and rotation (deferred)
-                mark_needs_sync(current_board);
-                info!("Marked board for synchronization after ban");
-            });
-        }
+        // Close the member modal immediately for better UX
+        MEMBER_INFO_MODAL.with_mut(|modal| {
+            modal.member = None;
+        });
+        spawn_local(async move {
+            if let Err(e) = ban_member(member_to_ban).await {
+                error!("Failed to ban member: {}", e);
+            }
+        });
     };
 
-    if is_downstream {
+    if show_trigger {
         rsx! {
             div { class: "mt-4",
                 button {
