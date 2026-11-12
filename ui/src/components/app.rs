@@ -153,24 +153,26 @@ pub fn App() -> Element {
     });
 
     // Watch CURRENT_BOARD and navigate if URL doesn't match
-    // This handles the case where sync/delegate sets the current board but URL remains unchanged.
-    // Only acts when the URL already points at a board: opening the root URL (or an
-    // invite) must not jump into the last board restored from the delegate.
+    // This handles a board chosen from the list (and sync setting the current board):
+    // CURRENT_BOARD changes, and the URL follows. The startup restore from the
+    // delegate is gone, so opening the root URL keeps CURRENT_BOARD empty and
+    // nothing navigates.
     use_effect(move || {
         let current_board = CURRENT_BOARD.read();
         if let Some(owner_key) = current_board.owner_key {
             let board_id = bs58::encode(owner_key.as_bytes()).into_string();
 
             // Check if URL already shows this board to avoid race conditions with regular navigation
-            let hash = if let Some(window) = window() {
-                window.location().hash().unwrap_or_default()
+            let url_matches = if let Some(window) = window() {
+                if let Ok(hash) = window.location().hash() {
+                    // URL hash is like "#/board/{board_id}" or "#/board/{board_id}/..."
+                    hash.contains(&format!("/board/{}", board_id))
+                } else {
+                    false
+                }
             } else {
-                String::new()
+                false
             };
-            if !hash.contains("/board/") {
-                return;
-            }
-            let url_matches = hash.contains(&format!("/board/{}", board_id));
 
             if !url_matches {
                 debug!(
