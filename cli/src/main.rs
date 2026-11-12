@@ -5,15 +5,15 @@ use tracing::info;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
-use riverctl::{
+use plazactl::{
     api,
     commands::{board, debug, invite, member, message},
     config, output,
 };
 
 #[derive(Parser)]
-#[command(name = "river")]
-#[command(about = "Command-line interface for River chat on Freenet")]
+#[command(name = "plazactl")]
+#[command(about = "Command-line interface for FreeTalk Plaza on Freenet")]
 #[command(version)]
 #[command(arg_required_else_help = true)]
 struct Cli {
@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
     // Initialize logging (keep stdout clean for user/JSON output)
     let _log_guard = init_logging(cli.debug, cli.log_file.as_deref())?;
 
-    info!("River starting...");
+    info!("FreeTalk Plaza starting...");
 
     // Load configuration
     let config = config::Config::load()?;

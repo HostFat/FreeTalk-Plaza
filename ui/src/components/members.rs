@@ -4,10 +4,10 @@ use dioxus::prelude::*;
 use dioxus_free_icons::icons::fa_solid_icons::{FaFileExport, FaUserPlus, FaUsers};
 use dioxus_free_icons::Icon;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use river_core::board_state::identity::IdentityExport;
-use river_core::board_state::member::MembersV1;
-use river_core::board_state::member::{AuthorizedMember, Member, MemberId};
-use river_core::board_state::ChatBoardParametersV1;
+use plaza_core::board_state::identity::IdentityExport;
+use plaza_core::board_state::member::MembersV1;
+use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
+use plaza_core::board_state::ChatBoardParametersV1;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -390,7 +390,7 @@ fn ExportIdentityModal(is_active: Signal<bool>) -> Element {
                     "Export Identity"
                 }
                 p { class: "text-sm text-text-muted mb-3",
-                    "Copy this token and import it in another Freetalk client to use the same identity."
+                    "Copy this token and import it in another FreeTalk Plaza client to use the same identity."
                 }
                 p { class: "text-sm text-yellow-500 font-medium mb-3",
                     "Warning: This token contains your private key. Treat it like a password."
@@ -451,10 +451,10 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                 let contract_key = crate::util::owner_vk_to_contract_key(&owner_key);
 
                 // Create BoardData from the import, using board name from export if available
-                let mut initial_state = river_core::board_state::ChatBoardStateV1::default();
+                let mut initial_state = plaza_core::board_state::ChatBoardStateV1::default();
                 if let Some(ref name) = export.board_name {
                     initial_state.configuration.configuration.display =
-                        river_core::board_state::privacy::BoardDisplayMetadata::public(
+                        plaza_core::board_state::privacy::BoardDisplayMetadata::public(
                             name.clone(),
                             None,
                         );
@@ -558,7 +558,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     "Import Identity"
                 }
                 p { class: "text-sm text-text-muted mb-3",
-                    "Paste a Freetalk identity token exported from another client."
+                    "Paste a FreeTalk Plaza identity token exported from another client."
                 }
                 textarea {
                     class: "w-full h-40 bg-surface border border-border rounded-lg p-3 text-xs font-mono text-text resize-none",

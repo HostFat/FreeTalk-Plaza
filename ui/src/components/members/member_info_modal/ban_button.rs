@@ -4,9 +4,9 @@ use crate::util::get_current_system_time;
 use dioxus::logger::tracing::{error, info};
 use dioxus::prelude::*;
 use freenet_scaffold::ComposableState;
-use river_core::board_state::ban::{AuthorizedUserBan, UserBan};
-use river_core::board_state::member::MemberId;
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
+use plaza_core::board_state::ban::{AuthorizedUserBan, UserBan};
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 use wasm_bindgen_futures::spawn_local;
 
 #[component]

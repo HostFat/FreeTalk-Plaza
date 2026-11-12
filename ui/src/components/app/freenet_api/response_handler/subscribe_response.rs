@@ -3,7 +3,7 @@ use crate::components::app::BOARDS;
 use dioxus::logger::tracing::{info, warn};
 use dioxus::prelude::ReadableExt;
 use freenet_stdlib::prelude::ContractKey;
-use river_core::board_state::member::MemberId;
+use plaza_core::board_state::member::MemberId;
 
 /// Handle a subscribe response from the network.
 /// Returns `true` if a re-PUT should be scheduled (subscription failed but we have local state).

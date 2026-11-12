@@ -4,7 +4,7 @@
 //! of being accepted or retrieved.
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use river_core::board_state::member::AuthorizedMember;
+use plaza_core::board_state::member::AuthorizedMember;
 use std::collections::HashMap;
 
 /// Collection of pending board join requests

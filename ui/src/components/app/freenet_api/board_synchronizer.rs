@@ -27,11 +27,11 @@ use freenet_stdlib::{
         Parameters, UpdateData, WrappedContract, WrappedState,
     },
 };
-use river_core::board_state::member::MemberId;
-use river_core::board_state::member_info::MemberInfoV1;
-use river_core::board_state::message::{BoardMessageBody, MessageId};
-use river_core::board_state::privacy::PrivacyMode;
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::member_info::MemberInfoV1;
+use plaza_core::board_state::message::{BoardMessageBody, MessageId};
+use plaza_core::board_state::privacy::PrivacyMode;
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -131,7 +131,7 @@ impl BoardSynchronizer {
                                 })
                                 .collect();
 
-                            let owner_id = river_core::board_state::member::MemberId::from(&params.owner);
+                            let owner_id = plaza_core::board_state::member::MemberId::from(&params.owner);
                             let admin_ids: std::collections::HashSet<_> = board_data
                                 .board_state
                                 .admin
@@ -480,7 +480,7 @@ impl BoardSynchronizer {
                 let (upgrade_state, _new_contract_key) = {
                     let boards = BOARDS.read();
                     if let Some(board_data) = boards.map.get(owner_vk) {
-                        use river_core::board_state::upgrade::{
+                        use plaza_core::board_state::upgrade::{
                             AuthorizedUpgradeV1, OptionalUpgradeV1, UpgradeV1,
                         };
 
@@ -727,7 +727,7 @@ impl BoardSynchronizer {
                                 })
                                 .collect();
 
-                            let owner_id = river_core::board_state::member::MemberId::from(&board_owner_vk);
+                            let owner_id = plaza_core::board_state::member::MemberId::from(&board_owner_vk);
                             let admin_ids: std::collections::HashSet<_> = board_data
                                 .board_state
                                 .admin

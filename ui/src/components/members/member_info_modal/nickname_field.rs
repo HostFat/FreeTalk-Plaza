@@ -5,10 +5,10 @@ use dioxus::prelude::*;
 use dioxus_free_icons::icons::fa_solid_icons::FaPencil;
 use dioxus_free_icons::Icon;
 use freenet_scaffold::ComposableState;
-use river_core::board_state::member::MemberId;
-use river_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
-use river_core::board_state::privacy::SealedBytes;
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
+use plaza_core::board_state::privacy::SealedBytes;
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -112,7 +112,7 @@ pub fn NicknameField(member_info: AuthorizedMemberInfo) -> Element {
                                         members_to_add.push(chain_member.clone());
                                     }
                                 }
-                                Some(river_core::board_state::member::MembersDelta::new(
+                                Some(plaza_core::board_state::member::MembersDelta::new(
                                     members_to_add,
                                 ))
                             } else {

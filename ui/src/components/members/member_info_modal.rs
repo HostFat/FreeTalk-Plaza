@@ -9,8 +9,8 @@ use crate::components::members::member_info_modal::nickname_field::NicknameField
 use crate::util::ecies::unseal_bytes_with_secrets;
 use dioxus::logger::tracing::*;
 use dioxus::prelude::*;
-use river_core::board_state::member::MemberId;
-use river_core::board_state::ChatBoardParametersV1;
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::ChatBoardParametersV1;
 
 #[component]
 pub fn MemberInfoModal() -> Element {

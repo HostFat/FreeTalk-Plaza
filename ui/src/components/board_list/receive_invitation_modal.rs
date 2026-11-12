@@ -6,7 +6,7 @@ use crate::invites::{PendingBoardJoin, PendingBoardStatus};
 use dioxus::logger::tracing::{error, info};
 use dioxus::prelude::*;
 use ed25519_dalek::VerifyingKey;
-use river_core::board_state::member::MemberId;
+use plaza_core::board_state::member::MemberId;
 
 /// Main component for the invitation modal
 #[component]

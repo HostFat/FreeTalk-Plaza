@@ -5,7 +5,7 @@ use crate::util::from_cbor_slice;
 use dioxus::logger::tracing::{info, warn};
 use dioxus::prelude::ReadableExt;
 use freenet_stdlib::prelude::{ContractKey, UpdateData};
-use river_core::board_state::{ChatBoardStateV1, ChatBoardStateV1Delta};
+use plaza_core::board_state::{ChatBoardStateV1, ChatBoardStateV1Delta};
 
 pub fn handle_update_notification(
     board_synchronizer: &mut BoardSynchronizer,

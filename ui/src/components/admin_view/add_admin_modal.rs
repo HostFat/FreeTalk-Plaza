@@ -4,9 +4,9 @@ use dioxus::logger::tracing::{error, info};
 use dioxus::prelude::*;
 use freenet_scaffold::util::FastHash;
 use freenet_scaffold::ComposableState;
-use river_core::board_state::admin::{Admin, AdminsDelta, AuthorizedAdmin};
-use river_core::board_state::member::MemberId;
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
+use plaza_core::board_state::admin::{Admin, AdminsDelta, AuthorizedAdmin};
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 use wasm_bindgen_futures::spawn_local;
 
 #[component]

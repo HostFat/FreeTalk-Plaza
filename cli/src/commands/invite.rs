@@ -59,7 +59,7 @@ pub async fn execute(command: InviteCommands, api: ApiClient, format: OutputForm
                             println!("{}", invitation_code.bright_yellow());
                             println!("\nShare this code with someone to invite them to the board.");
                             println!("They can accept it with:");
-                            println!("  riverctl invite accept {}", invitation_code);
+                            println!("  plazactl invite accept {}", invitation_code);
                         }
                         OutputFormat::Json => {
                             println!(
@@ -110,10 +110,10 @@ pub async fn execute(command: InviteCommands, api: ApiClient, format: OutputForm
                             println!("Contract key: {}", contract_key.id());
                             println!("\nYou can now:");
                             println!(
-                                "  - Send messages: riverctl message send {} \"Hello!\"",
+                                "  - Send messages: plazactl message send {} \"Hello!\"",
                                 owner_key_str
                             );
-                            println!("  - List members: riverctl member list {}", owner_key_str);
+                            println!("  - List members: plazactl member list {}", owner_key_str);
                         }
                         OutputFormat::Json => {
                             println!(

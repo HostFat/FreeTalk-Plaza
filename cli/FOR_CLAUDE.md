@@ -34,13 +34,13 @@ River needs to store chat board data in Freenet's decentralized network. The iss
 3. **Test the bug**:
    ```bash
    # This works - WebSocket is fine
-   river debug websocket
+   plazactl debug websocket
    
    # This times out after 30s - demonstrates PUT issue
-   river board create --name "Test" --nickname "Alice"
+   plazactl board create --name "Test" --nickname "Alice"
    
    # If you had a board, this would timeout too - demonstrates GET issue
-   river debug contract-get <board-owner-key>
+   plazactl debug contract-get <board-owner-key>
    ```
 
 ## Architecture Notes

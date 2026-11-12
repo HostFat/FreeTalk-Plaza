@@ -1,8 +1,8 @@
 use crate::components::conversation::MessageData;
 use dioxus::prelude::*;
-use river_core::board_state::content::validate_icon;
-use river_core::board_state::member::MemberId;
-use river_core::board_state::message::MessageId;
+use plaza_core::board_state::content::validate_icon;
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::message::MessageId;
 
 /// Color presets for category selection
 const COLOR_PRESETS: &[(&str, &str)] = &[

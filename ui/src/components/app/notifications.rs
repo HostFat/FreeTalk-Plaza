@@ -12,9 +12,9 @@ use crate::util::ecies::{decrypt_with_symmetric_key, unseal_bytes_with_secrets};
 use dioxus::logger::tracing::{debug, info, warn};
 use dioxus::prelude::*;
 use ed25519_dalek::VerifyingKey;
-use river_core::board_state::member::MemberId;
-use river_core::board_state::member_info::MemberInfoV1;
-use river_core::board_state::message::{AuthorizedMessageV1, BoardMessageBody};
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::member_info::MemberInfoV1;
+use plaza_core::board_state::message::{AuthorizedMessageV1, BoardMessageBody};
 use std::collections::HashSet;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -422,7 +422,7 @@ fn get_message_preview(
     content: &BoardMessageBody,
     board_secrets: &std::collections::HashMap<u32, [u8; 32]>,
 ) -> String {
-    use river_core::board_state::content::{
+    use plaza_core::board_state::content::{
         ActionContentV1, ReplyContentV1, TextContentV1, ACTION_TYPE_DELETE, ACTION_TYPE_EDIT,
         ACTION_TYPE_REACTION, ACTION_TYPE_REMOVE_REACTION, CONTENT_TYPE_ACTION, CONTENT_TYPE_REPLY,
         CONTENT_TYPE_TEXT,

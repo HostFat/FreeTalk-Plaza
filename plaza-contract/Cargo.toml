@@ -1,5 +1,5 @@
 [package]
-name = "board-contract"
+name = "plaza-contract"
 version = "0.1.0"
 edition = "2021"
 
@@ -15,7 +15,7 @@ rand.workspace = true
 getrandom.workspace = true
 freenet-stdlib.workspace = true
 freenet-scaffold.workspace = true
-river-core.workspace = true
+plaza-core.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]

@@ -12,13 +12,13 @@ use freenet_stdlib::prelude::{
     ContractCode, ContractContainer, ContractInstanceId, ContractKey, ContractWasmAPIVersion,
     Parameters, UpdateData, WrappedContract, WrappedState,
 };
-use river_core::board_state::ban::{AuthorizedUserBan, UserBan};
-use river_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
-use river_core::board_state::member::{AuthorizedMember, Member, MemberId, MembersDelta};
-use river_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
-use river_core::board_state::privacy::{BoardDisplayMetadata, SealedBytes};
-use river_core::board_state::ChatBoardStateV1Delta;
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
+use plaza_core::board_state::ban::{AuthorizedUserBan, UserBan};
+use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId, MembersDelta};
+use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
+use plaza_core::board_state::privacy::{BoardDisplayMetadata, SealedBytes};
+use plaza_core::board_state::ChatBoardStateV1Delta;
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
@@ -29,7 +29,7 @@ use tokio_tungstenite::connect_async;
 use tracing::{debug, info};
 
 // Load the board contract WASM copied by build.rs
-const BOARD_CONTRACT_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/board_contract.wasm"));
+const BOARD_CONTRACT_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/plaza_contract.wasm"));
 
 /// Compute the contract key for a board from its owner verifying key.
 /// This uses the current bundled WASM to ensure consistency.
@@ -587,7 +587,7 @@ impl ApiClient {
 
                         // Validate the board state is properly initialized
                         if board_state.configuration.configuration.owner_member_id
-                            == river_core::board_state::member::MemberId(
+                            == plaza_core::board_state::member::MemberId(
                                 freenet_scaffold::util::FastHash(0),
                             )
                         {
@@ -948,10 +948,10 @@ impl ApiClient {
         }
 
         // Create the message
-        let message = river_core::board_state::message::MessageV1 {
+        let message = plaza_core::board_state::message::MessageV1 {
             board_owner: MemberId::from(*board_owner_key),
             author: sender_member_id,
-            content: river_core::board_state::message::BoardMessageBody::public(
+            content: plaza_core::board_state::message::BoardMessageBody::public(
                 String::new(),
                 message_content,
             ),
@@ -960,7 +960,7 @@ impl ApiClient {
 
         // Sign the message
         let auth_message =
-            river_core::board_state::message::AuthorizedMessageV1::new(message, signing_key);
+            plaza_core::board_state::message::AuthorizedMessageV1::new(message, signing_key);
 
         // Check if we need to re-add ourselves (pruned for inactivity)
         let (members_delta, member_info_delta) =
@@ -1042,10 +1042,10 @@ impl ApiClient {
         let (signing_key, mut board_state, _contract_key_str) = board_data;
 
         // Create the message
-        let message = river_core::board_state::message::MessageV1 {
-            board_owner: river_core::board_state::member::MemberId::from(*board_owner_key),
-            author: river_core::board_state::member::MemberId::from(&signing_key.verifying_key()),
-            content: river_core::board_state::message::BoardMessageBody::public(
+        let message = plaza_core::board_state::message::MessageV1 {
+            board_owner: plaza_core::board_state::member::MemberId::from(*board_owner_key),
+            author: plaza_core::board_state::member::MemberId::from(&signing_key.verifying_key()),
+            content: plaza_core::board_state::message::BoardMessageBody::public(
                 String::new(),
                 message_content,
             ),
@@ -1054,14 +1054,14 @@ impl ApiClient {
 
         // Sign the message
         let auth_message =
-            river_core::board_state::message::AuthorizedMessageV1::new(message, &signing_key);
+            plaza_core::board_state::message::AuthorizedMessageV1::new(message, &signing_key);
 
         // Check if we need to re-add ourselves (pruned for inactivity)
         let (members_delta, member_info_delta) =
             self.build_rejoin_delta(&board_state, board_owner_key, &signing_key);
 
         // Create a delta with the new message
-        let delta = river_core::board_state::ChatBoardStateV1Delta {
+        let delta = plaza_core::board_state::ChatBoardStateV1Delta {
             recent_messages: Some(vec![auth_message.clone()]),
             members: members_delta,
             member_info: member_info_delta,
@@ -1129,7 +1129,7 @@ impl ApiClient {
     pub async fn edit_message(
         &self,
         board_owner_key: &VerifyingKey,
-        target_message_id: river_core::board_state::message::MessageId,
+        target_message_id: plaza_core::board_state::message::MessageId,
         new_title: String,
         new_content: String,
     ) -> Result<()> {
@@ -1145,10 +1145,10 @@ impl ApiClient {
         let (signing_key, mut board_state, _contract_key_str) = board_data;
 
         // Create the edit action message
-        let message = river_core::board_state::message::MessageV1 {
+        let message = plaza_core::board_state::message::MessageV1 {
             board_owner: MemberId::from(*board_owner_key),
             author: MemberId::from(&signing_key.verifying_key()),
-            content: river_core::board_state::message::BoardMessageBody::edit(
+            content: plaza_core::board_state::message::BoardMessageBody::edit(
                 target_message_id,
                 new_title,
                 new_content,
@@ -1158,7 +1158,7 @@ impl ApiClient {
 
         // Sign the message
         let auth_message =
-            river_core::board_state::message::AuthorizedMessageV1::new(message, &signing_key);
+            plaza_core::board_state::message::AuthorizedMessageV1::new(message, &signing_key);
 
         // Check if we need to re-add ourselves (pruned for inactivity)
         let (members_delta, member_info_delta) =
@@ -1192,7 +1192,7 @@ impl ApiClient {
     pub async fn delete_message(
         &self,
         board_owner_key: &VerifyingKey,
-        target_message_id: river_core::board_state::message::MessageId,
+        target_message_id: plaza_core::board_state::message::MessageId,
     ) -> Result<()> {
         info!(
             "Deleting message in board owned by: {}",
@@ -1206,16 +1206,16 @@ impl ApiClient {
         let (signing_key, mut board_state, _contract_key_str) = board_data;
 
         // Create the delete action message
-        let message = river_core::board_state::message::MessageV1 {
+        let message = plaza_core::board_state::message::MessageV1 {
             board_owner: MemberId::from(*board_owner_key),
             author: MemberId::from(&signing_key.verifying_key()),
-            content: river_core::board_state::message::BoardMessageBody::delete(target_message_id),
+            content: plaza_core::board_state::message::BoardMessageBody::delete(target_message_id),
             time: std::time::SystemTime::now(),
         };
 
         // Sign the message
         let auth_message =
-            river_core::board_state::message::AuthorizedMessageV1::new(message, &signing_key);
+            plaza_core::board_state::message::AuthorizedMessageV1::new(message, &signing_key);
 
         // Check if we need to re-add ourselves (pruned for inactivity)
         let (members_delta, member_info_delta) =
@@ -1249,7 +1249,7 @@ impl ApiClient {
     pub async fn add_reaction(
         &self,
         board_owner_key: &VerifyingKey,
-        target_message_id: river_core::board_state::message::MessageId,
+        target_message_id: plaza_core::board_state::message::MessageId,
         emoji: String,
     ) -> Result<()> {
         info!(
@@ -1265,10 +1265,10 @@ impl ApiClient {
         let (signing_key, mut board_state, _contract_key_str) = board_data;
 
         // Create the reaction action message
-        let message = river_core::board_state::message::MessageV1 {
+        let message = plaza_core::board_state::message::MessageV1 {
             board_owner: MemberId::from(*board_owner_key),
             author: MemberId::from(&signing_key.verifying_key()),
-            content: river_core::board_state::message::BoardMessageBody::reaction(
+            content: plaza_core::board_state::message::BoardMessageBody::reaction(
                 target_message_id,
                 emoji,
             ),
@@ -1277,7 +1277,7 @@ impl ApiClient {
 
         // Sign the message
         let auth_message =
-            river_core::board_state::message::AuthorizedMessageV1::new(message, &signing_key);
+            plaza_core::board_state::message::AuthorizedMessageV1::new(message, &signing_key);
 
         // Check if we need to re-add ourselves (pruned for inactivity)
         let (members_delta, member_info_delta) =
@@ -1311,7 +1311,7 @@ impl ApiClient {
     pub async fn remove_reaction(
         &self,
         board_owner_key: &VerifyingKey,
-        target_message_id: river_core::board_state::message::MessageId,
+        target_message_id: plaza_core::board_state::message::MessageId,
         emoji: String,
     ) -> Result<()> {
         info!(
@@ -1327,10 +1327,10 @@ impl ApiClient {
         let (signing_key, mut board_state, _contract_key_str) = board_data;
 
         // Create the remove_reaction action message
-        let message = river_core::board_state::message::MessageV1 {
+        let message = plaza_core::board_state::message::MessageV1 {
             board_owner: MemberId::from(*board_owner_key),
             author: MemberId::from(&signing_key.verifying_key()),
-            content: river_core::board_state::message::BoardMessageBody::remove_reaction(
+            content: plaza_core::board_state::message::BoardMessageBody::remove_reaction(
                 target_message_id,
                 emoji,
             ),
@@ -1339,7 +1339,7 @@ impl ApiClient {
 
         // Sign the message
         let auth_message =
-            river_core::board_state::message::AuthorizedMessageV1::new(message, &signing_key);
+            plaza_core::board_state::message::AuthorizedMessageV1::new(message, &signing_key);
 
         // Check if we need to re-add ourselves (pruned for inactivity)
         let (members_delta, member_info_delta) =
@@ -1373,7 +1373,7 @@ impl ApiClient {
     pub async fn send_reply(
         &self,
         board_owner_key: &VerifyingKey,
-        target_message_id: river_core::board_state::message::MessageId,
+        target_message_id: plaza_core::board_state::message::MessageId,
         reply_text: String,
     ) -> Result<()> {
         info!(
@@ -1413,10 +1413,10 @@ impl ApiClient {
             .collect();
 
         // Create the reply message
-        let message = river_core::board_state::message::MessageV1 {
+        let message = plaza_core::board_state::message::MessageV1 {
             board_owner: MemberId::from(*board_owner_key),
             author: MemberId::from(&signing_key.verifying_key()),
-            content: river_core::board_state::message::BoardMessageBody::reply(
+            content: plaza_core::board_state::message::BoardMessageBody::reply(
                 String::new(),
                 reply_text,
                 target_message_id,
@@ -1428,7 +1428,7 @@ impl ApiClient {
 
         // Sign the message
         let auth_message =
-            river_core::board_state::message::AuthorizedMessageV1::new(message, &signing_key);
+            plaza_core::board_state::message::AuthorizedMessageV1::new(message, &signing_key);
 
         // Check if we need to re-add ourselves (pruned for inactivity)
         let (members_delta, member_info_delta) =
@@ -1621,7 +1621,7 @@ impl ApiClient {
     /// Helper function to output a message in the requested format
     fn output_message(
         board_state: &ChatBoardStateV1,
-        msg: &river_core::board_state::message::AuthorizedMessageV1,
+        msg: &plaza_core::board_state::message::AuthorizedMessageV1,
         board_owner_key: &VerifyingKey,
         format: &OutputFormat,
     ) -> Result<()> {

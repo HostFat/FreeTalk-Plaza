@@ -1,8 +1,8 @@
 use crate::components::app::{BOARDS, CURRENT_BOARD, CURRENT_CATEGORY};
 use crate::util::messaging::send_category;
 use dioxus::prelude::*;
-use river_core::board_state::content::validate_icon;
-use river_core::board_state::message::MessageId;
+use plaza_core::board_state::content::validate_icon;
+use plaza_core::board_state::message::MessageId;
 use wasm_bindgen_futures::spawn_local;
 
 /// Global signal for category creation modal

@@ -10,9 +10,9 @@
 use crate::components::app::chat_delegate::{generate_request_id, send_delegate_request};
 use dioxus::logger::tracing::{info, warn};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use river_core::board_state::member::MemberId;
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
-use river_core::chat_delegate::{BoardKey, ChatDelegateRequestMsg, ChatDelegateResponseMsg};
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
+use plaza_core::chat_delegate::{BoardKey, ChatDelegateRequestMsg, ChatDelegateResponseMsg};
 
 /// Store a signing key in the delegate for a board.
 ///
@@ -444,8 +444,8 @@ pub fn remove_unverifiable_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use river_core::board_state::member::{AuthorizedMember, Member};
-    use river_core::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
+    use plaza_core::board_state::member::{AuthorizedMember, Member};
+    use plaza_core::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
 
     fn make_signed_message(author_sk: &SigningKey, owner_vk: &VerifyingKey) -> AuthorizedMessageV1 {
         let msg = MessageV1 {

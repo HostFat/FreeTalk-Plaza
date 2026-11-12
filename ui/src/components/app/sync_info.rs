@@ -6,8 +6,8 @@ use dioxus::prelude::{Global, GlobalSignal, ReadableExt};
 use ed25519_dalek::VerifyingKey;
 use freenet_stdlib::prelude::tracing::info;
 use freenet_stdlib::prelude::ContractInstanceId;
-use river_core::board_state::member::MemberId;
-use river_core::ChatBoardStateV1;
+use plaza_core::board_state::member::MemberId;
+use plaza_core::ChatBoardStateV1;
 use std::collections::HashMap;
 
 /// Get current time in milliseconds (works in WASM)

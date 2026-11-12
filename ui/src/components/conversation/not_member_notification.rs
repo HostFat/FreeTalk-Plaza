@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use dioxus_free_icons::icons::fa_solid_icons::FaCopy;
 use dioxus_free_icons::Icon;
 use ed25519_dalek::VerifyingKey;
-use river_core::crypto_values::CryptoValue;
+use plaza_core::crypto_values::CryptoValue;
 
 #[component]
 pub fn NotMemberNotification(user_verifying_key: VerifyingKey) -> Element {

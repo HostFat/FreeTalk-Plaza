@@ -10,10 +10,10 @@ mod tests {
     use ciborium::ser::into_writer;
     use ed25519_dalek::SigningKey;
     use freenet_stdlib::prelude::{ContractInterface, Parameters, RelatedContracts, State};
-    use river_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
-    use river_core::board_state::member::{AuthorizedMember, Member};
-    use river_core::board_state::ChatBoardParametersV1;
-    use river_core::ChatBoardStateV1;
+    use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+    use plaza_core::board_state::member::{AuthorizedMember, Member};
+    use plaza_core::board_state::ChatBoardParametersV1;
+    use plaza_core::ChatBoardStateV1;
 
     fn parameters(owner: &SigningKey) -> Parameters<'static> {
         let mut bytes = Vec::new();

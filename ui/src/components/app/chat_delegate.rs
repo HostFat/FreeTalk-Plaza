@@ -9,7 +9,7 @@ use freenet_stdlib::prelude::{
 };
 use futures::channel::oneshot;
 use futures::future::{select, Either};
-use river_core::chat_delegate::{
+use plaza_core::chat_delegate::{
     BoardKey, ChatDelegateKey, ChatDelegateRequestMsg, ChatDelegateResponseMsg, RequestId,
 };
 use std::collections::HashMap;
@@ -187,7 +187,7 @@ async fn fire_load_boards_request() {
     }
 
     let delegate_code = DelegateCode::from(
-        include_bytes!("../../../../target/wasm32-unknown-unknown/release/freetalk_delegate.wasm")
+        include_bytes!("../../../../target/wasm32-unknown-unknown/release/plaza_delegate.wasm")
             .to_vec(),
     );
     let params = Parameters::from(Vec::<u8>::new());
@@ -274,7 +274,7 @@ pub async fn save_boards_to_delegate() -> Result<(), String> {
 
 fn create_chat_delegate_container() -> DelegateContainer {
     let delegate_bytes =
-        include_bytes!("../../../../target/wasm32-unknown-unknown/release/freetalk_delegate.wasm");
+        include_bytes!("../../../../target/wasm32-unknown-unknown/release/plaza_delegate.wasm");
     let delegate_code = DelegateCode::from(delegate_bytes.to_vec());
     let params = Parameters::from(Vec::<u8>::new());
     let delegate = Delegate::from((&delegate_code, &params));
@@ -383,7 +383,7 @@ pub async fn send_delegate_request(
     info!("Serialized request payload size: {} bytes", payload.len());
 
     let delegate_code = DelegateCode::from(
-        include_bytes!("../../../../target/wasm32-unknown-unknown/release/freetalk_delegate.wasm")
+        include_bytes!("../../../../target/wasm32-unknown-unknown/release/plaza_delegate.wasm")
             .to_vec(),
     );
     let params = Parameters::from(Vec::<u8>::new());

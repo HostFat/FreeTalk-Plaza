@@ -3,8 +3,8 @@ use anyhow::{anyhow, Result};
 use directories::ProjectDirs;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_stdlib::prelude::ContractKey;
-use river_core::board_state::member::AuthorizedMember;
-use river_core::board_state::ChatBoardStateV1;
+use plaza_core::board_state::member::AuthorizedMember;
+use plaza_core::board_state::ChatBoardStateV1;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -230,7 +230,7 @@ impl Storage {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use river_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+    use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
     use tempfile::TempDir;
 
     fn create_test_storage() -> (Storage, TempDir) {

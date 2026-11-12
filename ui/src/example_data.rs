@@ -9,8 +9,8 @@ use freenet_scaffold::ComposableState;
 use freenet_stdlib::prelude::{ContractCode, ContractInstanceId, ContractKey, Parameters};
 use lipsum::lipsum;
 use rand::rngs::OsRng;
-use river_core::board_state::ChatBoardParametersV1;
-use river_core::{
+use plaza_core::board_state::ChatBoardParametersV1;
+use plaza_core::{
     board_state::{
         configuration::*,
         member::*,

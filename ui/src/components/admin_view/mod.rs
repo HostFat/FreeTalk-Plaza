@@ -7,7 +7,7 @@ use add_admin_modal::AddAdminModal;
 use crate::board_data::BoardData;
 use crate::components::app::{BOARDS, CURRENT_BOARD, EDIT_BOARD_MODAL};
 use dioxus::prelude::*;
-use river_core::board_state::member::MemberId;
+use plaza_core::board_state::member::MemberId;
 
 #[component]
 pub fn AdminView() -> Element {

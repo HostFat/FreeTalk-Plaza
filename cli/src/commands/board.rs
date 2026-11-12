@@ -84,7 +84,7 @@ pub async fn execute(command: BoardCommands, api: ApiClient, format: OutputForma
                             println!("Owner key: {}", result.owner_key);
                             println!("Contract key: {}", result.contract_key);
                             println!("\nTo invite others, use:");
-                            println!("  riverctl invite create {}", result.owner_key);
+                            println!("  plazactl invite create {}", result.owner_key);
                         }
                         OutputFormat::Json => {
                             println!("{}", serde_json::to_string_pretty(&result)?);
@@ -108,7 +108,7 @@ pub async fn execute(command: BoardCommands, api: ApiClient, format: OutputForma
                     if boards.is_empty() {
                         match format {
                             OutputFormat::Human => {
-                                println!("No boards found. Use 'riverctl board create' to create a new board.");
+                                println!("No boards found. Use 'plazactl board create' to create a new board.");
                             }
                             OutputFormat::Json => {
                                 println!("[]");
@@ -151,7 +151,7 @@ pub async fn execute(command: BoardCommands, api: ApiClient, format: OutputForma
         BoardCommands::Join { board_id } => {
             if !matches!(format, OutputFormat::Json) {
                 eprintln!("Joining board: {}", board_id);
-                eprintln!("To join a board, you need an invitation. Use 'riverctl invite accept <invitation-code>'");
+                eprintln!("To join a board, you need an invitation. Use 'plazactl invite accept <invitation-code>'");
             }
             Ok(())
         }

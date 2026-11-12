@@ -17,7 +17,7 @@ use utils::*;
 // Custom logging module to handle different environments
 mod logging;
 
-use river_core::chat_delegate::*;
+use plaza_core::chat_delegate::*;
 use serde::{Deserialize, Serialize};
 
 /// Chat delegate for storing and retrieving data in the Freenet secret storage.
@@ -112,7 +112,7 @@ fn check_origin(origin: Option<MessageOrigin>, message_type: &str) -> Result<Ori
                 "Rejecting inter-delegate call from caller {caller_key}"
             ));
             Err(DelegateError::Other(format!(
-                "freetalk-delegate does not accept inter-delegate calls (caller: {caller_key})"
+                "plaza-delegate does not accept inter-delegate calls (caller: {caller_key})"
             )))
         }
         None => {
@@ -125,7 +125,7 @@ fn check_origin(origin: Option<MessageOrigin>, message_type: &str) -> Result<Ori
             logging::info("Unknown MessageOrigin variant");
             Err(DelegateError::Other(
                 "unknown MessageOrigin variant - \
-                 freetalk-delegate must be rebuilt against a newer freenet-stdlib"
+                 plaza-delegate must be rebuilt against a newer freenet-stdlib"
                     .into(),
             ))
         }

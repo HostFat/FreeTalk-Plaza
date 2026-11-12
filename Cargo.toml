@@ -1,8 +1,8 @@
 [workspace]
 members = [
     "common",
-    "freetalk-contract",
-    "freetalk-delegate",
+    "plaza-contract",
+    "plaza-delegate",
     "ui",
     "cli",
 ]
@@ -41,7 +41,7 @@ wasm-bindgen-futures = "0.4.43"
 futures-timer = "3.0.2"
 
 # Internal dependencies
-river-core = { path = "common", package = "river-core", default-features = true }
+plaza-core = { path = "common", package = "plaza-core", default-features = true }
 river = { path = "cli", package = "river" }
 
 # Freenet dependencies

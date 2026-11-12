@@ -27,8 +27,8 @@ use dioxus::logger::tracing::{debug, error, info};
 use dioxus::prelude::*;
 use ed25519_dalek::VerifyingKey;
 use freenet_stdlib::client_api::WebApi;
-use river_core::board_state::member::MemberId;
-use river_core::board_state::message::MessageId;
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::message::MessageId;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::window;
 
@@ -114,7 +114,7 @@ const GIT_COMMIT: &str = env!("GIT_COMMIT_HASH");
 #[component]
 pub fn App() -> Element {
     info!(
-        "FreeTalk UI loaded - Built: {} | Commit: {}",
+        "FreeTalk Plaza UI loaded - Built: {} | Commit: {}",
         BUILD_TIMESTAMP, GIT_COMMIT
     );
 

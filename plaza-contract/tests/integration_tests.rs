@@ -3,7 +3,7 @@
 mod common;
 
 use common::{
-    collect_river_node_diagnostics, connect_ws_with_retries, deploy_board_contract,
+    collect_river_node_diagnostics, connect_ws_with_retries, deploy_plaza_contract,
     get_all_board_states, river_states_equal, send_test_message, subscribe_to_contract,
     update_board_state_delta, wait_for_update_response, BoardTestState,
 };
@@ -166,7 +166,7 @@ async fn test_invitation_message_propagation() -> TestResult {
             println!("   - Using pre-configured Alice owner key: {:?}", alice_verifying_key);
 
             println!("Deploying contract...");
-            let contract_key = deploy_board_contract(
+            let contract_key = deploy_plaza_contract(
                 &mut client_node1,
                 initial_state.board_state.clone(),
                 &initial_state.parameters,
@@ -192,13 +192,13 @@ async fn test_invitation_message_propagation() -> TestResult {
 
             println!("   - Bob's key: {:?}", bob_verifying_key);
 
-            let bob_member = river_core::board_state::member::Member {
+            let bob_member = plaza_core::board_state::member::Member {
                 owner_member_id: alice_verifying_key.into(),
                 member_vk: bob_verifying_key,
                 invited_by: alice_verifying_key.into(),
             };
 
-            let authorized_bob_member = river_core::board_state::member::AuthorizedMember::new(
+            let authorized_bob_member = plaza_core::board_state::member::AuthorizedMember::new(
                 bob_member, &alice_signing_key
             );
 
@@ -214,26 +214,26 @@ async fn test_invitation_message_propagation() -> TestResult {
                 .map_err(|e| format!("Bob failed to get board state: {}", e))?;
             let mut bob_board_state = bob_board_states[0].clone();
 
-            let bob_members_delta = river_core::board_state::member::MembersDelta::new(
+            let bob_members_delta = plaza_core::board_state::member::MembersDelta::new(
                 vec![authorized_bob_member.clone()]
             );
 
             bob_board_state.members.apply_delta(&bob_board_state.clone(), &initial_state.parameters, &Some(bob_members_delta))
                 .map_err(|e| format!("Failed to add Bob to members: {}", e))?;
 
-            let bob_member_info = river_core::board_state::member_info::MemberInfo {
+            let bob_member_info = plaza_core::board_state::member_info::MemberInfo {
                 member_id: bob_signing_key.verifying_key().into(),
                 version: 0,
-                preferred_nickname: river_core::board_state::privacy::SealedBytes::public("Bob".to_string().into_bytes()),
+                preferred_nickname: plaza_core::board_state::privacy::SealedBytes::public("Bob".to_string().into_bytes()),
             };
-            let authorized_bob_info = river_core::board_state::member_info::AuthorizedMemberInfo::new_with_member_key(
+            let authorized_bob_info = plaza_core::board_state::member_info::AuthorizedMemberInfo::new_with_member_key(
                 bob_member_info, &bob_signing_key
             );
 
             bob_board_state.member_info.member_info.push(authorized_bob_info.clone());
 
-            let bob_membership_delta = river_core::board_state::ChatBoardStateV1Delta {
-                members: Some(river_core::board_state::member::MembersDelta::new(vec![authorized_bob_member.clone()])),
+            let bob_membership_delta = plaza_core::board_state::ChatBoardStateV1Delta {
+                members: Some(plaza_core::board_state::member::MembersDelta::new(vec![authorized_bob_member.clone()])),
                 ..Default::default()
             };
 
@@ -248,7 +248,7 @@ async fn test_invitation_message_propagation() -> TestResult {
             println!("   - Bob membership update successful!");
 
             println!("   - Sending Bob's member info (nickname)...");
-            let bob_info_delta = river_core::board_state::ChatBoardStateV1Delta {
+            let bob_info_delta = plaza_core::board_state::ChatBoardStateV1Delta {
                 member_info: Some(vec![authorized_bob_info.clone()]),
                 ..Default::default()
             };

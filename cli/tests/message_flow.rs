@@ -18,7 +18,7 @@ use freenet_stdlib::client_api::{
 use freenet_stdlib::prelude::{ContractCode, ContractKey, Parameters};
 use freenet_test_network::{Backend, BuildProfile, DockerNatConfig, FreenetBinary, TestNetwork};
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use river_core::board_state::ChatBoardParametersV1;
+use plaza_core::board_state::ChatBoardParametersV1;
 use serde::Deserialize;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -27,10 +27,10 @@ use tokio_tungstenite::connect_async;
 
 // Load the board contract WASM for reconstructing ContractKey
 // IMPORTANT: Use the canonical source from ui/public/contracts/ to match what
-// build.rs copies to OUT_DIR for the main riverctl binary. Using the copy at
-// ../contracts/board_contract.wasm can cause contract key mismatches if that
+// build.rs copies to OUT_DIR for the main plazactl binary. Using the copy at
+// ../contracts/plaza_contract.wasm can cause contract key mismatches if that
 // file becomes stale (different WASM = different contract key hash).
-const BOARD_CONTRACT_WASM: &[u8] = include_bytes!("../../ui/public/contracts/board_contract.wasm");
+const BOARD_CONTRACT_WASM: &[u8] = include_bytes!("../../ui/public/contracts/plaza_contract.wasm");
 
 /// Reconstruct ContractKey from owner key string using board contract code
 fn owner_key_to_contract_key(owner_key_str: &str) -> Result<ContractKey> {
@@ -220,7 +220,7 @@ impl LatencyTracker {
     }
 }
 
-async fn run_riverctl(config_dir: &Path, node_url: &str, args: &[&str]) -> Result<String> {
+async fn run_plazactl(config_dir: &Path, node_url: &str, args: &[&str]) -> Result<String> {
     fn extract_json_payload(stdout: &str) -> Option<String> {
         fn strip_ansi_sequences(input: &str) -> String {
             let mut result = String::with_capacity(input.len());
@@ -336,16 +336,16 @@ async fn run_riverctl(config_dir: &Path, node_url: &str, args: &[&str]) -> Resul
     let args_clone = full_args.clone();
 
     let output: Output = tokio::task::spawn_blocking(move || -> Result<Output> {
-        let mut cmd = cargo_bin_cmd!("riverctl");
+        let mut cmd = cargo_bin_cmd!("plazactl");
         cmd.env("RIVER_CONFIG_DIR", &config_dir).args(&args_clone);
-        cmd.output().context("Failed to execute riverctl command")
+        cmd.output().context("Failed to execute plazactl command")
     })
     .await
-    .context("Failed to join riverctl command task")??;
+    .context("Failed to join plazactl command task")??;
 
     if !output.status.success() {
         return Err(anyhow!(
-            "riverctl command failed: {}\nstdout: {}\nstderr: {}",
+            "plazactl command failed: {}\nstdout: {}\nstderr: {}",
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
@@ -353,7 +353,7 @@ async fn run_riverctl(config_dir: &Path, node_url: &str, args: &[&str]) -> Resul
     }
 
     let stdout =
-        String::from_utf8(output.stdout).context("riverctl command produced non-UTF8 stdout")?;
+        String::from_utf8(output.stdout).context("plazactl command produced non-UTF8 stdout")?;
 
     if let Some(payload) = extract_json_payload(&stdout) {
         return Ok(payload);
@@ -907,7 +907,7 @@ async fn send_message_or_dump(
     sender_label: &str,
     contract_key: &ContractKey,
 ) -> Result<()> {
-    if let Err(err) = run_riverctl(
+    if let Err(err) = run_plazactl(
         config_dir.path(),
         node_url,
         &["message", "send", owner_key, message],
@@ -920,7 +920,7 @@ async fn send_message_or_dump(
         dump_subscriptions(network).await;
         dump_diagnostics(network, contract_key).await;
         return Err(anyhow!(
-            "riverctl message send ({sender_label}) failed: {err}"
+            "plazactl message send ({sender_label}) failed: {err}"
         ));
     }
     Ok(())
@@ -944,7 +944,7 @@ async fn wait_for_expected_messages(
     let mut seen: HashSet<String> = HashSet::with_capacity(expected.len());
 
     loop {
-        let stdout = match run_riverctl(
+        let stdout = match run_plazactl(
             config_dir.path(),
             node_url,
             &["message", "list", owner_key],
@@ -959,7 +959,7 @@ async fn wait_for_expected_messages(
                 dump_subscriptions(network).await;
                 dump_diagnostics(network, contract_key).await;
                 return Err(anyhow!(
-                    "riverctl message list ({participant}) failed: {err}"
+                    "plazactl message list ({participant}) failed: {err}"
                 ));
             }
         };
@@ -1210,7 +1210,7 @@ async fn setup_board_and_exchange_messages(
     let create_stdout = loop {
         create_attempts += 1;
         let start = Instant::now();
-        match run_riverctl(
+        match run_plazactl(
             owner.config_dir.path(),
             &owner_url,
             &[
@@ -1226,14 +1226,14 @@ async fn setup_board_and_exchange_messages(
         {
             Ok(output) => {
                 println!(
-                    "riverctl board create succeeded in {:.2?} (attempt {create_attempts})",
+                    "plazactl board create succeeded in {:.2?} (attempt {create_attempts})",
                     start.elapsed()
                 );
                 break output;
             }
             Err(err) => {
                 println!(
-                    "riverctl board create failed after {:.2?} (attempt {create_attempts}): {err}",
+                    "plazactl board create failed after {:.2?} (attempt {create_attempts}): {err}",
                     start.elapsed()
                 );
                 let timed_out = err.to_string().contains("Timeout waiting for PUT response");
@@ -1243,7 +1243,7 @@ async fn setup_board_and_exchange_messages(
                     continue;
                 }
                 dump_full_network_state(network).await;
-                return Err(anyhow!("riverctl board create failed: {}", err));
+                return Err(anyhow!("plazactl board create failed: {}", err));
             }
         }
     };
@@ -1255,12 +1255,12 @@ async fn setup_board_and_exchange_messages(
     board.contract_key = Some(contract_key);
 
     for user in board.users.iter().skip(1) {
-        let invite_stdout = run_riverctl_checked(
+        let invite_stdout = run_plazactl_checked(
             network,
             owner.config_dir.path(),
             &owner_url,
             &["invite", "create", board.owner_key()],
-            "riverctl invite create",
+            "plazactl invite create",
         )
         .await?;
         let invite_output: InviteCreateOutput =
@@ -1272,7 +1272,7 @@ async fn setup_board_and_exchange_messages(
         let accept_stdout = loop {
             accept_attempts += 1;
             let start = Instant::now();
-            match run_riverctl(
+            match run_plazactl(
                 user.config_dir.path(),
                 &user_url,
                 &[
@@ -1287,14 +1287,14 @@ async fn setup_board_and_exchange_messages(
             {
                 Ok(output) => {
                     println!(
-                        "riverctl invite accept succeeded in {:.2?} (attempt {accept_attempts})",
+                        "plazactl invite accept succeeded in {:.2?} (attempt {accept_attempts})",
                         start.elapsed()
                     );
                     break output;
                 }
                 Err(err) => {
                     println!(
-                        "riverctl invite accept failed after {:.2?} (attempt {accept_attempts}): {err}",
+                        "plazactl invite accept failed after {:.2?} (attempt {accept_attempts}): {err}",
                         start.elapsed()
                     );
                     let timed_out = err.to_string().contains("Timeout waiting for GET response");
@@ -1304,7 +1304,7 @@ async fn setup_board_and_exchange_messages(
                         continue;
                     }
                     dump_full_network_state(network).await;
-                    return Err(anyhow!("riverctl invite accept failed: {}", err));
+                    return Err(anyhow!("plazactl invite accept failed: {}", err));
                 }
             }
         };
@@ -1493,14 +1493,14 @@ async fn setup_board_and_exchange_messages(
     Ok(board.expected_messages.len())
 }
 
-async fn run_riverctl_checked(
+async fn run_plazactl_checked(
     network: &TestNetwork,
     config_dir: &Path,
     node_url: &str,
     args: &[&str],
     label: &str,
 ) -> Result<String> {
-    match run_riverctl(config_dir, node_url, args).await {
+    match run_plazactl(config_dir, node_url, args).await {
         Ok(output) => Ok(output),
         Err(err) => {
             dump_full_network_state(network).await;
@@ -1626,7 +1626,7 @@ async fn run_late_joiner_test() -> Result<()> {
     let owner_url = node_url(owner_peer);
     println!("Step 1: Owner (peer 0) creates board");
 
-    let create_stdout = run_riverctl(
+    let create_stdout = run_plazactl(
         owner_config.path(),
         &owner_url,
         &[
@@ -1654,7 +1654,7 @@ async fn run_late_joiner_test() -> Result<()> {
     let early_peer = network.peer(1);
     let early_url = node_url(early_peer);
 
-    let invite1_stdout = run_riverctl(
+    let invite1_stdout = run_plazactl(
         owner_config.path(),
         &owner_url,
         &["invite", "create", &owner_key],
@@ -1663,7 +1663,7 @@ async fn run_late_joiner_test() -> Result<()> {
     .context("Failed to create invite for early joiner")?;
     let invite1: InviteCreateOutput = serde_json::from_str(&invite1_stdout)?;
 
-    run_riverctl(
+    run_plazactl(
         early_joiner_config.path(),
         &early_url,
         &[
@@ -1726,7 +1726,7 @@ async fn run_late_joiner_test() -> Result<()> {
     ];
 
     for msg in &pre_join_messages {
-        run_riverctl(
+        run_plazactl(
             owner_config.path(),
             &owner_url,
             &["message", "send", &owner_key, msg],
@@ -1756,7 +1756,7 @@ async fn run_late_joiner_test() -> Result<()> {
     let late_peer = network.peer(2);
     let late_url = node_url(late_peer);
 
-    let invite2_stdout = run_riverctl(
+    let invite2_stdout = run_plazactl(
         owner_config.path(),
         &owner_url,
         &["invite", "create", &owner_key],
@@ -1766,7 +1766,7 @@ async fn run_late_joiner_test() -> Result<()> {
     let invite2: InviteCreateOutput = serde_json::from_str(&invite2_stdout)?;
 
     // This is the critical step: late joiner accepts invite, triggering GET to fetch contract
-    run_riverctl(
+    run_plazactl(
         late_joiner_config.path(),
         &late_url,
         &[
@@ -1817,7 +1817,7 @@ async fn run_late_joiner_test() -> Result<()> {
     ];
 
     for msg in &post_join_messages {
-        run_riverctl(
+        run_plazactl(
             owner_config.path(),
             &owner_url,
             &["message", "send", &owner_key, msg],

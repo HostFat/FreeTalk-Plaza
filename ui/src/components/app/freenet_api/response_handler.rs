@@ -26,10 +26,10 @@ use freenet_stdlib::client_api::{ContractResponse, HostResponse};
 use freenet_stdlib::prelude::OutboundDelegateMsg;
 pub use get_response::handle_get_response;
 pub use put_response::handle_put_response;
-use river_core::board_state::member::MemberId;
-use river_core::board_state::message::{BoardMessageBody, MessageId};
-use river_core::board_state::privacy::PrivacyMode;
-use river_core::chat_delegate::{ChatDelegateRequestMsg, ChatDelegateResponseMsg};
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::message::{BoardMessageBody, MessageId};
+use plaza_core::board_state::privacy::PrivacyMode;
+use plaza_core::chat_delegate::{ChatDelegateRequestMsg, ChatDelegateResponseMsg};
 use std::collections::HashMap;
 pub use subscribe_response::handle_subscribe_response;
 pub use update_notification::handle_update_notification;
@@ -181,7 +181,7 @@ impl ResponseHandler {
                                     ChatDelegateResponseMsg::ListResponse { .. } => {
                                         // Use the special list request key
                                         let list_key =
-                                            river_core::chat_delegate::ChatDelegateKey::new(
+                                            plaza_core::chat_delegate::ChatDelegateKey::new(
                                                 b"__list_request__".to_vec(),
                                             );
                                         complete_pending_request(&list_key, response.clone())
@@ -359,7 +359,7 @@ impl ResponseHandler {
                                                                             })
                                                                             .collect();
 
-                                                                        let owner_id = river_core::board_state::member::MemberId::from(&board_data.owner_vk);
+                                                                        let owner_id = plaza_core::board_state::member::MemberId::from(&board_data.owner_vk);
                                                                         let admin_ids: std::collections::HashSet<_> = board_data
                                                                             .board_state
                                                                             .admin

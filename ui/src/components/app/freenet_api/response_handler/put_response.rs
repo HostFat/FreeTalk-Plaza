@@ -6,7 +6,7 @@ use crate::util::owner_vk_to_contract_key;
 use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::ReadableExt;
 use freenet_stdlib::prelude::ContractKey;
-use river_core::board_state::member::MemberId;
+use plaza_core::board_state::member::MemberId;
 
 pub async fn handle_put_response(
     board_synchronizer: &mut BoardSynchronizer,
@@ -33,8 +33,8 @@ pub async fn handle_put_response(
         let mut found_owner_vk = None;
 
         for owner_key in boards.map.keys() {
-            let board_contract_key = owner_vk_to_contract_key(owner_key);
-            if board_contract_key.id() == contract_id {
+            let plaza_contract_key = owner_vk_to_contract_key(owner_key);
+            if plaza_contract_key.id() == contract_id {
                 info!(
                     "Found matching owner key in boards: {:?}",
                     MemberId::from(*owner_key)
@@ -98,8 +98,8 @@ pub async fn handle_put_response(
                     .keys()
                     .map(|board_key| {
                         let contract_key = owner_vk_to_contract_key(board_key);
-                        let board_contract_id = contract_key.id();
-                        (MemberId::from(*board_key), board_contract_id.to_string())
+                        let plaza_contract_id = contract_key.id();
+                        (MemberId::from(*board_key), plaza_contract_id.to_string())
                     })
                     .collect()
             };

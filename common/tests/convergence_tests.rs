@@ -13,14 +13,14 @@
 use ed25519_dalek::SigningKey;
 use freenet_scaffold::ComposableState;
 use rand::rngs::OsRng;
-use river_core::board_state::ban::{AuthorizedUserBan, BansV1, UserBan};
-use river_core::board_state::member::{
+use plaza_core::board_state::ban::{AuthorizedUserBan, BansV1, UserBan};
+use plaza_core::board_state::member::{
     AuthorizedMember, Member, MemberId, MembersDelta, MembersV1,
 };
-use river_core::board_state::message::{
+use plaza_core::board_state::message::{
     AuthorizedMessageV1, BoardMessageBody, MessageId, MessageV1, MessagesV1,
 };
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
 use std::time::SystemTime;
 
 /// Helper to create a test member that's invited by a given inviter
@@ -1676,7 +1676,7 @@ fn test_regression_message_pruning_order() {
 // This is the ultimate convergence test: two peers starting from different initial
 // states must produce identical serialized output after merging the other's state.
 
-use river_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
+use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
 
 #[test]
 fn test_full_state_merge_commutativity() {
@@ -2016,7 +2016,7 @@ fn test_regression_combined_scenario() {
 // list during merge. clean_orphaned_bans post-hook removes invalid bans after
 // all fields are applied.
 
-use river_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
 
 /// Helper to create a signed configuration for tests
 fn create_test_config(owner_sk: &SigningKey) -> AuthorizedConfigurationV1 {
@@ -2683,7 +2683,7 @@ fn test_merge_owner_ban_across_diverged_states() {
 // ADMIN TESTS
 // =============================================================================
 
-use river_core::board_state::admin::{Admin, AdminsDelta, AdminsV1, AuthorizedAdmin};
+use plaza_core::board_state::admin::{Admin, AdminsDelta, AdminsV1, AuthorizedAdmin};
 
 /// Test that the owner cannot be added as an admin.
 /// The owner already has full privileges, so adding them as admin is rejected.

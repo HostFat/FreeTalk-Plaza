@@ -16,8 +16,8 @@ use freenet_stdlib::client_api::HostResponse;
 use freenet_stdlib::prelude::OutboundDelegateMsg;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::StreamExt;
-use river_core::board_state::member::AuthorizedMember;
-use river_core::board_state::member::MemberId;
+use plaza_core::board_state::member::AuthorizedMember;
+use plaza_core::board_state::member::MemberId;
 use std::time::Duration;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
@@ -455,8 +455,8 @@ impl FreenetSynchronizer {
                                                 .map(|board_key| {
                                                     let contract_key =
                                                         owner_vk_to_contract_key(board_key);
-                                                    let board_contract_id = contract_key.id();
-                                                    (*board_key, board_contract_id.to_string())
+                                                    let plaza_contract_id = contract_key.id();
+                                                    (*board_key, plaza_contract_id.to_string())
                                                 })
                                                 .collect()
                                         };
@@ -464,8 +464,8 @@ impl FreenetSynchronizer {
                                         let mut found = false;
                                         let mut matching_boards = Vec::new();
 
-                                        for (board_key, board_contract_id) in &board_matches {
-                                            if board_contract_id == contract_id {
+                                        for (board_key, plaza_contract_id) in &board_matches {
+                                            if plaza_contract_id == contract_id {
                                                 info!("Contract ID {} matches board with owner key: {:?}", 
                                                       contract_id, MemberId::from(*board_key));
                                                 found = true;

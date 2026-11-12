@@ -3,49 +3,49 @@
 ## Installation
 
 ```bash
-cargo install riverctl
+cargo install plazactl
 ```
 
 ## Basic Usage
 
 ### 1. Test Connection
 ```bash
-riverctl debug websocket
+plazactl debug websocket
 ```
 
 ### 2. Create a Board
 ```bash
-riverctl board create --name "My Board" --nickname "YourName"
+plazactl board create --name "My Board" --nickname "YourName"
 ```
 
 This will output a board owner key (save this for later commands).
 
 ### 3. Create an Invitation
 ```bash
-riverctl invite create <board-owner-key>
+plazactl invite create <board-owner-key>
 ```
 
 This generates an invitation code to share.
 
 ### 4. Accept an Invitation
 ```bash
-riverctl invite accept <invitation-code>
+plazactl invite accept <invitation-code>
 ```
 
 ### 5. Debug Commands
 ```bash
 # Show contract key for a board
-riverctl debug contract-key <board-owner-key>
+plazactl debug contract-key <board-owner-key>
 
 # Perform raw GET operation
-riverctl debug contract-get <board-owner-key>
+plazactl debug contract-get <board-owner-key>
 ```
 
 ## Output Formats
 
 All commands support JSON output:
 ```bash
-riverctl -f json <command>
+plazactl -f json <command>
 ```
 
 ## Common Issues
@@ -60,5 +60,5 @@ riverctl -f json <command>
 
 Example:
 ```bash
-RUST_LOG=debug riverctl -d board create --name "Test" --nickname "User"
+RUST_LOG=debug plazactl -d board create --name "Test" --nickname "User"
 ```

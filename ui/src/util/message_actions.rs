@@ -6,13 +6,13 @@ use crate::util::get_current_system_time;
 use dioxus::prelude::*;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
-use river_core::board_state::content::ActionContentV1;
-use river_core::board_state::member::MemberId;
-use river_core::board_state::message::{
+use plaza_core::board_state::content::ActionContentV1;
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::message::{
     AuthorizedMessageV1, BoardMessageBody, MessageId, MessageV1,
 };
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
-use river_core::chat_delegate::BoardKey;
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
+use plaza_core::chat_delegate::BoardKey;
 
 /// Parameters needed for message actions
 #[derive(Clone)]

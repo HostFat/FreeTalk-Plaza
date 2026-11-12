@@ -3,10 +3,10 @@ use freenet_stdlib::prelude::*;
 
 use freenet_scaffold::ComposableState;
 use freenet_stdlib::prelude::ContractError;
-use river_core::board_state::{
+use plaza_core::board_state::{
     ChatBoardParametersV1, ChatBoardStateV1Delta, ChatBoardStateV1Summary,
 };
-use river_core::ChatBoardStateV1;
+use plaza_core::ChatBoardStateV1;
 
 // NOTE: Crypto helper modules intentionally not compiled by default.
 // They are retained under examples/docs to avoid accidental inclusion.

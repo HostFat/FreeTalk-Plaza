@@ -36,17 +36,17 @@ jobs:
     - name: Run tests
       run: nix develop --command cargo test --verbose
     - name: Build UI with dioxus
-      run: nix develop --command dx build --package freetalk-ui --release
-    - name: Upload board_contract.wasm
+      run: nix develop --command dx build --package plaza-ui --release
+    - name: Upload plaza_contract.wasm
       uses: actions/upload-artifact@v4
       with:
-        name: board_contract.wasm
-        path: ui/public/contracts/board_contract.wasm
-    - name: Upload freetalk_delegate.wasm
+        name: plaza_contract.wasm
+        path: ui/public/contracts/plaza_contract.wasm
+    - name: Upload plaza_delegate.wasm
       uses: actions/upload-artifact@v4
       with:
-        name: freetalk_delegate.wasm
-        path: ui/public/contracts/freetalk_delegate.wasm
+        name: plaza_delegate.wasm
+        path: ui/public/contracts/plaza_delegate.wasm
     - name: Upload styles.css
       uses: actions/upload-artifact@v4
       with:
@@ -55,5 +55,5 @@ jobs:
     - name: Upload UI dist
       uses: actions/upload-artifact@v4
       with:
-        name: freetalk-ui
-        path: target/dx/freetalk-ui/release/web/public
+        name: plaza-ui
+        path: target/dx/plaza-ui/release/web/public

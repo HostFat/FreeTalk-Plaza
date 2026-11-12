@@ -8,16 +8,16 @@ use freenet_stdlib::client_api::{
     ClientRequest, ContractRequest, ContractResponse, HostResponse, WebApi,
 };
 use freenet_stdlib::prelude::*;
-use river_core::board_state::member::{AuthorizedMember, Member, MemberId, MembersDelta};
-use river_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
-use river_core::board_state::privacy::SealedBytes;
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
+use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId, MembersDelta};
+use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
+use plaza_core::board_state::privacy::SealedBytes;
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_tungstenite::connect_async;
 
 // Board contract WASM bytes (bundled)
-const BOARD_CONTRACT_WASM: &[u8] = include_bytes!("../contracts/board_contract.wasm");
+const BOARD_CONTRACT_WASM: &[u8] = include_bytes!("../contracts/plaza_contract.wasm");
 
 #[tokio::main]
 async fn main() -> Result<()> {

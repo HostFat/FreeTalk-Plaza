@@ -4,10 +4,10 @@ default_to_workspace = false
 
 [env]
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
-CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["common", "freetalk-contract", "freetalk-delegate", "ui", "cli"]
+CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["common", "plaza-contract", "plaza-delegate", "ui", "cli"]
 CONTRACT_TARGET = "wasm32-unknown-unknown"
-CONTRACT_NAME = "board_contract"
-DELEGATE_NAME = "freetalk_delegate"
+CONTRACT_NAME = "plaza_contract"
+DELEGATE_NAME = "plaza_delegate"
 BUILD_PROFILE = "release"
 # Comma-separated list of features to enable
 UI_FEATURES = ""
@@ -29,26 +29,26 @@ command = "npm"
 args = ["run", "watch:css"]
 cwd = "./ui"
 
-[tasks.build-board-contract]
+[tasks.build-plaza-contract]
 description = "Build the board contract WASM"
 command = "cargo"
-args = ["build", "--locked", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "board-contract", "--target-dir", "target"]
+args = ["build", "--locked", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "plaza-contract", "--target-dir", "target"]
 
 [tasks.sync-cli-wasm]
 description = "Sync board contract WASM to CLI package for crates.io publishing"
-dependencies = ["build-board-contract"]
+dependencies = ["build-plaza-contract"]
 script = '''
 #!/bin/bash
 set -e
 
 # Source and destination paths
-SOURCE_WASM="ui/public/contracts/board_contract.wasm"
-DEST_WASM="cli/contracts/board_contract.wasm"
+SOURCE_WASM="ui/public/contracts/plaza_contract.wasm"
+DEST_WASM="cli/contracts/plaza_contract.wasm"
 
 # Check if source exists
 if [ ! -f "$SOURCE_WASM" ]; then
     echo "Error: Source WASM not found at $SOURCE_WASM"
-    echo "Please run 'cargo make build-board-contract' first"
+    echo "Please run 'cargo make build-plaza-contract' first"
     exit 1
 fi
 
@@ -57,7 +57,7 @@ mkdir -p cli/contracts
 
 # Copy the WASM file
 cp "$SOURCE_WASM" "$DEST_WASM"
-echo "✓ Synced board_contract.wasm to CLI package"
+echo "✓ Synced plaza_contract.wasm to CLI package"
 
 # Check if the files differ (useful for CI)
 if ! cmp -s "$SOURCE_WASM" "$DEST_WASM"; then
@@ -100,7 +100,7 @@ cargo publish
 [tasks.build-chat-delegate]
 description = "Build the chat delegate WASM"
 command = "cargo"
-args = ["build", "--locked", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "freetalk-delegate", "--target-dir", "target"]
+args = ["build", "--locked", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "plaza-delegate", "--target-dir", "target"]
 
 [tasks.build-web-container]
 description = "Build the web container contract WASM"
@@ -154,7 +154,7 @@ description = "Compress the built webapp into tar.xz"
 dependencies = ["build-ui-with-cleanup"]
 script = '''
 mkdir -p target/webapp
-cd target/dx/freetalk-ui/${BUILD_PROFILE}/web/public && \
+cd target/dx/plaza-ui/${BUILD_PROFILE}/web/public && \
 tar -cJf ../../../../../webapp/webapp.tar.xz *
 '''
 
@@ -208,10 +208,10 @@ description = "Run integration tests for web-container-contract"
 command = "cargo"
 args = ["test", "--package", "web-container-contract", "--target-dir", "target/native", "--target", "x86_64-unknown-linux-gnu", "--test", "integration_tests"]
 
-[tasks.test-board-contract]
-description = "Run tests for board-contract"
+[tasks.test-plaza-contract]
+description = "Run tests for plaza-contract"
 command = "cargo"
-args = ["test", "--package", "board-contract", "--target-dir", "target/native", "--target", "x86_64-unknown-linux-gnu"]
+args = ["test", "--package", "plaza-contract", "--target-dir", "target/native", "--target", "x86_64-unknown-linux-gnu"]
 
 [tasks.test-scaffold]
 description = "Run tests for scaffold crate"
@@ -221,16 +221,16 @@ args = ["test", "--package", "freenet-scaffold", "--target-dir", "target/native"
 [tasks.test-common]
 description = "Run tests for common crate"
 command = "cargo"
-args = ["test", "--package", "river-core", "--target-dir", "target/native", "--target", "x86_64-unknown-linux-gnu"]
+args = ["test", "--package", "plaza-core", "--target-dir", "target/native", "--target", "x86_64-unknown-linux-gnu"]
 
 [tasks.test-chat-delegate]
 description = "Run tests for chat-delegate"
 command = "cargo"
-args = ["test", "--package", "freetalk-delegate", "--target-dir", "target/native"]
+args = ["test", "--package", "plaza-delegate", "--target-dir", "target/native"]
 
 [tasks.test]
 description = "Run all tests"
-dependencies = ["test-web-container", "test-web-container-integration", "test-board-contract", "test-scaffold", "test-common", "test-chat-delegate"]
+dependencies = ["test-web-container", "test-web-container-integration", "test-plaza-contract", "test-scaffold", "test-common", "test-chat-delegate"]
 
 [tasks.update-published-contract]
 description = "Build, publish, and update the published contract files"

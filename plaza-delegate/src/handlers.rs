@@ -1,7 +1,7 @@
 use super::*;
 use ed25519_dalek::{Signer, SigningKey};
 use freenet_stdlib::prelude::DelegateCtx;
-use river_core::chat_delegate::{BoardKey, RequestId};
+use plaza_core::chat_delegate::{BoardKey, RequestId};
 
 /// Handle an application message using the host function API for direct secret access.
 pub(crate) fn handle_application_message(
@@ -495,7 +495,7 @@ mod tests {
         let value = b"test_value".to_vec();
 
         let request = ChatDelegateRequestMsg::StoreRequest {
-            key: river_core::chat_delegate::ChatDelegateKey(key.clone()),
+            key: plaza_core::chat_delegate::ChatDelegateKey(key.clone()),
             value: value.clone(),
         };
         let app_msg = create_app_message(request);
@@ -522,7 +522,7 @@ mod tests {
             } => {
                 assert_eq!(
                     resp_key,
-                    river_core::chat_delegate::ChatDelegateKey(key.clone())
+                    plaza_core::chat_delegate::ChatDelegateKey(key.clone())
                 );
                 assert!(result.is_ok());
                 assert_eq!(value_size, value.len());
@@ -536,7 +536,7 @@ mod tests {
         let key = b"test_key".to_vec();
 
         let request = ChatDelegateRequestMsg::GetRequest {
-            key: river_core::chat_delegate::ChatDelegateKey(key.clone()),
+            key: plaza_core::chat_delegate::ChatDelegateKey(key.clone()),
         };
         let app_msg = create_app_message(request);
         let inbound_msg = InboundDelegateMsg::ApplicationMessage(app_msg);
@@ -561,7 +561,7 @@ mod tests {
             } => {
                 assert_eq!(
                     resp_key,
-                    river_core::chat_delegate::ChatDelegateKey(key.clone())
+                    plaza_core::chat_delegate::ChatDelegateKey(key.clone())
                 );
                 // Value will be None in test since we didn't store it first
             }
@@ -574,7 +574,7 @@ mod tests {
         let key = b"test_key".to_vec();
 
         let request = ChatDelegateRequestMsg::DeleteRequest {
-            key: river_core::chat_delegate::ChatDelegateKey(key.clone()),
+            key: plaza_core::chat_delegate::ChatDelegateKey(key.clone()),
         };
         let app_msg = create_app_message(request);
         let inbound_msg = InboundDelegateMsg::ApplicationMessage(app_msg);
@@ -599,7 +599,7 @@ mod tests {
             } => {
                 assert_eq!(
                     resp_key,
-                    river_core::chat_delegate::ChatDelegateKey(key.clone())
+                    plaza_core::chat_delegate::ChatDelegateKey(key.clone())
                 );
                 assert!(result.is_ok());
             }
@@ -683,7 +683,7 @@ mod tests {
 
     #[test]
     fn test_store_signing_key() {
-        let board_key: river_core::chat_delegate::BoardKey = [7u8; 32];
+        let board_key: plaza_core::chat_delegate::BoardKey = [7u8; 32];
         let signing_key_bytes: [u8; 32] = [8u8; 32];
 
         let request = ChatDelegateRequestMsg::StoreSigningKey {
@@ -720,7 +720,7 @@ mod tests {
 
     #[test]
     fn test_get_public_key_not_found() {
-        let board_key: river_core::chat_delegate::BoardKey = [9u8; 32];
+        let board_key: plaza_core::chat_delegate::BoardKey = [9u8; 32];
 
         let request = ChatDelegateRequestMsg::GetPublicKey { board_key };
         let app_msg = create_app_message(request);
@@ -754,8 +754,8 @@ mod tests {
 
     #[test]
     fn test_sign_message_without_key_returns_error() {
-        let board_key: river_core::chat_delegate::BoardKey = [10u8; 32];
-        let request_id: river_core::chat_delegate::RequestId = 12345;
+        let board_key: plaza_core::chat_delegate::BoardKey = [10u8; 32];
+        let request_id: plaza_core::chat_delegate::RequestId = 12345;
         let message_bytes = b"test message to sign".to_vec();
 
         let request = ChatDelegateRequestMsg::SignMessage {

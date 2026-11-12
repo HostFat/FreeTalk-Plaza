@@ -1,6 +1,11 @@
-# FreeTalk
+# FreeTalk Plaza
 
-A Forum for freenet
+A forum on Freenet: boards, categories, posts, private boards, and portable
+identities, all stored in Freenet contracts instead of a server.
+
+FreeTalk Plaza is a fork of [River](https://github.com/freenet/river) that
+replaces chat rooms with a forum, on top of the current Freenet stack
+(freenet-stdlib 0.12, Dioxus 0.7).
 
 # Building
 
@@ -16,8 +21,11 @@ cargo make sync-wasm        # or: cargo run --manifest-path tools/wasm-tool/Carg
 # Always: CSS + dev server
 npm --prefix ui install
 npm --prefix ui run watch:css
-dx serve --package freetalk-ui
+dx serve --package plaza-ui
 ```
+
+(`cargo make` tasks need `cargo install cargo-make`; every task has an
+equivalent `cargo run --manifest-path tools/wasm-tool/Cargo.toml -- …` command.)
 
 # Delegate generations
 
@@ -41,3 +49,6 @@ entry fails the build instead of silently orphaning data.
 Install deploy-tool from [ ◆ Freenet Shared ](https://github.com/free-network/freenet-shared)
 
 Run `deploy-tool deploy`
+
+The deployment id in `deploy.toml` (`freetalk`) is the live app identity and is
+intentionally unchanged by the rename.

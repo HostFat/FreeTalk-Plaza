@@ -16,11 +16,11 @@ use freenet_stdlib::prelude::{
     ContractCode, ContractContainer, ContractKey, ContractWasmAPIVersion, Parameters,
     WrappedContract, WrappedState,
 };
-use river_core::board_state::member::MemberId;
-use river_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
-use river_core::board_state::message::{BoardMessageBody, MessageId};
-use river_core::board_state::privacy::{PrivacyMode, SealedBytes};
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
+use plaza_core::board_state::message::{BoardMessageBody, MessageId};
+use plaza_core::board_state::privacy::{PrivacyMode, SealedBytes};
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
 use std::collections::HashMap;
 use std::sync::Arc;
 use x25519_dalek::PublicKey as X25519PublicKey;
@@ -281,7 +281,7 @@ pub async fn handle_get_response(
                         })
                         .collect();
 
-                    let owner_id = river_core::board_state::member::MemberId::from(&owner_vk);
+                    let owner_id = plaza_core::board_state::member::MemberId::from(&owner_vk);
                     let admin_ids: std::collections::HashSet<_> = board_data
                         .board_state
                         .admin

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to riverctl will be documented in this file.
+All notable changes to plazactl will be documented in this file.
 
 ## [0.1.8] - 2025-08-09
 

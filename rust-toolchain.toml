@@ -1,5 +1,5 @@
 [toolchain]
-# Pinned so `board_contract.wasm` and `freetalk_delegate.wasm` rebuild to the
+# Pinned so `plaza_contract.wasm` and `plaza_delegate.wasm` rebuild to the
 # same bytes on every machine.
 #
 # Why this matters: the delegate key is BLAKE3(BLAKE3(wasm) || params), and the

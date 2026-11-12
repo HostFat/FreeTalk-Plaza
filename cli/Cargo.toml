@@ -1,31 +1,31 @@
 [package]
-name = "riverctl"
+name = "plazactl"
 version = "0.1.37"
 edition = "2021"
 authors = ["Freenet Project"]
-description = "Command-line interface for River decentralized chat on Freenet"
-homepage = "https://github.com/freenet/river"
-repository = "https://github.com/freenet/river"
+description = "Command-line interface for FreeTalk Plaza on Freenet"
+homepage = "https://github.com/HostFat/FreeTalk-Plaza"
+repository = "https://github.com/HostFat/FreeTalk-Plaza"
 license = "LGPL-3.0"
 readme = "README.md"
-keywords = ["freenet", "chat", "cli", "p2p", "decentralized"]
+keywords = ["freenet", "forum", "cli", "p2p", "decentralized"]
 categories = ["command-line-utilities", "network-programming"]
-include = ["src/**/*", "Cargo.toml", "README.md", "LICENSE*", "contracts/board_contract.wasm", "build.rs"]
+include = ["src/**/*", "Cargo.toml", "README.md", "LICENSE*", "contracts/plaza_contract.wasm", "build.rs"]
 
 [features]
 default = []
 # Integration tests that start a real Freenet node. Off by default: the harness
 # crate (`freenet-test-network`) links its own freenet-stdlib, and two stdlib
 # copies in one binary fail to link on `__frnt_set_id`. Run with
-# `cargo test -p riverctl --features freenet-test`.
+# `cargo test -p plazactl --features freenet-test`.
 freenet-test = ["dep:freenet-test-network"]
 
 [lib]
-name = "riverctl"
+name = "plazactl"
 path = "src/lib.rs"
 
 [[bin]]
-name = "riverctl"
+name = "plazactl"
 path = "src/main.rs"
 
 [[test]]
@@ -66,7 +66,7 @@ dialoguer = "0.11"
 atty = "0.2"
 
 # Internal dependencies
-river-core = { version = "0.1.3", path = "../common" }
+plaza-core = { version = "0.1.3", path = "../common" }
 freenet-stdlib = { workspace = true, features = ["net"] }
 freenet-scaffold = "0.2.2"
 

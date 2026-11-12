@@ -6,21 +6,21 @@ use crate::{constants::BOARD_CONTRACT_WASM, util::to_cbor_vec};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use freenet_stdlib::prelude::{ContractCode, ContractKey, Parameters};
-use river_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
-use river_core::board_state::member::AuthorizedMember;
-use river_core::board_state::member::MemberId;
-use river_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
-use river_core::board_state::message::MessageId;
-use river_core::board_state::privacy::{
+use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+use plaza_core::board_state::member::AuthorizedMember;
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
+use plaza_core::board_state::message::MessageId;
+use plaza_core::board_state::privacy::{
     BoardCipherSpec, BoardDisplayMetadata, PrivacyMode, SealedBytes,
 };
-use river_core::board_state::secret::{
+use plaza_core::board_state::secret::{
     AuthorizedEncryptedSecretForMember, AuthorizedSecretVersionRecord, EncryptedSecretForMemberV1,
     SecretVersionRecordV1,
 };
-use river_core::board_state::ChatBoardParametersV1;
-use river_core::chat_delegate::BoardKey;
-use river_core::ChatBoardStateV1;
+use plaza_core::board_state::ChatBoardParametersV1;
+use plaza_core::chat_delegate::BoardKey;
+use plaza_core::ChatBoardStateV1;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -111,7 +111,7 @@ impl BoardData {
     pub fn is_private(&self) -> bool {
         matches!(
             self.board_state.configuration.configuration.privacy_mode,
-            river_core::board_state::privacy::PrivacyMode::Private
+            plaza_core::board_state::privacy::PrivacyMode::Private
         )
     }
 
@@ -363,8 +363,8 @@ impl BoardData {
     /// Returns a SecretsDelta with the new secret version and encrypted secrets
     pub fn rotate_secret(
         &mut self,
-    ) -> Result<river_core::board_state::secret::SecretsDelta, String> {
-        use river_core::board_state::secret::SecretsDelta;
+    ) -> Result<plaza_core::board_state::secret::SecretsDelta, String> {
+        use plaza_core::board_state::secret::SecretsDelta;
 
         // Only allow rotation for private boards
         if !self.is_private() {
@@ -471,8 +471,8 @@ impl BoardData {
     /// Returns a SecretsDelta if secrets were generated, None otherwise
     pub fn generate_missing_member_secrets(
         &self,
-    ) -> Option<river_core::board_state::secret::SecretsDelta> {
-        use river_core::board_state::secret::SecretsDelta;
+    ) -> Option<plaza_core::board_state::secret::SecretsDelta> {
+        use plaza_core::board_state::secret::SecretsDelta;
 
         // Only generate secrets if this is a private board and we have the secret
         if !self.is_private() {
@@ -794,8 +794,8 @@ impl Boards {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use river_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
-    use river_core::board_state::member::{AuthorizedMember, Member};
+    use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+    use plaza_core::board_state::member::{AuthorizedMember, Member};
 
     /// Regression test for #85: accepting an invitation for a board that already
     /// exists in the boards map must update self_sk so can_send_message() passes.
@@ -862,7 +862,7 @@ mod tests {
     /// Test that capture_self_membership_data captures and updates member_info.
     #[test]
     fn test_capture_self_membership_data_preserves_nickname() {
-        use river_core::board_state::privacy::SealedBytes;
+        use plaza_core::board_state::privacy::SealedBytes;
 
         let mut rng = rand::thread_rng();
         let owner_sk = SigningKey::generate(&mut rng);
@@ -1000,7 +1000,7 @@ mod tests {
 
         // Synced board with members pruned but messages present: NOT awaiting sync
         let mut pruned_board = make_board(invitee_sk, vec![]);
-        use river_core::board_state::message::{
+        use plaza_core::board_state::message::{
             AuthorizedMessageV1, BoardMessageBody, MessageV1,
         };
         let dummy_msg = AuthorizedMessageV1 {

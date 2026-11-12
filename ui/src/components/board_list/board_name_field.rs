@@ -4,9 +4,9 @@ use dioxus::logger::tracing::*;
 use dioxus::prelude::*;
 use dioxus_core::Event;
 use freenet_scaffold::ComposableState;
-use river_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
-use river_core::board_state::privacy::{BoardDisplayMetadata, SealedBytes};
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
+use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+use plaza_core::board_state::privacy::{BoardDisplayMetadata, SealedBytes};
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 use wasm_bindgen_futures::spawn_local;
 
 #[component]

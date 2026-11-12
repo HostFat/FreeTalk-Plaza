@@ -4,7 +4,7 @@ use ciborium::de::from_reader;
 use redb::{
     Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition, TableHandle,
 };
-use river_core::board_state::ChatBoardStateV1;
+use plaza_core::board_state::ChatBoardStateV1;
 use std::env;
 use std::time::SystemTime;
 
@@ -69,11 +69,11 @@ fn main() -> Result<()> {
                 .map(|d| d.as_secs())
                 .unwrap_or_default();
             match &msg.message.content {
-                river_core::board_state::message::BoardMessageBody::Public { .. } => {
+                plaza_core::board_state::message::BoardMessageBody::Public { .. } => {
                     let text = msg.message.content.as_public_string().unwrap_or_default();
                     println!("  [{}] {}...", timestamp, truncate(&text, 80));
                 }
-                river_core::board_state::message::BoardMessageBody::Private { .. } => {
+                plaza_core::board_state::message::BoardMessageBody::Private { .. } => {
                     println!("  [{}] <private message>", timestamp);
                 }
             }

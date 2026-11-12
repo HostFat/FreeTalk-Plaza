@@ -1,5 +1,5 @@
 {
-  "name": "river-ui",
+  "name": "plaza-ui",
   "private": true,
   "scripts": {
     "build:css": "tailwindcss -i assets/tailwind.css -o assets/styles.css --minify",

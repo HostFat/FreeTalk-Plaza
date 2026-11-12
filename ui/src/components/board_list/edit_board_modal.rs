@@ -6,8 +6,8 @@ use dioxus::prelude::*;
 use dioxus_free_icons::icons::fa_solid_icons::FaRotate;
 use dioxus_free_icons::Icon;
 use freenet_scaffold::ComposableState;
-use river_core::board_state::privacy::PrivacyMode;
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
+use plaza_core::board_state::privacy::PrivacyMode;
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 use std::ops::Deref;
 
 #[component]

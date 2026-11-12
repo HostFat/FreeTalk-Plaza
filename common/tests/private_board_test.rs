@@ -1,18 +1,18 @@
 use ed25519_dalek::SigningKey;
 use freenet_scaffold::ComposableState;
 use rand::rngs::OsRng;
-use river_core::board_state::ban::{AuthorizedUserBan, UserBan};
-use river_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
-use river_core::board_state::member::{AuthorizedMember, Member, MemberId};
-use river_core::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
-use river_core::board_state::privacy::{
+use plaza_core::board_state::ban::{AuthorizedUserBan, UserBan};
+use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
+use plaza_core::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
+use plaza_core::board_state::privacy::{
     BoardCipherSpec, BoardDisplayMetadata, PrivacyMode, SealedBytes,
 };
-use river_core::board_state::secret::{
+use plaza_core::board_state::secret::{
     AuthorizedEncryptedSecretForMember, AuthorizedSecretVersionRecord, BoardSecretsV1,
     EncryptedSecretForMemberV1, SecretVersionRecordV1, SecretsDelta,
 };
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
 use std::time::SystemTime;
 
 /// Helper function to generate a random 32-byte secret

@@ -1,14 +1,14 @@
 [package]
-name = "river-core"
+name = "plaza-core"
 version.workspace = true
 edition.workspace = true
 authors = ["Freenet Project"]
-description = "Core library for River - decentralized group chat on Freenet"
-homepage = "https://github.com/freenet/river"
-repository = "https://github.com/freenet/river"
+description = "Core library for FreeTalk Plaza - a forum on Freenet"
+homepage = "https://github.com/HostFat/FreeTalk-Plaza"
+repository = "https://github.com/HostFat/FreeTalk-Plaza"
 license = "LGPL-3.0"
 readme = "../README.md"
-keywords = ["freenet", "chat", "p2p", "decentralized", "core"]
+keywords = ["freenet", "forum", "p2p", "decentralized", "core"]
 categories = ["network-programming", "cryptography"]
 
 [dependencies]

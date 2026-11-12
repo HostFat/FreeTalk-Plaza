@@ -16,9 +16,9 @@ use crate::board_data::SendMessageError;
 use crate::components::conversation::message_input::PostInput;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
-use river_core::board_state::member::MemberId;
-use river_core::board_state::member_info::MemberInfoV1;
-use river_core::board_state::message::{BoardMessageBody, MessageId, MessagesV1};
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::member_info::MemberInfoV1;
+use plaza_core::board_state::message::{BoardMessageBody, MessageId, MessagesV1};
 use std::collections::HashMap;
 use wasm_bindgen_futures::spawn_local;
 
@@ -206,7 +206,7 @@ pub fn build_reply_tree(
 }
 
 fn decrypt_message_title(content: &BoardMessageBody, secrets: &HashMap<u32, [u8; 32]>) -> String {
-    use river_core::board_state::content::{
+    use plaza_core::board_state::content::{
         ReplyContentV1, TextContentV1, CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT,
     };
 
@@ -256,7 +256,7 @@ fn decrypt_message_title(content: &BoardMessageBody, secrets: &HashMap<u32, [u8;
 }
 
 fn decrypt_message_content(content: &BoardMessageBody, secrets: &HashMap<u32, [u8; 32]>) -> String {
-    use river_core::board_state::content::{
+    use plaza_core::board_state::content::{
         ReplyContentV1, TextContentV1, CONTENT_TYPE_ACTION, CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT,
     };
 
@@ -319,7 +319,7 @@ fn extract_reply_context(
     content: &BoardMessageBody,
     secrets: &HashMap<u32, [u8; 32]>,
 ) -> (Option<String>, Option<String>, Option<MessageId>) {
-    use river_core::board_state::content::{ReplyContentV1, CONTENT_TYPE_REPLY};
+    use plaza_core::board_state::content::{ReplyContentV1, CONTENT_TYPE_REPLY};
 
     match content {
         BoardMessageBody::Public {
@@ -365,7 +365,7 @@ fn extract_category_info(
     content: &BoardMessageBody,
     _secrets: &HashMap<u32, [u8; 32]>,
 ) -> (bool, Option<String>, Option<String>, Option<String>, Option<String>, Option<MessageId>) {
-    use river_core::board_state::content::{CategoryContentV1, CONTENT_TYPE_CATEGORY};
+    use plaza_core::board_state::content::{CategoryContentV1, CONTENT_TYPE_CATEGORY};
 
     match content {
         BoardMessageBody::Public {

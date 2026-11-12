@@ -9,8 +9,8 @@ use crate::util::ecies::unseal_bytes_with_secrets;
 use crate::util::messaging::{send_message, ReplyContext};
 use dioxus::prelude::*;
 use dioxus_free_icons::{icons::fa_solid_icons::FaBars, Icon};
-use river_core::board_state::member::MemberId;
-use river_core::board_state::privacy::PrivacyMode;
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::privacy::PrivacyMode;
 
 /// Top bar component displaying the current user's profile, admin controls, and post input.
 #[component]

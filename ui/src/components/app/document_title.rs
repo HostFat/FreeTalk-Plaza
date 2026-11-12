@@ -12,7 +12,7 @@ use crate::components::app::{BOARDS, CURRENT_BOARD};
 use crate::util::ecies::unseal_bytes_with_secrets;
 use dioxus::logger::tracing::{debug, info, warn};
 use dioxus::prelude::*;
-use river_core::board_state::member::MemberId;
+use plaza_core::board_state::member::MemberId;
 use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;

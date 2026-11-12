@@ -14,7 +14,7 @@ Command-line interface for River decentralized chat on Freenet. This tool allows
 ## Installation
 
 ```bash
-cargo install riverctl
+cargo install plazactl
 ```
 
 ## Usage
@@ -57,16 +57,16 @@ exists to reproduce and debug the issue.
 ## Architecture
 
 The CLI uses core components from the River ecosystem:
-- `river-core` - Core protocol and data structures
+- `plaza-core` - Core protocol and data structures
 - `freenet-stdlib` - WebSocket client for Freenet communication
 - Pre-built board contract WASM included in the package
 
 ## Commands
 
-- `riverctl board` - Board management (create, list, info)
-- `riverctl invite` - Invitation handling (create, accept)
-- `riverctl debug` - Debugging tools for contract operations
-- `riverctl message` - Messaging (coming soon)
-- `riverctl member` - Member management (coming soon)
+- `plazactl board` - Board management (create, list, info)
+- `plazactl invite` - Invitation handling (create, accept)
+- `plazactl debug` - Debugging tools for contract operations
+- `plazactl message` - Messaging (coming soon)
+- `plazactl member` - Member management (coming soon)
 
-Run `riverctl --help` for full command documentation.
+Run `plazactl --help` for full command documentation.

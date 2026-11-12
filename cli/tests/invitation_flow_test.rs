@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Result};
 use ed25519_dalek::SigningKey;
 use freenet_scaffold::ComposableState;
-use river_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
-use river_core::board_state::member::{AuthorizedMember, Member};
-use river_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
-use river_core::board_state::message::BoardMessageBody;
-use river_core::board_state::privacy::{BoardDisplayMetadata, SealedBytes};
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
+use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+use plaza_core::board_state::member::{AuthorizedMember, Member};
+use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
+use plaza_core::board_state::message::BoardMessageBody;
+use plaza_core::board_state::privacy::{BoardDisplayMetadata, SealedBytes};
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
 
 #[test]
 fn test_invitation_acceptance_initializes_board_state_correctly() -> Result<()> {
@@ -53,7 +53,7 @@ fn test_invitation_acceptance_initializes_board_state_correctly() -> Result<()> 
     // 1. Apply member delta
     let parameters = ChatBoardParametersV1 { owner: owner_vk };
     let members_delta =
-        river_core::board_state::member::MembersDelta::new(vec![authorized_member.clone()]);
+        plaza_core::board_state::member::MembersDelta::new(vec![authorized_member.clone()]);
     board_state
         .members
         .apply_delta(&board_state.clone(), &parameters, &Some(members_delta))
@@ -71,7 +71,7 @@ fn test_invitation_acceptance_initializes_board_state_correctly() -> Result<()> 
     // Validate the state is properly initialized
     assert_ne!(
         board_state.configuration.configuration.owner_member_id,
-        river_core::board_state::member::MemberId(freenet_scaffold::util::FastHash(0)),
+        plaza_core::board_state::member::MemberId(freenet_scaffold::util::FastHash(0)),
         "owner_member_id should not be default"
     );
 
@@ -108,7 +108,7 @@ fn test_invitation_acceptance_initializes_board_state_correctly() -> Result<()> 
 
 #[test]
 fn test_message_validation_after_invitation_acceptance() -> Result<()> {
-    use river_core::board_state::message::{AuthorizedMessageV1, MessageV1};
+    use plaza_core::board_state::message::{AuthorizedMessageV1, MessageV1};
     use std::time::SystemTime;
 
     // Set up board with owner and invited member
@@ -181,7 +181,7 @@ fn test_message_validation_after_invitation_acceptance() -> Result<()> {
 
 #[test]
 fn test_uninvited_user_messages_are_filtered() -> Result<()> {
-    use river_core::board_state::message::{AuthorizedMessageV1, MessageV1};
+    use plaza_core::board_state::message::{AuthorizedMessageV1, MessageV1};
     use std::time::SystemTime;
 
     // Set up board with owner only

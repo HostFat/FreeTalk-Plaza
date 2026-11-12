@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const COMMITTED_WASM: &str = "ui/public/contracts/freetalk_delegate.wasm";
+const COMMITTED_WASM: &str = "ui/public/contracts/plaza_delegate.wasm";
 const REGISTRY: &str = "legacy_delegates.toml";
 
 fn main() {
@@ -107,9 +107,9 @@ fn cmd_sync() -> Result<(), String> {
             "--target",
             "wasm32-unknown-unknown",
             "-p",
-            "board-contract",
+            "plaza-contract",
             "-p",
-            "freetalk-delegate",
+            "plaza-delegate",
         ])
         .current_dir(&root)
         .status()
@@ -120,9 +120,9 @@ fn cmd_sync() -> Result<(), String> {
 
     let out = root.join("target/wasm32-unknown-unknown/release");
     let copies = [
-        ("board_contract.wasm", "ui/public/contracts/board_contract.wasm"),
-        ("freetalk_delegate.wasm", "ui/public/contracts/freetalk_delegate.wasm"),
-        ("board_contract.wasm", "cli/contracts/board_contract.wasm"),
+        ("plaza_contract.wasm", "ui/public/contracts/plaza_contract.wasm"),
+        ("plaza_delegate.wasm", "ui/public/contracts/plaza_delegate.wasm"),
+        ("plaza_contract.wasm", "cli/contracts/plaza_contract.wasm"),
     ];
     for (src, dst) in copies {
         let src = out.join(src);

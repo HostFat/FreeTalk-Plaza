@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 use dioxus_free_icons::icons::fa_solid_icons::{FaArrowsRotate, FaCopy, FaXmark};
 use dioxus_free_icons::Icon;
 use ed25519_dalek::SigningKey;
-use river_core::board_state::member::{AuthorizedMember, Member};
+use plaza_core::board_state::member::{AuthorizedMember, Member};
 use std::rc::Rc;
 
 /// Fallback URL for non-browser environments or when window.location is unavailable

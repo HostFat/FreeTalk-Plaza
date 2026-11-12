@@ -7,7 +7,7 @@ use freenet_stdlib::{
     client_api::{ClientRequest, ContractRequest, HostResponse, WebApi},
     prelude::*,
 };
-use river_core::{
+use plaza_core::{
     board_state::{configuration::AuthorizedConfigurationV1, ChatBoardParametersV1},
     ChatBoardStateV1,
 };
@@ -28,7 +28,7 @@ impl BoardTestState {
         let owner_verifying_key = owner_key.verifying_key();
 
         let config = AuthorizedConfigurationV1::new(
-            river_core::board_state::configuration::Configuration::default(),
+            plaza_core::board_state::configuration::Configuration::default(),
             &owner_key,
         );
 
@@ -42,43 +42,43 @@ impl BoardTestState {
 
         let owner_id = owner_verifying_key.into();
 
-        let member1 = river_core::board_state::member::Member {
+        let member1 = plaza_core::board_state::member::Member {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: member1_verifying_key,
         };
 
-        let member2 = river_core::board_state::member::Member {
+        let member2 = plaza_core::board_state::member::Member {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: member2_verifying_key,
         };
 
-        let member3 = river_core::board_state::member::Member {
+        let member3 = plaza_core::board_state::member::Member {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: member3_verifying_key,
         };
 
         let authorized_member1 =
-            river_core::board_state::member::AuthorizedMember::new(member1, &owner_key);
+            plaza_core::board_state::member::AuthorizedMember::new(member1, &owner_key);
         let authorized_member2 =
-            river_core::board_state::member::AuthorizedMember::new(member2, &owner_key);
+            plaza_core::board_state::member::AuthorizedMember::new(member2, &owner_key);
         let authorized_member3 =
-            river_core::board_state::member::AuthorizedMember::new(member3, &owner_key);
+            plaza_core::board_state::member::AuthorizedMember::new(member3, &owner_key);
 
-        let members = river_core::board_state::member::MembersV1 {
+        let members = plaza_core::board_state::member::MembersV1 {
             members: vec![authorized_member1, authorized_member2, authorized_member3],
         };
 
         let board_state = ChatBoardStateV1 {
             configuration: config,
-            bans: river_core::board_state::ban::BansV1::default(),
+            bans: plaza_core::board_state::ban::BansV1::default(),
             members,
-            member_info: river_core::board_state::member_info::MemberInfoV1::default(),
-            secrets: river_core::board_state::secret::BoardSecretsV1::default(),
-            recent_messages: river_core::board_state::message::MessagesV1::default(),
-            upgrade: river_core::board_state::upgrade::OptionalUpgradeV1(None),
+            member_info: plaza_core::board_state::member_info::MemberInfoV1::default(),
+            secrets: plaza_core::board_state::secret::BoardSecretsV1::default(),
+            recent_messages: plaza_core::board_state::message::MessagesV1::default(),
+            upgrade: plaza_core::board_state::upgrade::OptionalUpgradeV1(None),
             ..Default::default()
         };
 
@@ -113,14 +113,14 @@ pub fn river_states_equal(a: &ChatBoardStateV1, b: &ChatBoardStateV1) -> bool {
         && a.upgrade == b.upgrade
 }
 
-pub async fn deploy_board_contract(
+pub async fn deploy_plaza_contract(
     client: &mut WebApi,
     initial_board_state: ChatBoardStateV1,
     parameters: &ChatBoardParametersV1,
     subscribe: bool,
 ) -> Result<ContractKey> {
     let mut path_to_code = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path_to_code.pop(); // go up from board-contract
+    path_to_code.pop(); // go up from plaza-contract
     path_to_code.pop(); // go up from contracts to river root
 
     println!(
@@ -212,8 +212,8 @@ pub async fn subscribe_to_contract(client: &mut WebApi, key: ContractKey) -> Res
 
 // Contract compilation constants
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
-const PATH_TO_CONTRACT: &str = "contracts/board-contract";
-const WASM_FILE_NAME: &str = "board-contract";
+const PATH_TO_CONTRACT: &str = "contracts/plaza-contract";
+const WASM_FILE_NAME: &str = "plaza-contract";
 const CONTRACT_FEATURES: &str = "contract,freenet-main-contract";
 
 // Timeout constants
@@ -412,10 +412,10 @@ pub async fn send_test_message(
 ) -> Result<()> {
     println!("--> [UPDATE] Sending test message: '{}'", message_content);
 
-    let message = river_core::board_state::message::MessageV1 {
+    let message = plaza_core::board_state::message::MessageV1 {
         board_owner: parameters.owner_id(),
         author: signing_key.verifying_key().into(),
-        content: river_core::board_state::message::BoardMessageBody::public(
+        content: plaza_core::board_state::message::BoardMessageBody::public(
             String::new(),
             message_content.clone(),
         ),
@@ -423,9 +423,9 @@ pub async fn send_test_message(
     };
 
     let auth_message =
-        river_core::board_state::message::AuthorizedMessageV1::new(message, signing_key);
+        plaza_core::board_state::message::AuthorizedMessageV1::new(message, signing_key);
 
-    let delta = river_core::board_state::ChatBoardStateV1Delta {
+    let delta = plaza_core::board_state::ChatBoardStateV1Delta {
         recent_messages: Some(vec![auth_message.clone()]),
         ..Default::default()
     };
@@ -455,7 +455,7 @@ pub async fn send_test_message(
 pub async fn update_board_state_delta(
     client: &mut WebApi,
     key: ContractKey,
-    delta: river_core::board_state::ChatBoardStateV1Delta,
+    delta: plaza_core::board_state::ChatBoardStateV1Delta,
 ) -> Result<()> {
     let mut delta_bytes = Vec::new();
     ciborium::ser::into_writer(&delta, &mut delta_bytes)?;

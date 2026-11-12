@@ -5,7 +5,7 @@ use base64::Engine;
 use chrono::{DateTime, Local, Utc};
 use clap::Subcommand;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use river_core::board_state::message::MessageId;
+use plaza_core::board_state::message::MessageId;
 use serde_json::json;
 
 #[derive(Subcommand)]
@@ -235,10 +235,10 @@ pub async fn execute(command: MessageCommands, api: ApiClient, format: OutputFor
 
                             // Check for reply context
                             let reply_prefix = {
-                                use river_core::board_state::content::CONTENT_TYPE_REPLY;
+                                use plaza_core::board_state::content::CONTENT_TYPE_REPLY;
                                 if msg.message.content.content_type() == CONTENT_TYPE_REPLY {
                                     if let Some(
-                                        river_core::board_state::content::DecodedContent::Reply(
+                                        plaza_core::board_state::content::DecodedContent::Reply(
                                             reply,
                                         ),
                                     ) = msg.message.content.decode_content()

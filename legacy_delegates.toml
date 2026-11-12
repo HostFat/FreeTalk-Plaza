@@ -33,3 +33,10 @@ description = "Baseline after the freenet-stdlib 0.12.1 and Dioxus 0.7.10 upgrad
 date = "2026-11-12"
 delegate_key = "d635c76ddc61e778a83f9f45bd53d61fe80a2608243238dec8d28b742e00abe3"
 code_hash = "96e880ce0e920f8699117acd935f18c55e00fbaf9ac781c6ee42ad54bc67bf58"
+
+[[entry]]
+version = "V3"
+description = "Rename to FreeTalk Plaza (plaza-core/plaza-contract/plaza-delegate)"
+date = "2026-11-12"
+delegate_key = "41610d94254c49fe365a7ff97168098155ea1facfc7d05c6739e4993c96473fd"
+code_hash = "64c1e96519036994101515380ceac9f30ff689f28624981a5529c5209c78f73a"

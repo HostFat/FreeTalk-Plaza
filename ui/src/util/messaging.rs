@@ -8,16 +8,16 @@ use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::ReadableExt;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
-use river_core::board_state::content::{
+use plaza_core::board_state::content::{
     ReplyContentV1, TextContentV1, CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT, REPLY_CONTENT_VERSION,
     TEXT_CONTENT_VERSION,
 };
-use river_core::board_state::member::MemberId;
-use river_core::board_state::message::{
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::message::{
     AuthorizedMessageV1, BoardMessageBody, MessageId, MessageV1,
 };
-use river_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
-use river_core::chat_delegate::BoardKey;
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
+use plaza_core::chat_delegate::BoardKey;
 
 /// Context for a reply message
 #[derive(Clone, PartialEq, Debug)]
@@ -169,7 +169,7 @@ pub async fn send_message(
                         .iter()
                         .map(|m| m.member.id())
                         .collect();
-                    let mut members_to_add: Vec<river_core::board_state::member::AuthorizedMember> =
+                    let mut members_to_add: Vec<plaza_core::board_state::member::AuthorizedMember> =
                         vec![authorized_member.clone()];
                     for chain_member in &board_data.invite_chain {
                         if !current_member_ids.contains(&chain_member.member.id()) {
@@ -178,13 +178,13 @@ pub async fn send_message(
                     }
 
                     // Use stored member_info to preserve nickname, or fall back to "Member"
-                    use river_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
+                    use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
                     let authorized_info: AuthorizedMemberInfo = if let Some(ref stored_info) =
                         board_data.self_member_info
                     {
                         stored_info.clone()
                     } else {
-                        use river_core::board_state::privacy::SealedBytes;
+                        use plaza_core::board_state::privacy::SealedBytes;
                         let member_id = MemberId::from(&self_vk);
                         let existing_version = board_data
                             .board_state
@@ -205,7 +205,7 @@ pub async fn send_message(
                     };
 
                     (
-                        Some(river_core::board_state::member::MembersDelta::new(
+                        Some(plaza_core::board_state::member::MembersDelta::new(
                             members_to_add,
                         )),
                         Some(vec![authorized_info]),

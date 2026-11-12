@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use ed25519_dalek::VerifyingKey;
-use river_core::board_state::member::AuthorizedMember;
+use plaza_core::board_state::member::AuthorizedMember;
 use std::collections::HashMap;
 
 #[derive(Clone)]
