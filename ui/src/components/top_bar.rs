@@ -152,6 +152,16 @@ pub fn TopBar() -> Element {
     let self_avatar = get_avatar(&self_member_id);
     let board_id = bs58::encode(board_data.owner_vk.as_bytes()).into_string();
 
+    // Target hashes for the tab links. The links prevent the browser's default
+    // navigation and set the hash instead: inside the Freenet gateway's sandboxed
+    // iframe a real anchor navigation reloads the whole app (white flash).
+    let nav_posts = format!("/board/{board_id}");
+    let nav_members = format!("/board/{board_id}/members");
+    let nav_admin = format!("/board/{board_id}/admin");
+    let nav_posts_mobile = nav_posts.clone();
+    let nav_members_mobile = nav_members.clone();
+    let nav_admin_mobile = nav_admin.clone();
+
     rsx! {
         div { class: "flex justify-between",
             // Brand + user profile
@@ -201,27 +211,45 @@ pub fn TopBar() -> Element {
                 // Desktop navigation buttons (hidden on mobile)
                 div { class: "hidden md:flex items-center gap-3",
                     // Posts button
-                    a {
-                        href: "#/board/{board_id}",
+                    button {
+                        r#type: "button",
                         class: "flex items-center gap-2 px-4 py-2.5 bg-surface hover:bg-surface-hover text-text font-medium rounded-xl transition-colors",
                         title: "View Posts",
+                        onclick: move |ev: MouseEvent| {
+                            ev.prevent_default();
+                            if let Some(win) = web_sys::window() {
+                                let _ = win.location().set_hash(&nav_posts);
+                            }
+                        },
                         span { "📝" }
                         span { "Posts" }
                     }
                     // Members button
-                    a {
-                        href: "#/board/{board_id}/members",
+                    button {
+                        r#type: "button",
                         class: "flex items-center gap-2 px-4 py-2.5 bg-surface hover:bg-surface-hover text-text font-medium rounded-xl transition-colors",
                         title: "View Members",
+                        onclick: move |ev: MouseEvent| {
+                            ev.prevent_default();
+                            if let Some(win) = web_sys::window() {
+                                let _ = win.location().set_hash(&nav_members);
+                            }
+                        },
                         span { "👥" }
                         span { "Members" }
                     }
                     // Admin button for owners or admins
                     if is_owner || is_admin {
-                        a {
-                            href: "#/board/{board_id}/admin",
+                        button {
+                            r#type: "button",
                             class: "flex items-center gap-2 px-4 py-2.5 bg-surface hover:bg-surface-hover text-text font-medium rounded-xl transition-colors",
                             title: "Manage Admins",
+                            onclick: move |ev: MouseEvent| {
+                                ev.prevent_default();
+                                if let Some(win) = web_sys::window() {
+                                    let _ = win.location().set_hash(&nav_admin);
+                                }
+                            },
                             span { "⚙" }
                             span { "Admin" }
                         }
@@ -259,25 +287,40 @@ pub fn TopBar() -> Element {
                         }
                         // Menu
                         div { class: "absolute right-0 top-full mt-2 bg-panel shadow-lg rounded-xl overflow-hidden z-20 min-w-48",
-                            a {
-                                href: "#/board/{board_id}",
-                                class: "flex items-center gap-3 px-4 py-3 text-text hover:bg-surface transition-colors",
-                                onclick: move |_| menu_open.set(false),
+                            button {
+                                r#type: "button",
+                                class: "flex items-center gap-3 px-4 py-3 text-text hover:bg-surface transition-colors w-full text-left",
+                                onclick: move |_| {
+                                    menu_open.set(false);
+                                    if let Some(win) = web_sys::window() {
+                                        let _ = win.location().set_hash(&nav_posts_mobile);
+                                    }
+                                },
                                 span { "📝" }
                                 span { "Posts" }
                             }
-                            a {
-                                href: "#/board/{board_id}/members",
-                                class: "flex items-center gap-3 px-4 py-3 text-text hover:bg-surface transition-colors",
-                                onclick: move |_| menu_open.set(false),
+                            button {
+                                r#type: "button",
+                                class: "flex items-center gap-3 px-4 py-3 text-text hover:bg-surface transition-colors w-full text-left",
+                                onclick: move |_| {
+                                    menu_open.set(false);
+                                    if let Some(win) = web_sys::window() {
+                                        let _ = win.location().set_hash(&nav_members_mobile);
+                                    }
+                                },
                                 span { "👥" }
                                 span { "Members" }
                             }
                             if is_owner || is_admin {
-                                a {
-                                    href: "#/board/{board_id}/admin",
-                                    class: "flex items-center gap-3 px-4 py-3 text-text hover:bg-surface transition-colors",
-                                    onclick: move |_| menu_open.set(false),
+                                button {
+                                    r#type: "button",
+                                    class: "flex items-center gap-3 px-4 py-3 text-text hover:bg-surface transition-colors w-full text-left",
+                                    onclick: move |_| {
+                                        menu_open.set(false);
+                                        if let Some(win) = web_sys::window() {
+                                            let _ = win.location().set_hash(&nav_admin_mobile);
+                                        }
+                                    },
                                     span { "⚙" }
                                     span { "Admin" }
                                 }

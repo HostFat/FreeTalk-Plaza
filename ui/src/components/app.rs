@@ -30,7 +30,6 @@ use ed25519_dalek::VerifyingKey;
 use freenet_stdlib::client_api::WebApi;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::window;
 
@@ -131,50 +130,7 @@ pub fn App() -> Element {
     // Must be called from within a Dioxus component where the runtime is active.
     crate::util::capture_runtime();
 
-    // Route in-app links through the hash instead of letting the browser follow
-    // them. Inside the Freenet gateway the app runs in a sandboxed iframe, where
-    // an anchor navigation to "#/..." reloads the whole document (white flash and
-    // a full app restart). Assigning `location.hash` changes the route without a
-    // reload, which is what HashHistory expects.
-    use_effect(move || {
-        static CLICKS_BOUND: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        if CLICKS_BOUND.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            return;
-        }
-        let Some(win) = web_sys::window() else {
-            return;
-        };
-        let Some(document) = win.document() else {
-            return;
-        };
-        let cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
-            // Leave modified clicks alone so "open in new tab" still works.
-            if ev.button() != 0 || ev.meta_key() || ev.ctrl_key() || ev.shift_key() || ev.alt_key()
-            {
-                return;
-            }
-            let Some(target) = ev.target() else {
-                return;
-            };
-            let Ok(element) = target.dyn_into::<web_sys::Element>() else {
-                return;
-            };
-            let Ok(Some(anchor)) = element.closest("a[href^='#/']") else {
-                return;
-            };
-            let Some(href) = anchor.get_attribute("href") else {
-                return;
-            };
-            ev.prevent_default();
-            if let Some(win) = web_sys::window() {
-                let _ = win.location().set_hash(&href);
-            }
-        });
-        let _ = document
-            .add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
-        cb.forget();
-    });
+
 
     // Get auth token from window global (injected by Freenet gateway)
     // This is synchronous - no network request needed
@@ -326,9 +282,14 @@ fn Invite(invite_code: String) -> Element {
             div { class: "flex-1 flex flex-col items-center justify-center p-8 text-center",
                 h1 { class: "text-2xl font-bold text-text mb-4", "Invalid Invitation" }
                 p { class: "text-text-muted mb-6", "The invitation link appears to be invalid or corrupted." }
-                a {
-                    href: "#/",
+                button {
+                    r#type: "button",
                     class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white rounded-lg transition-colors inline-block",
+                    onclick: move |_| {
+                        if let Some(win) = web_sys::window() {
+                            let _ = win.location().set_hash("/");
+                        }
+                    },
                     "Go to Home"
                 }
             }
@@ -367,9 +328,14 @@ fn board_guard(board_id: &str) -> Option<Element> {
                 p { class: "text-text-muted mb-6",
                     "Select a board from the list above, or wait for it to sync."
                 }
-                a {
-                    href: "#/",
+                button {
+                    r#type: "button",
                     class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white rounded-lg transition-colors inline-block",
+                    onclick: move |_| {
+                        if let Some(win) = web_sys::window() {
+                            let _ = win.location().set_hash("/");
+                        }
+                    },
                     "Go to Home"
                 }
             }
@@ -440,9 +406,14 @@ fn NotFound(route: Vec<String>) -> Element {
             h1 { class: "text-6xl font-bold text-text-muted mb-4", "404" }
             p { class: "text-xl text-text mb-2", "Page not found" }
             p { class: "text-text-muted mb-6", "The path \"{path}\" does not exist." }
-            a {
-                href: "#/",
+            button {
+                r#type: "button",
                 class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white rounded-lg transition-colors inline-block",
+                onclick: move |_| {
+                    if let Some(win) = web_sys::window() {
+                        let _ = win.location().set_hash("/");
+                    }
+                },
                 "Go to Home"
             }
         }
