@@ -7,7 +7,6 @@ mod update_response;
 use super::board_synchronizer::BoardSynchronizer;
 use super::error::SynchronizerError;
 use crate::board_data::Boards;
-use crate::board_data::CurrentBoard;
 use crate::components::app::chat_delegate::{
     complete_pending_public_key_request, complete_pending_request, complete_pending_sign_request,
     complete_pending_signing_key_request, is_legacy_delegate_key, mark_legacy_migration_done,
@@ -16,7 +15,7 @@ use crate::components::app::chat_delegate::{
 use crate::components::app::document_title::{mark_current_board_as_read, update_document_title};
 use crate::components::app::notifications::mark_initial_sync_complete;
 use crate::components::app::sync_info::{BoardSyncStatus, SYNC_INFO};
-use crate::components::app::{BOARDS, BOARDS_LOADED, CURRENT_BOARD, DELEGATE_HAD_BOARDS};
+use crate::components::app::{BOARDS, BOARDS_LOADED, DELEGATE_HAD_BOARDS};
 use crate::util::ecies::{decrypt_secret_from_member_blob, decrypt_with_symmetric_key};
 use crate::util::owner_vk_to_contract_key;
 use ciborium::de::from_reader;
@@ -241,33 +240,6 @@ impl ResponseHandler {
 
                                                         if !loaded_boards.map.is_empty() {
                                                             *DELEGATE_HAD_BOARDS.write() = true;
-                                                        }
-
-                                                        // Restore the current board selection if saved
-                                                        if let Some(saved_board_key) =
-                                                            loaded_boards.current_board_key
-                                                        {
-                                                            // Only restore a selection that is actually
-                                                            // present: a key without its board would leave
-                                                            // every route showing "not found".
-                                                            if loaded_boards
-                                                                .map
-                                                                .contains_key(&saved_board_key)
-                                                            {
-                                                                info!("Restoring current board selection from delegate");
-                                                                crate::util::defer(move || {
-                                                                    *CURRENT_BOARD.write() =
-                                                                        CurrentBoard {
-                                                                            owner_key: Some(
-                                                                                saved_board_key,
-                                                                            ),
-                                                                        };
-                                                                });
-                                                            } else {
-                                                                warn!(
-                                                                    "Ignoring stored current board selection: board not in the loaded set"
-                                                                );
-                                                            }
                                                         }
 
                                                         // Collect board keys and signing keys before merge
