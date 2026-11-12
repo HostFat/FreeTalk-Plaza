@@ -30,6 +30,8 @@ use ed25519_dalek::VerifyingKey;
 use freenet_stdlib::client_api::WebApi;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
+use std::str::FromStr;
+
 use wasm_bindgen_futures::spawn_local;
 use web_sys::window;
 
@@ -317,43 +319,74 @@ fn board_guard(board_id: &str) -> Option<Element> {
     sync_board_from_url(board_id);
 
     // Check if the board exists in our map
-    let board_exists = if let Ok(bytes) = bs58::decode(board_id).into_vec() {
-        if bytes.len() == 32 {
-            if let Ok(vk) = VerifyingKey::from_bytes(&bytes.try_into().unwrap()) {
-                BOARDS.read().map.contains_key(&vk)
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    } else {
-        false
-    };
+    let board_exists = parse_board_key(board_id)
+        .map(|vk| BOARDS.read().map.contains_key(&vk))
+        .unwrap_or(false);
 
     if board_exists {
         None
     } else {
+        // On a page reload the route is known before the delegate load finishes,
+        // so the board is briefly missing. Show a loading state and let
+        // WaitingForBoard re-enter the route once the board arrives, instead of
+        // a dead-end error.
         Some(rsx! {
-            div { class: "flex-1 flex flex-col items-center justify-center p-8 text-center",
-                p { class: "text-xl text-text-muted mb-4",
-                    "Board not found or not yet loaded"
-                }
-                p { class: "text-text-muted mb-6",
-                    "Select a board from the list above, or wait for it to sync."
-                }
-                button {
-                    r#type: "button",
-                    class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white rounded-lg transition-colors inline-block",
-                    onclick: move |_| {
-                        if let Some(win) = web_sys::window() {
-                            let _ = win.location().set_hash("/");
-                        }
-                    },
-                    "Go to Home"
-                }
-            }
+            WaitingForBoard { board_id: board_id.to_string() }
         })
+    }
+}
+
+fn parse_board_key(board_id: &str) -> Option<VerifyingKey> {
+    let bytes = bs58::decode(board_id).into_vec().ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    VerifyingKey::from_bytes(&bytes.try_into().ok()?).ok()
+}
+
+/// Shown while the board referenced by the URL is not in memory yet.
+///
+/// It watches BOARDS and re-enters the current route when the board appears,
+/// which re-runs the guard. Without this, a reload left the guard's error on
+/// screen even after the delegate had loaded the board.
+#[component]
+fn WaitingForBoard(board_id: String) -> Element {
+    let parsed = parse_board_key(&board_id);
+    let ready = use_memo(move || {
+        parsed
+            .map(|key| BOARDS.read().map.contains_key(&key))
+            .unwrap_or(false)
+    });
+
+    use_effect(move || {
+        if *ready.read() {
+            let path = web_sys::window()
+                .and_then(|w| w.location().hash().ok())
+                .unwrap_or_default();
+            let path = path.trim_start_matches('#');
+            if let Ok(route) = Route::from_str(path) {
+                navigator().replace(route);
+            }
+        }
+    });
+
+    rsx! {
+        div { class: "flex-1 flex flex-col items-center justify-center p-8 text-center",
+            p { class: "text-xl text-text-muted mb-2", "Loading board…" }
+            p { class: "text-text-muted mb-6 text-sm",
+                "Waiting for the board state. It appears in the list above as soon as it is loaded."
+            }
+            button {
+                r#type: "button",
+                class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white rounded-lg transition-colors inline-block",
+                onclick: move |_| {
+                    if let Some(win) = web_sys::window() {
+                        let _ = win.location().set_hash("/");
+                    }
+                },
+                "Go to Home"
+            }
+        }
     }
 }
 
