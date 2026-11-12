@@ -47,12 +47,41 @@ export function js_copy_to_clipboard(text) {
     document.execCommand('copy');
     document.body.removeChild(ta);
 }
+export function wrap_textarea_selection(id, before, after) {
+    const el = document.getElementById(id);
+    if (!el) return '';
+    const start = el.selectionStart === null ? el.value.length : el.selectionStart;
+    const end = el.selectionEnd === null ? el.value.length : el.selectionEnd;
+    const selected = el.value.slice(start, end);
+    const value = el.value.slice(0, start) + before + selected + after + el.value.slice(end);
+    el.value = value;
+    const cursor = start + before.length + selected.length;
+    el.focus();
+    el.setSelectionRange(cursor, cursor);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    return value;
+}
 ")]
 extern "C" {
     fn get_current_time() -> f64;
     fn format_time_local(timestamp_ms: f64) -> String;
     fn format_full_datetime_local(timestamp_ms: f64) -> String;
     fn js_copy_to_clipboard(text: &str);
+    fn wrap_textarea_selection(id: &str, before: &str, after: &str) -> String;
+}
+
+/// Wrap the current selection of a textarea with markdown markers.
+/// Returns the new value so the caller can update its signal.
+pub fn markdown_wrap(id: &str, before: &str, after: &str) -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        wrap_textarea_selection(id, before, after)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (id, before, after);
+        String::new()
+    }
 }
 
 /// Copy text to clipboard. Works in sandboxed iframes where the Clipboard API is blocked.

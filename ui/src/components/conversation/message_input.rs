@@ -174,6 +174,80 @@ pub fn PostInput(
                                     "{message_text.read().len()}/{max_message_size}"
                                 }
                             }
+                            // Markdown toolbar
+                            div { class: "flex flex-wrap items-center gap-1 mb-2",
+                                button {
+                                    r#type: "button",
+                                    class: "px-2 py-1 text-xs font-bold bg-surface hover:bg-surface-hover rounded",
+                                    title: "Bold",
+                                    onclick: move |_| {
+                                        let v = crate::util::markdown_wrap("message-input", "**", "**");
+                                        if !v.is_empty() { message_text.set(v); }
+                                    },
+                                    "B"
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "px-2 py-1 text-xs italic bg-surface hover:bg-surface-hover rounded",
+                                    title: "Italic",
+                                    onclick: move |_| {
+                                        let v = crate::util::markdown_wrap("message-input", "*", "*");
+                                        if !v.is_empty() { message_text.set(v); }
+                                    },
+                                    "I"
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "px-2 py-1 text-xs bg-surface hover:bg-surface-hover rounded font-mono",
+                                    title: "Inline code",
+                                    onclick: move |_| {
+                                        let v = crate::util::markdown_wrap("message-input", "`", "`");
+                                        if !v.is_empty() { message_text.set(v); }
+                                    },
+                                    "</>"
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "px-2 py-1 text-xs bg-surface hover:bg-surface-hover rounded",
+                                    title: "Link",
+                                    onclick: move |_| {
+                                        let v = crate::util::markdown_wrap("message-input", "[", "](https://)");
+                                        if !v.is_empty() { message_text.set(v); }
+                                    },
+                                    "Link"
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "px-2 py-1 text-xs bg-surface hover:bg-surface-hover rounded",
+                                    title: "Quote",
+                                    onclick: move |_| {
+                                        let v = crate::util::markdown_wrap("message-input", "> ", "");
+                                        if !v.is_empty() { message_text.set(v); }
+                                    },
+                                    "Quote"
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "px-2 py-1 text-xs bg-surface hover:bg-surface-hover rounded",
+                                    title: "Bullet list",
+                                    onclick: move |_| {
+                                        let v = crate::util::markdown_wrap("message-input", "- ", "");
+                                        if !v.is_empty() { message_text.set(v); }
+                                    },
+                                    "List"
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "px-2 py-1 text-xs bg-surface hover:bg-surface-hover rounded",
+                                    title: "Heading",
+                                    onclick: move |_| {
+                                        let v = crate::util::markdown_wrap("message-input", "### ", "");
+                                        if !v.is_empty() { message_text.set(v); }
+                                    },
+                                    "H"
+                                }
+                                span { class: "text-xs text-text-muted ml-1", "Markdown supported" }
+                            }
                             div { class: "relative",
                                 // Emoji picker backdrop
                                 if show_emoji_picker() {

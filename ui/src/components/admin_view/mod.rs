@@ -100,6 +100,16 @@ pub fn AdminView() -> Element {
                     }
                     button {
                         r#type: "button",
+                        class: if *tab.read() == "bans" {
+                            "px-4 py-2 rounded-md text-sm bg-accent text-white"
+                        } else {
+                            "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
+                        },
+                        onclick: move |_| tab.set("bans".to_string()),
+                        "Banned"
+                    }
+                    button {
+                        r#type: "button",
                         class: if *tab.read() == "roles" {
                             "px-4 py-2 rounded-md text-sm bg-accent text-white"
                         } else {
@@ -203,34 +213,6 @@ pub fn AdminView() -> Element {
                 }
             }
 
-            // Banned users section
-            div { class: "mb-6",
-                h2 { class: "text-lg font-semibold text-text mb-3", "Banned Users" }
-
-                if banned_users.read().is_empty() {
-                    div { class: "bg-surface rounded-lg p-4 text-text-muted",
-                        "No users have been banned."
-                    }
-                } else {
-                    div { class: "space-y-2",
-                        for ban in banned_users.read().iter() {
-                            div { class: "bg-surface rounded-lg p-3 flex items-center gap-3",
-                                div { class: "w-8 h-8 bg-red-500/20 rounded-full flex items-center justify-center text-red-400 text-sm",
-                                    {get_nickname(ban.ban.banned_user).chars().next().unwrap_or('?').to_string()}
-                                }
-                                div { class: "flex-1",
-                                    p { class: "text-text font-medium", "{get_nickname(ban.ban.banned_user)}" }
-                                    p { class: "text-text-muted text-xs", "{ban.ban.banned_user}" }
-                                }
-                                div { class: "text-right text-xs text-text-muted",
-                                    p { "Banned by: {get_nickname(ban.banned_by)}" }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
             // Non-owner message
             if !*is_owner.read() {
                 div { class: "bg-surface rounded-lg p-4",
@@ -239,6 +221,33 @@ pub fn AdminView() -> Element {
                     }
                 }
             }
+            } else if *tab.read() == "bans" {
+                div { class: "mb-6",
+                    h2 { class: "text-lg font-semibold text-text mb-3", "Banned Users" }
+
+                    if banned_users.read().is_empty() {
+                        div { class: "bg-surface rounded-lg p-4 text-text-muted",
+                            "No users have been banned."
+                        }
+                    } else {
+                        div { class: "space-y-2",
+                            for ban in banned_users.read().iter() {
+                                div { class: "bg-surface rounded-lg p-3 flex items-center gap-3",
+                                    div { class: "w-8 h-8 bg-red-500/20 rounded-full flex items-center justify-center text-red-400 text-sm",
+                                        {get_nickname(ban.ban.banned_user).chars().next().unwrap_or('?').to_string()}
+                                    }
+                                    div { class: "flex-1",
+                                        p { class: "text-text font-medium", "{get_nickname(ban.ban.banned_user)}" }
+                                        p { class: "text-text-muted text-xs", "{ban.ban.banned_user}" }
+                                    }
+                                    div { class: "text-right text-xs text-text-muted",
+                                        p { "Banned by: {get_nickname(ban.banned_by)}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             } else if *tab.read() == "roles" {
                 RolesSection {}
             } else {
