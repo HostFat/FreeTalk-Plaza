@@ -112,6 +112,7 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: self_vk.clone(),
+                join_proof: None,
             },
             owner_sk,
         ));
@@ -153,6 +154,7 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
             owner_member_id: owner_id,
             invited_by: inviter_id,
             member_vk: other_member_vk,
+            join_proof: None,
         },
         inviter_sk,
     ));

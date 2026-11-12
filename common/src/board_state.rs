@@ -3,10 +3,12 @@ pub mod ban;
 pub mod configuration;
 pub mod content;
 pub mod identity;
+pub mod invites;
 pub mod member;
 pub mod member_info;
 pub mod message;
 pub mod privacy;
+pub mod roles;
 pub mod secret;
 pub mod upgrade;
 pub mod version;
@@ -14,9 +16,11 @@ pub mod version;
 use crate::board_state::admin::AdminsV1;
 use crate::board_state::ban::BansV1;
 use crate::board_state::configuration::AuthorizedConfigurationV1;
+use crate::board_state::invites::InviteTokensV1;
 use crate::board_state::member::{MemberId, MembersV1};
 use crate::board_state::member_info::MemberInfoV1;
 use crate::board_state::message::MessagesV1;
+use crate::board_state::roles::RolesV1;
 use crate::board_state::secret::BoardSecretsV1;
 use crate::board_state::upgrade::OptionalUpgradeV1;
 use crate::board_state::version::StateVersion;
@@ -43,6 +47,15 @@ pub struct ChatBoardStateV1 {
     /// A list of recently banned members, a banned member can't be present in the
     /// members list and will be removed from it ifc necessary.
     pub bans: BansV1,
+
+    /// Named roles and their members, used for access control.
+    #[serde(default)]
+    pub roles: RolesV1,
+
+    /// Reusable invite links. Applied before `members` so a token join can be
+    /// validated in the same update that adds the member.
+    #[serde(default)]
+    pub invites: InviteTokensV1,
 
     /// The members in the chat board along with who invited them
     pub members: MembersV1,
@@ -79,6 +92,10 @@ impl ChatBoardStateV1 {
     /// If the banner was merely pruned for inactivity, their bans persist.
     fn post_apply_cleanup(&mut self, parameters: &ChatBoardParametersV1) -> Result<(), String> {
         let owner_id = MemberId::from(&parameters.owner);
+
+        // 0. Enforce invite-link use caps first, so members dropped here do not
+        // keep their messages alive in the steps below.
+        self.enforce_invite_caps();
 
         // 1. Collect message author IDs
         let message_authors: HashSet<MemberId> = self
@@ -164,6 +181,43 @@ impl ChatBoardStateV1 {
         Ok(())
     }
 
+    /// Keep at most `max_uses` members per invite link, choosing the lowest
+    /// member ids. Deterministic, so peers that merge joins in a different order
+    /// still keep the same members.
+    pub(crate) fn enforce_invite_caps(&mut self) {
+        let tokens: Vec<_> = self.invites.tokens.clone();
+        for token in tokens {
+            let Some(max) = token.token.max_uses else {
+                continue;
+            };
+            if token.token.deleted {
+                continue;
+            }
+            let mut joined: Vec<MemberId> = self
+                .members
+                .members
+                .iter()
+                .filter(|m| {
+                    m.member
+                        .join_proof
+                        .as_ref()
+                        .map(|p| p.token_id == token.token.id)
+                        .unwrap_or(false)
+                })
+                .map(|m| m.member.id())
+                .collect();
+            if joined.len() <= max as usize {
+                continue;
+            }
+            joined.sort();
+            let keep: HashSet<MemberId> = joined.into_iter().take(max as usize).collect();
+            self.members.members.retain(|m| match &m.member.join_proof {
+                Some(proof) if proof.token_id == token.token.id => keep.contains(&m.member.id()),
+                _ => true,
+            });
+        }
+    }
+
     /// Run the same cleanup `apply_delta` runs after every update.
     ///
     /// Exposed so the contract can check whether a state it is asked to accept
@@ -211,6 +265,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: member_key.verifying_key(),
+                join_proof: None,
             },
             &owner_key,
         ));
@@ -328,6 +383,8 @@ mod tests {
             ChatBoardStateV1 {
                 configuration: config,
                 bans: BansV1::default(),
+                roles: RolesV1::default(),
+                invites: InviteTokensV1::default(),
                 members: MembersV1::default(),
                 member_info: MemberInfoV1::default(),
                 secrets: BoardSecretsV1::default(),
@@ -377,6 +434,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: a_vk,
+                join_proof: None,
             },
             &owner_sk,
         );
@@ -489,6 +547,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: a_vk,
+                join_proof: None,
             },
             &owner_sk,
         );
@@ -497,6 +556,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: b_vk,
+                join_proof: None,
             },
             &owner_sk,
         );
@@ -555,6 +615,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: a_vk,
+                join_proof: None,
             },
             &owner_sk,
         );
@@ -563,6 +624,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: a_id,
                 member_vk: b_vk,
+                join_proof: None,
             },
             &a_sk,
         );
@@ -635,6 +697,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: a_vk,
+                join_proof: None,
             },
             &owner_sk,
         );
@@ -694,6 +757,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: a_vk,
+                join_proof: None,
             },
             &owner_sk,
         );
@@ -750,6 +814,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: a_vk,
+                join_proof: None,
             },
             &owner_sk,
         );

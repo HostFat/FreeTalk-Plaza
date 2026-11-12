@@ -276,6 +276,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: member_verifying_key,
+            join_proof: None,
         };
         let authorized_member = AuthorizedMember::new(member, &owner_signing_key);
         parent_state.members.members.push(authorized_member);
@@ -411,6 +412,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: member_verifying_key,
+                join_proof: None,
             },
             signature: owner_signing_key
                 .sign("TestUser".as_bytes())
@@ -506,6 +508,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: new_member_verifying_key,
+                join_proof: None,
             },
             signature: owner_signing_key
                 .sign("NewTestUser".as_bytes())
@@ -639,6 +642,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: member_verifying_key,
+            join_proof: None,
         };
         let authorized_member = AuthorizedMember::new(member, &owner_signing_key);
         parent_state.members.members.push(authorized_member);
@@ -695,6 +699,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: owner_verifying_key,
+                join_proof: None,
             },
             signature: owner_signing_key
                 .sign("TestOwner".as_bytes())
@@ -749,6 +754,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: member_verifying_key,
+                join_proof: None,
             },
             signature: owner_signing_key
                 .sign("TestMember".as_bytes())

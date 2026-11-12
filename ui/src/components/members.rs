@@ -331,6 +331,7 @@ fn ExportIdentityModal(is_active: Signal<bool>) -> Element {
                                 owner_member_id: owner_id,
                                 invited_by: owner_id,
                                 member_vk: owner_key,
+                                join_proof: None,
                             };
                             AuthorizedMember::new(member, &board_data.self_sk)
                         } else {

@@ -30,7 +30,7 @@ impl ComposableState for MembersV1 {
 
     fn verify(
         &self,
-        _parent_state: &Self::ParentState,
+        parent_state: &Self::ParentState,
         parameters: &Self::Parameters,
     ) -> Result<(), String> {
         if self.members.is_empty() {
@@ -48,6 +48,10 @@ impl ComposableState for MembersV1 {
                 return Err(
                     "Member cannot have the same verifying key as the board owner".to_string(),
                 );
+            }
+            if let Some(proof) = &member.member.join_proof {
+                Self::verify_token_join(member, proof, parent_state, parameters)?;
+                continue;
             }
             if member.member.invited_by == member.member.id() {
                 return Err("Self-invitation detected".to_string());
@@ -106,7 +110,15 @@ impl ComposableState for MembersV1 {
 
             // Verify that all new members have valid invites
             for member in &delta.added {
-                self.verify_member_invite_with_lookup(member, parameters, &combined_members_by_id)?;
+                if let Some(proof) = &member.member.join_proof {
+                    Self::verify_token_join(member, proof, parent_state, parameters)?;
+                } else {
+                    self.verify_member_invite_with_lookup(
+                        member,
+                        parameters,
+                        &combined_members_by_id,
+                    )?;
+                }
             }
 
             // Add ALL new members (deduplicated)
@@ -134,6 +146,33 @@ impl ComposableState for MembersV1 {
 }
 
 impl MembersV1 {
+    /// A member who joined through a link signs their own record, and the link
+    /// key signs the join proof. No inviter is involved.
+    fn verify_token_join(
+        member: &AuthorizedMember,
+        proof: &crate::board_state::invites::JoinProof,
+        parent_state: &ChatBoardStateV1,
+        parameters: &ChatBoardParametersV1,
+    ) -> Result<(), String> {
+        if member.member.invited_by != member.member.id() {
+            return Err("A token-joined member must be self-signed".to_string());
+        }
+        member.verify_signature(&member.member.member_vk)?;
+
+        let token = parent_state
+            .invites
+            .token(&proof.token_id)
+            .ok_or_else(|| "Invite token is not active".to_string())?;
+        if parent_state.roles.role(&token.role_id).is_none() {
+            return Err("The invite token grants a role that no longer exists".to_string());
+        }
+
+        proof.verify(
+            &token.verifying_key,
+            &crate::board_state::invites::join_message(&parameters.owner, &member.member.member_vk),
+        )
+    }
+
     /// Verify a member's invite chain using a pre-built lookup map.
     /// The lookup map should include both existing members AND delta members
     /// when called during apply_delta, so that inviters in the same delta
@@ -412,6 +451,11 @@ pub struct Member {
     pub owner_member_id: MemberId,
     pub invited_by: MemberId,
     pub member_vk: VerifyingKey,
+    /// Present when the member joined through a reusable invite link instead of
+    /// a personal invitation. Such a member is self-signed and the proof is
+    /// checked against the token key.
+    #[serde(default)]
+    pub join_proof: Option<crate::board_state::invites::JoinProof>,
 }
 
 impl fmt::Debug for Member {
@@ -481,6 +525,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by,
             member_vk: verifying_key,
+            join_proof: None,
         };
         (member, signing_key)
     }
@@ -519,6 +564,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: owner_verifying_key,
+            join_proof: None,
         };
         let authorized_owner = AuthorizedMember::new(owner_member, &owner_signing_key);
         let members_with_owner = MembersV1 {
@@ -1128,6 +1174,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: owner_verifying_key,
+            join_proof: None,
         };
 
         let authorized_owner_member = AuthorizedMember::new(owner_member, &owner_signing_key);

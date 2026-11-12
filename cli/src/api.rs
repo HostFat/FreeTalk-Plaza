@@ -491,6 +491,7 @@ impl ApiClient {
         let member = Member {
             owner_member_id: (*board_owner_key).into(),
             member_vk: invitee_vk,
+            join_proof: None,
             invited_by: signing_key.verifying_key().into(),
         };
 

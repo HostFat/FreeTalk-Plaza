@@ -881,6 +881,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: invitee_sk.verifying_key(),
+                join_proof: None,
             },
             &owner_sk,
         ));
@@ -958,6 +959,7 @@ mod tests {
             owner_member_id: owner_vk.into(),
             invited_by: owner_vk.into(),
             member_vk: invitee_vk,
+            join_proof: None,
         };
         let authorized_member = AuthorizedMember::new(member, &owner_sk);
         board_state.members.members.push(authorized_member);
@@ -1019,6 +1021,7 @@ mod tests {
             owner_member_id: owner_vk.into(),
             invited_by: owner_vk.into(),
             member_vk: invitee_vk,
+            join_proof: None,
         };
         board_state
             .members
@@ -1130,6 +1133,7 @@ mod tests {
             owner_member_id: owner_vk.into(),
             invited_by: owner_vk.into(),
             member_vk: invitee_sk.verifying_key(),
+            join_proof: None,
         };
         let auth_member = AuthorizedMember::new(member, &owner_sk);
         let synced_board = make_board(invitee_sk.clone(), vec![auth_member]);

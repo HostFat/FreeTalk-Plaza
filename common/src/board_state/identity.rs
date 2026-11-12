@@ -142,6 +142,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk,
+            join_proof: None,
         };
         let authorized_member = AuthorizedMember::new(member, &owner_sk);
 
@@ -194,6 +195,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk,
+            join_proof: None,
         };
         let authorized_member = AuthorizedMember::new(member, &owner_sk);
 
@@ -225,6 +227,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: member_a_sk.verifying_key(),
+            join_proof: None,
         };
         let auth_member_a = AuthorizedMember::new(member_a, &owner_sk);
 
@@ -233,6 +236,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: MemberId::from(&member_a_sk.verifying_key()),
             member_vk: member_b_sk.verifying_key(),
+            join_proof: None,
         };
         let auth_member_b = AuthorizedMember::new(member_b, &member_a_sk);
 
@@ -284,6 +288,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: member_sk.verifying_key(),
+            join_proof: None,
         };
         let authorized_member = AuthorizedMember::new(member, &owner_sk);
 
@@ -334,6 +339,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: member_sk.verifying_key(),
+            join_proof: None,
         };
         let authorized_member = AuthorizedMember::new(member, &owner_sk);
 
@@ -370,6 +376,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: member_sk.verifying_key(),
+            join_proof: None,
         };
         let authorized_member = AuthorizedMember::new(member, &owner_sk);
 

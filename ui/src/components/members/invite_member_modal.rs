@@ -70,6 +70,7 @@ pub fn InviteMemberModal(is_active: Signal<bool>) -> Element {
                     owner_member_id: board_data.owner_vk.into(),
                     invited_by: board_data.self_sk.verifying_key().into(),
                     member_vk: invitee_verifying_key,
+                    join_proof: None,
                 };
 
                 // Serialize member to CBOR for signing

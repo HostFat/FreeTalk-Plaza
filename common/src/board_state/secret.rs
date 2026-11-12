@@ -838,6 +838,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk,
+            join_proof: None,
         };
         let auth_member = AuthorizedMember::new(member, &owner_sk);
         state.members.members.push(auth_member);
@@ -901,6 +902,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: params.owner,
+            join_proof: None,
         };
         let auth_member = AuthorizedMember::new(member, &owner_sk);
 
@@ -933,6 +935,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk,
+            join_proof: None,
         };
         let auth_member = AuthorizedMember::new(member, &owner_sk);
 
@@ -959,6 +962,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk,
+            join_proof: None,
         };
         let auth_member = AuthorizedMember::new(member, &owner_sk);
         state.members.members.push(auth_member);

@@ -1005,6 +1005,7 @@ mod tests {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: author_verifying_key,
+            join_proof: None,
         };
         let authorized_author =
             crate::board_state::member::AuthorizedMember::new(author_member, &owner_signing_key);
@@ -1156,6 +1157,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: author_verifying_key,
+                join_proof: None,
             },
             signature: owner_signing_key.try_sign(&[0; 32]).unwrap(),
         }];
@@ -1264,6 +1266,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: author_vk,
+                join_proof: None,
             },
             signature: owner_sk.try_sign(&[0; 32]).unwrap(),
         }];

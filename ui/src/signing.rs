@@ -475,6 +475,7 @@ mod tests {
             owner_member_id: owner_vk.into(),
             invited_by: owner_vk.into(),
             member_vk: member_sk.verifying_key(),
+            join_proof: None,
         };
         let auth_member = AuthorizedMember::new(member, &owner_sk);
 
