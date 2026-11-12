@@ -16,7 +16,7 @@ use crate::components::app::document_title::{mark_current_board_as_read, update_
 use crate::components::app::notifications::mark_initial_sync_complete;
 use crate::components::app::sync_info::{BoardSyncStatus, SYNC_INFO};
 use crate::components::app::{BOARDS, BOARDS_LOADED, DELEGATE_HAD_BOARDS};
-use crate::util::ecies::{decrypt_secret_from_member_blob, decrypt_with_symmetric_key};
+use crate::util::ecies::decrypt_secret_from_member_blob;
 use crate::util::owner_vk_to_contract_key;
 use ciborium::de::from_reader;
 use dioxus::logger::tracing::{error, info, warn};
@@ -24,12 +24,11 @@ use dioxus::logger::tracing::{error, info, warn};
 use freenet_stdlib::client_api::{ContractResponse, HostResponse};
 use freenet_stdlib::prelude::OutboundDelegateMsg;
 pub use get_response::handle_get_response;
-pub use put_response::handle_put_response;
 use plaza_core::board_state::member::MemberId;
-use plaza_core::board_state::message::{BoardMessageBody, MessageId};
 use plaza_core::board_state::privacy::PrivacyMode;
+use plaza_core::board_state::ChatBoardParametersV1;
 use plaza_core::chat_delegate::{ChatDelegateRequestMsg, ChatDelegateResponseMsg};
-use std::collections::HashMap;
+pub use put_response::handle_put_response;
 pub use subscribe_response::handle_subscribe_response;
 pub use update_notification::handle_update_notification;
 pub use update_response::handle_update_response;
@@ -263,7 +262,7 @@ impl ResponseHandler {
 
                                                         // Merge the loaded boards with the current boards
                                                         crate::util::defer(move || {
-                                                        BOARDS.with_mut(|current_boards| {
+                                                            BOARDS.with_mut(|current_boards| {
                                                             if let Err(e) = current_boards.merge(loaded_boards) {
                                                                 error!("Failed to merge boards: {}", e);
                                                             } else {
@@ -319,59 +318,21 @@ impl ResponseHandler {
                                                                     }
                                                                 }
 
-                                                                // Rebuild actions_state for each loaded board
-                                                                // This is needed because actions_state is #[serde(skip)] and not serialized
+                                                                // Rebuild actions_state for each loaded board.
+                                                                // actions_state is #[serde(skip)]; private and
+                                                                // category-scoped actions need their key.
                                                                 for board_data in current_boards.map.values_mut() {
-                                                                    let is_private = board_data.board_state.configuration.configuration.privacy_mode == PrivacyMode::Private;
-                                                                    if is_private {
-                                                                        // Decrypt all private action messages using version-aware lookup
-                                                                        let decrypted_actions: HashMap<MessageId, Vec<u8>> = board_data
-                                                                            .board_state
-                                                                            .recent_messages
-                                                                            .messages
-                                                                            .iter()
-                                                                            .filter(|msg| msg.message.content.is_action())
-                                                                            .filter_map(|msg| {
-                                                                                if let BoardMessageBody::Private { ciphertext, nonce, secret_version, .. } = &msg.message.content
-                                                                                {
-                                                                                    // Look up the secret for this message's version
-                                                                                    board_data.get_secret_for_version(*secret_version)
-                                                                                        .and_then(|secret| {
-                                                                                            decrypt_with_symmetric_key(secret, ciphertext, nonce)
-                                                                                                .ok()
-                                                                                                .map(|plaintext| (msg.id(), plaintext))
-                                                                                        })
-                                                                                } else {
-                                                                                    None
-                                                                                }
-                                                                            })
-                                                                            .collect();
-
-                                                                        let owner_id = plaza_core::board_state::member::MemberId::from(&board_data.owner_vk);
-                                                                        let admin_ids: std::collections::HashSet<_> = board_data
-                                                                            .board_state
-                                                                            .admin
-                                                                            .admins
-                                                                            .iter()
-                                                                            .map(|a| a.admin.id())
-                                                                            .collect();
-                                                                        board_data
-                                                                            .board_state
-                                                                            .recent_messages
-                                                                            .rebuild_actions_state_with_permissions(&decrypted_actions, Some(owner_id), Some(&admin_ids));
-                                                                    } else {
-                                                                        // Public board - rebuild from public action messages
-                                                                        board_data
-                                                                            .board_state
-                                                                            .recent_messages
-                                                                            .rebuild_actions_state();
-                                                                    }
+                                                                    let owner = board_data.owner_vk;
+                                                                    board_data.decrypt_category_secrets();
+                                                                    board_data.rebuild_actions_with_local_secrets(
+                                                                        &ChatBoardParametersV1 { owner },
+                                                                    );
                                                                 }
                                                             }
                                                         });
-                                                        // Saves are refused until this is true, so set it only
-                                                        // after the merge has placed the stored boards in BOARDS.
-                                                        *BOARDS_LOADED.write() = true;
+                                                            // Saves are refused until this is true, so set it only
+                                                            // after the merge has placed the stored boards in BOARDS.
+                                                            *BOARDS_LOADED.write() = true;
                                                         });
 
                                                         // Mark current board as read since user is viewing it
@@ -408,13 +369,15 @@ impl ResponseHandler {
                                                                         if migrated {
                                                                             // Must defer signal mutations from spawn_local to
                                                                             // avoid RefCell already borrowed panics in Dioxus runtime
-                                                                            crate::util::defer(move || {
-                                                                                BOARDS.with_mut(|boards| {
+                                                                            crate::util::defer(
+                                                                                move || {
+                                                                                    BOARDS.with_mut(|boards| {
                                                                                 if let Some(board_data) = boards.map.get_mut(&board_key_copy) {
                                                                                     board_data.key_migrated_to_delegate = true;
                                                                                 }
                                                                             });
-                                                                            });
+                                                                                },
+                                                                            );
                                                                         }
                                                                     },
                                                                 );
@@ -446,9 +409,9 @@ impl ResponseHandler {
                                                                 SYNC_INFO
                                                                     .write()
                                                                     .update_sync_status(
-                                                                        &board_key,
-                                                                        BoardSyncStatus::Subscribing,
-                                                                    );
+                                                                    &board_key,
+                                                                    BoardSyncStatus::Subscribing,
+                                                                );
                                                             });
 
                                                             // Get contract key and subscribe

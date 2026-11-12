@@ -6,15 +6,15 @@ pub mod receive_times;
 pub mod sync_info;
 
 use super::{
-    admin_view::AdminView, board_list::BoardList, conversation::Conversation,
-    members::MembersView, top_bar::TopBar,
+    admin_view::AdminView, board_list::BoardList, conversation::Conversation, members::MembersView,
+    top_bar::TopBar,
 };
 use crate::board_data::{Boards, CurrentBoard};
+use crate::components::about_modal::AboutModal;
 use crate::components::app::document_title::DocumentTitleUpdater;
 use crate::components::app::freenet_api::freenet_synchronizer::SynchronizerMessage;
 use crate::components::app::freenet_api::freenet_synchronizer::SynchronizerStatus;
 use crate::components::app::freenet_api::FreenetSynchronizer;
-use crate::components::about_modal::AboutModal;
 use crate::components::board_list::create_board_modal::CreateBoardModal;
 use crate::components::board_list::edit_board_modal::EditBoardModal;
 use crate::components::board_list::receive_invitation_modal::ReceiveInvitationModal;
@@ -150,8 +150,6 @@ pub fn App() -> Element {
     use_effect(move || {
         crate::util::install_shell_hash_bridge_once();
     });
-
-
 
     // Get auth token from window global (injected by Freenet gateway)
     // This is synchronous - no network request needed

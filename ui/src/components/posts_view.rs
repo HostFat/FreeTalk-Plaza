@@ -1,4 +1,6 @@
-use crate::components::app::{CurrentCategoryContext, Route, BOARDS, CURRENT_BOARD, CURRENT_CATEGORY};
+use crate::components::app::{
+    CurrentCategoryContext, Route, BOARDS, CURRENT_BOARD, CURRENT_CATEGORY,
+};
 use crate::components::category_view::{CategoryCard, CategoryEditData};
 use crate::components::conversation::{
     get_all_messages, get_category_posts, get_subcategories, get_top_level_categories,
@@ -19,7 +21,10 @@ struct BreadcrumbItem {
 }
 
 /// Build breadcrumb trail from root to current category
-fn build_breadcrumbs(category_id: Option<&String>, all_messages: &[MessageData]) -> Vec<BreadcrumbItem> {
+fn build_breadcrumbs(
+    category_id: Option<&String>,
+    all_messages: &[MessageData],
+) -> Vec<BreadcrumbItem> {
     let mut crumbs = vec![BreadcrumbItem {
         id: None,
         name: "Home".to_string(),
@@ -32,13 +37,22 @@ fn build_breadcrumbs(category_id: Option<&String>, all_messages: &[MessageData])
         let mut current_id = Some(cat_id.clone());
 
         while let Some(cid) = current_id {
-            if let Some(cat) = all_messages.iter().find(|m| m.id_string() == cid && m.is_category) {
+            if let Some(cat) = all_messages
+                .iter()
+                .find(|m| m.id_string() == cid && m.is_category)
+            {
                 chain.push(BreadcrumbItem {
                     id: Some(cat.id_string()),
-                    name: cat.category_name.clone().unwrap_or_else(|| "Unnamed".to_string()),
+                    name: cat
+                        .category_name
+                        .clone()
+                        .unwrap_or_else(|| "Unnamed".to_string()),
                     icon: cat.category_icon.clone(),
                 });
-                current_id = cat.parent_category_id.as_ref().map(|id| format!("{}", id.0.0));
+                current_id = cat
+                    .parent_category_id
+                    .as_ref()
+                    .map(|id| format!("{}", id.0 .0));
             } else {
                 break;
             }
@@ -53,12 +67,17 @@ fn build_breadcrumbs(category_id: Option<&String>, all_messages: &[MessageData])
 }
 
 /// Get content (subcategories and posts) for a category or root
-fn get_content(category_id: Option<&String>, all_messages: &[MessageData]) -> (Vec<MessageData>, Vec<MessageData>) {
+fn get_content(
+    category_id: Option<&String>,
+    all_messages: &[MessageData],
+) -> (Vec<MessageData>, Vec<MessageData>) {
     if let Some(cat_id_str) = category_id {
         // Parse category_id to MessageId
-        if let Some(cat_msg_id) = cat_id_str.parse::<i64>().ok().map(|hash| {
-            MessageId(freenet_scaffold::util::FastHash(hash))
-        }) {
+        if let Some(cat_msg_id) = cat_id_str
+            .parse::<i64>()
+            .ok()
+            .map(|hash| MessageId(freenet_scaffold::util::FastHash(hash)))
+        {
             let categories = get_subcategories(all_messages, &cat_msg_id);
             let posts = get_category_posts(all_messages, &cat_msg_id);
             return (categories, posts);
@@ -71,9 +90,7 @@ fn get_content(category_id: Option<&String>, all_messages: &[MessageData]) -> (V
 }
 
 #[component]
-pub fn PostsView(
-    #[props(default)] category_id: Option<String>,
-) -> Element {
+pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
 
     // Get current board data
@@ -98,6 +115,7 @@ pub fn PostsView(
             &board_data.board_state.member_info,
             self_member_id,
             &board_data.secrets,
+            &board_data.category_secrets,
         )
     } else {
         Vec::new()
@@ -105,7 +123,8 @@ pub fn PostsView(
 
     // Get current category if viewing one
     let current_category: Option<MessageData> = if let Some(ref cat_id) = category_id {
-        all_messages.iter()
+        all_messages
+            .iter()
             .find(|m| m.id_string() == *cat_id && m.is_category)
             .cloned()
     } else {
@@ -118,18 +137,26 @@ pub fn PostsView(
     // Get content
     let (categories, posts) = get_content(category_id.as_ref(), &all_messages);
 
+    // A restricted category we cannot open stays read-only: it gets no reply
+    // context, so the composer cannot post into it.
+    let category_is_locked = current_category
+        .as_ref()
+        .map(|cat| cat.category_locked)
+        .unwrap_or(false);
+
     // Update CURRENT_CATEGORY for auto-parenting posts/categories
     // Compare before writing to avoid unnecessary updates
     {
-        let new_context = if let Some(cat) = current_category.as_ref() {
-            CurrentCategoryContext {
-                category_id: Some(cat.message_id.clone()),
-                category_name: cat.category_name.clone(),
-                author_name: Some(cat.author_name.clone()),
-            }
-        } else {
-            CurrentCategoryContext::default()
-        };
+        let new_context =
+            if let Some(cat) = current_category.as_ref().filter(|_| !category_is_locked) {
+                CurrentCategoryContext {
+                    category_id: Some(cat.message_id.clone()),
+                    category_name: cat.category_name.clone(),
+                    author_name: Some(cat.author_name.clone()),
+                }
+            } else {
+                CurrentCategoryContext::default()
+            };
 
         let current = CURRENT_CATEGORY.read();
         if current.category_id != new_context.category_id {
@@ -294,8 +321,21 @@ pub fn PostsView(
                             }
                         }
 
+                        // Locked restricted category: show the notice instead
+                        // of posts this member cannot read.
+                        if category_is_locked {
+                            div { class: "flex flex-col items-center justify-center h-56 text-text-muted text-center",
+                                div { class: "text-4xl mb-3", "🔒" }
+                                p { class: "text-lg font-medium text-text", "Restricted category" }
+                                p { class: "text-sm mt-1 max-w-md",
+                                    "Only members with the right role can read the name and the posts here."
+                                }
+                            }
+                        }
+
                         // Content
-                        {
+                        if !category_is_locked {
+                            {
                             let board_info = current_board_data.as_ref()
                                 .map(|bd| {
                                     let config = &bd.board_state.configuration.configuration;
@@ -429,6 +469,7 @@ pub fn PostsView(
                                     }
                                 }
                             }
+                            }
                         }
                     }
                 }
@@ -502,6 +543,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                     &board_data.board_state.member_info,
                     self_member_id,
                     &board_data.secrets,
+                    &board_data.category_secrets,
                 );
                 let post = all_messages.into_iter().find(|m| m.id_string() == post_id);
                 return post.map(|p| (p, self_member_id, max_title_size, max_message_size));

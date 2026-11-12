@@ -143,6 +143,37 @@ impl ActionContentV1 {
                 new_description,
                 new_icon,
                 new_color,
+                sealed_name: None,
+                allowed_roles: Vec::new(),
+                hidden: false,
+            }),
+        }
+    }
+
+    /// Edit a restricted category: the real name stays sealed and the ACL is
+    /// carried along so the edit cannot widen access.
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_category_sealed(
+        target: MessageId,
+        placeholder_name: String,
+        new_description: Option<String>,
+        new_icon: Option<String>,
+        new_color: String,
+        sealed_name: crate::board_state::privacy::SealedBytes,
+        allowed_roles: Vec<crate::board_state::roles::RoleId>,
+        hidden: bool,
+    ) -> Self {
+        Self {
+            action_type: ACTION_TYPE_EDIT_CATEGORY,
+            target,
+            payload: encode_cbor(&CategoryEditPayload {
+                new_name: placeholder_name,
+                new_description,
+                new_icon,
+                new_color,
+                sealed_name: Some(sealed_name),
+                allowed_roles,
+                hidden,
             }),
         }
     }
@@ -201,12 +232,38 @@ pub struct ReactionPayload {
 }
 
 /// Payload for category edit actions
+///
+/// Restricted categories carry the sealed name and their ACL so an edit does
+/// not publish the name or widen access. Older payloads decode with the
+/// defaults, which means "public category, name in clear".
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct CategoryEditPayload {
     pub new_name: String,
     pub new_description: Option<String>,
     pub new_icon: Option<String>,
     pub new_color: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_name: Option<crate::board_state::privacy::SealedBytes>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_roles: Vec<crate::board_state::roles::RoleId>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
+}
+
+/// Keeps new default fields out of the bytes that signatures cover.
+pub(crate) fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl CategoryEditPayload {
+    /// Placeholder shown to members without the category secret.
+    pub fn placeholder_name(hidden: bool) -> String {
+        if hidden {
+            "Hidden category".to_string()
+        } else {
+            "Restricted category".to_string()
+        }
+    }
 }
 
 /// Reply message content (content_type = 3)
@@ -270,14 +327,15 @@ pub struct CategoryContentV1 {
     /// Parent category ID (None for top-level categories)
     pub parent_category_id: Option<MessageId>,
     /// Roles allowed to read and post here. Empty means everyone on the board.
-    #[serde(default)]
+    /// Omitted when empty so old signed categories round-trip unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_roles: Vec<crate::board_state::roles::RoleId>,
     /// Sealed real name, used when `allowed_roles` is not empty. Only members
     /// holding the category secret can read it.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed_name: Option<crate::board_state::privacy::SealedBytes>,
     /// Keep the category out of listings for members without the secret.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
 }
 
@@ -554,8 +612,12 @@ mod tests {
 
     #[test]
     fn test_category_content_roundtrip() {
-        let category = CategoryContentV1::new("General".to_string(), Some("General discussion".to_string()), "#6366f1".to_string())
-            .with_icon("💬".to_string());
+        let category = CategoryContentV1::new(
+            "General".to_string(),
+            Some("General discussion".to_string()),
+            "#6366f1".to_string(),
+        )
+        .with_icon("💬".to_string());
         let encoded = category.encode();
         let decoded = CategoryContentV1::decode(&encoded).unwrap();
         assert_eq!(category, decoded);
@@ -567,8 +629,9 @@ mod tests {
     #[test]
     fn test_category_with_parent() {
         let parent_id = test_message_id();
-        let category = CategoryContentV1::new("Subcategory".to_string(), None, "#ef4444".to_string())
-            .with_parent(parent_id.clone());
+        let category =
+            CategoryContentV1::new("Subcategory".to_string(), None, "#ef4444".to_string())
+                .with_parent(parent_id.clone());
         let encoded = category.encode();
         let decoded = CategoryContentV1::decode(&encoded).unwrap();
         assert_eq!(decoded.parent_category_id, Some(parent_id));
@@ -576,8 +639,12 @@ mod tests {
 
     #[test]
     fn test_decoded_content_category() {
-        let cat = CategoryContentV1::new("Test".to_string(), Some("Description".to_string()), "#22c55e".to_string())
-            .with_icon("🎯".to_string());
+        let cat = CategoryContentV1::new(
+            "Test".to_string(),
+            Some("Description".to_string()),
+            "#22c55e".to_string(),
+        )
+        .with_icon("🎯".to_string());
         let dc = DecodedContent::Category(cat.clone());
         assert!(dc.is_category());
         assert_eq!(dc.as_category(), Some(&cat));

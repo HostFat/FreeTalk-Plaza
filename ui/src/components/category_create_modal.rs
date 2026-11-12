@@ -3,6 +3,7 @@ use crate::util::messaging::send_category;
 use dioxus::prelude::*;
 use plaza_core::board_state::content::validate_icon;
 use plaza_core::board_state::message::MessageId;
+use plaza_core::board_state::roles::RoleId;
 use wasm_bindgen_futures::spawn_local;
 
 /// Global signal for category creation modal
@@ -39,6 +40,8 @@ pub fn CategoryCreateModal() -> Element {
     let mut color = use_signal(|| COLOR_PRESETS[0].0.to_string());
     let mut error_msg = use_signal(|| None::<String>);
     let mut is_creating = use_signal(|| false);
+    let mut selected_roles = use_signal(Vec::<RoleId>::new);
+    let mut hidden = use_signal(|| false);
 
     let modal_state = CREATE_CATEGORY_MODAL.read();
     let is_open = modal_state.show;
@@ -50,18 +53,30 @@ pub fn CategoryCreateModal() -> Element {
         return rsx! {};
     }
 
-    // Check if user can create categories
-    let can_create = {
+    // Check if user can create categories and list the roles they can restrict to
+    let (can_create, is_owner, roles) = {
         let current_board = CURRENT_BOARD.read();
         if let Some(key) = current_board.owner_key {
             let boards = BOARDS.read();
             if let Some(board_data) = boards.map.get(&key) {
-                board_data.can_create_categories()
+                let roles = board_data
+                    .board_state
+                    .roles
+                    .roles
+                    .iter()
+                    .filter(|role| !role.role.deleted)
+                    .map(|role| (role.role.id, role.role.name.clone()))
+                    .collect::<Vec<_>>();
+                (
+                    board_data.can_create_categories(),
+                    board_data.self_sk.verifying_key() == board_data.owner_vk,
+                    roles,
+                )
             } else {
-                false
+                (false, false, Vec::new())
             }
         } else {
-            false
+            (false, false, Vec::new())
         }
     };
 
@@ -107,7 +122,9 @@ pub fn CategoryCreateModal() -> Element {
         }
 
         if name_val.len() > 50 {
-            error_msg.set(Some("Category name must be 50 characters or less".to_string()));
+            error_msg.set(Some(
+                "Category name must be 50 characters or less".to_string(),
+            ));
             return;
         }
 
@@ -138,9 +155,20 @@ pub fn CategoryCreateModal() -> Element {
 
         let color_val = color.read().clone();
         let parent_id_val = parent_id_for_closure.clone();
+        let roles_val = selected_roles.read().clone();
+        let hidden_val = *hidden.read();
 
         spawn_local(async move {
-            match send_category(name_val, description_val, icon_val, color_val, parent_id_val).await
+            match send_category(
+                name_val,
+                description_val,
+                icon_val,
+                color_val,
+                parent_id_val,
+                roles_val,
+                hidden_val,
+            )
+            .await
             {
                 Ok(()) => {
                     // Reset and close modal
@@ -148,6 +176,8 @@ pub fn CategoryCreateModal() -> Element {
                     description.set(String::new());
                     icon.set(String::new());
                     color.set(COLOR_PRESETS[0].0.to_string());
+                    selected_roles.set(Vec::new());
+                    hidden.set(false);
                     CREATE_CATEGORY_MODAL.with_mut(|modal| {
                         modal.show = false;
                         modal.parent_category_id = None;
@@ -284,6 +314,60 @@ pub fn CategoryCreateModal() -> Element {
                                     }
                                 }
                             })}
+                        }
+                    }
+
+                    // Restricted visibility: owner only, and only when roles exist
+                    if is_owner && !roles.is_empty() {
+                        div {
+                            label { class: "block text-sm font-medium text-text mb-2", "Visible to" }
+                            p { class: "text-xs text-text-muted mb-2",
+                                "Select roles to keep this category private. Leave empty for everyone."
+                            }
+                            div { class: "flex flex-wrap gap-2",
+                                {roles.iter().map(|(id, role_name)| {
+                                    let id = *id;
+                                    let selected = selected_roles.read().contains(&id);
+                                    let role_name = role_name.clone();
+                                    rsx! {
+                                        button {
+                                            key: "{id:?}",
+                                            r#type: "button",
+                                            class: if selected {
+                                                "px-3 py-1.5 text-sm rounded-full bg-accent text-white"
+                                            } else {
+                                                "px-3 py-1.5 text-sm rounded-full bg-surface border border-border text-text-muted hover:text-text"
+                                            },
+                                            onclick: move |_| {
+                                                let mut current = selected_roles.write();
+                                                if current.contains(&id) {
+                                                    current.retain(|role| *role != id);
+                                                } else {
+                                                    current.push(id);
+                                                }
+                                            },
+                                            "{role_name}"
+                                        }
+                                    }
+                                })}
+                            }
+                            if !selected_roles.read().is_empty() {
+                                label { class: "flex items-center gap-2 mt-3 text-sm text-text cursor-pointer",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: *hidden.read(),
+                                        onchange: move |evt| hidden.set(evt.checked()),
+                                    }
+                                    "Hide from members without access"
+                                }
+                                p { class: "text-xs text-text-muted mt-1",
+                                    "The name and posts are encrypted with a key shared with the selected roles."
+                                }
+                            }
+                        }
+                    } else if !is_owner && !roles.is_empty() {
+                        p { class: "text-xs text-text-muted",
+                            "Only the owner can restrict a category to roles."
                         }
                     }
                 }

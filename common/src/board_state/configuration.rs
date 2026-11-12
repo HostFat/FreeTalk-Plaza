@@ -215,7 +215,6 @@ pub struct Configuration {
     pub max_board_description: usize,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

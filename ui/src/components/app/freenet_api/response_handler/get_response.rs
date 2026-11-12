@@ -6,7 +6,7 @@ use crate::components::app::sync_info::{BoardSyncStatus, SYNC_INFO};
 use crate::components::app::{BOARDS, CURRENT_BOARD, PENDING_INVITES, WEB_API};
 use crate::constants::BOARD_CONTRACT_WASM;
 use crate::invites::PendingBoardStatus;
-use crate::util::ecies::{decrypt_secret_from_member_blob, decrypt_with_symmetric_key};
+use crate::util::ecies::decrypt_secret_from_member_blob;
 use crate::util::{from_cbor_slice, owner_vk_to_contract_key, to_cbor_vec};
 use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::ReadableExt;
@@ -18,10 +18,8 @@ use freenet_stdlib::prelude::{
 };
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
-use plaza_core::board_state::message::{BoardMessageBody, MessageId};
 use plaza_core::board_state::privacy::{PrivacyMode, SealedBytes};
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
-use std::collections::HashMap;
 use std::sync::Arc;
 use x25519_dalek::PublicKey as X25519PublicKey;
 
@@ -112,7 +110,7 @@ pub async fn handle_get_response(
 
             // Update the board data
             crate::util::defer(move || {
-            BOARDS.with_mut(|boards| {
+                BOARDS.with_mut(|boards| {
                 // Get the entry for this board
                 let entry = boards.map.entry(owner_vk);
 
@@ -129,6 +127,7 @@ pub async fn handle_get_response(
                         contract_key: key,
                         last_read_message_id: None,
                         secrets: std::collections::HashMap::new(),
+                        category_secrets: std::collections::HashMap::new(),
                         current_secret_version: None,
                         last_secret_rotation: None,
                         key_migrated_to_delegate: false, // Will be checked/migrated on startup
@@ -252,54 +251,13 @@ pub async fn handle_get_response(
                     board_data.invite_chain = chain;
                 }
 
-                // Rebuild actions_state from action messages (edit, delete, reaction)
-                // This is needed because actions_state is #[serde(skip)] and not serialized
-                let is_private = board_data.board_state.configuration.configuration.privacy_mode
-                    == PrivacyMode::Private;
-                if is_private {
-                    // Decrypt all private action messages using version-aware lookup
-                    let decrypted_actions: HashMap<MessageId, Vec<u8>> = board_data
-                        .board_state
-                        .recent_messages
-                        .messages
-                        .iter()
-                        .filter(|msg| msg.message.content.is_action())
-                        .filter_map(|msg| {
-                            if let BoardMessageBody::Private { ciphertext, nonce, secret_version, .. } =
-                                &msg.message.content
-                            {
-                                // Look up the secret for this message's version
-                                board_data.get_secret_for_version(*secret_version)
-                                    .and_then(|secret| {
-                                        decrypt_with_symmetric_key(secret, ciphertext, nonce)
-                                            .ok()
-                                            .map(|plaintext| (msg.id(), plaintext))
-                                    })
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    let owner_id = plaza_core::board_state::member::MemberId::from(&owner_vk);
-                    let admin_ids: std::collections::HashSet<_> = board_data
-                        .board_state
-                        .admin
-                        .admins
-                        .iter()
-                        .map(|a| a.admin.id())
-                        .collect();
-                    board_data
-                        .board_state
-                        .recent_messages
-                        .rebuild_actions_state_with_permissions(&decrypted_actions, Some(owner_id), Some(&admin_ids));
-                } else {
-                    // Public board - rebuild from public action messages
-                    board_data
-                        .board_state
-                        .recent_messages
-                        .rebuild_actions_state();
-                }
+                // Rebuild actions_state from action messages (edit, delete,
+                // reaction). actions_state is #[serde(skip)], and private or
+                // category-scoped actions need their own key.
+                board_data.decrypt_category_secrets();
+                board_data.rebuild_actions_with_local_secrets(&ChatBoardParametersV1 {
+                    owner: owner_vk,
+                });
             });
             });
 
@@ -406,7 +364,8 @@ pub async fn handle_get_response(
                     wasm_bindgen_futures::spawn_local(async move {
                         let board_key = owner_vk.to_bytes();
                         let migrated =
-                            crate::signing::migrate_signing_key(board_key, &signing_key_clone).await;
+                            crate::signing::migrate_signing_key(board_key, &signing_key_clone)
+                                .await;
                         if migrated {
                             // Must defer signal mutations from spawn_local to
                             // avoid RefCell already borrowed panics in Dioxus runtime
@@ -442,10 +401,11 @@ pub async fn handle_get_response(
                         let current_state = board_data.board_state.clone();
 
                         // Merge the retrieved state into the existing state
-                        match board_data
-                            .board_state
-                            .merge(&current_state, &params, &retrieved_state)
-                        {
+                        match board_data.board_state.merge(
+                            &current_state,
+                            &params,
+                            &retrieved_state,
+                        ) {
                             Ok(_) => {
                                 info!(
                                     "Successfully merged refreshed state for board {:?}",
@@ -459,6 +419,11 @@ pub async fn handle_get_response(
 
                                 // Migration: capture self membership data for old boards
                                 board_data.capture_self_membership_data(&params);
+
+                                // New category keys may have arrived with the
+                                // refreshed state.
+                                board_data.decrypt_category_secrets();
+                                board_data.rebuild_actions_with_local_secrets(&params);
                             }
                             Err(e) => {
                                 error!(

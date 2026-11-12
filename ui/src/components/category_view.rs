@@ -121,6 +121,13 @@ pub fn CategoryCard(
                         h3 { class: "text-lg font-semibold text-text group-hover:text-accent transition-colors truncate",
                             "{name}"
                         }
+                        if !category.category_allowed_roles.is_empty() {
+                            span {
+                                class: "ml-auto flex-shrink-0 text-xs px-2 py-0.5 rounded-full bg-surface border border-border text-text-muted",
+                                title: "Visible only to members of the selected roles",
+                                if category.category_locked { "🔒 Locked" } else { "🔒 Restricted" }
+                            }
+                        }
                     }
                 }
 

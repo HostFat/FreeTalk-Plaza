@@ -188,9 +188,8 @@ impl ComposableState for CategorySecretsV1 {
                 }
 
                 set.versions.sort_by_key(|v| v.record.version);
-                set.encrypted_secrets.sort_by_key(|s| {
-                    (s.secret.secret_version, s.secret.member_id)
-                });
+                set.encrypted_secrets
+                    .sort_by_key(|s| (s.secret.secret_version, s.secret.member_id));
                 set.current_version = set
                     .versions
                     .iter()
@@ -242,8 +241,7 @@ impl CategorySecretsV1 {
             .iter()
             .filter(|member| {
                 !set.encrypted_secrets.iter().any(|s| {
-                    s.secret.member_id == **member
-                        && s.secret.secret_version == set.current_version
+                    s.secret.member_id == **member && s.secret.secret_version == set.current_version
                 })
             })
             .copied()
@@ -297,7 +295,9 @@ mod tests {
         }
     }
 
-    fn state_with_category(owner: &ed25519_dalek::SigningKey) -> (ChatBoardStateV1, MessageId, MemberId) {
+    fn state_with_category(
+        owner: &ed25519_dalek::SigningKey,
+    ) -> (ChatBoardStateV1, MessageId, MemberId) {
         let category_id = MessageId(FastHash(7));
         let member = MemberId(FastHash(9));
         let version = SecretVersionRecordV1 {

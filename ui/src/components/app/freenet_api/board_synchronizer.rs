@@ -14,7 +14,6 @@ use crate::components::app::sync_info::{now_ms, BoardSyncStatus, SYNC_INFO};
 use crate::components::app::{mark_needs_sync, BOARDS, CURRENT_BOARD, PENDING_INVITES, WEB_API};
 use crate::constants::BOARD_CONTRACT_WASM;
 use crate::invites::PendingBoardStatus;
-use crate::util::ecies::decrypt_with_symmetric_key;
 use crate::util::{owner_vk_to_contract_key, to_cbor_vec};
 use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::*;
@@ -29,8 +28,6 @@ use freenet_stdlib::{
 };
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::member_info::MemberInfoV1;
-use plaza_core::board_state::message::{BoardMessageBody, MessageId};
-use plaza_core::board_state::privacy::PrivacyMode;
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -107,47 +104,11 @@ impl BoardSynchronizer {
                     .apply_delta(&state_clone, &params, &Some(delta))
                 {
                     Ok(_) => {
-                        // For private boards, rebuild actions_state with decrypted content
-                        // (apply_delta only processes public actions)
-                        let is_private = board_data.board_state.configuration.configuration.privacy_mode
-                            == PrivacyMode::Private;
-                        if is_private {
-                            // Decrypt all private action messages using version-aware lookup
-                            let decrypted_actions: HashMap<MessageId, Vec<u8>> = board_data
-                                .board_state
-                                .recent_messages
-                                .messages
-                                .iter()
-                                .filter(|msg| msg.message.content.is_action())
-                                .filter_map(|msg| {
-                                    if let BoardMessageBody::Private { ciphertext, nonce, secret_version, .. } =
-                                        &msg.message.content
-                                    {
-                                        board_data.get_secret_for_version(*secret_version)
-                                            .and_then(|secret| {
-                                                decrypt_with_symmetric_key(secret, ciphertext, nonce)
-                                                    .ok()
-                                                    .map(|plaintext| (msg.id(), plaintext))
-                                            })
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect();
-
-                            let owner_id = plaza_core::board_state::member::MemberId::from(&params.owner);
-                            let admin_ids: std::collections::HashSet<_> = board_data
-                                .board_state
-                                .admin
-                                .admins
-                                .iter()
-                                .map(|a| a.admin.id())
-                                .collect();
-                            board_data
-                                .board_state
-                                .recent_messages
-                                .rebuild_actions_state_with_permissions(&decrypted_actions, Some(owner_id), Some(&admin_ids));
-                        }
+                        // New category blobs may have arrived; open them before
+                        // rebuilding edits and reactions, which can also be
+                        // sealed per category.
+                        board_data.decrypt_category_secrets();
+                        board_data.rebuild_actions_with_local_secrets(&params);
 
                         // Log versions after applying delta
                         info!("Updated member_info state after delta ({} items):",
@@ -189,6 +150,33 @@ impl BoardSynchronizer {
                                     }
                                     Err(e) => {
                                         error!("Failed to distribute board secrets: {}", e)
+                                    }
+                                }
+                            }
+                        }
+
+                        // Same for category secrets: the owner hands the key to
+                        // members who were added to an allowed role.
+                        if board_data.owner_vk == board_data.self_sk.verifying_key() {
+                            if let Some(category_delta) =
+                                board_data.generate_missing_category_secrets()
+                            {
+                                let state_before = board_data.board_state.clone();
+                                let delta = ChatBoardStateV1Delta {
+                                    category_secrets: Some(category_delta),
+                                    ..Default::default()
+                                };
+                                match board_data.board_state.apply_delta(
+                                    &state_before,
+                                    &params,
+                                    &Some(delta),
+                                ) {
+                                    Ok(_) => {
+                                        info!("Distributed category secrets to new members");
+                                        distributed_secrets = true;
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to distribute category secrets: {}", e)
                                     }
                                 }
                             }
@@ -703,6 +691,8 @@ impl BoardSynchronizer {
         // Updated member_info captured after state merge (so new sender nicknames are included)
         let mut updated_member_info: Option<MemberInfoV1> = None;
         let board_owner_copy = board_owner_vk;
+        // Set when the owner hands category keys to newly added members.
+        let mut distributed_secrets = false;
 
         BOARDS.with_mut(|boards| {
             if let Some(board_data) = boards.map.get_mut(&board_owner_vk) {
@@ -742,46 +732,13 @@ impl BoardSynchronizer {
                     &state,
                 ) {
                     Ok(_) => {
-                        // For private boards, rebuild actions_state with decrypted content
-                        let is_private = board_data.board_state.configuration.configuration.privacy_mode
-                            == PrivacyMode::Private;
-                        if is_private {
-                            // Decrypt all private action messages using version-aware lookup
-                            let decrypted_actions: HashMap<MessageId, Vec<u8>> = board_data
-                                .board_state
-                                .recent_messages
-                                .messages
-                                .iter()
-                                .filter(|msg| msg.message.content.is_action())
-                                .filter_map(|msg| {
-                                    if let BoardMessageBody::Private { ciphertext, nonce, secret_version, .. } =
-                                        &msg.message.content
-                                    {
-                                        board_data.get_secret_for_version(*secret_version)
-                                            .and_then(|secret| {
-                                                decrypt_with_symmetric_key(secret, ciphertext, nonce)
-                                                    .ok()
-                                                    .map(|plaintext| (msg.id(), plaintext))
-                                            })
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect();
-
-                            let owner_id = plaza_core::board_state::member::MemberId::from(&board_owner_vk);
-                            let admin_ids: std::collections::HashSet<_> = board_data
-                                .board_state
-                                .admin
-                                .admins
-                                .iter()
-                                .map(|a| a.admin.id())
-                                .collect();
-                            board_data
-                                .board_state
-                                .recent_messages
-                                .rebuild_actions_state_with_permissions(&decrypted_actions, Some(owner_id), Some(&admin_ids));
-                        }
+                        // Category keys may have arrived with this state; open
+                        // them, then rebuild edits and reactions.
+                        let params = ChatBoardParametersV1 {
+                            owner: board_owner_vk,
+                        };
+                        board_data.decrypt_category_secrets();
+                        board_data.rebuild_actions_with_local_secrets(&params);
 
                         // Log member info versions after merge
                         info!(
@@ -800,6 +757,30 @@ impl BoardSynchronizer {
                         // Keep cached self membership data up to date
                         let params = ChatBoardParametersV1 { owner: board_owner_vk };
                         board_data.capture_self_membership_data(&params);
+
+                        // The owner hands category keys to members who joined
+                        // since the last distribution, then pushes the state.
+                        if board_data.owner_vk == board_data.self_sk.verifying_key() {
+                            if let Some(category_delta) =
+                                board_data.generate_missing_category_secrets()
+                            {
+                                let state_before = board_data.board_state.clone();
+                                if board_data
+                                    .board_state
+                                    .apply_delta(
+                                        &state_before,
+                                        &params,
+                                        &Some(ChatBoardStateV1Delta {
+                                            category_secrets: Some(category_delta),
+                                            ..Default::default()
+                                        }),
+                                    )
+                                    .is_ok()
+                                {
+                                    distributed_secrets = true;
+                                }
+                            }
+                        }
 
                         // Make sure the board is registered in SYNC_INFO and update the
                         // baseline to the INCOMING contract state (not the post-merge state).
@@ -889,6 +870,10 @@ impl BoardSynchronizer {
 
         // Update document title after boards.with_mut completes (update_document_title calls boards.read())
         update_document_title();
+
+        if distributed_secrets {
+            mark_needs_sync(board_owner_copy);
+        }
 
         // Now safe to call notify_new_messages (it calls boards.read() internally)
         // Use updated_member_info (captured after state merge) so new sender nicknames are included

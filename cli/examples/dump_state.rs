@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use bs58::Alphabet;
 use ciborium::de::from_reader;
+use plaza_core::board_state::ChatBoardStateV1;
 use redb::{
     Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition, TableHandle,
 };
-use plaza_core::board_state::ChatBoardStateV1;
 use std::env;
 use std::time::SystemTime;
 

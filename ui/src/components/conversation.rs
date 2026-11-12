@@ -16,9 +16,11 @@ use crate::board_data::SendMessageError;
 use crate::components::conversation::message_input::PostInput;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
+use plaza_core::board_state::content::CategoryContentV1;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::member_info::MemberInfoV1;
-use plaza_core::board_state::message::{BoardMessageBody, MessageId, MessagesV1};
+use plaza_core::board_state::message::{BoardMessageBody, MessageId, MessagesV1, SecretScope};
+use plaza_core::board_state::roles::RoleId;
 use std::collections::HashMap;
 use wasm_bindgen_futures::spawn_local;
 
@@ -52,6 +54,12 @@ pub struct MessageData {
     pub category_color: Option<String>,
     /// Parent category ID (if this is a subcategory)
     pub parent_category_id: Option<MessageId>,
+    /// Roles allowed in this category (empty for public categories)
+    pub category_allowed_roles: Vec<RoleId>,
+    /// Category is hidden from members without its secret
+    pub category_hidden: bool,
+    /// Category is restricted and we do not hold its secret
+    pub category_locked: bool,
 }
 
 /// A message with its nested replies
@@ -69,7 +77,7 @@ impl MessageData {
 
     /// Get a string ID suitable for use in URLs/routes
     pub fn id_string(&self) -> String {
-        format!("{}", self.message_id.0.0)
+        format!("{}", self.message_id.0 .0)
     }
 }
 
@@ -79,6 +87,7 @@ pub fn get_all_messages(
     member_info: &MemberInfoV1,
     self_member_id: MemberId,
     secrets: &HashMap<u32, [u8; 32]>,
+    category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
 ) -> Vec<MessageData> {
     let mut messages = Vec::new();
 
@@ -102,11 +111,11 @@ pub fn get_all_messages(
             })
             .unwrap_or_else(|| "Unknown".to_string());
 
-        let content_text = messages_state
-            .effective_text(message)
-            .unwrap_or_else(|| decrypt_message_content(&message.message.content, secrets));
+        let content_text = messages_state.effective_text(message).unwrap_or_else(|| {
+            decrypt_message_content(&message.message.content, secrets, category_secrets)
+        });
         let content_html = text_to_html(&content_text);
-        let title_text = decrypt_message_title(&message.message.content, secrets);
+        let title_text = decrypt_message_title(&message.message.content, secrets, category_secrets);
         let is_self = author_id == self_member_id;
 
         let reactions = messages_state
@@ -115,37 +124,76 @@ pub fn get_all_messages(
             .unwrap_or_default();
 
         let (reply_to_author, reply_to_preview, reply_to_message_id) =
-            extract_reply_context(&message.message.content, secrets);
+            extract_reply_context(&message.message.content, secrets, category_secrets);
 
         let send_time_ms = raw_time.timestamp_millis();
         let receive_delay_secs = get_delay_secs(&message_id, send_time_ms);
 
         // Extract category info (with edits applied)
-        let (is_category, category_name, category_description, category_icon, category_color, parent_category_id) = {
-            let (is_cat, name, desc, icon, color, parent) =
-                extract_category_info(&message.message.content, secrets);
-            // Apply category edits if available
-            if is_cat {
+        let category_info = extract_category_info(
+            &message.message.content,
+            secrets,
+            category_secrets,
+            &message_id,
+        );
+        let (
+            is_category,
+            category_name,
+            category_description,
+            category_icon,
+            category_color,
+            parent_category_id,
+            category_allowed_roles,
+            category_hidden,
+            category_locked,
+        ) = match category_info {
+            Some(mut info) => {
                 if let Some(edit) = messages_state.edited_category(&message_id) {
-                    (
-                        true,
-                        Some(edit.new_name.clone()),
-                        edit.new_description.clone(),
-                        edit.new_icon.clone(),
-                        Some(edit.new_color.clone()),
-                        parent,
-                    )
-                } else {
-                    (is_cat, name, desc, icon, color, parent)
+                    // A sealed edit carries the real name encrypted; without
+                    // the key we keep the placeholder the edit publishes.
+                    match (edit.sealed_name.as_ref(), category_secrets.get(&message_id)) {
+                        (Some(sealed), Some((_, key))) => {
+                            if let Ok(bytes) = crate::util::ecies::unseal_bytes(sealed, Some(key)) {
+                                if let Ok(name) = String::from_utf8(bytes) {
+                                    info.name = Some(name);
+                                }
+                            }
+                        }
+                        (None, _) => info.name = Some(edit.new_name.clone()),
+                        _ => {}
+                    }
+                    info.description = edit.new_description.clone();
+                    info.icon = edit.new_icon.clone();
+                    info.color = Some(edit.new_color.clone());
                 }
-            } else {
-                (is_cat, name, desc, icon, color, parent)
+                (
+                    true,
+                    info.name,
+                    info.description,
+                    info.icon,
+                    info.color,
+                    info.parent,
+                    info.allowed_roles,
+                    info.hidden,
+                    info.locked,
+                )
             }
+            None => (
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                false,
+                false,
+            ),
         };
 
         // Mark as edited if category was edited
-        let edited = messages_state.is_edited(&message_id)
-            || messages_state.is_category_edited(&message_id);
+        let edited =
+            messages_state.is_edited(&message_id) || messages_state.is_category_edited(&message_id);
 
         messages.push(MessageData {
             message_id,
@@ -169,6 +217,9 @@ pub fn get_all_messages(
             category_icon,
             category_color,
             parent_category_id,
+            category_allowed_roles,
+            category_hidden,
+            category_locked,
         });
     }
 
@@ -205,7 +256,30 @@ pub fn build_reply_tree(
         .collect()
 }
 
-fn decrypt_message_title(content: &BoardMessageBody, secrets: &HashMap<u32, [u8; 32]>) -> String {
+/// Secret that opens a body, chosen by the scope recorded on it.
+fn body_secret(
+    content: &BoardMessageBody,
+    board_secrets: &HashMap<u32, [u8; 32]>,
+    category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+) -> Option<[u8; 32]> {
+    match content {
+        BoardMessageBody::Private {
+            secret_version,
+            secret_scope,
+            ..
+        } => match secret_scope {
+            SecretScope::Board => board_secrets.get(secret_version).copied(),
+            SecretScope::Category(id) => category_secrets.get(id).map(|(_, key)| *key),
+        },
+        BoardMessageBody::Public { .. } => None,
+    }
+}
+
+fn decrypt_message_title(
+    content: &BoardMessageBody,
+    secrets: &HashMap<u32, [u8; 32]>,
+    category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+) -> String {
     use plaza_core::board_state::content::{
         ReplyContentV1, TextContentV1, CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT,
     };
@@ -230,13 +304,12 @@ fn decrypt_message_title(content: &BoardMessageBody, secrets: &HashMap<u32, [u8;
             content_type,
             ciphertext,
             nonce,
-            secret_version,
             ..
         } => {
-            if let Some(secret) = secrets.get(secret_version) {
+            if let Some(secret) = body_secret(content, secrets, category_secrets) {
                 use crate::util::ecies::decrypt_with_symmetric_key;
                 if let Ok(decrypted_bytes) =
-                    decrypt_with_symmetric_key(secret, ciphertext.as_slice(), nonce)
+                    decrypt_with_symmetric_key(&secret, ciphertext.as_slice(), nonce)
                 {
                     if *content_type == CONTENT_TYPE_TEXT {
                         if let Ok(text_content) = TextContentV1::decode(&decrypted_bytes) {
@@ -255,7 +328,11 @@ fn decrypt_message_title(content: &BoardMessageBody, secrets: &HashMap<u32, [u8;
     }
 }
 
-fn decrypt_message_content(content: &BoardMessageBody, secrets: &HashMap<u32, [u8; 32]>) -> String {
+fn decrypt_message_content(
+    content: &BoardMessageBody,
+    secrets: &HashMap<u32, [u8; 32]>,
+    category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+) -> String {
     use plaza_core::board_state::content::{
         ReplyContentV1, TextContentV1, CONTENT_TYPE_ACTION, CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT,
     };
@@ -284,12 +361,13 @@ fn decrypt_message_content(content: &BoardMessageBody, secrets: &HashMap<u32, [u
             ciphertext,
             nonce,
             secret_version,
+            secret_scope,
             ..
         } => {
-            if let Some(secret) = secrets.get(secret_version) {
+            if let Some(secret) = body_secret(content, secrets, category_secrets) {
                 use crate::util::ecies::decrypt_with_symmetric_key;
                 if let Ok(decrypted_bytes) =
-                    decrypt_with_symmetric_key(secret, ciphertext.as_slice(), nonce)
+                    decrypt_with_symmetric_key(&secret, ciphertext.as_slice(), nonce)
                 {
                     if *content_type == CONTENT_TYPE_TEXT {
                         if let Ok(text_content) = TextContentV1::decode(&decrypted_bytes) {
@@ -305,11 +383,16 @@ fn decrypt_message_content(content: &BoardMessageBody, secrets: &HashMap<u32, [u
                 }
                 content.to_string_lossy()
             } else {
-                format!(
-                    "[Encrypted message - secret v{} not available (have: {:?})]",
-                    secret_version,
-                    secrets.keys().collect::<Vec<_>>()
-                )
+                match secret_scope {
+                    SecretScope::Board => format!(
+                        "[Encrypted message - secret v{} not available (have: {:?})]",
+                        secret_version,
+                        secrets.keys().collect::<Vec<_>>()
+                    ),
+                    SecretScope::Category(_) => {
+                        "[Restricted post - you do not have access to this category]".to_string()
+                    }
+                }
             }
         }
     }
@@ -318,6 +401,7 @@ fn decrypt_message_content(content: &BoardMessageBody, secrets: &HashMap<u32, [u
 fn extract_reply_context(
     content: &BoardMessageBody,
     secrets: &HashMap<u32, [u8; 32]>,
+    category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
 ) -> (Option<String>, Option<String>, Option<MessageId>) {
     use plaza_core::board_state::content::{ReplyContentV1, CONTENT_TYPE_REPLY};
 
@@ -337,13 +421,12 @@ fn extract_reply_context(
             content_type,
             ciphertext,
             nonce,
-            secret_version,
             ..
         } if *content_type == CONTENT_TYPE_REPLY => {
-            if let Some(secret) = secrets.get(secret_version) {
+            if let Some(secret) = body_secret(content, secrets, category_secrets) {
                 use crate::util::ecies::decrypt_with_symmetric_key;
                 if let Ok(decrypted_bytes) =
-                    decrypt_with_symmetric_key(secret, ciphertext.as_slice(), nonce)
+                    decrypt_with_symmetric_key(&secret, ciphertext.as_slice(), nonce)
                 {
                     if let Ok(reply) = ReplyContentV1::decode(&decrypted_bytes) {
                         return (
@@ -360,61 +443,78 @@ fn extract_reply_context(
     (None, None, None)
 }
 
+/// Decoded category metadata, with the sealed name opened when possible.
+#[derive(Clone, PartialEq, Debug)]
+pub struct CategoryInfo {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub icon: Option<String>,
+    pub color: Option<String>,
+    pub parent: Option<MessageId>,
+    pub allowed_roles: Vec<RoleId>,
+    pub hidden: bool,
+    /// Restricted category whose key this client does not hold.
+    pub locked: bool,
+}
+
+/// Open a category's sealed name when its key is available.
+fn open_category_name(
+    mut category: CategoryContentV1,
+    category_id: &MessageId,
+    category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+) -> CategoryContentV1 {
+    if let Some(sealed) = category.sealed_name.as_ref() {
+        if let Some((_, key)) = category_secrets.get(category_id) {
+            if let Ok(bytes) = crate::util::ecies::unseal_bytes(sealed, Some(key)) {
+                if let Ok(name) = String::from_utf8(bytes) {
+                    category.name = name;
+                }
+            }
+        }
+    }
+    category
+}
+
 /// Extract category information from message content
 fn extract_category_info(
     content: &BoardMessageBody,
     secrets: &HashMap<u32, [u8; 32]>,
-) -> (bool, Option<String>, Option<String>, Option<String>, Option<String>, Option<MessageId>) {
+    category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+    message_id: &MessageId,
+) -> Option<CategoryInfo> {
     use plaza_core::board_state::content::{CategoryContentV1, CONTENT_TYPE_CATEGORY};
-    use plaza_core::board_state::privacy::SealedBytes;
 
-    match content {
+    let category = match content {
         BoardMessageBody::Public {
             content_type, data, ..
-        } if *content_type == CONTENT_TYPE_CATEGORY => {
-            if let Ok(cat) = CategoryContentV1::decode(data) {
-                return (
-                    true,
-                    Some(cat.name),
-                    cat.description,
-                    cat.icon,
-                    Some(cat.color),
-                    cat.parent_category_id,
-                );
-            }
-        }
+        } if *content_type == CONTENT_TYPE_CATEGORY => CategoryContentV1::decode(data).ok()?,
         // Private boards seal their categories like any other content.
         BoardMessageBody::Private {
             content_type,
             ciphertext,
             nonce,
-            secret_version,
             ..
         } if *content_type == CONTENT_TYPE_CATEGORY => {
-            let sealed = SealedBytes::Private {
-                ciphertext: ciphertext.clone(),
-                nonce: *nonce,
-                secret_version: *secret_version,
-                declared_len_bytes: 0,
-            };
-            if let Ok(bytes) = crate::util::ecies::unseal_bytes_with_secrets(&sealed, secrets) {
-                if let Ok(cat) = CategoryContentV1::decode(&bytes) {
-                    return (
-                        true,
-                        Some(cat.name),
-                        cat.description,
-                        cat.icon,
-                        Some(cat.color),
-                        cat.parent_category_id,
-                    );
-                }
-            }
-            // Still a category, just not readable with the secrets we hold.
-            return (true, None, None, None, None, None);
+            let secret = body_secret(content, secrets, category_secrets)?;
+            let bytes =
+                crate::util::ecies::decrypt_with_symmetric_key(&secret, ciphertext, nonce).ok()?;
+            CategoryContentV1::decode(&bytes).ok()?
         }
-        _ => {}
-    }
-    (false, None, None, None, None, None)
+        _ => return None,
+    };
+
+    let locked = category.is_restricted() && !category_secrets.contains_key(message_id);
+    let category = open_category_name(category, message_id, category_secrets);
+    Some(CategoryInfo {
+        name: Some(category.name),
+        description: category.description,
+        icon: category.icon,
+        color: Some(category.color),
+        parent: category.parent_category_id,
+        allowed_roles: category.allowed_roles,
+        hidden: category.hidden,
+        locked,
+    })
 }
 
 /// Conversation component that shows replies to a specific parent message
@@ -457,6 +557,7 @@ pub fn Conversation(
                         &board_data.board_state.member_info,
                         self_member_id,
                         &board_data.secrets,
+                        &board_data.category_secrets,
                     );
 
                     // Build member name lookup
@@ -478,7 +579,13 @@ pub fn Conversation(
                         .collect();
 
                     let tree = build_reply_tree(&all_messages, parent_id.as_ref());
-                    return Some((tree, self_member_id, member_names, max_title_size, max_message_size));
+                    return Some((
+                        tree,
+                        self_member_id,
+                        member_names,
+                        max_title_size,
+                        max_message_size,
+                    ));
                 }
             }
             None
@@ -533,6 +640,11 @@ pub fn Conversation(
                 let secret_opt: Option<([u8; 32], u32)> = current_board_data
                     .get_secret()
                     .map(|(secret, version)| (*secret, version));
+                // Replies to a restricted category, or to a post inside one,
+                // are sealed with that category's key.
+                let category_secret = reply_ctx
+                    .as_ref()
+                    .and_then(|reply| current_board_data.posting_secret_for(&reply.message_id));
 
                 spawn_local(async move {
                     send_message(
@@ -542,6 +654,7 @@ pub fn Conversation(
                         board_state_clone,
                         is_private,
                         secret_opt,
+                        category_secret,
                         title_text,
                         message_text,
                         reply_ctx,
@@ -966,8 +1079,8 @@ fn MessageEditForm(
         let new_text = edit_text.read().clone();
         let changed = !new_text.is_empty()
             && (new_title != original_title_for_key || new_text != original_text_for_key);
-        let valid = edit_title.read().len() <= max_title_size
-            && edit_text.read().len() <= max_message_size;
+        let valid =
+            edit_title.read().len() <= max_title_size && edit_text.read().len() <= max_message_size;
         changed && valid
     });
 
@@ -1637,7 +1750,11 @@ pub fn get_top_level_posts(all_messages: &[MessageData]) -> Vec<MessageData> {
 pub fn get_top_level_categories(all_messages: &[MessageData]) -> Vec<MessageData> {
     let mut categories: Vec<_> = all_messages
         .iter()
-        .filter(|m| m.is_category && m.parent_category_id.is_none())
+        .filter(|m| {
+            m.is_category
+                && m.parent_category_id.is_none()
+                && !(m.category_hidden && m.category_locked)
+        })
         .cloned()
         .collect();
     categories.sort_by_key(|m| m.time);
@@ -1645,10 +1762,17 @@ pub fn get_top_level_categories(all_messages: &[MessageData]) -> Vec<MessageData
 }
 
 /// Get subcategories of a specific category
-pub fn get_subcategories(all_messages: &[MessageData], category_id: &MessageId) -> Vec<MessageData> {
+pub fn get_subcategories(
+    all_messages: &[MessageData],
+    category_id: &MessageId,
+) -> Vec<MessageData> {
     let mut subcategories: Vec<_> = all_messages
         .iter()
-        .filter(|m| m.is_category && m.parent_category_id.as_ref() == Some(category_id))
+        .filter(|m| {
+            m.is_category
+                && m.parent_category_id.as_ref() == Some(category_id)
+                && !(m.category_hidden && m.category_locked)
+        })
         .cloned()
         .collect();
     subcategories.sort_by_key(|m| m.time);
@@ -1656,7 +1780,10 @@ pub fn get_subcategories(all_messages: &[MessageData], category_id: &MessageId) 
 }
 
 /// Get posts within a category (non-category messages that reply to the category)
-pub fn get_category_posts(all_messages: &[MessageData], category_id: &MessageId) -> Vec<MessageData> {
+pub fn get_category_posts(
+    all_messages: &[MessageData],
+    category_id: &MessageId,
+) -> Vec<MessageData> {
     let mut posts: Vec<_> = all_messages
         .iter()
         .filter(|m| !m.is_category && m.reply_to_message_id.as_ref() == Some(category_id))
@@ -1673,7 +1800,7 @@ mod category_tests {
     use plaza_core::board_state::content::{
         CategoryContentV1, CATEGORY_CONTENT_VERSION, CONTENT_TYPE_CATEGORY,
     };
-    use plaza_core::board_state::message::BoardMessageBody;
+    use plaza_core::board_state::message::{BoardMessageBody, MessageId};
     use plaza_core::board_state::privacy::SealedBytes;
     use std::collections::HashMap;
 
@@ -1698,6 +1825,10 @@ mod category_tests {
         }
     }
 
+    fn message_id() -> MessageId {
+        MessageId(freenet_scaffold::util::FastHash(42))
+    }
+
     #[test]
     fn private_category_is_decoded_with_the_board_secret() {
         let secret = [7u8; 32];
@@ -1705,16 +1836,48 @@ mod category_tests {
 
         let mut secrets = HashMap::new();
         secrets.insert(0u32, secret);
-        let (is_category, name, _, _, color, _) = extract_category_info(&content, &secrets);
-        assert!(is_category);
-        assert_eq!(name.as_deref(), Some("Segreta"));
-        assert_eq!(color.as_deref(), Some("#6366f1"));
+        let info = extract_category_info(&content, &secrets, &HashMap::new(), &message_id())
+            .expect("category decodes");
+        assert_eq!(info.name.as_deref(), Some("Segreta"));
+        assert_eq!(info.color.as_deref(), Some("#6366f1"));
+        assert!(!info.locked);
 
-        // Without the secret the message is still recognised as a category, just
-        // without readable content, so it does not show up as a post.
-        let (is_category, name, ..) = extract_category_info(&content, &HashMap::new());
-        assert!(is_category);
-        assert!(name.is_none());
+        // Without the secret the content is unreadable, so it is not listed as
+        // a category at all.
+        assert!(
+            extract_category_info(&content, &HashMap::new(), &HashMap::new(), &message_id())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn restricted_category_name_opens_only_with_its_secret() {
+        let category_secret = [9u8; 32];
+        let id = message_id();
+        let sealed_name = crate::util::ecies::seal_bytes(b"Members only", &category_secret, 0);
+        let cat = CategoryContentV1::new(
+            "Restricted category".to_string(),
+            Some("desc".to_string()),
+            "#6366f1".to_string(),
+        )
+        .with_allowed_roles(vec![[1u8; 16]], sealed_name, true);
+        let content = BoardMessageBody::Public {
+            content_type: CONTENT_TYPE_CATEGORY,
+            content_version: CATEGORY_CONTENT_VERSION,
+            data: cat.encode(),
+        };
+
+        let mut category_secrets = HashMap::new();
+        category_secrets.insert(id.clone(), (0u32, category_secret));
+        let readable = extract_category_info(&content, &HashMap::new(), &category_secrets, &id)
+            .expect("category decodes");
+        assert_eq!(readable.name.as_deref(), Some("Members only"));
+        assert!(!readable.locked);
+        assert!(readable.hidden);
+
+        let outsider = extract_category_info(&content, &HashMap::new(), &HashMap::new(), &id)
+            .expect("placeholder is still visible");
+        assert_eq!(outsider.name.as_deref(), Some("Restricted category"));
+        assert!(outsider.locked);
     }
 }
-

@@ -119,8 +119,10 @@ mod imp {
                                                 }
                                             }
                                         }
-                                        let _ = storage
-                                            .set_item("freetalk_last_auth_reload", &now.to_string());
+                                        let _ = storage.set_item(
+                                            "freetalk_last_auth_reload",
+                                            &now.to_string(),
+                                        );
                                     }
                                 }
 

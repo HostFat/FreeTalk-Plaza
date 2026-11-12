@@ -130,24 +130,32 @@ impl ComposableState for MessagesV1 {
                 }
 
                 match content {
-                    BoardMessageBody::Private { secret_version, .. } => {
-                        // In private mode, verify secret version matches current
-                        if *privacy_mode == PrivacyMode::Private
-                            && *secret_version != current_secret_version
-                        {
-                            return Err(format!(
-                                "Private message secret version {} does not match current version {}",
-                                secret_version, current_secret_version
-                            ));
-                        }
+                    BoardMessageBody::Private {
+                        secret_version,
+                        secret_scope,
+                        ..
+                    } => {
+                        // Category-sealed content uses the category key, so the
+                        // board secret version and distribution do not apply.
+                        if *secret_scope == SecretScope::Board {
+                            // In private mode, verify secret version matches current
+                            if *privacy_mode == PrivacyMode::Private
+                                && *secret_version != current_secret_version
+                            {
+                                return Err(format!(
+                                    "Private message secret version {} does not match current version {}",
+                                    secret_version, current_secret_version
+                                ));
+                            }
 
-                        // Verify all current members have encrypted blobs for this version
-                        let members = parent_state.members.members_by_member_id();
-                        if !parent_state.secrets.has_complete_distribution(&members) {
-                            return Err(
-                                "Cannot accept private messages: incomplete secret distribution"
-                                    .to_string(),
-                            );
+                            // Verify all current members have encrypted blobs for this version
+                            let members = parent_state.members.members_by_member_id();
+                            if !parent_state.secrets.has_complete_distribution(&members) {
+                                return Err(
+                                    "Cannot accept private messages: incomplete secret distribution"
+                                        .to_string(),
+                                );
+                            }
                         }
                     }
                     BoardMessageBody::Public { .. } => {
@@ -387,7 +395,9 @@ impl MessagesV1 {
 
     /// Check if a category has been edited
     pub fn is_category_edited(&self, message_id: &MessageId) -> bool {
-        self.actions_state.edited_categories.contains_key(message_id)
+        self.actions_state
+            .edited_categories
+            .contains_key(message_id)
     }
 
     /// Get the edited category payload if available
@@ -464,8 +474,10 @@ pub enum BoardMessageBody {
         /// Version of the board secret used for encryption
         secret_version: SecretVersion,
         /// Which secret sealed this message. Older messages use the board
-        /// secret; restricted categories use their own.
-        #[serde(default)]
+        /// secret; restricted categories use their own. Omitted when it is the
+        /// board scope so records signed before this field existed keep
+        /// verifying byte for byte.
+        #[serde(default, skip_serializing_if = "SecretScope::is_board")]
         secret_scope: SecretScope,
     },
 }
@@ -476,6 +488,12 @@ pub enum SecretScope {
     #[default]
     Board,
     Category(MessageId),
+}
+
+impl SecretScope {
+    fn is_board(&self) -> bool {
+        matches!(self, SecretScope::Board)
+    }
 }
 
 impl BoardMessageBody {
@@ -597,7 +615,8 @@ impl BoardMessageBody {
         use crate::board_state::content::{
             ActionContentV1, ACTION_CONTENT_VERSION, CONTENT_TYPE_ACTION,
         };
-        let action = ActionContentV1::edit_category(target, new_name, new_description, new_icon, new_color);
+        let action =
+            ActionContentV1::edit_category(target, new_name, new_description, new_icon, new_color);
         Self::Public {
             content_type: CONTENT_TYPE_ACTION,
             content_version: ACTION_CONTENT_VERSION,
@@ -741,9 +760,9 @@ impl BoardMessageBody {
                     .ok()
                     .map(DecodedContent::Action),
                 CONTENT_TYPE_REPLY => ReplyContentV1::decode(data).ok().map(DecodedContent::Reply),
-                CONTENT_TYPE_CATEGORY => {
-                    CategoryContentV1::decode(data).ok().map(DecodedContent::Category)
-                }
+                CONTENT_TYPE_CATEGORY => CategoryContentV1::decode(data)
+                    .ok()
+                    .map(DecodedContent::Category),
                 _ => Some(DecodedContent::Unknown {
                     content_type: *content_type,
                     content_version: *content_version,
@@ -925,6 +944,35 @@ mod tests {
             time: SystemTime::now(),
             content: BoardMessageBody::public(String::new(), "Test message".to_string()),
         }
+    }
+
+    /// Adding `secret_scope` must not change the bytes of older signed
+    /// messages: the default board scope is skipped on serialization.
+    #[test]
+    fn board_scope_is_skipped_so_old_signatures_verify() {
+        let mut rng = OsRng;
+        let signing_key = SigningKey::generate(&mut rng);
+        let message = MessageV1 {
+            board_owner: MemberId::from(&signing_key.verifying_key()),
+            author: MemberId::from(&signing_key.verifying_key()),
+            content: BoardMessageBody::private_text(vec![1, 2, 3], [0u8; 12], 0),
+            time: SystemTime::now(),
+        };
+
+        let mut original = Vec::new();
+        ciborium::into_writer(&message, &mut original).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&original).contains("secret_scope"),
+            "the default scope must not appear in the signed bytes"
+        );
+
+        let decoded: MessageV1 = ciborium::from_reader(&original[..]).unwrap();
+        let mut again = Vec::new();
+        ciborium::into_writer(&decoded, &mut again).unwrap();
+        assert_eq!(original, again, "round-tripping must keep the bytes");
+
+        let signature = sign_struct(&message, &signing_key);
+        assert!(verify_struct(&decoded, &signature, &signing_key.verifying_key()).is_ok());
     }
 
     #[test]
@@ -1127,7 +1175,9 @@ mod tests {
         };
 
         // Test with partial old summary
-        let old_summary: BTreeSet<MessageId> = [authorized_message1.id(), authorized_message2.id()].into_iter().collect();
+        let old_summary: BTreeSet<MessageId> = [authorized_message1.id(), authorized_message2.id()]
+            .into_iter()
+            .collect();
         let delta = messages
             .delta(&parent_state, &parameters, &old_summary)
             .unwrap();

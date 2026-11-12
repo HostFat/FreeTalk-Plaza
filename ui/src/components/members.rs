@@ -471,6 +471,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     contract_key,
                     last_read_message_id: None,
                     secrets: HashMap::new(),
+                    category_secrets: HashMap::new(),
                     current_secret_version: None,
                     last_secret_rotation: None,
                     key_migrated_to_delegate: false,
@@ -503,9 +504,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     )
                     .await;
                     if migrated {
-                        dioxus::logger::tracing::info!(
-                            "Import: signing key migrated to delegate"
-                        );
+                        dioxus::logger::tracing::info!("Import: signing key migrated to delegate");
                         crate::util::defer(move || {
                             let mut sanitized = false;
                             BOARDS.with_mut(|boards| {
@@ -514,11 +513,10 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                                     // Remove any messages with invalid signatures
                                     // left by a stale delegate key
                                     let params = ChatBoardParametersV1 { owner: owner_key };
-                                    let removed =
-                                        crate::signing::remove_unverifiable_messages(
-                                            &mut rd.board_state,
-                                            &params,
-                                        );
+                                    let removed = crate::signing::remove_unverifiable_messages(
+                                        &mut rd.board_state,
+                                        &params,
+                                    );
                                     sanitized = removed > 0;
                                 }
                             });
@@ -533,7 +531,9 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     }
                 });
 
-                success_msg.set(Some("Identity imported! Syncing board state...".to_string()));
+                success_msg.set(Some(
+                    "Identity imported! Syncing board state...".to_string(),
+                ));
                 error_msg.set(None);
             }
             Err(e) => {

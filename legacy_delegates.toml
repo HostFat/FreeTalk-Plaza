@@ -40,3 +40,10 @@ description = "Rename to FreeTalk Plaza (plaza-core/plaza-contract/plaza-delegat
 date = "2026-11-12"
 delegate_key = "41610d94254c49fe365a7ff97168098155ea1facfc7d05c6739e4993c96473fd"
 code_hash = "64c1e96519036994101515380ceac9f30ff689f28624981a5529c5209c78f73a"
+
+[[entry]]
+version = "V4"
+description = "Per-category secrets and restricted categories (owner-signed category keys)"
+date = "2026-11-12"
+delegate_key = "aaa265f4052a9310903dee44d9997f88c7755f7271866dee398af4f0a2cbaea6"
+code_hash = "66d2bdd044d8b75392b4e29c02e1449e738e31264621c55e1fb634c4a69adb44"

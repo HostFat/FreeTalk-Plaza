@@ -50,7 +50,7 @@ pub struct AuthorizedInviteToken {
     pub signature: Signature,
     /// Who signed it. `None` means the owner. Outside the signed payload so
     /// records written before delegation existed keep verifying.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
 }
 
@@ -129,16 +129,11 @@ impl ComposableState for InviteTokensV1 {
         let mut ids = std::collections::HashSet::new();
         for token in &self.tokens {
             let signer = token.signer_id(parameters);
-            if signer != parameters.owner_id()
-                && !parent_state.roles.can_manage_access(&signer)
-            {
+            if signer != parameters.owner_id() && !parent_state.roles.can_manage_access(&signer) {
                 return Err("Invite link signer cannot manage access".to_string());
             }
-            let signing_key = crate::board_state::roles::signer_key(
-                parent_state,
-                parameters,
-                &signer,
-            )?;
+            let signing_key =
+                crate::board_state::roles::signer_key(parent_state, parameters, &signer)?;
             verify_struct(&token.token, &token.signature, &signing_key)
                 .map_err(|e| format!("Invalid invite token signature: {}", e))?;
 
@@ -201,7 +196,11 @@ impl ComposableState for InviteTokensV1 {
         if let Some(delta) = delta {
             let mut combined = self.clone();
             for token in &delta.tokens {
-                match combined.tokens.iter().find(|t| t.token.id == token.token.id) {
+                match combined
+                    .tokens
+                    .iter()
+                    .find(|t| t.token.id == token.token.id)
+                {
                     Some(existing) if existing.token.generation >= token.token.generation => {}
                     _ => {
                         combined.tokens.retain(|t| t.token.id != token.token.id);
@@ -212,16 +211,12 @@ impl ComposableState for InviteTokensV1 {
 
             for token in &delta.tokens {
                 let signer = token.signer_id(parameters);
-                if signer != parameters.owner_id()
-                    && !parent_state.roles.can_manage_access(&signer)
+                if signer != parameters.owner_id() && !parent_state.roles.can_manage_access(&signer)
                 {
                     return Err("Invite link signer cannot manage access".to_string());
                 }
-                let signing_key = crate::board_state::roles::signer_key(
-                    parent_state,
-                    parameters,
-                    &signer,
-                )?;
+                let signing_key =
+                    crate::board_state::roles::signer_key(parent_state, parameters, &signer)?;
                 verify_struct(&token.token, &token.signature, &signing_key)
                     .map_err(|e| format!("Invalid invite token signature: {}", e))?;
             }

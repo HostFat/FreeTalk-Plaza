@@ -81,6 +81,7 @@ pub fn TopBar() -> Element {
                             board_data.board_state.clone(),
                             is_private,
                             secret_opt,
+                            board_data.clone(),
                         ))
                     } else {
                         None
@@ -97,8 +98,13 @@ pub fn TopBar() -> Element {
                 board_state_clone,
                 is_private,
                 secret_opt,
+                snapshot,
             )) = board_info
             {
+                // A composer opened inside a restricted category carries its id.
+                let category_secret = reply_ctx
+                    .as_ref()
+                    .and_then(|reply| snapshot.posting_secret_for(&reply.message_id));
                 spawn(async move {
                     send_message(
                         current_board,
@@ -107,6 +113,7 @@ pub fn TopBar() -> Element {
                         board_state_clone,
                         is_private,
                         secret_opt,
+                        category_secret,
                         title_text,
                         message_text,
                         reply_ctx,

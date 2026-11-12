@@ -170,7 +170,10 @@ mod tests {
 
         // Roundtrip
         let decoded = IdentityExport::from_armored_string(&armored).unwrap();
-        assert_eq!(decoded.board_owner.as_bytes(), export.board_owner.as_bytes());
+        assert_eq!(
+            decoded.board_owner.as_bytes(),
+            export.board_owner.as_bytes()
+        );
         assert_eq!(
             decoded.signing_key.to_bytes(),
             export.signing_key.to_bytes()

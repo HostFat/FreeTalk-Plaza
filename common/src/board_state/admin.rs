@@ -256,11 +256,7 @@ impl AdminsV1 {
                 .iter()
                 .find(|a| a.admin.id() == member_id)
                 .cloned();
-            let revocation = self
-                .revoked
-                .iter()
-                .find(|r| r.id() == member_id)
-                .cloned();
+            let revocation = self.revoked.iter().find(|r| r.id() == member_id).cloned();
             self.remove_records_for(&member_id);
 
             if let (Some(admin), Some(revocation)) = (admin, revocation) {
@@ -351,8 +347,14 @@ impl Hash for AuthorizedAdmin {
 pub struct Admin {
     pub member_id: MemberId,
     /// Owner-chosen generation. Higher generations supersede lower ones.
-    #[serde(default)]
+    /// Omitted at zero so records signed before generations existed keep
+    /// verifying byte for byte.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub generation: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl fmt::Debug for Admin {
@@ -374,7 +376,7 @@ impl Admin {
 #[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Clone, Copy, Debug)]
 pub struct AdminRevocation {
     pub member_id: MemberId,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub generation: u64,
 }
 
@@ -457,7 +459,11 @@ mod revocation_tests {
 
         let mut admins = AdminsV1::default();
         admins
-            .apply_delta(&parent, &params, &Some(AdminsDelta::new(vec![grant(admin_id, 1, &owner)])))
+            .apply_delta(
+                &parent,
+                &params,
+                &Some(AdminsDelta::new(vec![grant(admin_id, 1, &owner)])),
+            )
             .unwrap();
         assert_eq!(admins.admins.len(), 1);
         assert_eq!(admins.next_generation(&admin_id), 2);
@@ -466,9 +472,9 @@ mod revocation_tests {
             .apply_delta(
                 &parent,
                 &params,
-                &Some(AdminsDelta::revocation(vec![AuthorizedAdminRevocation::new(
-                    admin_id, 2, &owner,
-                )])),
+                &Some(AdminsDelta::revocation(vec![
+                    AuthorizedAdminRevocation::new(admin_id, 2, &owner),
+                ])),
             )
             .unwrap();
         assert!(admins.admins.is_empty());
@@ -476,7 +482,11 @@ mod revocation_tests {
         admins.verify(&parent, &params).unwrap();
 
         admins
-            .apply_delta(&parent, &params, &Some(AdminsDelta::new(vec![grant(admin_id, 3, &owner)])))
+            .apply_delta(
+                &parent,
+                &params,
+                &Some(AdminsDelta::new(vec![grant(admin_id, 3, &owner)])),
+            )
             .unwrap();
         assert_eq!(admins.admins.len(), 1);
         assert!(!admins.is_revoked(&admin_id));
@@ -495,17 +505,29 @@ mod revocation_tests {
 
         // Revocation first, then the newer grant.
         let mut a = AdminsV1::default();
-        a.apply_delta(&parent, &params, &Some(AdminsDelta::revocation(vec![revocation.clone()])))
-            .unwrap();
-        a.apply_delta(&parent, &params, &Some(AdminsDelta::new(vec![grant_v3.clone()])))
-            .unwrap();
+        a.apply_delta(
+            &parent,
+            &params,
+            &Some(AdminsDelta::revocation(vec![revocation.clone()])),
+        )
+        .unwrap();
+        a.apply_delta(
+            &parent,
+            &params,
+            &Some(AdminsDelta::new(vec![grant_v3.clone()])),
+        )
+        .unwrap();
 
         // The reverse order must converge to the same state.
         let mut b = AdminsV1::default();
         b.apply_delta(&parent, &params, &Some(AdminsDelta::new(vec![grant_v3])))
             .unwrap();
-        b.apply_delta(&parent, &params, &Some(AdminsDelta::revocation(vec![revocation])))
-            .unwrap();
+        b.apply_delta(
+            &parent,
+            &params,
+            &Some(AdminsDelta::revocation(vec![revocation])),
+        )
+        .unwrap();
 
         assert_eq!(a, b);
         assert_eq!(a.admins.len(), 1);
@@ -524,13 +546,17 @@ mod revocation_tests {
             .apply_delta(
                 &parent,
                 &params,
-                &Some(AdminsDelta::revocation(vec![AuthorizedAdminRevocation::new(
-                    admin_id, 5, &owner,
-                )])),
+                &Some(AdminsDelta::revocation(vec![
+                    AuthorizedAdminRevocation::new(admin_id, 5, &owner),
+                ])),
             )
             .unwrap();
         admins
-            .apply_delta(&parent, &params, &Some(AdminsDelta::new(vec![grant(admin_id, 4, &owner)])))
+            .apply_delta(
+                &parent,
+                &params,
+                &Some(AdminsDelta::new(vec![grant(admin_id, 4, &owner)])),
+            )
             .unwrap();
 
         assert!(admins.admins.is_empty());

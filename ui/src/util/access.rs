@@ -2,18 +2,20 @@
 
 use crate::board_data::BoardData;
 use crate::components::app::freenet_api::freenet_synchronizer::SynchronizerMessage;
-use crate::components::app::{mark_needs_sync, BOARDS, CURRENT_BOARD, PENDING_INVITES, SYNCHRONIZER};
+use crate::components::app::{
+    mark_needs_sync, BOARDS, CURRENT_BOARD, PENDING_INVITES, SYNCHRONIZER,
+};
 use crate::invites::{PendingBoardJoin, PendingBoardStatus};
 use dioxus::logger::tracing::info;
 use dioxus::prelude::ReadableExt;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use plaza_core::board_state::invites::{join_message, InviteToken, JoinProof, TokenId};
+use plaza_core::board_state::invites::{AuthorizedInviteToken, InviteTokensDelta};
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
 use plaza_core::board_state::roles::{
     AuthorizedRole, AuthorizedRoleAssignment, Role, RoleAssignment, RoleId, RolesDelta,
 };
-use plaza_core::board_state::invites::{AuthorizedInviteToken, InviteTokensDelta};
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 use serde::{Deserialize, Serialize};
 
@@ -52,10 +54,7 @@ fn with_manager_board<T>(
     f: impl FnOnce(&BoardData, SigningKey, VerifyingKey, MemberId) -> Result<T, String>,
 ) -> Result<T, String> {
     let (board_key, self_sk, data) = {
-        let current_board = CURRENT_BOARD
-            .read()
-            .owner_key
-            .ok_or("No board selected")?;
+        let current_board = CURRENT_BOARD.read().owner_key.ok_or("No board selected")?;
         let boards = BOARDS.read();
         let data = boards
             .map
@@ -86,10 +85,7 @@ fn with_owner_board<T>(
     f: impl FnOnce(&BoardData, SigningKey, VerifyingKey) -> Result<T, String>,
 ) -> Result<T, String> {
     let (board_key, self_sk, data) = {
-        let current_board = CURRENT_BOARD
-            .read()
-            .owner_key
-            .ok_or("No board selected")?;
+        let current_board = CURRENT_BOARD.read().owner_key.ok_or("No board selected")?;
         let boards = BOARDS.read();
         let data = boards
             .map
@@ -110,6 +106,7 @@ fn apply_and_sync(
     delta: ChatBoardStateV1Delta,
 ) -> Result<(), String> {
     let mut error: Option<String> = None;
+    let mut applied = false;
     BOARDS.with_mut(|boards| {
         if let Some(board) = boards.map.get_mut(&board_key) {
             match board.board_state.apply_delta(
@@ -117,11 +114,23 @@ fn apply_and_sync(
                 &ChatBoardParametersV1 { owner: board_key },
                 &Some(delta),
             ) {
-                Ok(_) => mark_needs_sync(board_key),
+                Ok(_) => {
+                    board.rebuild_actions_with_local_secrets(&ChatBoardParametersV1 {
+                        owner: board_key,
+                    });
+                    applied = true;
+                }
                 Err(e) => error = Some(e),
             }
         }
     });
+    if applied {
+        // A role change can put new members in a restricted category's ACL;
+        // the owner owes them the category key.
+        if !crate::util::messaging::distribute_category_secrets(board_key) {
+            mark_needs_sync(board_key);
+        }
+    }
     match error {
         Some(e) => Err(e),
         None => Ok(()),
@@ -182,11 +191,7 @@ pub fn remove_role(role_id: RoleId) -> Result<(), String> {
     })
 }
 
-pub fn set_role_member(
-    role_id: RoleId,
-    member_id: MemberId,
-    grant: bool,
-) -> Result<(), String> {
+pub fn set_role_member(role_id: RoleId, member_id: MemberId, grant: bool) -> Result<(), String> {
     with_manager_board(|data, self_sk, board_key, self_id| {
         let generation = data
             .board_state

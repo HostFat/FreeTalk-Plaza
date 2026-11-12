@@ -454,7 +454,7 @@ pub struct Member {
     /// Present when the member joined through a reusable invite link instead of
     /// a personal invitation. Such a member is self-signed and the proof is
     /// checked against the token key.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub join_proof: Option<crate::board_state::invites::JoinProof>,
 }
 
@@ -1094,10 +1094,22 @@ mod tests {
         let result = members.apply_delta(&parent_state, &parameters, &Some(delta));
         assert!(result.is_ok());
         assert_eq!(members.members.len(), 4, "All 4 members should be kept");
-        assert!(members.members.iter().any(|m| m.member.id() == member1.id()));
-        assert!(members.members.iter().any(|m| m.member.id() == member2.id()));
-        assert!(members.members.iter().any(|m| m.member.id() == member3.id()));
-        assert!(members.members.iter().any(|m| m.member.id() == member4.id()));
+        assert!(members
+            .members
+            .iter()
+            .any(|m| m.member.id() == member1.id()));
+        assert!(members
+            .members
+            .iter()
+            .any(|m| m.member.id() == member2.id()));
+        assert!(members
+            .members
+            .iter()
+            .any(|m| m.member.id() == member3.id()));
+        assert!(members
+            .members
+            .iter()
+            .any(|m| m.member.id() == member4.id()));
 
         // Test applying delta with already existing member (deduplication)
         let delta = MembersDelta {

@@ -75,9 +75,7 @@ impl DelegateInterface for ChatDelegate {
             | InboundDelegateMsg::SubscribeContractResponse(_)
             | InboundDelegateMsg::ContractNotification(_)
             | InboundDelegateMsg::DelegateMessage(_) => {
-                logging::info(&format!(
-                    "Received unexpected message: {message_type}"
-                ));
+                logging::info(&format!("Received unexpected message: {message_type}"));
                 Err(DelegateError::Other(format!(
                     "unexpected message type: {message_type}"
                 )))
@@ -104,7 +102,10 @@ impl DelegateInterface for ChatDelegate {
 /// `MessageOrigin` is `#[non_exhaustive]` and gained a `Delegate(DelegateKey)`
 /// variant for runtime-attested inter-delegate callers. This delegate is driven
 /// only by the FreeTalk web app, so anything else is rejected.
-fn check_origin(origin: Option<MessageOrigin>, message_type: &str) -> Result<Origin, DelegateError> {
+fn check_origin(
+    origin: Option<MessageOrigin>,
+    message_type: &str,
+) -> Result<Origin, DelegateError> {
     match origin {
         Some(MessageOrigin::WebApp(contract_id)) => Ok(Origin(contract_id.as_bytes().to_vec())),
         Some(MessageOrigin::Delegate(caller_key)) => {

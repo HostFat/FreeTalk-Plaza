@@ -6,11 +6,13 @@ use crate::{constants::BOARD_CONTRACT_WASM, util::to_cbor_vec};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use freenet_stdlib::prelude::{ContractCode, ContractKey, Parameters};
+use plaza_core::board_state::category_secrets::{CategorySecretSetDelta, CategorySecretsDelta};
 use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+use plaza_core::board_state::content::CategoryContentV1;
 use plaza_core::board_state::member::AuthorizedMember;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
-use plaza_core::board_state::message::MessageId;
+use plaza_core::board_state::message::{BoardMessageBody, MessageId, SecretScope};
 use plaza_core::board_state::privacy::{
     BoardCipherSpec, BoardDisplayMetadata, PrivacyMode, SealedBytes,
 };
@@ -45,6 +47,9 @@ pub struct BoardData {
     /// Maps secret_version -> decrypted 32-byte secret
     #[serde(skip)]
     pub secrets: HashMap<u32, [u8; 32]>,
+    /// Decrypted per-category secrets: category id -> (version, key).
+    #[serde(skip)]
+    pub category_secrets: HashMap<MessageId, (u32, [u8; 32])>,
     /// The current (latest) secret version
     #[serde(skip)]
     pub current_secret_version: Option<u32>,
@@ -70,6 +75,340 @@ pub struct BoardData {
 }
 
 impl BoardData {
+    /// Decrypt every category secret this member holds a blob for.
+    ///
+    /// Categories whose blob is missing stay out of the map: the UI treats them
+    /// as unreadable, which is exactly what "restricted" means.
+    pub fn decrypt_category_secrets(&mut self) {
+        use crate::util::ecies::decrypt_secret_from_member_blob;
+        use x25519_dalek::PublicKey as X25519PublicKey;
+
+        let member_id = MemberId::from(&self.self_sk.verifying_key());
+        let sets = self.board_state.category_secrets.categories.clone();
+        for set in &sets {
+            let blob = set
+                .encrypted_secrets
+                .iter()
+                .filter(|s| s.secret.member_id == member_id)
+                .max_by_key(|s| s.secret.secret_version);
+            let Some(blob) = blob else { continue };
+            let ephemeral = X25519PublicKey::from(blob.secret.sender_ephemeral_public_key);
+            match decrypt_secret_from_member_blob(
+                &blob.secret.ciphertext,
+                &blob.secret.nonce,
+                &ephemeral,
+                &self.self_sk,
+            ) {
+                Ok(secret) => {
+                    self.category_secrets.insert(
+                        set.category_id.clone(),
+                        (blob.secret.secret_version, secret),
+                    );
+                }
+                Err(e) => {
+                    dioxus::logger::tracing::warn!("Failed to decrypt category secret: {}", e);
+                }
+            }
+        }
+
+        // Forget categories that no longer have a secret set.
+        self.category_secrets
+            .retain(|id, _| self.board_state.category_secrets.set(id).is_some());
+    }
+
+    pub fn category_secret(&self, category: &MessageId) -> Option<(u32, [u8; 32])> {
+        self.category_secrets.get(category).copied()
+    }
+
+    /// The newest secret that opens this body, whichever scope sealed it.
+    pub fn body_secret(&self, content: &BoardMessageBody) -> Option<([u8; 32], u32)> {
+        match content {
+            BoardMessageBody::Private {
+                secret_version,
+                secret_scope,
+                ..
+            } => match secret_scope {
+                SecretScope::Board => self
+                    .get_secret_for_version(*secret_version)
+                    .map(|secret| (*secret, *secret_version)),
+                SecretScope::Category(id) => self
+                    .category_secret(id)
+                    .map(|(version, secret)| (secret, version)),
+            },
+            BoardMessageBody::Public { .. } => None,
+        }
+    }
+
+    /// Decode a category message. `None` when this client cannot open it.
+    pub fn decode_category(&self, content: &BoardMessageBody) -> Option<CategoryContentV1> {
+        use crate::util::ecies::decrypt_with_symmetric_key;
+        use plaza_core::board_state::content::CONTENT_TYPE_CATEGORY;
+
+        match content {
+            BoardMessageBody::Public {
+                content_type, data, ..
+            } if *content_type == CONTENT_TYPE_CATEGORY => CategoryContentV1::decode(data).ok(),
+            BoardMessageBody::Private {
+                content_type,
+                ciphertext,
+                nonce,
+                ..
+            } if *content_type == CONTENT_TYPE_CATEGORY => {
+                let (secret, _) = self.body_secret(content)?;
+                let bytes = decrypt_with_symmetric_key(&secret, ciphertext, nonce).ok()?;
+                CategoryContentV1::decode(&bytes).ok()
+            }
+            _ => None,
+        }
+    }
+
+    /// Category content with its sealed name opened when we hold its key.
+    pub fn readable_category(
+        &self,
+        category_id: &MessageId,
+        content: &BoardMessageBody,
+    ) -> Option<CategoryContentV1> {
+        let mut category = self.decode_category(content)?;
+        if let Some(sealed) = category.sealed_name.as_ref() {
+            if let Some((_, key)) = self.category_secret(category_id) {
+                if let Ok(bytes) = crate::util::ecies::unseal_bytes(sealed, Some(&key)) {
+                    if let Ok(name) = String::from_utf8(bytes) {
+                        category.name = name;
+                    }
+                }
+            }
+        }
+        Some(category)
+    }
+
+    /// A restricted category is readable only with its own key. The owner
+    /// always holds the key because creation distributes one to them.
+    pub fn can_read_category(&self, category_id: &MessageId, content: &BoardMessageBody) -> bool {
+        match self.decode_category(content) {
+            Some(category) if category.is_restricted() => {
+                self.category_secret(category_id).is_some()
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    /// The category a reply belongs to: the target itself when it is a
+    /// restricted category, otherwise the category scope of the target.
+    pub fn category_for_target(&self, target: &MessageId) -> Option<MessageId> {
+        let message = self
+            .board_state
+            .recent_messages
+            .messages
+            .iter()
+            .find(|m| m.id() == *target)?;
+        if let Some(category) = self.decode_category(&message.message.content) {
+            if category.is_restricted() {
+                return Some(target.clone());
+            }
+        }
+        match &message.message.content {
+            BoardMessageBody::Private {
+                secret_scope: SecretScope::Category(id),
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        }
+    }
+
+    /// Secret to seal a post in the category that owns `target`.
+    pub fn posting_secret_for(&self, target: &MessageId) -> Option<(MessageId, [u8; 32], u32)> {
+        let category_id = self.category_for_target(target)?;
+        let (version, secret) = self.category_secret(&category_id)?;
+        Some((category_id, secret, version))
+    }
+
+    /// Every restricted category this client can decode, with its content.
+    pub fn restricted_categories(&self) -> Vec<(MessageId, CategoryContentV1)> {
+        self.board_state
+            .recent_messages
+            .messages
+            .iter()
+            .filter_map(|message| {
+                let category = self.decode_category(&message.message.content)?;
+                category.is_restricted().then(|| (message.id(), category))
+            })
+            .collect()
+    }
+
+    /// Readers of a category: the owner plus every member of its roles.
+    pub fn category_readers(&self, category: &CategoryContentV1) -> Vec<MemberId> {
+        let mut readers: Vec<MemberId> = category
+            .allowed_roles
+            .iter()
+            .flat_map(|role| self.board_state.roles.members_of_role(role))
+            .collect();
+        readers.push(self.owner_vk.into());
+        readers.sort_by_key(|m| m.0 .0);
+        readers.dedup();
+        readers
+    }
+
+    fn category_secret_records(
+        &self,
+        category_id: &MessageId,
+        secret: &[u8; 32],
+        version: u32,
+        readers: &[MemberId],
+        include_version: bool,
+    ) -> CategorySecretSetDelta {
+        let owner_id = MemberId::from(&self.owner_vk);
+        let mut encrypted_secrets = Vec::new();
+        for member_id in readers {
+            let member_vk = if *member_id == owner_id {
+                Some(self.owner_vk)
+            } else {
+                self.board_state
+                    .members
+                    .members
+                    .iter()
+                    .find(|m| MemberId::from(&m.member.member_vk) == *member_id)
+                    .map(|m| m.member.member_vk)
+            };
+            let Some(member_vk) = member_vk else { continue };
+            let (ciphertext, nonce, ephemeral_key) = encrypt_secret_for_member(secret, &member_vk);
+            let record = EncryptedSecretForMemberV1 {
+                member_id: *member_id,
+                secret_version: version,
+                ciphertext,
+                nonce,
+                sender_ephemeral_public_key: ephemeral_key.to_bytes(),
+                provider: owner_id,
+            };
+            encrypted_secrets.push(AuthorizedEncryptedSecretForMember::new(
+                record,
+                &self.self_sk,
+            ));
+        }
+
+        let versions = if include_version {
+            vec![AuthorizedSecretVersionRecord::new(
+                SecretVersionRecordV1 {
+                    version,
+                    cipher_spec: BoardCipherSpec::Aes256Gcm,
+                    created_at: get_current_system_time(),
+                },
+                &self.self_sk,
+            )]
+        } else {
+            Vec::new()
+        };
+
+        CategorySecretSetDelta {
+            category_id: category_id.clone(),
+            current_version: version,
+            versions,
+            encrypted_secrets,
+        }
+    }
+
+    /// Signed secret set for a freshly created restricted category.
+    pub fn new_category_secret_set(
+        &self,
+        category_id: &MessageId,
+        secret: &[u8; 32],
+        version: u32,
+        readers: &[MemberId],
+    ) -> CategorySecretSetDelta {
+        self.category_secret_records(category_id, secret, version, readers, true)
+    }
+
+    /// Recompute edits, deletions and reactions, opening actions sealed with
+    /// the board key or with a category key. The contract only understands
+    /// public actions, so every private action is decrypted here.
+    pub fn rebuild_actions_with_local_secrets(&mut self, parameters: &ChatBoardParametersV1) {
+        use crate::util::ecies::decrypt_with_symmetric_key;
+        use std::collections::HashSet;
+
+        let decrypted_actions: HashMap<MessageId, Vec<u8>> = self
+            .board_state
+            .recent_messages
+            .messages
+            .iter()
+            .filter(|message| message.message.content.is_action())
+            .filter_map(|message| {
+                let BoardMessageBody::Private {
+                    ciphertext, nonce, ..
+                } = &message.message.content
+                else {
+                    return None;
+                };
+                let (key, _) = self.body_secret(&message.message.content)?;
+                decrypt_with_symmetric_key(&key, ciphertext, nonce)
+                    .ok()
+                    .map(|plaintext| (message.id(), plaintext))
+            })
+            .collect();
+
+        if decrypted_actions.is_empty() {
+            self.board_state.recent_messages.rebuild_actions_state();
+            return;
+        }
+
+        let owner_id = MemberId::from(&parameters.owner);
+        let admin_ids: HashSet<MemberId> = self
+            .board_state
+            .admin
+            .admins
+            .iter()
+            .map(|admin| admin.admin.id())
+            .collect();
+        self.board_state
+            .recent_messages
+            .rebuild_actions_state_with_permissions(
+                &decrypted_actions,
+                Some(owner_id),
+                Some(&admin_ids),
+            );
+    }
+
+    /// Blobs for members of a category's roles who joined after the last
+    /// distribution. Only the owner can sign these records.
+    pub fn generate_missing_category_secrets(&self) -> Option<CategorySecretsDelta> {
+        if self.self_sk.verifying_key() != self.owner_vk {
+            return None;
+        }
+
+        let mut sets = Vec::new();
+        for (category_id, category) in self.restricted_categories() {
+            let Some((version, secret)) = self.category_secret(&category_id) else {
+                continue;
+            };
+            let readers = self.category_readers(&category);
+            let missing = self
+                .board_state
+                .category_secrets
+                .members_missing_secret(&category_id, &readers);
+            let includes_version = self
+                .board_state
+                .category_secrets
+                .set(&category_id)
+                .map(|set| set.versions.iter().any(|v| v.record.version == version))
+                .unwrap_or(false);
+            if missing.is_empty() && includes_version {
+                continue;
+            }
+            sets.push(self.category_secret_records(
+                &category_id,
+                &secret,
+                version,
+                &missing,
+                !includes_version,
+            ));
+        }
+
+        if sets.is_empty() {
+            None
+        } else {
+            Some(CategorySecretsDelta { sets })
+        }
+    }
+
     /// Regenerate the contract_key from the owner_vk using the current WASM.
     /// This ensures the contract_key always matches the bundled WASM, which may
     /// have been updated since the board was first created/stored.
@@ -748,6 +1087,7 @@ impl Boards {
             self_authorized_member: None,    // Owner doesn't need this
             invite_chain: vec![],
             self_member_info: None,
+            category_secrets: HashMap::new(),
         };
 
         info!("🟢 Inserting board into map...");
@@ -765,6 +1105,9 @@ impl Boards {
             // Regenerate contract_key to ensure it matches the current bundled WASM
             // This handles the case where boards were stored with an older WASM version
             board_data.regenerate_contract_key();
+            // Stored state carries category keys; open them on load so the UI can
+            // show restricted categories without waiting for a network round trip.
+            board_data.decrypt_category_secrets();
 
             // If the contract key changed (WASM was updated), track for upgrade pointer
             if old_contract_key != board_data.contract_key {
@@ -823,7 +1166,8 @@ mod tests {
                 .normalize(&params)
                 .expect("cleanup must succeed on a fresh board");
             assert_eq!(
-                normalized, board.board_state,
+                normalized,
+                board.board_state,
                 "a freshly created {} board must be a cleanup fixpoint",
                 if private { "private" } else { "public" }
             );
@@ -876,15 +1220,19 @@ mod tests {
         let invitee_sk = SigningKey::generate(&mut rng);
         let owner_id: MemberId = key.into();
         let board = boards.map.get_mut(&key).unwrap();
-        board.board_state.members.members.push(AuthorizedMember::new(
-            Member {
-                owner_member_id: owner_id,
-                invited_by: owner_id,
-                member_vk: invitee_sk.verifying_key(),
-                join_proof: None,
-            },
-            &owner_sk,
-        ));
+        board
+            .board_state
+            .members
+            .members
+            .push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: owner_id,
+                    invited_by: owner_id,
+                    member_vk: invitee_sk.verifying_key(),
+                    join_proof: None,
+                },
+                &owner_sk,
+            ));
 
         // The owner distributes the secret (same call the sync path makes when
         // a member joins) and applies it to the board state.
@@ -935,6 +1283,294 @@ mod tests {
         );
     }
 
+    /// A restricted category shares its key with the members of the chosen
+    /// roles only. Members of the roles read the real name and its posts; other
+    /// board members see the placeholder and cannot open them.
+    #[test]
+    fn restricted_category_reaches_only_role_members() {
+        use crate::util::ecies::{decrypt_with_symmetric_key, seal_bytes};
+        use plaza_core::board_state::category_secrets::CategorySecretsDelta;
+        use plaza_core::board_state::content::{
+            CategoryContentV1, CATEGORY_CONTENT_VERSION, CONTENT_TYPE_CATEGORY,
+        };
+        use plaza_core::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
+        use plaza_core::board_state::roles::{
+            AuthorizedRole, AuthorizedRoleAssignment, Role, RoleAssignment, RolesDelta,
+        };
+        use plaza_core::board_state::ChatBoardStateV1Delta;
+
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let invitee_sk = SigningKey::generate(&mut rng);
+        let outsider_sk = SigningKey::generate(&mut rng);
+
+        let mut boards = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            migrated_boards: vec![],
+        };
+        let key = boards.create_new_board_with_name(
+            owner_sk.clone(),
+            "Public Board".to_string(),
+            "alice".to_string(),
+            false,
+        );
+        let params = ChatBoardParametersV1 { owner: key };
+        let owner_id: MemberId = key.into();
+        let invitee_id: MemberId = invitee_sk.verifying_key().into();
+        let role_id = [7u8; 16];
+
+        let board = boards.map.get_mut(&key).unwrap();
+        board
+            .board_state
+            .members
+            .members
+            .push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: owner_id,
+                    invited_by: owner_id,
+                    member_vk: invitee_sk.verifying_key(),
+                    join_proof: None,
+                },
+                &owner_sk,
+            ));
+
+        let before = board.board_state.clone();
+        board
+            .board_state
+            .apply_delta(
+                &before,
+                &params,
+                &Some(ChatBoardStateV1Delta {
+                    roles: Some(RolesDelta {
+                        roles: vec![AuthorizedRole::new(
+                            Role {
+                                id: role_id,
+                                name: "Members".to_string(),
+                                generation: 0,
+                                can_manage_access: false,
+                                deleted: false,
+                            },
+                            &owner_sk,
+                        )],
+                        assignments: vec![AuthorizedRoleAssignment::new(
+                            RoleAssignment {
+                                role_id,
+                                member_id: invitee_id,
+                                generation: 1,
+                                revoked: false,
+                            },
+                            &owner_sk,
+                        )],
+                    }),
+                    // A member with no messages is pruned by cleanup, so keep
+                    // the invitee alive with one post, as a real board would.
+                    recent_messages: Some(vec![AuthorizedMessageV1::new(
+                        MessageV1 {
+                            board_owner: owner_id,
+                            author: invitee_id,
+                            content: BoardMessageBody::public(String::new(), "hello".to_string()),
+                            time: get_current_system_time(),
+                        },
+                        &invitee_sk,
+                    )]),
+                    ..Default::default()
+                }),
+            )
+            .expect("roles apply");
+
+        // The category the create-category modal builds for a restricted entry.
+        let category_secret = [3u8; 32];
+        let sealed_name = seal_bytes(b"Members only", &category_secret, 0);
+        let category = CategoryContentV1::new(
+            "Restricted category".to_string(),
+            None,
+            "#6366f1".to_string(),
+        )
+        .with_allowed_roles(vec![role_id], sealed_name, true);
+        let message = MessageV1 {
+            board_owner: owner_id,
+            author: owner_id,
+            content: BoardMessageBody::public_raw(
+                CONTENT_TYPE_CATEGORY,
+                CATEGORY_CONTENT_VERSION,
+                category.encode(),
+            ),
+            time: get_current_system_time(),
+        };
+        let authorized = AuthorizedMessageV1::new(message, &owner_sk);
+        let category_id = authorized.id();
+
+        let readers = board.category_readers(&category);
+        assert!(readers.contains(&invitee_id));
+        let secret_set = board.new_category_secret_set(&category_id, &category_secret, 0, &readers);
+
+        let before = board.board_state.clone();
+        board
+            .board_state
+            .apply_delta(
+                &before,
+                &params,
+                &Some(ChatBoardStateV1Delta {
+                    recent_messages: Some(vec![authorized]),
+                    category_secrets: Some(CategorySecretsDelta {
+                        sets: vec![secret_set],
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .expect("category and its secret set apply");
+        board.decrypt_category_secrets();
+        assert_eq!(
+            board.category_secret(&category_id),
+            Some((0, category_secret)),
+            "the owner keeps the key"
+        );
+
+        let owner_view = boards.map.get(&key).unwrap().clone();
+        let content = owner_view
+            .board_state
+            .recent_messages
+            .messages
+            .iter()
+            .find(|m| m.id() == category_id)
+            .expect("category message present")
+            .message
+            .content
+            .clone();
+        let owner_category = owner_view
+            .readable_category(&category_id, &content)
+            .expect("owner reads it");
+        assert_eq!(owner_category.name, "Members only");
+
+        // The invitee decrypts their blob and sees the same name.
+        let mut invitee_view = owner_view.clone();
+        invitee_view.self_sk = invitee_sk.clone();
+        invitee_view.category_secrets.clear();
+        invitee_view.decrypt_category_secrets();
+        assert_eq!(
+            invitee_view.category_secret(&category_id),
+            Some((0, category_secret))
+        );
+        let invitee_category = invitee_view
+            .readable_category(&category_id, &content)
+            .expect("invitee reads it");
+        assert_eq!(invitee_category.name, "Members only");
+
+        // The outsider is a board member but not in the role: no blob.
+        let outsider_id: MemberId = outsider_sk.verifying_key().into();
+        let mut outsider_view = owner_view.clone();
+        outsider_view.self_sk = outsider_sk.clone();
+        outsider_view.category_secrets.clear();
+        outsider_view.decrypt_category_secrets();
+        assert!(outsider_view.category_secret(&category_id).is_none());
+        assert!(!outsider_view.can_read_category(&category_id, &content));
+        let outsider_category = outsider_view
+            .readable_category(&category_id, &content)
+            .expect("placeholder still decodes");
+        assert_eq!(outsider_category.name, "Restricted category");
+
+        // A post sealed with the category key opens only for key holders.
+        let category_post = seal_bytes(b"members only post", &category_secret, 0);
+        let plaintext = decrypt_with_symmetric_key(
+            &category_secret,
+            match &category_post {
+                plaza_core::board_state::privacy::SealedBytes::Private { ciphertext, .. } => {
+                    ciphertext
+                }
+                _ => unreachable!(),
+            },
+            match &category_post {
+                plaza_core::board_state::privacy::SealedBytes::Private { nonce, .. } => nonce,
+                _ => unreachable!(),
+            },
+        )
+        .unwrap();
+        assert_eq!(plaintext, b"members only post");
+
+        // Adding a member to the role later: the owner's next distribution
+        // carries the key, and the new member can read the category.
+        let board = boards.map.get_mut(&key).unwrap();
+        board
+            .board_state
+            .members
+            .members
+            .push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: owner_id,
+                    invited_by: owner_id,
+                    member_vk: outsider_sk.verifying_key(),
+                    join_proof: None,
+                },
+                &owner_sk,
+            ));
+        let before = board.board_state.clone();
+        board
+            .board_state
+            .apply_delta(
+                &before,
+                &params,
+                &Some(ChatBoardStateV1Delta {
+                    roles: Some(RolesDelta {
+                        roles: vec![],
+                        assignments: vec![AuthorizedRoleAssignment::new(
+                            RoleAssignment {
+                                role_id,
+                                member_id: outsider_id,
+                                generation: 1,
+                                revoked: false,
+                            },
+                            &owner_sk,
+                        )],
+                    }),
+                    recent_messages: Some(vec![AuthorizedMessageV1::new(
+                        MessageV1 {
+                            board_owner: owner_id,
+                            author: outsider_id,
+                            content: BoardMessageBody::public(
+                                String::new(),
+                                "joined the role".to_string(),
+                            ),
+                            time: get_current_system_time(),
+                        },
+                        &outsider_sk,
+                    )]),
+                    ..Default::default()
+                }),
+            )
+            .expect("the role grant applies");
+
+        let delta = board
+            .generate_missing_category_secrets()
+            .expect("the new role member needs the category key");
+        assert!(delta.sets[0]
+            .encrypted_secrets
+            .iter()
+            .any(|blob| blob.secret.member_id == outsider_id));
+        let before = board.board_state.clone();
+        board
+            .board_state
+            .apply_delta(
+                &before,
+                &params,
+                &Some(ChatBoardStateV1Delta {
+                    category_secrets: Some(delta),
+                    ..Default::default()
+                }),
+            )
+            .expect("the distribution applies");
+
+        let mut newcomer = boards.map.get(&key).unwrap().clone();
+        newcomer.self_sk = outsider_sk;
+        newcomer.category_secrets.clear();
+        newcomer.decrypt_category_secrets();
+        assert_eq!(
+            newcomer.category_secret(&category_id),
+            Some((0, category_secret)),
+            "the new role member can read the category"
+        );
+    }
+
     /// Regression test for #85: accepting an invitation for a board that already
     /// exists in the boards map must update self_sk so can_send_message() passes.
     #[test]
@@ -979,6 +1615,7 @@ mod tests {
             contract_key,
             last_read_message_id: None,
             secrets: HashMap::new(),
+            category_secrets: HashMap::new(),
             current_secret_version: None,
             last_secret_rotation: None,
             key_migrated_to_delegate: false,
@@ -1050,6 +1687,7 @@ mod tests {
             contract_key,
             last_read_message_id: None,
             secrets: HashMap::new(),
+            category_secrets: HashMap::new(),
             current_secret_version: None,
             last_secret_rotation: None,
             key_migrated_to_delegate: false,
@@ -1111,6 +1749,7 @@ mod tests {
                 contract_key,
                 last_read_message_id: None,
                 secrets: HashMap::new(),
+                category_secrets: HashMap::new(),
                 current_secret_version: None,
                 last_secret_rotation: None,
                 key_migrated_to_delegate: false,
@@ -1141,9 +1780,7 @@ mod tests {
 
         // Synced board with members pruned but messages present: NOT awaiting sync
         let mut pruned_board = make_board(invitee_sk, vec![]);
-        use plaza_core::board_state::message::{
-            AuthorizedMessageV1, BoardMessageBody, MessageV1,
-        };
+        use plaza_core::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
         let dummy_msg = AuthorizedMessageV1 {
             message: MessageV1 {
                 board_owner: owner_vk.into(),

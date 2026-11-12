@@ -17,8 +17,8 @@ use freenet_stdlib::client_api::{
 };
 use freenet_stdlib::prelude::{ContractCode, ContractKey, Parameters};
 use freenet_test_network::{Backend, BuildProfile, DockerNatConfig, FreenetBinary, TestNetwork};
-use rand::{rngs::StdRng, Rng, SeedableRng};
 use plaza_core::board_state::ChatBoardParametersV1;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::Deserialize;
 use serde_json::Value;
 use tempfile::TempDir;

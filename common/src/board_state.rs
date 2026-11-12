@@ -1,7 +1,7 @@
 pub mod admin;
 pub mod ban;
-pub mod configuration;
 pub mod category_secrets;
+pub mod configuration;
 pub mod content;
 pub mod identity;
 pub mod invites;
@@ -16,8 +16,8 @@ pub mod version;
 
 use crate::board_state::admin::AdminsV1;
 use crate::board_state::ban::BansV1;
-use crate::board_state::configuration::AuthorizedConfigurationV1;
 use crate::board_state::category_secrets::CategorySecretsV1;
+use crate::board_state::configuration::AuthorizedConfigurationV1;
 use crate::board_state::invites::InviteTokensV1;
 use crate::board_state::member::{MemberId, MembersV1};
 use crate::board_state::member_info::MemberInfoV1;
@@ -292,7 +292,8 @@ mod tests {
                     banned_user: MemberId(FastHash(21)),
                 },
                 member_id,
-                &member_key,            ),
+                &member_key,
+            ),
             AuthorizedUserBan::new(
                 UserBan {
                     owner_member_id: owner_id,

@@ -8,7 +8,6 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use freenet_stdlib::prelude::{ContractCode, ContractKey, Parameters};
 use lipsum::lipsum;
-use rand::rngs::OsRng;
 use plaza_core::board_state::ChatBoardParametersV1;
 use plaza_core::{
     board_state::{
@@ -20,6 +19,7 @@ use plaza_core::{
     },
     ChatBoardStateV1,
 };
+use rand::rngs::OsRng;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -300,7 +300,11 @@ fn add_example_messages(
         let body = lipsum(word_count as usize);
         // Threads need a title; keep it short and derived from the body so the
         // fixture posts read like real ones.
-        let title: String = body.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
+        let title: String = body
+            .split_whitespace()
+            .take(4)
+            .collect::<Vec<_>>()
+            .join(" ");
         let msg = AuthorizedMessageV1::new(
             MessageV1 {
                 board_owner: *owner_id,

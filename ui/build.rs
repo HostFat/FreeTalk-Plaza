@@ -62,7 +62,8 @@ fn main() {
 /// one-line change that both CI (`scripts/check-migration.sh`) and the Wasm
 /// build see, instead of hand-copied byte arrays that drift apart.
 fn generate_legacy_delegates() {
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let manifest_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let registry = manifest_dir
         .parent()
         .expect("ui/ must live under the repository root")
@@ -148,7 +149,8 @@ fn flush_entry(
     version.clear();
 }
 
-fn parse_hex32(value: &str, field: &str, line_no: usize) -> [u8; 32] {    let hex = value.trim_matches('"');
+fn parse_hex32(value: &str, field: &str, line_no: usize) -> [u8; 32] {
+    let hex = value.trim_matches('"');
     assert!(
         hex.len() == 64,
         "legacy_delegates.toml line {line_no}: {field} must be 64 hex chars, got {hex:?}"

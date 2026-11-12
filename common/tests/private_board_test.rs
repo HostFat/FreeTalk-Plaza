@@ -1,6 +1,5 @@
 use ed25519_dalek::SigningKey;
 use freenet_scaffold::ComposableState;
-use rand::rngs::OsRng;
 use plaza_core::board_state::ban::{AuthorizedUserBan, UserBan};
 use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
@@ -13,6 +12,7 @@ use plaza_core::board_state::secret::{
     EncryptedSecretForMemberV1, SecretVersionRecordV1, SecretsDelta,
 };
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
+use rand::rngs::OsRng;
 use std::time::SystemTime;
 
 /// Helper function to generate a random 32-byte secret
@@ -198,6 +198,7 @@ fn test_private_board_member_addition_with_secrets() {
         owner_member_id: owner_id,
         invited_by: owner_id,
         member_vk,
+        join_proof: None,
     };
 
     let auth_member = AuthorizedMember::new(member, &owner_sk);
@@ -279,6 +280,7 @@ fn test_secret_rotation() {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk,
+            join_proof: None,
         },
         &owner_sk,
     ));
@@ -441,6 +443,7 @@ fn test_ban_member_excludes_from_new_secrets() {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: member1_vk,
+            join_proof: None,
         },
         &owner_sk,
     ));
@@ -449,6 +452,7 @@ fn test_ban_member_excludes_from_new_secrets() {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: member2_vk,
+            join_proof: None,
         },
         &owner_sk,
     ));

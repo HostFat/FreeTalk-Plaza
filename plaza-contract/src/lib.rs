@@ -103,11 +103,11 @@ impl ContractInterface for Contract {
         // Merging two individually valid states or deltas can still produce an
         // invalid one (e.g. a ban whose issuer the merge removed). Refuse the
         // update instead of storing a state that every later peer rejects.
-        chat_state
-            .verify(&chat_state, &parameters)
-            .map_err(|e| ContractError::InvalidUpdateWithInfo {
+        chat_state.verify(&chat_state, &parameters).map_err(|e| {
+            ContractError::InvalidUpdateWithInfo {
                 reason: format!("Merged state does not verify: {}", e),
-            })?;
+            }
+        })?;
 
         let mut updated_state = vec![];
         into_writer(&chat_state, &mut updated_state)

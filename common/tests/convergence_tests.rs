@@ -12,7 +12,6 @@
 
 use ed25519_dalek::SigningKey;
 use freenet_scaffold::ComposableState;
-use rand::rngs::OsRng;
 use plaza_core::board_state::ban::{AuthorizedUserBan, BansV1, UserBan};
 use plaza_core::board_state::member::{
     AuthorizedMember, Member, MemberId, MembersDelta, MembersV1,
@@ -21,6 +20,7 @@ use plaza_core::board_state::message::{
     AuthorizedMessageV1, BoardMessageBody, MessageId, MessageV1, MessagesV1,
 };
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
+use rand::rngs::OsRng;
 use std::time::SystemTime;
 
 /// Helper to create a test member that's invited by a given inviter
@@ -31,6 +31,7 @@ fn create_test_member(owner_id: MemberId, invited_by: MemberId) -> (Member, Sign
         owner_member_id: owner_id,
         invited_by,
         member_vk: verifying_key,
+        join_proof: None,
     };
     (member, signing_key)
 }
@@ -1079,13 +1080,24 @@ fn test_message_varying_limits_convergence() {
         .expect("apply_delta should succeed");
 
     // All 30 messages should be kept (no pruning)
-    assert_eq!(state_forward.messages.len(), 30, "Forward state should have 30 messages");
-    assert_eq!(state_backward.messages.len(), 30, "Backward state should have 30 messages");
+    assert_eq!(
+        state_forward.messages.len(),
+        30,
+        "Forward state should have 30 messages"
+    );
+    assert_eq!(
+        state_backward.messages.len(),
+        30,
+        "Backward state should have 30 messages"
+    );
 
     let ids_forward: Vec<_> = state_forward.messages.iter().map(|m| m.id()).collect();
     let ids_backward: Vec<_> = state_backward.messages.iter().map(|m| m.id()).collect();
 
-    assert_eq!(ids_forward, ids_backward, "Both states should converge to the same order");
+    assert_eq!(
+        ids_forward, ids_backward,
+        "Both states should converge to the same order"
+    );
 }
 
 // =============================================================================
@@ -2697,7 +2709,10 @@ fn test_owner_cannot_be_added_as_admin() {
     let parent_state = ChatBoardStateV1::default();
 
     // Try to add owner as admin
-    let admin = Admin { member_id: owner_id };
+    let admin = Admin {
+        member_id: owner_id,
+        generation: 0,
+    };
     let authorized_admin = AuthorizedAdmin::new(admin, &owner_sk);
 
     let mut admins = AdminsV1::default();
@@ -2705,12 +2720,11 @@ fn test_owner_cannot_be_added_as_admin() {
 
     let result = admins.apply_delta(&parent_state, &parameters, &Some(delta));
 
+    assert!(result.is_err(), "Adding owner as admin should fail");
     assert!(
-        result.is_err(),
-        "Adding owner as admin should fail"
-    );
-    assert!(
-        result.unwrap_err().contains("Owner cannot be added as an admin"),
+        result
+            .unwrap_err()
+            .contains("Owner cannot be added as an admin"),
         "Error message should mention owner cannot be admin"
     );
 }
@@ -2730,7 +2744,10 @@ fn test_member_can_be_added_as_admin() {
     let member_id = member.id();
 
     // Add member as admin (signed by owner)
-    let admin = Admin { member_id };
+    let admin = Admin {
+        member_id,
+        generation: 0,
+    };
     let authorized_admin = AuthorizedAdmin::new(admin, &owner_sk);
 
     let mut admins = AdminsV1::default();

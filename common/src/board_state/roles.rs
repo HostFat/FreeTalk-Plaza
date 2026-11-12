@@ -78,7 +78,7 @@ pub struct AuthorizedRoleAssignment {
     pub signature: Signature,
     /// Who signed it. `None` means the owner. Kept outside the signed payload so
     /// adding it does not invalidate records written before delegation existed.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
 }
 
@@ -148,14 +148,13 @@ impl ComposableState for RolesV1 {
                 return Err("Role assignment signer cannot manage access".to_string());
             }
             let signing_key = signer_key(parent_state, parameters, &signer)?;
-            verify_struct(
-                &assignment.assignment,
-                &assignment.signature,
-                &signing_key,
-            )
-            .map_err(|e| format!("Invalid role assignment signature: {}", e))?;
+            verify_struct(&assignment.assignment, &assignment.signature, &signing_key)
+                .map_err(|e| format!("Invalid role assignment signature: {}", e))?;
 
-            let key = (assignment.assignment.role_id, assignment.assignment.member_id);
+            let key = (
+                assignment.assignment.role_id,
+                assignment.assignment.member_id,
+            );
             if !assignment_keys.insert(key) {
                 return Err("Duplicate role assignment".to_string());
             }
@@ -182,17 +181,17 @@ impl ComposableState for RolesV1 {
         let mut assignments = BTreeMap::new();
         for assignment in &self.assignments {
             assignments.insert(
-                (assignment.assignment.role_id, assignment.assignment.member_id),
+                (
+                    assignment.assignment.role_id,
+                    assignment.assignment.member_id,
+                ),
                 AssignmentState {
                     generation: assignment.assignment.generation,
                     revoked: assignment.assignment.revoked,
                 },
             );
         }
-        RolesSummary {
-            roles,
-            assignments,
-        }
+        RolesSummary { roles, assignments }
     }
 
     fn delta(
@@ -229,10 +228,7 @@ impl ComposableState for RolesV1 {
         if roles.is_empty() && assignments.is_empty() {
             None
         } else {
-            Some(RolesDelta {
-                roles,
-                assignments,
-            })
+            Some(RolesDelta { roles, assignments })
         }
     }
 
@@ -253,11 +249,7 @@ impl ComposableState for RolesV1 {
             // in the same delta.
             let mut combined = self.clone();
             for role in &delta.roles {
-                match combined
-                    .roles
-                    .iter()
-                    .find(|r| r.role.id == role.role.id)
-                {
+                match combined.roles.iter().find(|r| r.role.id == role.role.id) {
                     Some(existing) if existing.role.generation >= role.role.generation => {}
                     _ => {
                         combined.roles.retain(|r| r.role.id != role.role.id);
@@ -281,9 +273,9 @@ impl ComposableState for RolesV1 {
                                 == assignment.assignment.generation
                                 && existing.assignment.revoked) => {}
                     _ => {
-                        combined.assignments.retain(|a| {
-                            (a.assignment.role_id, a.assignment.member_id) != key
-                        });
+                        combined
+                            .assignments
+                            .retain(|a| (a.assignment.role_id, a.assignment.member_id) != key);
                         combined.assignments.push(assignment.clone());
                     }
                 }
@@ -353,9 +345,7 @@ impl RolesV1 {
     pub fn next_assignment_generation(&self, role_id: &RoleId, member_id: &MemberId) -> u64 {
         self.assignments
             .iter()
-            .find(|a| {
-                a.assignment.role_id == *role_id && a.assignment.member_id == *member_id
-            })
+            .find(|a| a.assignment.role_id == *role_id && a.assignment.member_id == *member_id)
             .map(|a| a.assignment.generation + 1)
             .unwrap_or(1)
     }
