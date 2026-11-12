@@ -12,7 +12,19 @@ use plaza_core::board_state::member::MemberId;
 use wasm_bindgen_futures::spawn_local;
 
 #[component]
-pub fn AdminView() -> Element {
+pub fn AdminView(#[props(default)] tab: String) -> Element {
+    /// Tabs live in the URL so a refresh lands on the same one.
+    fn navigate_admin_tab(board_id: &str, tab: &str) {
+        let path = match tab {
+            "bans" => format!("/board/{board_id}/admin/banned"),
+            "roles" => format!("/board/{board_id}/admin/roles"),
+            "links" => format!("/board/{board_id}/admin/links"),
+            _ => format!("/board/{board_id}/admin"),
+        };
+        if let Some(win) = web_sys::window() {
+            let _ = win.location().set_hash(&path);
+        }
+    }
     let current_board_data: Memo<Option<BoardData>> = use_memo(move || {
         CURRENT_BOARD
             .read()
@@ -21,10 +33,19 @@ pub fn AdminView() -> Element {
             .and_then(|key| BOARDS.read().map.get(key).cloned())
     });
 
+    let active = if tab.is_empty() {
+        "admins".to_string()
+    } else {
+        tab.clone()
+    };
+    let board_id_for_tabs = CURRENT_BOARD
+        .read()
+        .owner_key
+        .map(|key| bs58::encode(key.as_bytes()).into_string())
+        .unwrap_or_default();
+
     let mut show_add_admin_modal = use_signal(|| false);
     let mut admin_error = use_signal(|| None::<String>);
-    // "admins" | "access"
-    let mut tab = use_signal(|| "admins".to_string());
 
     // Check if current user is the owner
     let is_owner = use_memo(move || {
@@ -80,6 +101,10 @@ pub fn AdminView() -> Element {
         };
     }
 
+    let tab_board_admins = board_id_for_tabs.clone();
+    let tab_board_bans = board_id_for_tabs.clone();
+    let tab_board_roles = board_id_for_tabs.clone();
+    let tab_board_links = board_id_for_tabs.clone();
     rsx! {
         div { class: "flex-1 flex flex-col p-6 overflow-y-auto",
             // Header
@@ -90,42 +115,42 @@ pub fn AdminView() -> Element {
                 div { class: "flex gap-1 bg-surface rounded-lg p-1 w-fit",
                     button {
                         r#type: "button",
-                        class: if *tab.read() == "admins" {
+                        class: if active == "admins" {
                             "px-4 py-2 rounded-md text-sm bg-accent text-white"
                         } else {
                             "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
                         },
-                        onclick: move |_| tab.set("admins".to_string()),
+                        onclick: move |_| navigate_admin_tab(&tab_board_admins, "admins"),
                         "Admins"
                     }
                     button {
                         r#type: "button",
-                        class: if *tab.read() == "bans" {
+                        class: if active == "bans" {
                             "px-4 py-2 rounded-md text-sm bg-accent text-white"
                         } else {
                             "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
                         },
-                        onclick: move |_| tab.set("bans".to_string()),
+                        onclick: move |_| navigate_admin_tab(&tab_board_bans, "bans"),
                         "Banned"
                     }
                     button {
                         r#type: "button",
-                        class: if *tab.read() == "roles" {
+                        class: if active == "roles" {
                             "px-4 py-2 rounded-md text-sm bg-accent text-white"
                         } else {
                             "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
                         },
-                        onclick: move |_| tab.set("roles".to_string()),
+                        onclick: move |_| navigate_admin_tab(&tab_board_roles, "roles"),
                         "Roles"
                     }
                     button {
                         r#type: "button",
-                        class: if *tab.read() == "links" {
+                        class: if active == "links" {
                             "px-4 py-2 rounded-md text-sm bg-accent text-white"
                         } else {
                             "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
                         },
-                        onclick: move |_| tab.set("links".to_string()),
+                        onclick: move |_| navigate_admin_tab(&tab_board_links, "links"),
                         "Invite links"
                     }
                 }
@@ -152,7 +177,7 @@ pub fn AdminView() -> Element {
                 }
             }
 
-            if *tab.read() == "admins" {
+            if active == "admins" {
 
             // Action buttons row (owner only)
             // (kept in the tab row above)
@@ -221,7 +246,7 @@ pub fn AdminView() -> Element {
                     }
                 }
             }
-            } else if *tab.read() == "bans" {
+            } else if active == "bans" {
                 div { class: "mb-6",
                     h2 { class: "text-lg font-semibold text-text mb-3", "Banned Users" }
 
@@ -248,7 +273,7 @@ pub fn AdminView() -> Element {
                         }
                     }
                 }
-            } else if *tab.read() == "roles" {
+            } else if active == "roles" {
                 RolesSection {}
             } else {
                 InviteLinksSection {}

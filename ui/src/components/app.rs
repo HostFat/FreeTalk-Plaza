@@ -53,6 +53,12 @@ pub enum Route {
     ConversationView { board_id: String },
     #[route("/board/:board_id/admin")]
     Admin { board_id: String },
+    #[route("/board/:board_id/admin/banned")]
+    AdminBanned { board_id: String },
+    #[route("/board/:board_id/admin/roles")]
+    AdminRoles { board_id: String },
+    #[route("/board/:board_id/admin/links")]
+    AdminLinks { board_id: String },
     #[route("/board/:board_id/members")]
     Members { board_id: String },
     #[route("/:..route")]
@@ -400,7 +406,33 @@ fn ConversationView(board_id: String) -> Element {
 /// Route component for admin management view
 #[component]
 fn Admin(board_id: String) -> Element {
-    rsx! { BoardGate { board_id: board_id.clone(), AdminView {} } }
+    rsx! {
+        BoardGate { board_id: board_id.clone(), AdminView { tab: "admins".to_string() } }
+    }
+}
+
+/// Admin view, banned users tab
+#[component]
+fn AdminBanned(board_id: String) -> Element {
+    rsx! {
+        BoardGate { board_id: board_id.clone(), AdminView { tab: "bans".to_string() } }
+    }
+}
+
+/// Admin view, roles tab
+#[component]
+fn AdminRoles(board_id: String) -> Element {
+    rsx! {
+        BoardGate { board_id: board_id.clone(), AdminView { tab: "roles".to_string() } }
+    }
+}
+
+/// Admin view, invite links tab
+#[component]
+fn AdminLinks(board_id: String) -> Element {
+    rsx! {
+        BoardGate { board_id: board_id.clone(), AdminView { tab: "links".to_string() } }
+    }
 }
 
 /// Route component for members view
