@@ -304,7 +304,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
     let viewing_category = category_id.is_some();
 
     rsx! {
-        div { class: "flex-1 flex flex-col min-w-0 bg-bg",
+        div { class: "flex-1 flex flex-col min-w-0 min-h-0 bg-bg",
             // Show no-board-selected message or header with user info
             if !has_board_selected {
                 div { class: "flex flex-col items-center justify-center h-64 text-text-muted",
@@ -591,7 +591,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                     "Recent activity"
                                                 }
                                             }
-                                            div { class: "space-y-8",
+                                            div { class: "space-y-3",
                                                 {displayed_posts.iter().map({
                                                     let handle_toggle_reaction = handle_toggle_reaction.clone();
                                                     let handle_edit_message = handle_edit_message.clone();
@@ -612,6 +612,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                     self_member_id: self_member_id,
                                                                     expanded: false,
                                                                     show_replies: false,
+                                                                    hide_content: true,
                                                                     max_title_size: max_title_size,
                                                                     max_message_size: max_message_size,
                                                                     reply_count: reply_count,
@@ -761,7 +762,7 @@ pub fn SinglePostView(post_id: String) -> Element {
     };
 
     rsx! {
-        div { class: "flex-1 flex flex-col min-w-0 bg-bg",
+        div { class: "flex-1 flex flex-col min-w-0 min-h-0 bg-bg",
             // Back button header
             div { class: "flex items-center gap-4 px-6 py-4 border-b border-border",
                 button {

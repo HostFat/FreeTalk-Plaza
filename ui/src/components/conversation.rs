@@ -666,7 +666,7 @@ pub fn Conversation(
     };
 
     rsx! {
-        div { class: "flex flex-col h-full",
+        div { class: "flex flex-col h-full min-h-0",
             // Reply thread area
             div { class: "flex-1 overflow-y-auto",
                 div { class: "max-w-4xl mx-auto px-4 py-4",
@@ -858,6 +858,9 @@ fn MessageHeader(
     full_time_str: String,
     time_clamped: bool,
     size: MessageSize,
+    /// Post title, shown next to the author in card views
+    #[props(default)]
+    title: Option<String>,
 ) -> Element {
     let (avatar_size, name_class) = match size {
         MessageSize::Compact => ("w-8 h-8", "text-sm font-medium text-text"),
@@ -889,15 +892,29 @@ fn MessageHeader(
             class: "{avatar_size} rounded-full"
         }
         div { class: if matches!(size, MessageSize::Compact) { "flex items-center gap-3" } else { "flex-1 min-w-0" },
-            div {
-                class: "{name_class} cursor-pointer hover:text-accent transition-colors",
-                onclick: move |e| {
-                    e.stop_propagation();
-                    MEMBER_INFO_MODAL.with_mut(|signal| {
-                        signal.member = Some(author_id);
-                    });
-                },
-                "{author_name}"
+            div { class: "flex items-center gap-2 min-w-0",
+                div {
+                    class: "{name_class} cursor-pointer hover:text-accent transition-colors flex-shrink-0",
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        MEMBER_INFO_MODAL.with_mut(|signal| {
+                            signal.member = Some(author_id);
+                        });
+                    },
+                    "{author_name}"
+                }
+                if let Some(title) = title.as_ref() {
+                    span { class: "text-text-muted flex-shrink-0", "·" }
+                    span {
+                        class: match size {
+                            MessageSize::Compact => "truncate text-sm font-semibold text-text",
+                            MessageSize::Normal => "truncate text-lg font-semibold text-text",
+                            MessageSize::Large => "truncate text-2xl font-bold text-text",
+                        },
+                        title: "{title}",
+                        "{title}"
+                    }
+                }
             }
             if is_self && matches!(size, MessageSize::Compact) {
                 span { class: "text-xs text-accent", "(you)" }
@@ -944,6 +961,9 @@ fn MessageContentDisplay(
     edited: bool,
     size: MessageSize,
     expanded: bool,
+    /// Card views show the title in the header instead
+    #[props(default = true)]
+    show_title: bool,
 ) -> Element {
     let (title_class, content_class) = match size {
         MessageSize::Compact => (
@@ -993,7 +1013,7 @@ fn MessageContentDisplay(
 
     rsx! {
         // Title
-        if !display_title.is_empty() {
+        if show_title && !display_title.is_empty() {
             match size {
                 MessageSize::Large if expanded => rsx! { h1 { class: "{title_class}", "{display_title}" } },
                 MessageSize::Compact => rsx! { h4 { class: "{title_class}", "{display_title}" } },
@@ -1456,6 +1476,9 @@ pub fn MessageCard(
     /// Last reply author and local time, shown next to the count
     #[props(default)]
     last_reply: Option<(String, String)>,
+    /// Hide the body and show only the header/title (post list)
+    #[props(default = false)]
+    hide_content: bool,
 ) -> Element {
     let msg = message.clone();
     let is_self = msg.is_self;
@@ -1485,6 +1508,16 @@ pub fn MessageCard(
     let content_text = msg.content_text.clone();
     let edited = msg.edited;
     let reactions = msg.reactions.clone();
+
+    // In card views the title moves next to the author. Give untitled posts
+    // something to show when the body is hidden.
+    let header_title = if title_text.trim().is_empty() {
+        "Untitled".to_string()
+    } else if edited {
+        format!("{title_text} (edited)")
+    } else {
+        title_text.clone()
+    };
 
     // Determine size based on variant and expanded state
     let size = match variant {
@@ -1663,32 +1696,37 @@ pub fn MessageCard(
                                 full_time_str: full_time_str.clone(),
                                 time_clamped: msg.time_clamped,
                                 size: size,
+                                title: Some(header_title.clone()),
                             }
                         }
 
-                        // Content
-                        div { class: "{content_padding}",
-                            if *editing.read() {
-                                MessageEditForm {
-                                    edit_title: edit_title,
-                                    edit_text: edit_text,
-                                    editing: editing,
-                                    original_title: title_text.clone(),
-                                    original_text: content_text.clone(),
-                                    msg_id: msg_id.clone(),
-                                    on_edit: on_edit.clone(),
-                                    size: size,
-                                    max_title_size: max_title_size,
-                                    max_message_size: max_message_size,
-                                }
-                            } else {
-                                MessageContentDisplay {
-                                    title_text: title_text.clone(),
-                                    content_html: content_html.clone(),
-                                    content_text: content_text.clone(),
-                                    edited: edited,
-                                    size: size,
-                                    expanded: expanded,
+                        // Content. The post list hides it and shows only the
+                        // title in the header.
+                        if !hide_content {
+                            div { class: "{content_padding}",
+                                if *editing.read() {
+                                    MessageEditForm {
+                                        edit_title: edit_title,
+                                        edit_text: edit_text,
+                                        editing: editing,
+                                        original_title: title_text.clone(),
+                                        original_text: content_text.clone(),
+                                        msg_id: msg_id.clone(),
+                                        on_edit: on_edit.clone(),
+                                        size: size,
+                                        max_title_size: max_title_size,
+                                        max_message_size: max_message_size,
+                                    }
+                                } else {
+                                    MessageContentDisplay {
+                                        title_text: title_text.clone(),
+                                        content_html: content_html.clone(),
+                                        content_text: content_text.clone(),
+                                        edited: edited,
+                                        size: size,
+                                        expanded: expanded,
+                                        show_title: false,
+                                    }
                                 }
                             }
                         }
