@@ -5,7 +5,7 @@ mod add_admin_modal;
 use add_admin_modal::AddAdminModal;
 
 use crate::board_data::BoardData;
-use crate::components::access_section::AccessSection;
+use crate::components::access_section::{InviteLinksSection, RolesSection};
 use crate::components::app::{BOARDS, CURRENT_BOARD, EDIT_BOARD_MODAL};
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
@@ -85,53 +85,67 @@ pub fn AdminView() -> Element {
             // Header
             h1 { class: "text-2xl font-bold text-text mb-4", "Admin Management" }
 
-            // Tabs
-            div { class: "flex gap-1 mb-6 bg-surface rounded-lg p-1 w-fit",
-                button {
-                    r#type: "button",
-                    class: if *tab.read() == "admins" {
-                        "px-4 py-2 rounded-md text-sm bg-accent text-white"
-                    } else {
-                        "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
-                    },
-                    onclick: move |_| tab.set("admins".to_string()),
-                    "Admins"
+            // Tabs and admin actions on one row
+            div { class: "flex flex-wrap items-center justify-between gap-3 mb-6",
+                div { class: "flex gap-1 bg-surface rounded-lg p-1 w-fit",
+                    button {
+                        r#type: "button",
+                        class: if *tab.read() == "admins" {
+                            "px-4 py-2 rounded-md text-sm bg-accent text-white"
+                        } else {
+                            "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
+                        },
+                        onclick: move |_| tab.set("admins".to_string()),
+                        "Admins"
+                    }
+                    button {
+                        r#type: "button",
+                        class: if *tab.read() == "roles" {
+                            "px-4 py-2 rounded-md text-sm bg-accent text-white"
+                        } else {
+                            "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
+                        },
+                        onclick: move |_| tab.set("roles".to_string()),
+                        "Roles"
+                    }
+                    button {
+                        r#type: "button",
+                        class: if *tab.read() == "links" {
+                            "px-4 py-2 rounded-md text-sm bg-accent text-white"
+                        } else {
+                            "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
+                        },
+                        onclick: move |_| tab.set("links".to_string()),
+                        "Invite links"
+                    }
                 }
-                button {
-                    r#type: "button",
-                    class: if *tab.read() == "access" {
-                        "px-4 py-2 rounded-md text-sm bg-accent text-white"
-                    } else {
-                        "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
-                    },
-                    onclick: move |_| tab.set("access".to_string()),
-                    "Roles & Invite links"
+
+                if *is_owner.read() {
+                    div { class: "flex gap-3",
+                        button {
+                            class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text rounded-lg transition-colors flex items-center gap-2",
+                            onclick: move |_| {
+                                if let Some(owner_key) = CURRENT_BOARD.read().owner_key {
+                                    EDIT_BOARD_MODAL.write().board = Some(owner_key);
+                                }
+                            },
+                            span { "⚙" }
+                            span { "Board Settings" }
+                        }
+                        button {
+                            class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white rounded-lg transition-colors flex items-center gap-2",
+                            onclick: move |_| show_add_admin_modal.set(true),
+                            span { "+" }
+                            span { "Add Admin" }
+                        }
+                    }
                 }
             }
 
             if *tab.read() == "admins" {
 
             // Action buttons row (owner only)
-            if *is_owner.read() {
-                div { class: "flex gap-3 mb-6",
-                    button {
-                        class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text rounded-lg transition-colors flex items-center gap-2",
-                        onclick: move |_| {
-                            if let Some(owner_key) = CURRENT_BOARD.read().owner_key {
-                                EDIT_BOARD_MODAL.write().board = Some(owner_key);
-                            }
-                        },
-                        span { "⚙" }
-                        span { "Board Settings" }
-                    }
-                    button {
-                        class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white rounded-lg transition-colors flex items-center gap-2",
-                        onclick: move |_| show_add_admin_modal.set(true),
-                        span { "+" }
-                        span { "Add Admin" }
-                    }
-                }
-            }
+            // (kept in the tab row above)
 
             // Current admins section
             div { class: "mb-6",
@@ -225,8 +239,10 @@ pub fn AdminView() -> Element {
                     }
                 }
             }
+            } else if *tab.read() == "roles" {
+                RolesSection {}
             } else {
-                AccessSection {}
+                InviteLinksSection {}
             }
         }
 
