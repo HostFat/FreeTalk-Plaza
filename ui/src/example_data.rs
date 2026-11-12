@@ -6,7 +6,7 @@ use crate::{
 };
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
-use freenet_stdlib::prelude::{ContractCode, ContractInstanceId, ContractKey, Parameters};
+use freenet_stdlib::prelude::{ContractCode, ContractKey, Parameters};
 use lipsum::lipsum;
 use rand::rngs::OsRng;
 use plaza_core::board_state::ChatBoardParametersV1;
@@ -295,12 +295,16 @@ fn add_example_messages(
 
         // Generate message with random length (15-35 words)
         let word_count = rand::random::<u8>() % 21 + 15;
+        let body = lipsum(word_count as usize);
+        // Threads need a title; keep it short and derived from the body so the
+        // fixture posts read like real ones.
+        let title: String = body.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
         let msg = AuthorizedMessageV1::new(
             MessageV1 {
                 board_owner: *owner_id,
                 author: author_id,
                 time: get_time_from_millis(current_time_ms),
-                content: BoardMessageBody::public(lipsum(word_count as usize)),
+                content: BoardMessageBody::public(title, body),
             },
             signing_key,
         );
