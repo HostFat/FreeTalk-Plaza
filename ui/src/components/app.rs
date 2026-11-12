@@ -357,6 +357,8 @@ fn WaitingForBoard(board_id: String) -> Element {
             .map(|key| BOARDS.read().map.contains_key(&key))
             .unwrap_or(false)
     });
+    // Once the delegate load is done, a missing board is genuinely unknown.
+    let boards_loaded = *crate::components::app::BOARDS_LOADED.read();
 
     use_effect(move || {
         if *ready.read() {
@@ -372,9 +374,16 @@ fn WaitingForBoard(board_id: String) -> Element {
 
     rsx! {
         div { class: "flex-1 flex flex-col items-center justify-center p-8 text-center",
-            p { class: "text-xl text-text-muted mb-2", "Loading board…" }
-            p { class: "text-text-muted mb-6 text-sm",
-                "Waiting for the board state. It appears in the list above as soon as it is loaded."
+            if boards_loaded {
+                p { class: "text-xl text-text-muted mb-2", "Board not found" }
+                p { class: "text-text-muted mb-6 text-sm",
+                    "This board is not stored on this device. If you were invited, open the invitation link again."
+                }
+            } else {
+                p { class: "text-xl text-text-muted mb-2", "Loading board…" }
+                p { class: "text-text-muted mb-6 text-sm",
+                    "Waiting for the board state. It appears in the list above as soon as it is loaded."
+                }
             }
             button {
                 r#type: "button",
