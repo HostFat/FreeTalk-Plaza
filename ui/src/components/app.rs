@@ -57,6 +57,11 @@ pub enum Route {
 }
 
 pub static BOARDS: GlobalSignal<Boards> = Global::new(initial_boards);
+
+/// Set once the boards stored in the delegate have been read (or the delegate
+/// answered that it has none). Until then `BOARDS` is empty only because the
+/// load has not finished, and persisting it would overwrite real data.
+pub static BOARDS_LOADED: GlobalSignal<bool> = Global::new(|| false);
 pub static CURRENT_BOARD: GlobalSignal<CurrentBoard> =
     Global::new(|| CurrentBoard { owner_key: None });
 pub static MEMBER_INFO_MODAL: GlobalSignal<MemberInfoModalSignal> =

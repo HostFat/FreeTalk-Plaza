@@ -245,6 +245,14 @@ pub async fn load_boards_from_delegate() -> Result<(), String> {
 
 /// Save boards to the delegate storage
 pub async fn save_boards_to_delegate() -> Result<(), String> {
+    // Never write before the initial load has completed: at startup `BOARDS` is
+    // empty and `CURRENT_BOARD` may already be set from the URL, so a save here
+    // would store an empty map and wipe the boards kept in the delegate.
+    if !*crate::components::app::BOARDS_LOADED.read() {
+        info!("Skipping delegate save: boards not loaded yet");
+        return Ok(());
+    }
+
     info!("Saving boards to delegate storage");
 
     // Get the current boards data - clone the data to avoid holding the read lock

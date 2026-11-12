@@ -16,7 +16,7 @@ use crate::components::app::chat_delegate::{
 use crate::components::app::document_title::{mark_current_board_as_read, update_document_title};
 use crate::components::app::notifications::mark_initial_sync_complete;
 use crate::components::app::sync_info::{BoardSyncStatus, SYNC_INFO};
-use crate::components::app::{BOARDS, CURRENT_BOARD};
+use crate::components::app::{BOARDS, BOARDS_LOADED, CURRENT_BOARD};
 use crate::util::ecies::{decrypt_secret_from_member_blob, decrypt_with_symmetric_key};
 use crate::util::owner_vk_to_contract_key;
 use ciborium::de::from_reader;
@@ -243,15 +243,27 @@ impl ResponseHandler {
                                                         if let Some(saved_board_key) =
                                                             loaded_boards.current_board_key
                                                         {
-                                                            info!("Restoring current board selection from delegate");
-                                                            crate::util::defer(move || {
-                                                                *CURRENT_BOARD.write() =
-                                                                    CurrentBoard {
-                                                                        owner_key: Some(
-                                                                            saved_board_key,
-                                                                        ),
-                                                                    };
-                                                            });
+                                                            // Only restore a selection that is actually
+                                                            // present: a key without its board would leave
+                                                            // every route showing "not found".
+                                                            if loaded_boards
+                                                                .map
+                                                                .contains_key(&saved_board_key)
+                                                            {
+                                                                info!("Restoring current board selection from delegate");
+                                                                crate::util::defer(move || {
+                                                                    *CURRENT_BOARD.write() =
+                                                                        CurrentBoard {
+                                                                            owner_key: Some(
+                                                                                saved_board_key,
+                                                                            ),
+                                                                        };
+                                                                });
+                                                            } else {
+                                                                warn!(
+                                                                    "Ignoring stored current board selection: board not in the loaded set"
+                                                                );
+                                                            }
                                                         }
 
                                                         // Collect board keys and signing keys before merge
@@ -381,6 +393,9 @@ impl ResponseHandler {
                                                                 }
                                                             }
                                                         });
+                                                        // Saves are refused until this is true, so set it only
+                                                        // after the merge has placed the stored boards in BOARDS.
+                                                        *BOARDS_LOADED.write() = true;
                                                         });
 
                                                         // Mark current board as read since user is viewing it
@@ -522,6 +537,9 @@ impl ResponseHandler {
                                                 }
                                             } else {
                                                 info!("No boards data found in delegate");
+                                                // Nothing stored: the empty map in memory is the truth,
+                                                // so saving is safe from now on.
+                                                *BOARDS_LOADED.write() = true;
                                                 // Mark migration as done regardless of which delegate responded.
                                                 // - If current delegate: we successfully communicated with it,
                                                 //   so legacy migration isn't needed
