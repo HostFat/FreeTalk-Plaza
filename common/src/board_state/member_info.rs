@@ -6,7 +6,7 @@ use crate::util::{sign_struct, verify_struct};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct MemberInfoV1 {
@@ -15,7 +15,7 @@ pub struct MemberInfoV1 {
 
 impl ComposableState for MemberInfoV1 {
     type ParentState = ChatBoardStateV1;
-    type Summary = HashMap<MemberId, u32>;
+    type Summary = BTreeMap<MemberId, u32>;
     type Delta = Vec<AuthorizedMemberInfo>;
     type Parameters = ChatBoardParametersV1;
 
@@ -377,7 +377,7 @@ mod tests {
         };
 
         // Create a HashMap with member_id1 and version 1
-        let mut old_summary = HashMap::new();
+        let mut old_summary = BTreeMap::new();
         old_summary.insert(member_id1, 1);
 
         let delta = member_info_v1.delta(&parent_state, &parameters, &old_summary);
@@ -579,11 +579,11 @@ mod tests {
 
         // Test when all members are new
         member_info_v1.member_info = member_infos.clone();
-        let delta = member_info_v1.delta(&parent_state, &parameters, &HashMap::new());
+        let delta = member_info_v1.delta(&parent_state, &parameters, &BTreeMap::new());
         assert_eq!(delta.unwrap().len(), 5);
 
         // Test when all members are old with same version
-        let old_summary: HashMap<MemberId, u32> = member_infos
+        let old_summary: BTreeMap<MemberId, u32> = member_infos
             .iter()
             .map(|info| (info.member_info.member_id, info.member_info.version))
             .collect();
@@ -591,7 +591,7 @@ mod tests {
         assert!(delta.is_none());
 
         // Test with a mix of new and old members
-        let mut old_summary = HashMap::new();
+        let mut old_summary = BTreeMap::new();
         old_summary.insert(member_infos[0].member_info.member_id, 1);
         old_summary.insert(member_infos[1].member_info.member_id, 1);
         let delta = member_info_v1.delta(&parent_state, &parameters, &old_summary);

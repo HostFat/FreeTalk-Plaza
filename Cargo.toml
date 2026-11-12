@@ -47,7 +47,7 @@ river = { path = "cli", package = "river" }
 # Freenet dependencies
 freenet-scaffold = "0.2.2"
 freenet-scaffold-macro = "0.2.2"
-freenet-stdlib = { version = "0.3.2", features = ["contract"] }
+freenet-stdlib = { version = "0.12.1", features = ["contract"] }
 
 [workspace.package]
 version = "0.1.3"
@@ -76,10 +76,3 @@ inherits = "dev"
 
 [workspace.metadata.dx]
 toolchain = "nightly"
-
-# We need to pin specific versions to resolve dependency conflicts
-
-# Patch freenet-stdlib to fix ErrorEvent.filename undefined bug
-# Run ./cargo.sh instead of cargo to auto-apply the patch
-[patch.crates-io]
-freenet-stdlib = { path = "/tmp/freenet-stdlib/rust" }

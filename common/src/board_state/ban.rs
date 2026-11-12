@@ -6,7 +6,7 @@ use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use freenet_scaffold::util::{fast_hash, FastHash};
 use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::time::SystemTime;
@@ -244,7 +244,7 @@ impl BansV1 {
 
 impl ComposableState for BansV1 {
     type ParentState = ChatBoardStateV1;
-    type Summary = HashSet<BanId>;
+    type Summary = BTreeSet<BanId>;
     type Delta = Vec<AuthorizedUserBan>;
     type Parameters = ChatBoardParametersV1;
 
@@ -368,21 +368,8 @@ impl ComposableState for BansV1 {
             let mut temp_bans = self.clone();
             temp_bans.0.extend(delta.iter().cloned());
 
-            // Remove oldest bans if we exceed the limit
-            let max_bans = parent_state.configuration.configuration.max_user_bans;
-            if temp_bans.0.len() > max_bans {
-                // Sort by banned_at time (oldest first), with BanId tie-breaking
-                // for deterministic ordering (CRDT convergence requirement)
-                temp_bans.0.sort_by(|a, b| {
-                    a.ban
-                        .banned_at
-                        .cmp(&b.ban.banned_at)
-                        .then_with(|| a.id().cmp(&b.id()))
-                });
-                // Remove oldest bans to get back to the limit
-                let to_remove = temp_bans.0.len() - max_bans;
-                temp_bans.0.drain(0..to_remove);
-            }
+            // Enforce the cap, keeping owner bans
+            temp_bans.enforce_cap(parent_state, parameters);
 
             // Verify the temporary board_state (excluding the max_bans check since we just enforced it)
             if let Err(e) = temp_bans.verify(parent_state, parameters) {
@@ -402,6 +389,51 @@ impl ComposableState for BansV1 {
         });
 
         Ok(())
+    }
+}
+
+impl BansV1 {
+    /// Trim the collection to `max_user_bans`.
+    ///
+    /// Eviction is oldest-first (with `BanId` tie-breaking) so every peer drops
+    /// the same entries, except that bans issued by the owner are kept: they are
+    /// signed by the party the parameters name, so an attacker flooding bans
+    /// cannot age out the owner's moderation. If owner bans alone exceed the
+    /// cap, the oldest of those are dropped too, because `verify` refuses an
+    /// over-cap state.
+    pub fn enforce_cap(
+        &mut self,
+        parent_state: &ChatBoardStateV1,
+        parameters: &ChatBoardParametersV1,
+    ) {
+        let owner_id = parameters.owner_id();
+        let max_bans = parent_state.configuration.configuration.max_user_bans;
+
+        self.0.sort_by(|a, b| {
+            a.ban
+                .banned_at
+                .cmp(&b.ban.banned_at)
+                .then_with(|| a.id().cmp(&b.id()))
+        });
+
+        if self.0.len() <= max_bans {
+            return;
+        }
+
+        let mut to_remove = self.0.len() - max_bans;
+        let mut kept = Vec::with_capacity(max_bans);
+        for ban in std::mem::take(&mut self.0) {
+            if to_remove > 0 && ban.banned_by != owner_id {
+                to_remove -= 1;
+                continue;
+            }
+            kept.push(ban);
+        }
+        if kept.len() > max_bans {
+            let excess = kept.len() - max_bans;
+            kept.drain(0..excess);
+        }
+        self.0 = kept;
     }
 }
 
@@ -728,19 +760,100 @@ mod tests {
         let bans = BansV1(vec![ban1.clone(), ban2.clone()]);
 
         // Test 1: Empty old summary
-        let empty_summary = HashSet::new();
+        let empty_summary = BTreeSet::new();
         let delta = bans.delta(&state, &params, &empty_summary);
         assert_eq!(delta, Some(vec![ban1.clone(), ban2.clone()]));
 
         // Test 2: Partial old summary
-        let partial_summary: HashSet<BanId> = vec![ban1.id()].into_iter().collect();
+        let partial_summary: BTreeSet<BanId> = vec![ban1.id()].into_iter().collect();
         let delta = bans.delta(&state, &params, &partial_summary);
         assert_eq!(delta, Some(vec![ban2.clone()]));
 
         // Test 3: Full old summary
-        let full_summary: HashSet<BanId> = vec![ban1.id(), ban2.id()].into_iter().collect();
+        let full_summary: BTreeSet<BanId> = vec![ban1.id(), ban2.id()].into_iter().collect();
         let delta = bans.delta(&state, &params, &full_summary);
         assert_eq!(delta, None);
+    }
+
+    #[test]
+    fn ban_summary_is_order_independent() {
+        let state = create_test_chat_board_state();
+        let params = create_test_parameters();
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        let id: MemberId = key.verifying_key().into();
+
+        let make = |secs: u64| {
+            AuthorizedUserBan::new(
+                UserBan {
+                    owner_member_id: id,
+                    banned_at: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+                    banned_user: id,
+                },
+                id,
+                &key,
+            )
+        };
+        let (first, second) = (make(1), make(2));
+
+        let serialize = |bans: &BansV1| {
+            let mut out = Vec::new();
+            ciborium::ser::into_writer(&bans.summarize(&state, &params), &mut out).unwrap();
+            out
+        };
+
+        // Two peers that received the same bans in different orders must send
+        // identical summary bytes, otherwise anti-entropy heals forever.
+        assert_eq!(
+            serialize(&BansV1(vec![first.clone(), second.clone()])),
+            serialize(&BansV1(vec![second, first]))
+        );
+    }
+
+    #[test]
+    fn owner_bans_survive_the_cap() {
+        let owner_key = SigningKey::generate(&mut rand::thread_rng());
+        let params = ChatBoardParametersV1 {
+            owner: owner_key.verifying_key(),
+        };
+        let owner_id = params.owner_id();
+        let mut state = create_test_chat_board_state();
+        state.configuration.configuration.max_user_bans = 1;
+
+        let member_key = SigningKey::generate(&mut rand::thread_rng());
+        let member_id: MemberId = member_key.verifying_key().into();
+        let at = |secs: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+
+        let older_member_ban = AuthorizedUserBan::new(
+            UserBan {
+                owner_member_id: owner_id,
+                banned_at: at(1),
+                banned_user: MemberId(FastHash(11)),
+            },
+            member_id,
+            &member_key,
+        );
+        let newer_owner_ban = AuthorizedUserBan::new(
+            UserBan {
+                owner_member_id: owner_id,
+                banned_at: at(2),
+                banned_user: MemberId(FastHash(12)),
+            },
+            owner_id,
+            &owner_key,
+        );
+
+        for order in [
+            vec![older_member_ban.clone(), newer_owner_ban.clone()],
+            vec![newer_owner_ban.clone(), older_member_ban.clone()],
+        ] {
+            let mut bans = BansV1(order);
+            bans.enforce_cap(&state, &params);
+            assert_eq!(bans.0.len(), 1, "cap must be enforced");
+            assert_eq!(
+                bans.0[0].banned_by, owner_id,
+                "the cap must not age out an owner ban in favour of a member's"
+            );
+        }
     }
 
     #[test]

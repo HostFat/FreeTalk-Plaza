@@ -54,6 +54,9 @@ pub fn handle_update_notification(
         UpdateData::RelatedStateAndDelta { .. } => {
             warn!("Received related state and delta update, ignored");
         }
+        _ => {
+            warn!("Received unknown update data variant, ignored");
+        }
     }
 
     Ok(())

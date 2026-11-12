@@ -37,7 +37,24 @@ impl ContractInterface for Contract {
             .map(|_| ValidateResult::Valid)
             .map_err(|e| ContractError::InvalidUpdateWithInfo {
                 reason: format!("State verification failed: {}", e),
-            })
+            })?;
+
+        // A state that `apply_delta`'s cleanup would change is not a fixpoint.
+        // Accepting it would make every peer publish a slightly different
+        // state, so anti-entropy would heal forever instead of converging.
+        let mut normalized = chat_state.clone();
+        normalized
+            .normalize(&parameters)
+            .map_err(|e| ContractError::InvalidUpdateWithInfo {
+                reason: format!("State cleanup failed: {}", e),
+            })?;
+        if normalized != chat_state {
+            return Err(ContractError::InvalidUpdateWithInfo {
+                reason: "State is not normalized: applying cleanup would change it".to_string(),
+            });
+        }
+
+        Ok(ValidateResult::Valid)
     }
 
     fn update_state(
@@ -82,6 +99,15 @@ impl ContractInterface for Contract {
                 _ => unreachable!(),
             }
         }
+
+        // Merging two individually valid states or deltas can still produce an
+        // invalid one (e.g. a ban whose issuer the merge removed). Refuse the
+        // update instead of storing a state that every later peer rejects.
+        chat_state
+            .verify(&chat_state, &parameters)
+            .map_err(|e| ContractError::InvalidUpdateWithInfo {
+                reason: format!("Merged state does not verify: {}", e),
+            })?;
 
         let mut updated_state = vec![];
         into_writer(&chat_state, &mut updated_state)
@@ -132,3 +158,6 @@ impl ContractInterface for Contract {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

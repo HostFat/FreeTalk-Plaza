@@ -30,7 +30,14 @@ wasm-crypto = ["ed25519-compact"]
 
 [dev-dependencies]
 anyhow = "1.0"
-freenet = "0.1.187"
+# Current node release. Must match the freenet-stdlib line in the workspace,
+# otherwise the test binary links two stdlib copies and fails on duplicate
+# `__frnt_set_id` symbols.
+freenet = "0.2.156"
+# The integration harness drives a node over the WebSocket client API, which
+# lives behind `net` in freenet-stdlib. Resolver v2 keeps this test-only feature
+# out of the wasm32 contract build (verified by re-hashing the WASM).
+freenet-stdlib = { workspace = true, features = ["net"] }
 once_cell.workspace = true
 tempfile = "3.0"
 testresult = "0.4"

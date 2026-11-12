@@ -19,6 +19,20 @@ use std::sync::Mutex;
 // Constant for the boards storage key
 pub const BOARDS_STORAGE_KEY: &[u8] = b"boards_data";
 
+// Cipher material for `DelegateRequest::RegisterDelegate`. freenet-stdlib 0.12
+// dropped the `DEFAULT_CIPHER`/`DEFAULT_NONCE` associated constants, but the
+// values are wire-visible: the node derives the storage key for the delegate's
+// secret store from them. They must stay identical to what previous builds sent
+// or every existing delegate secret becomes unreadable.
+const DEFAULT_CIPHER: [u8; 32] = [
+    0, 24, 22, 150, 112, 207, 24, 65, 182, 161, 169, 227, 66, 182, 237, 215, 206, 164, 58, 161,
+    64, 108, 157, 195, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+const DEFAULT_NONCE: [u8; 24] = [
+    57, 18, 79, 116, 63, 134, 93, 39, 208, 161, 156, 229, 222, 247, 111, 79, 210, 126, 127, 55,
+    224, 150, 139, 80,
+];
+
 // =============================================================================
 // LEGACY DELEGATE MIGRATION
 // When the delegate WASM changes (dependency updates, code changes), the delegate
@@ -28,21 +42,10 @@ pub const BOARDS_STORAGE_KEY: &[u8] = b"boards_data";
 // TODO: Remove entries older than 3 months once users have migrated.
 // =============================================================================
 
-/// Previous delegate keys for migration. Each entry is (delegate_key, code_hash).
-/// Add a new entry here whenever the delegate WASM changes (e.g., dependency updates).
-const LEGACY_DELEGATES: &[([u8; 32], [u8; 32])] = &[
-    // V1: Before freenet-stdlib 0.3.2 MessageOrigin API change (2026-03-14)
-    (
-        [
-            166, 218, 132, 157, 222, 254, 162, 3, 250, 42, 63, 152, 144, 234, 255, 90, 24, 3, 65,
-            29, 107, 145, 150, 181, 162, 135, 29, 6, 94, 126, 174, 97,
-        ],
-        [
-            28, 66, 102, 131, 72, 215, 177, 166, 224, 251, 52, 214, 240, 13, 8, 118, 165, 107, 149,
-            182, 143, 99, 19, 206, 35, 29, 220, 216, 219, 176, 171, 80,
-        ],
-    ),
-];
+// Previous delegate keys for migration, generated from `legacy_delegates.toml`
+// by `ui/build.rs`. Each entry is (delegate_key, code_hash). Add entries with
+// `cargo make add-migration`, never by hand.
+include!(concat!(env!("OUT_DIR"), "/legacy_delegates.rs"));
 
 /// Check if a delegate key matches any known legacy delegate
 pub fn is_legacy_delegate_key(key_bytes: &[u8]) -> bool {
@@ -136,8 +139,8 @@ pub async fn set_up_chat_delegate() -> Result<(), String> {
             info!("Registering chat delegate");
             api.send(DelegateOp(DelegateRequest::RegisterDelegate {
                 delegate,
-                cipher: DelegateRequest::DEFAULT_CIPHER,
-                nonce: DelegateRequest::DEFAULT_NONCE,
+                cipher: DEFAULT_CIPHER,
+                nonce: DEFAULT_NONCE,
             }))
             .await
         } else {

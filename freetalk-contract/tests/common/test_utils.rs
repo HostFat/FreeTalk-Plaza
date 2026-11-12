@@ -68,6 +68,7 @@ pub async fn base_node_test_config_with_rng(
             ws_api_port: Some(ws_api_port),
             token_ttl_seconds: None,
             token_cleanup_interval_seconds: None,
+            ..Default::default()
         },
         network_api: NetworkArgs {
             public_address: Some(Ipv4Addr::LOCALHOST.into()),
@@ -92,6 +93,7 @@ pub async fn base_node_test_config_with_rng(
             ledbat_min_ssthresh: None,
             bbr_startup_rate: None,
             congestion_control: None,
+            ..Default::default()
         },
         config_paths: freenet::config::ConfigPathsArgs {
             config_dir: Some(temp_dir.path().to_path_buf()),
@@ -290,10 +292,9 @@ pub async fn collect_river_node_diagnostics(
         }
 
         if let Some(metrics) = &diag.system_metrics {
-            println!(
-                "  System Metrics: {} active connections, {} seeding contracts",
-                metrics.active_connections, metrics.seeding_contracts
-            );
+            // Print the whole struct: individual fields come and go between
+            // freenet releases, and the diagnostics text is not asserted on.
+            println!("  System Metrics: {metrics:?}");
         }
     }
 

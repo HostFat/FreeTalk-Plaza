@@ -1,0 +1,17 @@
+[toolchain]
+# Pinned so `board_contract.wasm` and `freetalk_delegate.wasm` rebuild to the
+# same bytes on every machine.
+#
+# Why this matters: the delegate key is BLAKE3(BLAKE3(wasm) || params), and the
+# contract key includes the code hash. A different rustc produces different WASM
+# bytes, a different key, and every board stored under the old delegate key
+# becomes invisible. River pins its toolchain for the same reason.
+#
+# When updating this pin:
+#   1. Run `cargo make add-migration` BEFORE changing the pin, so the old
+#      delegate key is recorded in legacy_delegates.toml
+#   2. Rebuild and commit the WASMs in ui/public/contracts and cli/contracts
+#   3. Commit the new legacy_delegates.toml entry in the same change
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

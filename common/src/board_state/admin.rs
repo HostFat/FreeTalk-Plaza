@@ -5,7 +5,7 @@ use crate::ChatBoardStateV1;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
@@ -17,7 +17,7 @@ pub struct AdminsV1 {
 
 impl ComposableState for AdminsV1 {
     type ParentState = ChatBoardStateV1;
-    type Summary = HashSet<MemberId>;
+    type Summary = BTreeSet<MemberId>;
     type Delta = AdminsDelta;
     type Parameters = ChatBoardParametersV1;
 

@@ -143,6 +143,14 @@ impl ChatBoardStateV1 {
                 || !banned_user_ids.contains(&ban.banned_by)
         });
 
+        // 5b. Enforce the ban cap after the removals above. Doing it here (and
+        // not only when a delta arrives) means lowering `max_user_bans` in the
+        // configuration trims the collection deterministically instead of
+        // leaving a state that `verify` rejects forever.
+        let mut bans = std::mem::take(&mut self.bans);
+        bans.enforce_cap(self, parameters);
+        self.bans = bans;
+
         // 6. Re-sort for deterministic ordering
         self.members.members.sort_by_key(|m| m.member.id());
         self.member_info
@@ -150,6 +158,15 @@ impl ChatBoardStateV1 {
             .sort_by_key(|info| info.member_info.member_id);
 
         Ok(())
+    }
+
+    /// Run the same cleanup `apply_delta` runs after every update.
+    ///
+    /// Exposed so the contract can check whether a state it is asked to accept
+    /// is already normalized: a state that cleanup would change makes peers
+    /// rewrite it on every round trip instead of converging.
+    pub fn normalize(&mut self, parameters: &ChatBoardParametersV1) -> Result<(), String> {
+        self.post_apply_cleanup(parameters)
     }
 }
 
@@ -173,8 +190,70 @@ mod tests {
     use crate::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
     use crate::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
     use ed25519_dalek::SigningKey;
+    use freenet_scaffold::util::FastHash;
     use std::fmt::Debug;
     use std::time::SystemTime;
+
+    #[test]
+    fn cleanup_is_idempotent_and_enforces_the_ban_cap() {
+        let (mut state, parameters, owner_key) = create_empty_chat_board_state();
+        let owner_id = parameters.owner_id();
+
+        // A member with no messages is pruned by cleanup.
+        let member_key = SigningKey::generate(&mut rand::thread_rng());
+        let member_id = MemberId::from(member_key.verifying_key());
+        state.members.members.push(AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk: member_key.verifying_key(),
+            },
+            &owner_key,
+        ));
+
+        // Two bans over a cap of one, the owner's being the newest.
+        let mut cfg = state.configuration.configuration.clone();
+        cfg.max_user_bans = 1;
+        cfg.configuration_version += 1;
+        state.configuration = AuthorizedConfigurationV1::new(cfg, &owner_key);
+
+        let at = |secs: u64| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        state.bans = BansV1(vec![
+            AuthorizedUserBan::new(
+                UserBan {
+                    owner_member_id: owner_id,
+                    banned_at: at(1),
+                    banned_user: MemberId(FastHash(21)),
+                },
+                member_id,
+                &member_key,            ),
+            AuthorizedUserBan::new(
+                UserBan {
+                    owner_member_id: owner_id,
+                    banned_at: at(2),
+                    banned_user: MemberId(FastHash(23)),
+                },
+                owner_id,
+                &owner_key,
+            ),
+        ]);
+
+        let mut once = state.clone();
+        once.normalize(&parameters).unwrap();
+        let mut twice = once.clone();
+        twice.normalize(&parameters).unwrap();
+
+        assert_eq!(once, twice, "cleanup must be a fixpoint");
+        assert!(
+            once.members.members.is_empty(),
+            "a member without messages is pruned"
+        );
+        assert_eq!(once.bans.0.len(), 1, "the cap is enforced during cleanup");
+        assert_eq!(
+            once.bans.0[0].banned_by, owner_id,
+            "the owner's ban survives the cap"
+        );
+    }
 
     #[test]
     fn test_state() {

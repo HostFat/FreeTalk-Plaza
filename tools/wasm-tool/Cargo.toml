@@ -1,0 +1,14 @@
+[workspace]
+
+[package]
+name = "wasm-tool"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Host-only helper: computes BLAKE3 hashes of the committed WASMs and maintains
+# legacy_delegates.toml. Deliberately outside the main workspace so it is never
+# built for wasm32 and never affects the contract/delegate bytes.
+
+[dependencies]
+blake3 = "1.5.3"

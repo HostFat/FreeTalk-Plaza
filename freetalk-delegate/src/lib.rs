@@ -43,21 +43,12 @@ impl DelegateInterface for ChatDelegate {
             InboundDelegateMsg::SubscribeContractResponse(_) => "subscribe contract response",
             InboundDelegateMsg::ContractNotification(_) => "contract notification",
             InboundDelegateMsg::DelegateMessage(_) => "delegate message",
+            _ => "unknown message",
         };
 
         logging::info(&format!("Delegate received message of type {message_type}"));
 
-        // Verify that origin is provided - this is the authenticated origin
-        let caller_origin: Origin = match origin {
-            Some(MessageOrigin::WebApp(contract_id)) => Origin(contract_id.as_bytes().to_vec()),
-            None => {
-                logging::info("Missing message origin");
-                return Err(DelegateError::Other(format!(
-                    "missing message origin for message type: {:?}",
-                    message_type
-                )));
-            }
-        };
+        let caller_origin: Origin = check_origin(origin, message_type)?;
 
         let result = match message {
             InboundDelegateMsg::ApplicationMessage(app_msg) => {
@@ -91,6 +82,12 @@ impl DelegateInterface for ChatDelegate {
                     "unexpected message type: {message_type}"
                 )))
             }
+            _ => {
+                logging::info("Received unknown message type");
+                Err(DelegateError::Other(format!(
+                    "unknown message type: {message_type}"
+                )))
+            }
         };
 
         match &result {
@@ -99,5 +96,38 @@ impl DelegateInterface for ChatDelegate {
         }
 
         result
+    }
+}
+
+/// Verify that the request carried an authenticated origin.
+///
+/// `MessageOrigin` is `#[non_exhaustive]` and gained a `Delegate(DelegateKey)`
+/// variant for runtime-attested inter-delegate callers. This delegate is driven
+/// only by the FreeTalk web app, so anything else is rejected.
+fn check_origin(origin: Option<MessageOrigin>, message_type: &str) -> Result<Origin, DelegateError> {
+    match origin {
+        Some(MessageOrigin::WebApp(contract_id)) => Ok(Origin(contract_id.as_bytes().to_vec())),
+        Some(MessageOrigin::Delegate(caller_key)) => {
+            logging::info(&format!(
+                "Rejecting inter-delegate call from caller {caller_key}"
+            ));
+            Err(DelegateError::Other(format!(
+                "freetalk-delegate does not accept inter-delegate calls (caller: {caller_key})"
+            )))
+        }
+        None => {
+            logging::info("Missing message origin");
+            Err(DelegateError::Other(format!(
+                "missing message origin for message type: {message_type:?}"
+            )))
+        }
+        _ => {
+            logging::info("Unknown MessageOrigin variant");
+            Err(DelegateError::Other(
+                "unknown MessageOrigin variant - \
+                 freetalk-delegate must be rebuilt against a newer freenet-stdlib"
+                    .into(),
+            ))
+        }
     }
 }

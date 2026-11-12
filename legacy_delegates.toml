@@ -1,0 +1,35 @@
+# Legacy Delegate Registry
+#
+# Single source of truth for every delegate generation that may still hold a
+# user's boards. A delegate's address is BLAKE3(BLAKE3(wasm) || params), so any
+# change to the delegate WASM re-keys it and the new generation starts with an
+# EMPTY secret store. Recording the keys here is what lets the UI find data
+# written by a previous build instead of silently orphaning it.
+#
+# Fields:
+#   code_hash    = BLAKE3 hash of the raw delegate WASM bytes (hex)
+#   delegate_key = BLAKE3(code_hash_bytes) - the delegate key (hex)
+#
+# The Rust side (ui/build.rs) turns every entry into the LEGACY_DELEGATES const,
+# so adding an entry here is enough - do not edit chat_delegate.rs by hand.
+#
+# To add an entry:   cargo make add-migration
+# To validate:       cargo make check-migration
+# To rebuild WASMs:  cargo make sync-wasm
+#
+# The last entry is the current baseline. When the committed WASM changes, the
+# previous entry must stay in this file or CI fails.
+
+[[entry]]
+version = "V1"
+description = "Before the freenet-stdlib 0.3.2 MessageOrigin change"
+date = "2026-03-14"
+delegate_key = "a6da849ddefea203fa2a3f9890eaff5a1803411d6b9196b5a2871d065e7eae61"
+code_hash = "1c42668348d7b1a6e0fb34d6f00d0876a56b95b68f6313ce231ddcd8dbb0ab50"
+
+[[entry]]
+version = "V2"
+description = "Baseline after the freenet-stdlib 0.12.1 and Dioxus 0.7.10 upgrade"
+date = "2026-11-12"
+delegate_key = "d635c76ddc61e778a83f9f45bd53d61fe80a2608243238dec8d28b742e00abe3"
+code_hash = "96e880ce0e920f8699117acd935f18c55e00fbaf9ac781c6ee42ad54bc67bf58"

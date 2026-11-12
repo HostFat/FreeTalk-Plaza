@@ -6,7 +6,7 @@ use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use freenet_scaffold::util::{fast_hash, FastHash};
 use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
@@ -24,7 +24,7 @@ pub struct MembersV1 {
 
 impl ComposableState for MembersV1 {
     type ParentState = ChatBoardStateV1;
-    type Summary = HashSet<MemberId>;
+    type Summary = BTreeSet<MemberId>;
     type Delta = MembersDelta;
     type Parameters = ChatBoardParametersV1;
 

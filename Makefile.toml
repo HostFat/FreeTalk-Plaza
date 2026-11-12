@@ -4,10 +4,10 @@ default_to_workspace = false
 
 [env]
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
-CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["contracts/board-contract", "contracts/web-container-contract", "delegates/chat-delegate", "ui"]
+CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["common", "freetalk-contract", "freetalk-delegate", "ui", "cli"]
 CONTRACT_TARGET = "wasm32-unknown-unknown"
 CONTRACT_NAME = "board_contract"
-DELEGATE_NAME = "chat_delegate"
+DELEGATE_NAME = "freetalk_delegate"
 BUILD_PROFILE = "release"
 # Comma-separated list of features to enable
 UI_FEATURES = ""
@@ -32,7 +32,7 @@ cwd = "./ui"
 [tasks.build-board-contract]
 description = "Build the board contract WASM"
 command = "cargo"
-args = ["build", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "board-contract", "--target-dir", "target"]
+args = ["build", "--locked", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "board-contract", "--target-dir", "target"]
 
 [tasks.sync-cli-wasm]
 description = "Sync board contract WASM to CLI package for crates.io publishing"
@@ -100,7 +100,7 @@ cargo publish
 [tasks.build-chat-delegate]
 description = "Build the chat delegate WASM"
 command = "cargo"
-args = ["build", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "chat-delegate", "--target-dir", "target"]
+args = ["build", "--locked", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "freetalk-delegate", "--target-dir", "target"]
 
 [tasks.build-web-container]
 description = "Build the web container contract WASM"
@@ -154,7 +154,7 @@ description = "Compress the built webapp into tar.xz"
 dependencies = ["build-ui-with-cleanup"]
 script = '''
 mkdir -p target/webapp
-cd target/dx/river-ui/${BUILD_PROFILE}/web/public && \
+cd target/dx/freetalk-ui/${BUILD_PROFILE}/web/public && \
 tar -cJf ../../../../../webapp/webapp.tar.xz *
 '''
 
@@ -226,7 +226,7 @@ args = ["test", "--package", "river-core", "--target-dir", "target/native", "--t
 [tasks.test-chat-delegate]
 description = "Run tests for chat-delegate"
 command = "cargo"
-args = ["test", "--package", "chat-delegate", "--target-dir", "target/native", "--target", "x86_64-unknown-linux-gnu"]
+args = ["test", "--package", "freetalk-delegate", "--target-dir", "target/native"]
 
 [tasks.test]
 description = "Run all tests"
@@ -452,4 +452,17 @@ dependencies = ["build-chat-delegate"]
 command = "dx"
 args = ["serve"]
 cwd = "./ui"
+[tasks.sync-wasm]
+description = "Build the board contract and delegate WASMs and copy them to the committed locations"
+command = "cargo"
+args = ["run", "--manifest-path", "tools/wasm-tool/Cargo.toml", "--", "sync"]
 
+[tasks.check-migration]
+description = "Fail when the committed delegate WASM changed without a legacy_delegates.toml entry"
+command = "cargo"
+args = ["run", "--manifest-path", "tools/wasm-tool/Cargo.toml", "--", "check"]
+
+[tasks.add-migration]
+description = "Record the committed delegate WASM in legacy_delegates.toml (usage: cargo make add-migration V3 \"what changed\")"
+command = "cargo"
+args = ["run", "--manifest-path", "tools/wasm-tool/Cargo.toml", "--", "add", "${@}"]

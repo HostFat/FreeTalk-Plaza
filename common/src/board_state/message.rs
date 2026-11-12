@@ -8,7 +8,7 @@ use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use freenet_scaffold::util::{fast_hash, FastHash};
 use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::time::SystemTime;
 
@@ -38,7 +38,7 @@ pub struct MessagesV1 {
 
 impl ComposableState for MessagesV1 {
     type ParentState = ChatBoardStateV1;
-    type Summary = Vec<MessageId>;
+    type Summary = BTreeSet<MessageId>;
     type Delta = Vec<AuthorizedMessageV1>;
     type Parameters = ChatBoardParametersV1;
 
@@ -1070,8 +1070,11 @@ mod tests {
 
         let summary = messages.summarize(&parent_state, &parameters);
         assert_eq!(summary.len(), 2);
-        assert_eq!(summary[0], authorized_message1.id());
-        assert_eq!(summary[1], authorized_message2.id());
+        // The summary is a set ordered by MessageId, not insertion order: peers
+        // receive messages in different orders and must still produce identical
+        // summary bytes.
+        assert!(summary.contains(&authorized_message1.id()));
+        assert!(summary.contains(&authorized_message2.id()));
 
         // Test empty messages
         let empty_messages = MessagesV1::default();
@@ -1108,7 +1111,7 @@ mod tests {
         };
 
         // Test with partial old summary
-        let old_summary = vec![authorized_message1.id(), authorized_message2.id()];
+        let old_summary: BTreeSet<MessageId> = [authorized_message1.id(), authorized_message2.id()].into_iter().collect();
         let delta = messages
             .delta(&parent_state, &parameters, &old_summary)
             .unwrap();
@@ -1116,7 +1119,7 @@ mod tests {
         assert_eq!(delta[0], authorized_message3);
 
         // Test with empty old summary
-        let empty_summary: Vec<MessageId> = vec![];
+        let empty_summary: BTreeSet<MessageId> = BTreeSet::new();
         let full_delta = messages
             .delta(&parent_state, &parameters, &empty_summary)
             .unwrap();
@@ -1124,11 +1127,13 @@ mod tests {
         assert_eq!(full_delta, messages.messages);
 
         // Test with full old summary (no changes)
-        let full_summary = vec![
+        let full_summary: BTreeSet<MessageId> = [
             authorized_message1.id(),
             authorized_message2.id(),
             authorized_message3.id(),
-        ];
+        ]
+        .into_iter()
+        .collect();
         let no_delta = messages.delta(&parent_state, &parameters, &full_summary);
         assert!(no_delta.is_none());
     }

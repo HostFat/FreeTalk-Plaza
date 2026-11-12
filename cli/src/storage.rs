@@ -338,8 +338,8 @@ mod tests {
         let (retrieved_sk, retrieved_state, _) = storage.get_board(&owner_vk).unwrap().unwrap();
         assert_eq!(retrieved_sk.to_bytes(), owner_sk.to_bytes());
         assert_eq!(
-            retrieved_state.configuration.configuration.max_members,
-            state.configuration.configuration.max_members
+            retrieved_state.configuration.configuration.max_admins,
+            state.configuration.configuration.max_admins
         );
     }
 
@@ -364,8 +364,8 @@ mod tests {
         // The contract key should match the expected key (computed from owner_vk + current WASM)
         assert_eq!(retrieved_key, contract_key.id().to_string());
         assert_eq!(
-            retrieved_state.configuration.configuration.max_members,
-            state.configuration.configuration.max_members
+            retrieved_state.configuration.configuration.max_admins,
+            state.configuration.configuration.max_admins
         );
     }
 }
