@@ -81,7 +81,12 @@ pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
         let self_sk = board_data.self_sk.clone();
         let board_state_clone = board_data.board_state.clone();
 
-        let admin = Admin { member_id };
+        let admin = Admin {
+            member_id,
+            // A generation higher than any previous grant or revocation, so a
+            // re-added member gets their rights back.
+            generation: board_data.board_state.admin.next_generation(&member_id),
+        };
 
         // Close modal and reset selection
         on_close.call(());

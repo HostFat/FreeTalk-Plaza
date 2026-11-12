@@ -153,7 +153,7 @@ impl ChatBoardStateV1 {
 
         // 5c. Revocations win over admin records, so drop any admin the owner
         // has revoked. Running it here keeps merged states normalized.
-        self.admin.prune_revoked();
+        self.admin.resolve_conflicts();
 
         // 6. Re-sort for deterministic ordering
         self.members.members.sort_by_key(|m| m.member.id());

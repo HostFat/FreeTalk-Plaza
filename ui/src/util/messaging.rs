@@ -260,7 +260,7 @@ pub async fn send_message(
 pub async fn revoke_admin(member_id: MemberId) -> Result<(), String> {
     use crate::components::app::CURRENT_BOARD;
 
-    let (current_board, owner_sk, board_state_clone) = {
+    let (current_board, owner_sk, board_state_clone, generation) = {
         let current_board_read = CURRENT_BOARD.read();
         let boards_read = BOARDS.read();
 
@@ -281,10 +281,11 @@ pub async fn revoke_admin(member_id: MemberId) -> Result<(), String> {
             current_board,
             board_data.self_sk.clone(),
             board_data.board_state.clone(),
+            board_data.board_state.admin.next_generation(&member_id),
         )
     };
 
-    let revocation = AuthorizedAdminRevocation::new(member_id, &owner_sk);
+    let revocation = AuthorizedAdminRevocation::new(member_id, generation, &owner_sk);
     let delta = ChatBoardStateV1Delta {
         admin: Some(AdminsDelta::revocation(vec![revocation])),
         ..Default::default()

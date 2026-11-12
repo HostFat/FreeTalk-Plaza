@@ -5,17 +5,20 @@ use crate::ChatBoardStateV1;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 
+/// Admin records plus the owner's revocations.
+///
+/// Every record carries a generation chosen by the owner. For a member the
+/// highest generation decides: an admin record grants the rights, a revocation
+/// removes them, and on a tie the revocation wins. Merging is therefore order
+/// independent, and the owner can still re-add someone after revoking them by
+/// issuing a higher generation.
 #[derive(Serialize, Deserialize, Eq, PartialEq, Clone, Debug, Default)]
 pub struct AdminsV1 {
     pub admins: Vec<AuthorizedAdmin>,
-    /// Owner-signed revocations. A revocation is permanent and wins over any
-    /// admin record for the same member, so the outcome does not depend on the
-    /// order in which peers merge.
     #[serde(default)]
     pub revoked: Vec<AuthorizedAdminRevocation>,
 }
@@ -55,27 +58,51 @@ impl ComposableState for AdminsV1 {
             revocation.verify_signature(&parameters.owner)?;
         }
 
-        // Revocations win over admin records, so a state that still lists a
-        // revoked member is not normalized.
-        if self
-            .admins
-            .iter()
-            .any(|a| self.revoked.iter().any(|r| r.id() == a.admin.id()))
-        {
-            return Err("Revoked members must not be listed as admins".to_string());
+        // One record per member: the winner is decided by generation when the
+        // lists are merged, so a normalized state has no member in both.
+        for admin in &self.admins {
+            if self.revoked.iter().any(|r| r.id() == admin.admin.id()) {
+                return Err("A member cannot be both admin and revoked".to_string());
+            }
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        if !self.admins.iter().all(|a| seen.insert(a.admin.id())) {
+            return Err("Duplicate admin records".to_string());
+        }
+        seen.clear();
+        if !self.revoked.iter().all(|r| seen.insert(r.id())) {
+            return Err("Duplicate revocation records".to_string());
         }
 
         Ok(())
     }
+
     fn summarize(
         &self,
         _parent_state: &Self::ParentState,
         _parameters: &Self::Parameters,
     ) -> Self::Summary {
-        AdminsSummary {
-            present: self.admins.iter().map(|m| m.admin.id()).collect(),
-            revoked: self.revoked.iter().map(|r| r.id()).collect(),
+        let mut records = BTreeMap::new();
+        for admin in &self.admins {
+            records.insert(
+                admin.admin.id(),
+                AdminRecordState {
+                    generation: admin.admin.generation,
+                    revoked: false,
+                },
+            );
         }
+        for revocation in &self.revoked {
+            records.insert(
+                revocation.id(),
+                AdminRecordState {
+                    generation: revocation.revocation.generation,
+                    revoked: true,
+                },
+            );
+        }
+        AdminsSummary { records }
     }
 
     fn delta(
@@ -84,18 +111,28 @@ impl ComposableState for AdminsV1 {
         _parameters: &Self::Parameters,
         old_state_summary: &Self::Summary,
     ) -> Option<Self::Delta> {
+        // Send a record when the peer's summary does not already reflect it.
+        let is_known = |member: &MemberId, generation: u64, revoked: bool| {
+            old_state_summary
+                .records
+                .get(member)
+                .map(|r| r.generation >= generation && r.revoked == revoked)
+                .unwrap_or(false)
+        };
+
         let added = self
             .admins
             .iter()
-            .filter(|m| !old_state_summary.present.contains(&m.admin.id()))
+            .filter(|a| !is_known(&a.admin.id(), a.admin.generation, false))
             .cloned()
             .collect::<Vec<_>>();
         let revoked = self
             .revoked
             .iter()
-            .filter(|r| !old_state_summary.revoked.contains(&r.id()))
+            .filter(|r| !is_known(&r.id(), r.revocation.generation, true))
             .cloned()
             .collect::<Vec<_>>();
+
         if added.is_empty() && revoked.is_empty() {
             None
         } else {
@@ -112,143 +149,145 @@ impl ComposableState for AdminsV1 {
         let max_admins = parent_state.configuration.configuration.max_admins;
 
         if let Some(delta) = delta {
-            // Build a combined lookup map that includes both existing admins
-            // AND admins being added in this delta. This is necessary because
-            // during merge, a admin and their inviter may both be in the delta
-            // (e.g., admin B invited by admin A, both being added from the
-            // other state). Without this, verify would fail with "Inviter not found".
-            let mut combined_admins_by_id = self.admins_by_member_id();
-            for admin in &delta.added {
-                combined_admins_by_id
-                    .entry(admin.admin.id())
-                    .or_insert(admin);
-            }
-
-            if combined_admins_by_id.len() > max_admins {
-                return Err(format!(
-                    "Too many admins after delta: {} > {}",
-                    combined_admins_by_id.len(),
-                    max_admins
-                ));
-            }
-
             let owner_id = parameters.owner_id();
 
-            // Verify that all new admins have valid signatures and are not the owner
             for admin in &delta.added {
                 if admin.admin.id() == owner_id {
                     return Err("Owner cannot be added as an admin".to_string());
                 }
                 admin.verify_signature(&parameters.owner)?;
             }
+            for revocation in &delta.revoked {
+                revocation.verify_signature(&parameters.owner)?;
+            }
 
-            // Add ALL new admins (deduplicated).
-            // This ensures CRDT convergence: regardless of delta order, the same set of
-            // admins will be kept.
             for admin in &delta.added {
-                // Skip if this admin already exists
-                if self.admins.iter().any(|m| m.admin.id() == admin.admin.id()) {
-                    continue;
+                let incoming = admin.admin.generation;
+                match self.record_for(&admin.admin.id()) {
+                    Some((local, revoked)) if revoked => {
+                        // A revocation only gives way to a strictly newer grant.
+                        if incoming <= local {
+                            continue;
+                        }
+                    }
+                    Some((local, _)) if incoming <= local => continue,
+                    _ => {}
                 }
+                self.remove_records_for(&admin.admin.id());
                 self.admins.push(admin.clone());
             }
 
-            // Revocations are signed by the owner and win over admin records,
-            // whatever order they arrive in.
             for revocation in &delta.revoked {
-                revocation.verify_signature(&parameters.owner)?;
-                if self.revoked.iter().any(|r| r.id() == revocation.id()) {
-                    continue;
+                let incoming = revocation.revocation.generation;
+                match self.record_for(&revocation.id()) {
+                    Some((local, false)) if incoming < local => continue,
+                    Some((local, true)) if incoming <= local => continue,
+                    _ => {}
                 }
+                self.remove_records_for(&revocation.id());
                 self.revoked.push(revocation.clone());
             }
-            self.admins
-                .retain(|admin| !self.revoked.iter().any(|r| r.id() == admin.admin.id()));
+
+            if self.admins.len() > max_admins {
+                return Err(format!(
+                    "Too many admins after delta: {} > {}",
+                    self.admins.len(),
+                    max_admins
+                ));
+            }
+
+            // Deterministic ordering for CRDT convergence.
+            self.admins.sort_by_key(|a| a.admin.id());
             self.revoked.sort_by_key(|r| r.id());
         }
-
-        // Sort for deterministic ordering (CRDT convergence requirement)
-        self.admins.sort_by_key(|m| m.admin.id());
 
         Ok(())
     }
 }
 
 impl AdminsV1 {
-    /// Note: doesn't include owner
+    /// Note: doesn't include the owner.
     pub fn admins_by_member_id(&self) -> HashMap<MemberId, &AuthorizedAdmin> {
         self.admins.iter().map(|m| (m.admin.id(), m)).collect()
     }
 
-    /* /// Checks if there are any banned admins or admins downstream of banned admins in the invite chain
-    pub fn has_banned_admins(&self, bans_v1: &BansV1, parameters: &ChatBoardParametersV1) -> bool {
-        self.check_banned_admins(bans_v1, parameters).is_some()
+    /// The winning record for a member: (generation, is_revocation).
+    pub fn record_for(&self, member_id: &MemberId) -> Option<(u64, bool)> {
+        if let Some(admin) = self.admins.iter().find(|a| a.admin.id() == *member_id) {
+            return Some((admin.admin.generation, false));
+        }
+        self.revoked
+            .iter()
+            .find(|r| r.id() == *member_id)
+            .map(|r| (r.revocation.generation, true))
     }
 
-    /// Removes banned admins or admins downstream of banned admins in the invite chain
-    fn remove_banned_admins(&mut self, bans_v1: &BansV1, _parameters: &ChatBoardParametersV1) {
-        let mut banned_ids = HashSet::new();
-        for ban in &bans_v1.0 {
-            banned_ids.insert(ban.ban.banned_user);
-            banned_ids.extend(self.get_downstream_admins(ban.ban.banned_user));
-        }
-        self.admins
-            .retain(|m| !banned_ids.contains(&m.admin.id()));
-    }
-
-    /// Checks for banned admins and returns a set of admin IDs to be removed if any are found.
-    /// Uses chain walking without Ed25519 verification since we only need to check adminship,
-    /// not cryptographic validity.
-    fn check_banned_admins(
-        &self,
-        bans_v1: &BansV1,
-        parameters: &ChatBoardParametersV1,
-    ) -> Option<HashSet<MemberId>> {
-        let banned_user_ids: HashSet<MemberId> =
-            bans_v1.0.iter().map(|b| b.ban.banned_user).collect();
-        if banned_user_ids.is_empty() {
-            return None;
-        }
-
-        let admins_by_id = self.admins_by_member_id();
-        let owner_id = parameters.owner_id();
-        let mut result = HashSet::new();
-
-        for m in &self.admins {
-            // Walk the invite chain without Ed25519 verification
-            let chain_ids = Self::invite_chain_ids(m, owner_id, &admins_by_id);
-            if chain_ids.iter().any(|id| banned_user_ids.contains(id)) {
-                result.insert(m.admin.id());
-            }
-        }
-
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
-    }*/
-    /// Whether the owner has revoked this member's admin rights.
     pub fn is_revoked(&self, member_id: &MemberId) -> bool {
         self.revoked.iter().any(|r| r.id() == *member_id)
     }
 
-    /// Drop admin records whose member has been revoked. Used by the state
-    /// cleanup so merges converge on the owner's decision.
-    pub fn prune_revoked(&mut self) {
-        if self.revoked.is_empty() {
-            return;
+    /// Generation the owner should use for the next change to this member.
+    pub fn next_generation(&self, member_id: &MemberId) -> u64 {
+        self.record_for(member_id)
+            .map(|(generation, _)| generation + 1)
+            .unwrap_or(1)
+    }
+
+    fn remove_records_for(&mut self, member_id: &MemberId) {
+        self.admins.retain(|a| a.admin.id() != *member_id);
+        self.revoked.retain(|r| r.id() != *member_id);
+    }
+
+    /// Keep only the winning record per member. Used by the state cleanup so
+    /// merged states stay normalized.
+    pub fn resolve_conflicts(&mut self) {
+        let mut conflicts: Vec<MemberId> = self
+            .admins
+            .iter()
+            .filter(|a| self.revoked.iter().any(|r| r.id() == a.admin.id()))
+            .map(|a| a.admin.id())
+            .collect();
+        conflicts.sort();
+        conflicts.dedup();
+
+        for member_id in conflicts {
+            let admin = self
+                .admins
+                .iter()
+                .find(|a| a.admin.id() == member_id)
+                .cloned();
+            let revocation = self
+                .revoked
+                .iter()
+                .find(|r| r.id() == member_id)
+                .cloned();
+            self.remove_records_for(&member_id);
+
+            if let (Some(admin), Some(revocation)) = (admin, revocation) {
+                // On a tie the revocation wins, matching apply_delta.
+                if revocation.revocation.generation >= admin.admin.generation {
+                    self.revoked.push(revocation);
+                } else {
+                    self.admins.push(admin);
+                }
+            }
         }
-        self.admins
-            .retain(|admin| !self.revoked.iter().any(|r| r.id() == admin.admin.id()));
+
+        self.admins.sort_by_key(|a| a.admin.id());
+        self.revoked.sort_by_key(|r| r.id());
     }
 }
 
-/// Summary of the admin state: who is an admin and who the owner has revoked.
+/// Summary of the admin state: the winning record for every member.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
 pub struct AdminsSummary {
-    pub present: BTreeSet<MemberId>,
-    pub revoked: BTreeSet<MemberId>,
+    pub records: BTreeMap<MemberId, AdminRecordState>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AdminRecordState {
+    pub generation: u64,
+    pub revoked: bool,
 }
 
 #[derive(Serialize, Deserialize, Eq, PartialEq, Clone, Debug)]
@@ -292,7 +331,6 @@ impl AuthorizedAdmin {
     }
 
     /// Create an AuthorizedAdmin with a pre-computed signature.
-    /// Use this when signing is done externally (e.g., via delegate).
     pub fn with_signature(admin: Admin, signature: Signature) -> Self {
         Self { admin, signature }
     }
@@ -312,12 +350,16 @@ impl Hash for AuthorizedAdmin {
 #[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Clone)]
 pub struct Admin {
     pub member_id: MemberId,
+    /// Owner-chosen generation. Higher generations supersede lower ones.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 impl fmt::Debug for Admin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Admin")
             .field("member_id", &format_args!("{}", self.member_id))
+            .field("generation", &self.generation)
             .finish()
     }
 }
@@ -332,6 +374,8 @@ impl Admin {
 #[derive(Serialize, Deserialize, Eq, PartialEq, Hash, Clone, Copy, Debug)]
 pub struct AdminRevocation {
     pub member_id: MemberId,
+    #[serde(default)]
+    pub generation: u64,
 }
 
 impl AdminRevocation {
@@ -347,8 +391,11 @@ pub struct AuthorizedAdminRevocation {
 }
 
 impl AuthorizedAdminRevocation {
-    pub fn new(member_id: MemberId, owner_sk: &SigningKey) -> Self {
-        let revocation = AdminRevocation { member_id };
+    pub fn new(member_id: MemberId, generation: u64, owner_sk: &SigningKey) -> Self {
+        let revocation = AdminRevocation {
+            member_id,
+            generation,
+        };
         Self {
             signature: sign_struct(&revocation, owner_sk),
             revocation,
@@ -391,91 +438,118 @@ mod revocation_tests {
         }
     }
 
+    fn grant(member_id: MemberId, generation: u64, owner: &SigningKey) -> AuthorizedAdmin {
+        AuthorizedAdmin::new(
+            Admin {
+                member_id,
+                generation,
+            },
+            owner,
+        )
+    }
+
     #[test]
-    fn owner_revocation_removes_the_admin_and_survives_merge_order() {
+    fn revoke_then_readd_with_a_newer_generation() {
         let owner = owner_key();
         let admin_id = MemberId::from(member_key().verifying_key());
         let params = params(&owner);
         let parent = ChatBoardStateV1::default();
 
-        let added = AuthorizedAdmin::new(
-            Admin {
-                member_id: admin_id,
-            },
-            &owner,
-        );
-        let revoked = AuthorizedAdminRevocation::new(admin_id, &owner);
-
-        // Add, then revoke.
-        let mut first = AdminsV1::default();
-        first
-            .apply_delta(&parent, &params, &Some(AdminsDelta::new(vec![added.clone()])))
+        let mut admins = AdminsV1::default();
+        admins
+            .apply_delta(&parent, &params, &Some(AdminsDelta::new(vec![grant(admin_id, 1, &owner)])))
             .unwrap();
-        first
+        assert_eq!(admins.admins.len(), 1);
+        assert_eq!(admins.next_generation(&admin_id), 2);
+
+        admins
             .apply_delta(
                 &parent,
                 &params,
-                &Some(AdminsDelta::revocation(vec![revoked.clone()])),
+                &Some(AdminsDelta::revocation(vec![AuthorizedAdminRevocation::new(
+                    admin_id, 2, &owner,
+                )])),
             )
             .unwrap();
-        assert!(first.admins.is_empty());
-        assert!(first.is_revoked(&admin_id));
-        first.verify(&parent, &params).unwrap();
+        assert!(admins.admins.is_empty());
+        assert!(admins.is_revoked(&admin_id));
+        admins.verify(&parent, &params).unwrap();
 
-        // Revoke, then add: the revocation wins and the admin does not come back.
-        let mut second = AdminsV1::default();
-        second
-            .apply_delta(
-                &parent,
-                &params,
-                &Some(AdminsDelta::revocation(vec![revoked])),
-            )
+        admins
+            .apply_delta(&parent, &params, &Some(AdminsDelta::new(vec![grant(admin_id, 3, &owner)])))
             .unwrap();
-        second
-            .apply_delta(&parent, &params, &Some(AdminsDelta::new(vec![added])))
-            .unwrap();
-        assert!(second.admins.is_empty());
-        assert_eq!(first, second);
+        assert_eq!(admins.admins.len(), 1);
+        assert!(!admins.is_revoked(&admin_id));
+        admins.verify(&parent, &params).unwrap();
     }
 
     #[test]
-    fn non_owner_revocation_is_rejected() {
+    fn stale_records_are_ignored_in_both_orders() {
+        let owner = owner_key();
+        let admin_id = MemberId::from(member_key().verifying_key());
+        let params = params(&owner);
+        let parent = ChatBoardStateV1::default();
+
+        let revocation = AuthorizedAdminRevocation::new(admin_id, 2, &owner);
+        let grant_v3 = grant(admin_id, 3, &owner);
+
+        // Revocation first, then the newer grant.
+        let mut a = AdminsV1::default();
+        a.apply_delta(&parent, &params, &Some(AdminsDelta::revocation(vec![revocation.clone()])))
+            .unwrap();
+        a.apply_delta(&parent, &params, &Some(AdminsDelta::new(vec![grant_v3.clone()])))
+            .unwrap();
+
+        // The reverse order must converge to the same state.
+        let mut b = AdminsV1::default();
+        b.apply_delta(&parent, &params, &Some(AdminsDelta::new(vec![grant_v3])))
+            .unwrap();
+        b.apply_delta(&parent, &params, &Some(AdminsDelta::revocation(vec![revocation])))
+            .unwrap();
+
+        assert_eq!(a, b);
+        assert_eq!(a.admins.len(), 1);
+        assert!(a.revoked.is_empty());
+    }
+
+    #[test]
+    fn an_older_grant_does_not_beat_a_revocation() {
+        let owner = owner_key();
+        let admin_id = MemberId::from(member_key().verifying_key());
+        let params = params(&owner);
+        let parent = ChatBoardStateV1::default();
+
+        let mut admins = AdminsV1::default();
+        admins
+            .apply_delta(
+                &parent,
+                &params,
+                &Some(AdminsDelta::revocation(vec![AuthorizedAdminRevocation::new(
+                    admin_id, 5, &owner,
+                )])),
+            )
+            .unwrap();
+        admins
+            .apply_delta(&parent, &params, &Some(AdminsDelta::new(vec![grant(admin_id, 4, &owner)])))
+            .unwrap();
+
+        assert!(admins.admins.is_empty());
+        assert!(admins.is_revoked(&admin_id));
+        admins.verify(&parent, &params).unwrap();
+    }
+
+    #[test]
+    fn non_owner_revocations_are_rejected() {
         let owner = owner_key();
         let admin_id = MemberId::from(member_key().verifying_key());
         let imposter = SigningKey::from_bytes(&[3u8; 32]);
         let params = params(&owner);
         let parent = ChatBoardStateV1::default();
 
-        let fake = AuthorizedAdminRevocation::new(admin_id, &imposter);
+        let fake = AuthorizedAdminRevocation::new(admin_id, 1, &imposter);
         let mut admins = AdminsV1::default();
         assert!(admins
-            .apply_delta(
-                &parent,
-                &params,
-                &Some(AdminsDelta::revocation(vec![fake])),
-            )
+            .apply_delta(&parent, &params, &Some(AdminsDelta::revocation(vec![fake])))
             .is_err());
-    }
-
-    #[test]
-    fn verify_rejects_an_admin_that_is_also_revoked() {
-        let owner = owner_key();
-        let admin_id = MemberId::from(member_key().verifying_key());
-        let params = params(&owner);
-        let parent = ChatBoardStateV1::default();
-
-        let mut admins = AdminsV1 {
-            admins: vec![AuthorizedAdmin::new(
-                Admin {
-                    member_id: admin_id,
-                },
-                &owner,
-            )],
-            revoked: vec![AuthorizedAdminRevocation::new(admin_id, &owner)],
-        };
-        assert!(admins.verify(&parent, &params).is_err());
-        admins.prune_revoked();
-        assert!(admins.admins.is_empty());
-        admins.verify(&parent, &params).unwrap();
     }
 }
