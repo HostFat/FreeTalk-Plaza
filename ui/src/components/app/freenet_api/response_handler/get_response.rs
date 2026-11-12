@@ -3,14 +3,13 @@ use crate::components::app::freenet_api::board_synchronizer::BoardSynchronizer;
 use crate::components::app::freenet_api::error::SynchronizerError;
 use crate::components::app::notifications::mark_initial_sync_complete;
 use crate::components::app::sync_info::{BoardSyncStatus, SYNC_INFO};
-use crate::components::app::{BOARDS, CURRENT_BOARD, PENDING_INVITES, READ_ONLY_BOARDS, READ_ONLY_FETCHES, WEB_API};
+use crate::components::app::{BOARDS, CURRENT_BOARD, PENDING_INVITES, WEB_API};
 use crate::constants::BOARD_CONTRACT_WASM;
 use crate::invites::PendingBoardStatus;
 use crate::util::ecies::{decrypt_secret_from_member_blob, decrypt_with_symmetric_key};
 use crate::util::{from_cbor_slice, owner_vk_to_contract_key, to_cbor_vec};
 use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::ReadableExt;
-use ed25519_dalek::VerifyingKey;
 use freenet_scaffold::ComposableState;
 use freenet_stdlib::client_api::{ClientRequest, ContractRequest};
 use freenet_stdlib::prelude::{
@@ -33,35 +32,6 @@ pub async fn handle_get_response(
     state: Vec<u8>,
 ) -> Result<(), SynchronizerError> {
     info!("Received get response for key {key}");
-
-    // Read-only fetch: no local identity, keep the decoded state for display.
-    let read_only_requests: Vec<VerifyingKey> = READ_ONLY_FETCHES.read().iter().copied().collect();
-    for owner_vk in read_only_requests {
-        if owner_vk_to_contract_key(&owner_vk).id() == key.id() {
-            let decoded = if state.is_empty() {
-                None
-            } else {
-                ciborium::de::from_reader::<ChatBoardStateV1, _>(&state[..]).ok()
-            };
-            match decoded {
-                Some(decoded) => {
-                    READ_ONLY_BOARDS.with_mut(|boards| {
-                        boards.insert(owner_vk, decoded);
-                    });
-                }
-                None => {
-                    warn!("Read-only board {:?} is not available", MemberId::from(owner_vk));
-                    crate::components::app::READ_ONLY_UNAVAILABLE.with_mut(|failed| {
-                        failed.insert(owner_vk);
-                    });
-                }
-            }
-            READ_ONLY_FETCHES.with_mut(|pending| {
-                pending.remove(&owner_vk);
-            });
-            return Ok(());
-        }
-    }
 
     // First try to find the owner_vk from SYNC_INFO
     let owner_vk = SYNC_INFO.read().get_owner_vk_for_instance_id(key.id());

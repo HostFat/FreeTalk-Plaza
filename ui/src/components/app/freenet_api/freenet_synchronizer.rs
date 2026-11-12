@@ -6,7 +6,7 @@ use super::error::SynchronizerError;
 use super::response_handler::ResponseHandler;
 use crate::components::app::chat_delegate::{mark_legacy_migration_done, set_up_chat_delegate};
 use crate::components::app::sync_info::{BoardSyncStatus, SYNC_INFO};
-use crate::components::app::{BOARDS, READ_ONLY_FETCHES, SYNC_STATUS, WEB_API};
+use crate::components::app::{BOARDS, SYNC_STATUS, WEB_API};
 use crate::util::{owner_vk_to_contract_key, sleep};
 use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::*;
@@ -64,10 +64,6 @@ pub enum SynchronizerMessage {
         authorized_member: Box<AuthorizedMember>,
         invitee_signing_key: Box<SigningKey>,
         nickname: String,
-    },
-    /// Fetch a board's state without joining it, for read-only display.
-    FetchBoardForRead {
-        owner_vk: VerifyingKey,
     },
 }
 
@@ -228,29 +224,6 @@ impl FreenetSynchronizer {
                             }
                         } else {
                             info!("Successfully processed boards");
-                        }
-                    }
-                    SynchronizerMessage::FetchBoardForRead { owner_vk } => {
-                        info!(
-                            "Fetching board {:?} for read-only view",
-                            MemberId::from(owner_vk)
-                        );
-                        READ_ONLY_FETCHES.with_mut(|pending| {
-                            pending.insert(owner_vk);
-                        });
-                        let contract_key = owner_vk_to_contract_key(&owner_vk);
-                        if let Err(e) = response_handler
-                            .get_board_synchronizer_mut()
-                            .get_contract_state(&contract_key)
-                            .await
-                        {
-                            error!("Read-only fetch failed: {}", e);
-                            READ_ONLY_FETCHES.with_mut(|pending| {
-                                pending.remove(&owner_vk);
-                            });
-                            crate::components::app::READ_ONLY_UNAVAILABLE.with_mut(|failed| {
-                                failed.insert(owner_vk);
-                            });
                         }
                     }
                     SynchronizerMessage::ConnectionLost => {
@@ -471,33 +444,6 @@ impl FreenetSynchronizer {
                                             "Contract not found error for contract ID: {}",
                                             contract_id
                                         );
-
-                                        // A read-only fetch for a board the network does not
-                                        // have: stop waiting and tell the UI.
-                                        let read_only_ids: Vec<VerifyingKey> = READ_ONLY_FETCHES
-                                            .read()
-                                            .iter()
-                                            .copied()
-                                            .collect();
-                                        for owner_vk in read_only_ids {
-                                            if owner_vk_to_contract_key(&owner_vk)
-                                                .id()
-                                                .to_string()
-                                                == contract_id
-                                            {
-                                                warn!(
-                                                    "Read-only board {:?} not found on the network",
-                                                    MemberId::from(owner_vk)
-                                                );
-                                                READ_ONLY_FETCHES.with_mut(|pending| {
-                                                    pending.remove(&owner_vk);
-                                                });
-                                                crate::components::app::READ_ONLY_UNAVAILABLE
-                                                    .with_mut(|failed| {
-                                                        failed.insert(owner_vk);
-                                                    });
-                                            }
-                                        }
 
                                         // Check if this contract ID exists in our boards
                                         // Collect board information first to avoid nested borrows

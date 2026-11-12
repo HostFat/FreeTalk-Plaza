@@ -16,7 +16,7 @@ use crate::components::app::chat_delegate::{
 use crate::components::app::document_title::{mark_current_board_as_read, update_document_title};
 use crate::components::app::notifications::mark_initial_sync_complete;
 use crate::components::app::sync_info::{BoardSyncStatus, SYNC_INFO};
-use crate::components::app::{BOARDS, BOARDS_LOADED, CURRENT_BOARD, DELEGATE_HAD_BOARDS, READ_ONLY_FETCHES};
+use crate::components::app::{BOARDS, BOARDS_LOADED, CURRENT_BOARD, DELEGATE_HAD_BOARDS};
 use crate::util::ecies::{decrypt_secret_from_member_blob, decrypt_with_symmetric_key};
 use crate::util::owner_vk_to_contract_key;
 use ciborium::de::from_reader;
@@ -24,8 +24,6 @@ use dioxus::logger::tracing::{error, info, warn};
 
 use freenet_stdlib::client_api::{ContractResponse, HostResponse};
 use freenet_stdlib::prelude::OutboundDelegateMsg;
-use ed25519_dalek::VerifyingKey;
-use dioxus::prelude::ReadableExt;
 pub use get_response::handle_get_response;
 pub use put_response::handle_put_response;
 use plaza_core::board_state::member::MemberId;
@@ -113,33 +111,6 @@ impl ResponseHandler {
                                 e
                             );
                         }
-                    }
-                }
-                ContractResponse::NotFound { instance_id } => {
-                    // A read-only fetch for a board the network does not have.
-                    let requested: Vec<VerifyingKey> = READ_ONLY_FETCHES
-                        .read()
-                        .iter()
-                        .copied()
-                        .collect();
-                    let mut matched = false;
-                    for owner_vk in requested {
-                        if *crate::util::owner_vk_to_contract_key(&owner_vk).id() == instance_id {
-                            info!(
-                                "Read-only board {:?} not found on the network",
-                                MemberId::from(owner_vk)
-                            );
-                            READ_ONLY_FETCHES.with_mut(|pending| {
-                                pending.remove(&owner_vk);
-                            });
-                            crate::components::app::READ_ONLY_UNAVAILABLE.with_mut(|failed| {
-                                failed.insert(owner_vk);
-                            });
-                            matched = true;
-                        }
-                    }
-                    if !matched {
-                        info!("Unhandled contract response: {:?}", contract_response);
                     }
                 }
                 _ => {

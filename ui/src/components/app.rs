@@ -30,8 +30,6 @@ use ed25519_dalek::VerifyingKey;
 use freenet_stdlib::client_api::WebApi;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
-use std::str::FromStr;
-
 use wasm_bindgen_futures::spawn_local;
 use web_sys::window;
 
@@ -72,21 +70,9 @@ pub static BOARDS_LOADED: GlobalSignal<bool> = Global::new(|| false);
 /// refuse writing an empty map over real data if a load ever fails validation.
 pub static DELEGATE_HAD_BOARDS: GlobalSignal<bool> = Global::new(|| false);
 
-/// Board states fetched from the network without a local identity, shown
-/// read-only. Keyed by the board's owner key.
-pub static READ_ONLY_BOARDS: GlobalSignal<
-    std::collections::HashMap<VerifyingKey, plaza_core::ChatBoardStateV1>,
-> = Global::new(std::collections::HashMap::new);
-
-/// Read-only fetches in flight.
-pub static READ_ONLY_FETCHES: GlobalSignal<std::collections::HashSet<VerifyingKey>> =
-    Global::new(std::collections::HashSet::new);
-
-/// Boards whose read-only fetch came back empty or undecodable.
-pub static READ_ONLY_UNAVAILABLE: GlobalSignal<std::collections::HashSet<VerifyingKey>> =
-    Global::new(std::collections::HashSet::new);
 pub static CURRENT_BOARD: GlobalSignal<CurrentBoard> =
     Global::new(|| CurrentBoard { owner_key: None });
+
 pub static MEMBER_INFO_MODAL: GlobalSignal<MemberInfoModalSignal> =
     Global::new(|| MemberInfoModalSignal { member: None });
 /// Whether the "About FreeTalk Plaza" panel is open.
@@ -328,25 +314,50 @@ fn Invite(invite_code: String) -> Element {
 }
 
 /// Guard for board routes - returns Some(Element) if board not found, None if OK
-fn board_guard(board_id: &str) -> Option<Element> {
-    // Parse and sync the board
-    sync_board_from_url(board_id);
+#[component]
+fn BoardGate(board_id: String, children: Element) -> Element {
+    sync_board_from_url(&board_id);
 
-    // Check if the board exists in our map
-    let board_exists = parse_board_key(board_id)
-        .map(|vk| BOARDS.read().map.contains_key(&vk))
-        .unwrap_or(false);
+    let parsed = parse_board_key(&board_id);
+    // Reading BOARDS here (not in a plain function called by the route) makes the
+    // gate re-render when the delegate load delivers the board. Without this, a
+    // page reload left the "not found" screen on display even after the board
+    // appeared in the list, because the route component never re-ran.
+    let exists = use_memo(move || {
+        parsed
+            .map(|key| BOARDS.read().map.contains_key(&key))
+            .unwrap_or(false)
+    });
+    let boards_loaded = *crate::components::app::BOARDS_LOADED.read();
 
-    if board_exists {
-        None
-    } else {
-        // On a page reload the route is known before the delegate load finishes,
-        // so the board is briefly missing. Show a loading state and let
-        // WaitingForBoard re-enter the route once the board arrives, instead of
-        // a dead-end error.
-        Some(rsx! {
-            WaitingForBoard { board_id: board_id.to_string() }
-        })
+    if exists() {
+        return children;
+    }
+
+    rsx! {
+        div { class: "flex-1 flex flex-col items-center justify-center p-8 text-center",
+            if boards_loaded {
+                p { class: "text-xl text-text-muted mb-2", "Board not found" }
+                p { class: "text-text-muted mb-6 text-sm",
+                    "This board is not stored on this device. If you were invited, open the invitation link again."
+                }
+            } else {
+                p { class: "text-xl text-text-muted mb-2", "Loading board…" }
+                p { class: "text-text-muted mb-6 text-sm",
+                    "Waiting for the board state. It appears in the list above as soon as it is loaded."
+                }
+            }
+            button {
+                r#type: "button",
+                class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text rounded-lg transition-colors inline-block",
+                onclick: move |_| {
+                    if let Some(win) = web_sys::window() {
+                        let _ = win.location().set_hash("/");
+                    }
+                },
+                "Go to Home"
+            }
+        }
     }
 }
 
@@ -357,233 +368,42 @@ fn parse_board_key(board_id: &str) -> Option<VerifyingKey> {
     }
     VerifyingKey::from_bytes(&bytes.try_into().ok()?).ok()
 }
-
-/// Shown while the board referenced by the URL is not in memory yet.
-///
-/// It watches BOARDS and re-enters the current route when the board appears,
-/// which re-runs the guard. Without this, a reload left the guard's error on
-/// screen even after the delegate had loaded the board.
-#[component]
-fn WaitingForBoard(board_id: String) -> Element {
-    let parsed = parse_board_key(&board_id);
-    let ready = use_memo(move || {
-        parsed
-            .map(|key| BOARDS.read().map.contains_key(&key))
-            .unwrap_or(false)
-    });
-    // Once the delegate load is done, a missing board is genuinely unknown.
-    let boards_loaded = *crate::components::app::BOARDS_LOADED.read();
-    let read_only_state = use_memo(move || {
-        parsed.and_then(|key| crate::components::app::READ_ONLY_BOARDS.read().get(&key).cloned())
-    });
-    let mut requested = use_signal(|| false);
-    let unavailable = use_memo(move || {
-        parsed
-            .map(|key| crate::components::app::READ_ONLY_UNAVAILABLE.read().contains(&key))
-            .unwrap_or(false)
-    });
-
-    use_effect(move || {
-        if *ready.read() {
-            let path = web_sys::window()
-                .and_then(|w| w.location().hash().ok())
-                .unwrap_or_default();
-            let path = path.trim_start_matches('#');
-            if let Ok(route) = Route::from_str(path) {
-                navigator().replace(route);
-            }
-        }
-    });
-
-    if let Some(state) = read_only_state.read().clone() {
-        return rsx! {
-            ReadOnlyBoardView { board_id: board_id.clone(), state: state }
-        };
-    }
-
-    rsx! {
-        div { class: "flex-1 flex flex-col items-center justify-center p-8 text-center",
-            if boards_loaded {
-                p { class: "text-xl text-text-muted mb-2", "Board not found" }
-                p { class: "text-text-muted mb-6 text-sm",
-                    if *unavailable.read() {
-                        "The network does not have this board either. Check the link, or open the invitation again."
-                    } else {
-                        "This board is not stored on this device. You can open it read-only, or open the invitation link again if you have one."
-                    }
-                }
-            } else {
-                p { class: "text-xl text-text-muted mb-2", "Loading board…" }
-                p { class: "text-text-muted mb-6 text-sm",
-                    "Waiting for the board state. It appears in the list above as soon as it is loaded."
-                }
-            }
-            div { class: "flex items-center gap-3",
-                button {
-                    r#type: "button",
-                    class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text rounded-lg transition-colors inline-block",
-                    onclick: move |_| {
-                        if let Some(win) = web_sys::window() {
-                            let _ = win.location().set_hash("/");
-                        }
-                    },
-                    "Go to Home"
-                }
-                if boards_loaded && !*unavailable.read() {
-                    button {
-                        r#type: "button",
-                        class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white rounded-lg transition-colors inline-block disabled:opacity-50",
-                        disabled: *requested.read()
-                            || crate::components::app::READ_ONLY_FETCHES
-                                .read()
-                                .iter()
-                                .any(|key| Some(*key) == parsed),
-                        onclick: move |_| {
-                            if let Some(key) = parsed {
-                                requested.set(true);
-                                let _ = SYNCHRONIZER
-                                    .write()
-                                    .get_message_sender()
-                                    .unbounded_send(SynchronizerMessage::FetchBoardForRead {
-                                        owner_vk: key,
-                                    });
-                            }
-                        },
-                        if *requested.read() { "Fetching…" } else { "Open read-only" }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Read-only rendering of a board fetched from the network.
-#[component]
-fn ReadOnlyBoardView(board_id: String, state: plaza_core::ChatBoardStateV1) -> Element {
-    fn nickname(state: &plaza_core::ChatBoardStateV1, id: MemberId) -> String {
-        state
-            .member_info
-            .member_info
-            .iter()
-            .find(|info| info.member_info.member_id == id)
-            .map(|info| info.member_info.preferred_nickname.to_string_lossy())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| format!("{id}"))
-    }
-
-    let mut categories: Vec<String> = Vec::new();
-    let mut posts: Vec<(std::time::SystemTime, String, String)> = Vec::new();
-    for message in &state.recent_messages.messages {
-        let body = &message.message.content;
-        if body.is_category() {
-            if let Some(decoded) = body.decode_content() {
-                categories.push(decoded.to_display_string());
-            }
-        } else if !body.is_action() {
-            posts.push((
-                message.message.time,
-                nickname(&state, message.message.author),
-                body.to_string_lossy(),
-            ));
-        }
-    }
-    posts.sort_by(|a, b| a.0.cmp(&b.0));
-    let short_id: String = board_id.chars().take(8).collect();
-
-    rsx! {
-        div { class: "flex-1 flex flex-col overflow-y-auto",
-            div { class: "bg-amber-500/10 border-b border-amber-500/30 px-6 py-3 text-sm text-amber-200",
-                "Read-only view: this board is not stored on this device, so you cannot post here."
-            }
-            div { class: "px-6 py-5",
-                h1 { class: "text-2xl font-semibold text-text mb-1", "Board {short_id}…" }
-                p { class: "text-text-muted text-sm mb-4",
-                    "{state.members.members.len()} members · {posts.len()} posts · {categories.len()} categories"
-                }
-
-                if !categories.is_empty() {
-                    div { class: "mb-5",
-                        h2 { class: "text-sm uppercase tracking-wide text-text-muted mb-2", "Categories" }
-                        div { class: "flex flex-wrap gap-2",
-                            for category in categories.iter() {
-                                span {
-                                    class: "px-3 py-1 bg-surface rounded-full text-sm text-text",
-                                    "{category}"
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if posts.is_empty() {
-                    p { class: "text-text-muted", "No posts on this board." }
-                } else {
-                    div { class: "space-y-2",
-                        for (_, author, text) in posts.iter() {
-                            div { class: "bg-surface rounded-lg p-3",
-                                p { class: "text-text-muted text-xs mb-1", "{author}" }
-                                p { class: "text-text text-sm whitespace-pre-wrap", "{text}" }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Route component for posts list view
 #[component]
 fn Posts(board_id: String) -> Element {
-    if let Some(guard) = board_guard(&board_id) {
-        return guard;
-    }
-    rsx! { PostsView {} }
+    rsx! { BoardGate { board_id: board_id.clone(), PostsView {} } }
 }
 
 /// Route component for single post view
 #[component]
 fn Post(board_id: String, post_id: String) -> Element {
-    if let Some(guard) = board_guard(&board_id) {
-        return guard;
-    }
-    rsx! { SinglePostView { post_id: post_id } }
+    rsx! { BoardGate { board_id: board_id.clone(), SinglePostView { post_id: post_id } } }
 }
 
 /// Route component for category view (uses PostsView with category_id)
 #[component]
 fn PostsInCategory(board_id: String, category_id: String) -> Element {
-    if let Some(guard) = board_guard(&board_id) {
-        return guard;
+    rsx! {
+        BoardGate { board_id: board_id.clone(), PostsView { category_id: Some(category_id) } }
     }
-    rsx! { PostsView { category_id: Some(category_id) } }
 }
 
 /// Route component for conversation view
 #[component]
 fn ConversationView(board_id: String) -> Element {
-    if let Some(guard) = board_guard(&board_id) {
-        return guard;
-    }
-    rsx! { Conversation {} }
+    rsx! { BoardGate { board_id: board_id.clone(), Conversation {} } }
 }
 
 /// Route component for admin management view
 #[component]
 fn Admin(board_id: String) -> Element {
-    if let Some(guard) = board_guard(&board_id) {
-        return guard;
-    }
-    rsx! { AdminView {} }
+    rsx! { BoardGate { board_id: board_id.clone(), AdminView {} } }
 }
 
 /// Route component for members view
 #[component]
 fn Members(board_id: String) -> Element {
-    if let Some(guard) = board_guard(&board_id) {
-        return guard;
-    }
-    rsx! { MembersView {} }
+    rsx! { BoardGate { board_id: board_id.clone(), MembersView {} } }
 }
 
 /// Route component for 404 not found
