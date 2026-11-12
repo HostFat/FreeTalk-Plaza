@@ -33,7 +33,13 @@ pub fn MemberInfoModal() -> Element {
     // Memoized values
     let owner_key_signal = use_memo(move || CURRENT_BOARD.read().owner_key);
 
-    // Effect to handle closing the modal based on a specific condition
+    // This component is mounted unconditionally in app.rs, so anything returned
+    // while the modal is closed becomes part of the page layout. Every other
+    // modal returns an empty tree when idle; do the same here. All hooks above
+    // have run, so the hook order stays stable.
+    if MEMBER_INFO_MODAL.read().member.is_none() {
+        return rsx! {};
+    }
 
     // Event handlers
     let handle_close_modal = {
@@ -49,7 +55,17 @@ pub fn MemberInfoModal() -> Element {
     let board_state = match current_board_data.as_ref() {
         Some(state) => state,
         None => {
-            return rsx! { div { "Board state not available" } };
+            // The modal is open but the board state is not in memory yet: show
+            // the message inside a real dialog instead of dumping a bare div
+            // into the page flow.
+            return rsx! {
+                div { class: "fixed inset-0 z-50 flex items-center justify-center",
+                    div { class: "absolute inset-0 bg-black/50", onclick: handle_close_modal }
+                    div { class: "relative bg-surface border border-border rounded-lg p-4 text-text-muted",
+                        "Board state not available"
+                    }
+                }
+            };
         }
     };
 
