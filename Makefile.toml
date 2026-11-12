@@ -116,26 +116,10 @@ args = ["build", "--profile", "${BUILD_PROFILE}", "--package", "web-container-to
 [tasks.build-ui]
 description = "Build the Dioxus UI"
 # build-chat-delegate is required because UI includes delegate WASM via include_bytes!
-dependencies = ["build-chat-delegate", "build-tailwind", "uncomment-base-path"]
+dependencies = ["build-chat-delegate", "build-tailwind"]
 command = "dx"
 args = ["build", "--${BUILD_PROFILE}", "--features", "${UI_FEATURES}"]
 cwd = "./ui"
-
-[tasks.uncomment-base-path]
-private = true
-script = '''
-# Match lines starting with optional whitespace, '#', optional whitespace, 'base_path', optional whitespace, '=', and the rest.
-# Replace with the leading whitespace and 'base_path = ...', effectively removing the '#' and the space after it.
-sed -i 's/^\([[:space:]]*\)#[[:space:]]*\(base_path[[:space:]]*=.*\)/\1\2/' ui/Dioxus.toml
-'''
-
-[tasks.comment-base-path]
-private = true
-script = '''
-# Match lines starting with optional whitespace, 'base_path', optional whitespace, '=', and the rest.
-# Replace with the leading whitespace, '#', then 'base_path = ...'.
-sed -i 's/^\([[:space:]]*\)\(base_path[[:space:]]*=.*\)/\1#\2/' ui/Dioxus.toml
-'''
 
 [tasks.touch-ui-files]
 private = true
@@ -145,8 +129,8 @@ touch ui/src/main.rs
 '''
 
 [tasks.build-ui-with-cleanup]
-description = "Build the Dioxus UI and clean up afterwards"
-dependencies = ["touch-ui-files", "build-ui", "comment-base-path"]
+description = "Build the Dioxus UI after refreshing UI sources (used by the packaging tasks)"
+dependencies = ["touch-ui-files", "build-ui"]
 
 
 [tasks.compress-webapp]

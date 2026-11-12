@@ -9,9 +9,13 @@ use ed25519_dalek::SigningKey;
 use plaza_core::board_state::member::{AuthorizedMember, Member};
 use std::rc::Rc;
 
-/// Fallback URL for non-browser environments or when window.location is unavailable
+/// Fallback URL for non-browser environments or when window.location is unavailable.
+///
+/// This is the FreeTalk Plaza web-container contract. In the browser the link is
+/// derived from `window.location`, so this value only matters for tests and
+/// native builds; update it if the site is republished under a new id.
 const FALLBACK_BASE_URL: &str =
-    "http://127.0.0.1:7509/v1/contract/web/raAqMhMG7KUpXBU2SxgCQ3Vh4PYjttxdSWd9ftV7RLv/";
+    "http://127.0.0.1:7509/v1/contract/web/BvbQPohf6micoP1CBneuhNoZUBMToy6UqW4AzodyaLMW/";
 
 /// Get the base URL for invitation links.
 /// Derives from the current window.location so invitations work on any host/port.
