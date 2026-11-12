@@ -234,20 +234,28 @@ pub fn PostsView(
                                                 "{crumb_name}"
                                             }
                                         } else {
-                                            Link {
-                                                to: if crumb_id.is_none() {
-                                                    Route::Posts { board_id: board_id.clone() }
-                                                } else {
-                                                    Route::PostsInCategory {
-                                                        board_id: board_id.clone(),
-                                                        category_id: crumb_id.clone().unwrap_or_default(),
+                                            // A real link here would navigate the sandboxed
+                                            // iframe and reload the app; set the hash instead.
+                                            {
+                                                let target = match crumb_id.clone() {
+                                                    Some(id) => format!("/board/{board_id}/category/{id}"),
+                                                    None => format!("/board/{board_id}"),
+                                                };
+                                                rsx! {
+                                                    button {
+                                                        r#type: "button",
+                                                        class: "flex items-center gap-1 text-accent hover:text-accent/80 transition-colors",
+                                                        onclick: move |_| {
+                                                            if let Some(win) = web_sys::window() {
+                                                                let _ = win.location().set_hash(&target);
+                                                            }
+                                                        },
+                                                        if let Some(icon) = crumb_icon {
+                                                            span { "{icon}" }
+                                                        }
+                                                        "{crumb_name}"
                                                     }
-                                                },
-                                                class: "flex items-center gap-1 text-accent hover:text-accent/80 transition-colors",
-                                                if let Some(icon) = crumb_icon {
-                                                    span { "{icon}" }
                                                 }
-                                                "{crumb_name}"
                                             }
                                         }
                                     }
@@ -535,9 +543,15 @@ pub fn SinglePostView(post_id: String) -> Element {
         div { class: "flex-1 flex flex-col min-w-0 bg-bg",
             // Back button header
             div { class: "flex items-center gap-4 px-6 py-4 border-b border-border",
-                Link {
-                    to: Route::Posts { board_id: current_board_id.read().clone() },
+                button {
+                    r#type: "button",
                     class: "text-accent hover:text-accent/80 transition-colors text-lg",
+                    onclick: move |_| {
+                        let target = format!("/board/{}", current_board_id.read());
+                        if let Some(win) = web_sys::window() {
+                            let _ = win.location().set_hash(&target);
+                        }
+                    },
                     "← Back to posts"
                 }
             }
@@ -574,9 +588,15 @@ pub fn SinglePostView(post_id: String) -> Element {
                             rsx! {
                                 div { class: "flex-1 flex flex-col items-center justify-center h-64 text-text-muted",
                                     p { class: "text-xl", "Post not found." }
-                                    Link {
-                                        to: Route::Posts { board_id: current_board_id.read().clone() },
+                                    button {
+                                        r#type: "button",
                                         class: "mt-4 text-accent hover:text-accent/80 transition-colors",
+                                        onclick: move |_| {
+                                            let target = format!("/board/{}", current_board_id.read());
+                                            if let Some(win) = web_sys::window() {
+                                                let _ = win.location().set_hash(&target);
+                                            }
+                                        },
                                         "← Back to posts"
                                     }
                                 }
