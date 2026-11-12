@@ -271,12 +271,45 @@ fn category_keys_for_role(data: &BoardData, role_id: RoleId) -> Vec<(MessageId, 
         .collect()
 }
 
+/// Owner/manager: rename a link so the list stays readable.
+pub fn rename_invite_link(token_id: TokenId, label: String) -> Result<(), String> {
+    with_manager_board(|data, self_sk, board_key, self_id| {
+        let current = data
+            .board_state
+            .invites
+            .token(&token_id)
+            .cloned()
+            .ok_or("Link not found")?;
+        let token = InviteToken {
+            generation: current.generation + 1,
+            label: label
+                .trim()
+                .chars()
+                .take(plaza_core::board_state::invites::MAX_INVITE_LABEL)
+                .collect(),
+            ..current
+        };
+        let authorized = match signer_for(self_id, board_key) {
+            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &self_sk),
+            None => AuthorizedInviteToken::new(token, &self_sk),
+        };
+        let delta = ChatBoardStateV1Delta {
+            invites: Some(InviteTokensDelta {
+                tokens: vec![authorized],
+            }),
+            ..Default::default()
+        };
+        apply_and_sync(board_key, &data.board_state.clone(), delta)
+    })
+}
+
 /// Create a link and return its encoded form. With `include_category_keys`,
 /// the link carries the keys of the categories the role can read.
 pub fn create_invite_link(
     role_id: RoleId,
     max_uses: Option<u32>,
     include_category_keys: bool,
+    label: String,
 ) -> Result<String, String> {
     with_manager_board(|data, self_sk, board_key, self_id| {
         if data.board_state.roles.role(&role_id).is_none() {
@@ -295,6 +328,13 @@ pub fn create_invite_link(
             not_after: None,
             generation: 1,
             deleted: false,
+            label: label
+                .trim()
+                .chars()
+                .take(plaza_core::board_state::invites::MAX_INVITE_LABEL)
+                .collect(),
+            created_at: Some(crate::util::get_current_system_time()),
+            includes_category_keys: include_category_keys,
         };
         let authorized = match signer_for(self_id, board_key) {
             Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &self_sk),

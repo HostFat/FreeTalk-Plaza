@@ -27,12 +27,48 @@ fn role_id_of(text: &str) -> Option<RoleId> {
     Some(id)
 }
 
+fn format_created_at(created: Option<std::time::SystemTime>) -> Option<String> {
+    let millis = created?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as i64;
+    Some(crate::util::format_utc_as_local_time(millis))
+}
+
 fn current_board() -> Option<BoardData> {
     CURRENT_BOARD
         .read()
         .owner_key
         .as_ref()
         .and_then(|key| BOARDS.read().map.get(key).cloned())
+}
+
+/// Small "?" that works with a tap, not only with a mouse hover.
+#[component]
+fn InfoHint(text: String) -> Element {
+    let mut open = use_signal(|| false);
+    rsx! {
+        span { class: "relative inline-flex items-center",
+            button {
+                r#type: "button",
+                class: "w-4 h-4 rounded-full border border-border text-[10px] leading-none text-text-muted hover:text-text flex items-center justify-center",
+                title: "{text}",
+                onclick: move |evt| {
+                    evt.stop_propagation();
+                    let next = !*open.read();
+                    open.set(next);
+                },
+                "?"
+            }
+            if *open.read() {
+                div {
+                    class: "absolute z-40 left-1/2 -translate-x-1/2 top-full mt-1 w-64 p-2 rounded-lg bg-panel border border-border shadow-lg text-xs text-text-muted",
+                    onclick: move |evt| evt.stop_propagation(),
+                    "{text}"
+                }
+            }
+        }
+    }
 }
 
 #[component]
@@ -85,25 +121,35 @@ pub fn RolesSection() -> Element {
                     value: "{role_name}",
                     oninput: move |evt| role_name.set(evt.value()),
                 }
-                label {
-                    class: "flex items-center gap-2 text-sm text-text-muted",
-                    title: "Members with this role can create invite links and assign roles to other members.",
-                    input {
-                        r#type: "checkbox",
-                        checked: *role_manages.read(),
-                        onchange: move |evt| role_manages.set(evt.checked()),
+                div { class: "flex items-center gap-1",
+                    label {
+                        class: "flex items-center gap-2 text-sm text-text-muted",
+                        title: "Members with this role can create invite links and assign roles to other members.",
+                        input {
+                            r#type: "checkbox",
+                            checked: *role_manages.read(),
+                            onchange: move |evt| role_manages.set(evt.checked()),
+                        }
+                        "can manage access"
                     }
-                    "can manage access"
+                    InfoHint {
+                        text: "Members with this role can create invite links and assign roles to other members.".to_string(),
+                    }
                 }
-                label {
-                    class: "flex items-center gap-2 text-sm text-text-muted",
-                    title: "Members with this role can send the keys of restricted categories to members who lack them, even when the owner is offline.",
-                    input {
-                        r#type: "checkbox",
-                        checked: *role_distributes.read(),
-                        onchange: move |evt| role_distributes.set(evt.checked()),
+                div { class: "flex items-center gap-1",
+                    label {
+                        class: "flex items-center gap-2 text-sm text-text-muted",
+                        title: "Members with this role can send the keys of restricted categories to members who lack them, even when the owner is offline.",
+                        input {
+                            r#type: "checkbox",
+                            checked: *role_distributes.read(),
+                            onchange: move |evt| role_distributes.set(evt.checked()),
+                        }
+                        "can distribute category keys"
                     }
-                    "can distribute category keys"
+                    InfoHint {
+                        text: "Members with this role can send the keys of restricted categories to members who lack them, even when the owner is offline.".to_string(),
+                    }
                 }
                 button {
                     r#type: "button",
@@ -152,20 +198,25 @@ pub fn RolesSection() -> Element {
                                         "{assigned.len()} members"
                                     }
                                     if is_owner {
-                                        label {
-                                            class: "ml-auto flex items-center gap-1 text-xs text-text-muted",
-                                            title: "Allow this role's members to distribute the keys of restricted categories to new members. The owner can always do it.",
-                                            input {
-                                                r#type: "checkbox",
-                                                checked: distributes,
-                                                onchange: move |evt| {
-                                                    let _ = access::set_role_can_distribute_keys(
-                                                        role_id,
-                                                        evt.checked(),
-                                                    );
-                                                },
+                                        div { class: "ml-auto flex items-center gap-1",
+                                            label {
+                                                class: "flex items-center gap-1 text-xs text-text-muted",
+                                                title: "Allow this role's members to distribute the keys of restricted categories to new members. The owner can always do it.",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: distributes,
+                                                    onchange: move |evt| {
+                                                        let _ = access::set_role_can_distribute_keys(
+                                                            role_id,
+                                                            evt.checked(),
+                                                        );
+                                                    },
+                                                }
+                                                "keys"
                                             }
-                                            "keys"
+                                            InfoHint {
+                                                text: "Allow this role's members to distribute the keys of restricted categories to new members. The owner can always do it.".to_string(),
+                                            }
                                         }
                                         button {
                                             r#type: "button",
@@ -235,8 +286,12 @@ pub fn InviteLinksSection() -> Element {
     let board = use_memo(move || current_board());
     let mut link_role = use_signal(String::new);
     let mut link_max = use_signal(String::new);
+    let mut link_label = use_signal(String::new);
     let mut link_includes_keys = use_signal(|| false);
     let mut created_link = use_signal(|| None::<(String, bool, usize)>);
+    let mut copied = use_signal(|| false);
+    let mut editing_label = use_signal(|| None::<plaza_core::board_state::invites::TokenId>);
+    let mut label_edit = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
 
     let Some(data) = board.read().clone() else {
@@ -290,15 +345,26 @@ pub fn InviteLinksSection() -> Element {
                 value: "{link_max}",
                 oninput: move |evt| link_max.set(evt.value()),
             }
-            label {
-                class: "flex items-center gap-2 text-sm text-text-muted w-full",
-                title: "Put the keys of the restricted categories this role can read into the link itself. The new member can open them even if no key holder is online; anyone with the link can read them.",
-                input {
-                    r#type: "checkbox",
-                    checked: *link_includes_keys.read(),
-                    onchange: move |evt| link_includes_keys.set(evt.checked()),
+            input {
+                class: "flex-1 min-w-40 px-3 py-2 bg-panel border border-border rounded-lg text-text text-sm",
+                placeholder: "Label (e.g. Twitter, forum, October)",
+                maxlength: "80",
+                value: "{link_label}",
+                oninput: move |evt| link_label.set(evt.value()),
+            }
+            div { class: "flex items-center gap-1 w-full",
+                label {
+                    class: "flex items-center gap-2 text-sm text-text-muted",
+                    input {
+                        r#type: "checkbox",
+                        checked: *link_includes_keys.read(),
+                        onchange: move |evt| link_includes_keys.set(evt.checked()),
+                    }
+                    "Include the category keys this role can read (works while key holders are offline)"
                 }
-                "Include the category keys this role can read (works while key holders are offline)"
+                InfoHint {
+                    text: "Put the keys of the restricted categories this role can read into the link itself. The new member can open them even if no key holder is online; anyone with the link can read them.".to_string(),
+                }
             }
             button {
                 r#type: "button",
@@ -311,12 +377,15 @@ pub fn InviteLinksSection() -> Element {
                     };
                     let max = link_max.read().trim().parse::<u32>().ok();
                     let include_keys = *link_includes_keys.read();
-                    match access::create_invite_link(role_id, max, include_keys) {
+                    let label = link_label.read().clone();
+                    match access::create_invite_link(role_id, max, include_keys, label) {
                         Ok(link) => {
                             let key_count = access::JoinLink::decode(&link)
                                 .map(|parsed| parsed.category_keys.len())
                                 .unwrap_or(0);
                             created_link.set(Some((link, include_keys, key_count)));
+                            copied.set(false);
+                            link_label.set(String::new());
                             error.set(None);
                         }
                         Err(e) => error.set(Some(e)),
@@ -336,10 +405,24 @@ pub fn InviteLinksSection() -> Element {
                         "This link carries {key_count} category key(s). Treat it as a stronger secret than a link without keys."
                     }
                 }
-                input {
-                    class: "w-full px-2 py-1 bg-surface border border-border rounded text-xs font-mono text-text",
-                    readonly: true,
-                    value: "{link}",
+                div { class: "flex items-center gap-2",
+                    input {
+                        class: "flex-1 px-2 py-1 bg-surface border border-border rounded text-xs font-mono text-text",
+                        readonly: true,
+                        value: "{link}",
+                    }
+                    button {
+                        r#type: "button",
+                        class: "px-3 py-1 bg-surface hover:bg-surface-hover text-text text-xs rounded",
+                        onclick: {
+                            let link = link.clone();
+                            move |_| {
+                                crate::util::copy_to_clipboard(&link);
+                                copied.set(true);
+                            }
+                        },
+                        if *copied.read() { "Copied!" } else { "Copy" }
+                    }
                 }
             }
         }
@@ -367,23 +450,88 @@ pub fn InviteLinksSection() -> Element {
                         let max_text = token.max_uses
                             .map(|m| m.to_string())
                             .unwrap_or_else(|| "∞".to_string());
+                        let label = if token.label.is_empty() {
+                            "No label".to_string()
+                        } else {
+                            token.label.clone()
+                        };
+                        let label_for_edit = label.clone();
+                        let created = format_created_at(token.created_at);
+                        let includes_keys = token.includes_category_keys;
+                        let editing_this = *editing_label.read() == Some(token_id);
                         rsx! {
                             div {
-                                class: "bg-surface rounded-lg p-3 flex items-center gap-3",
+                                class: "bg-surface rounded-lg p-3",
                                 title: "Link {token_code}: the board stores only this token, not the URL with its signing key.",
-                                div { class: "flex-1",
-                                    p { class: "text-text text-sm", "Role: {role_name}" }
-                                    p { class: "text-text-muted text-xs",
-                                        "Link #{short_id} · {uses} / {max_text} uses"
+                                div { class: "flex items-start gap-3",
+                                    div { class: "flex-1 min-w-0",
+                                        div { class: "flex items-center gap-2 flex-wrap",
+                                            p { class: "text-text text-sm font-medium", "{label}" }
+                                            if includes_keys {
+                                                span {
+                                                    class: "text-[10px] px-2 py-0.5 rounded-full bg-yellow-500/10 text-yellow-400 border border-yellow-500/30",
+                                                    title: "This link carried category keys when it was created.",
+                                                    "with keys"
+                                                }
+                                            }
+                                        }
+                                        p { class: "text-text-muted text-xs",
+                                            "Role: {role_name}"
+                                            if let Some(date) = created {
+                                                span { " · created {date}" }
+                                            }
+                                        }
+                                        p { class: "text-text-muted text-xs",
+                                            "Link #{short_id} · {uses} / {max_text} uses"
+                                        }
+                                        if editing_this {
+                                            div { class: "flex items-center gap-2 mt-2",
+                                                input {
+                                                    class: "flex-1 px-2 py-1 bg-panel border border-border rounded text-xs text-text",
+                                                    maxlength: "80",
+                                                    value: "{label_edit}",
+                                                    oninput: move |evt| label_edit.set(evt.value()),
+                                                }
+                                                button {
+                                                    r#type: "button",
+                                                    class: "px-2 py-1 bg-accent hover:bg-accent/80 text-white text-xs rounded",
+                                                    onclick: move |_| {
+                                                        let _ = access::rename_invite_link(
+                                                            token_id,
+                                                            label_edit.read().clone(),
+                                                        );
+                                                        editing_label.set(None);
+                                                    },
+                                                    "Save"
+                                                }
+                                                button {
+                                                    r#type: "button",
+                                                    class: "px-2 py-1 bg-panel text-text-muted text-xs rounded",
+                                                    onclick: move |_| editing_label.set(None),
+                                                    "Cancel"
+                                                }
+                                            }
+                                        }
                                     }
-                                }
-                                button {
-                                    r#type: "button",
-                                    class: "text-xs text-red-400 hover:bg-red-500/10 rounded px-2 py-1",
-                                    onclick: move |_| {
-                                        let _ = access::revoke_invite_link(token_id);
-                                    },
-                                    "Revoke"
+                                    div { class: "flex items-center gap-1 flex-shrink-0",
+                                        button {
+                                            r#type: "button",
+                                            class: "text-xs text-text-muted hover:bg-surface-hover rounded px-2 py-1",
+                                            onclick: move |_| {
+                                                label_edit.set(label_for_edit.clone());
+                                                editing_label.set(Some(token_id));
+                                            },
+                                            "Rename"
+                                        }
+                                        button {
+                                            r#type: "button",
+                                            class: "text-xs text-red-400 hover:bg-red-500/10 rounded px-2 py-1",
+                                            onclick: move |_| {
+                                                let _ = access::revoke_invite_link(token_id);
+                                            },
+                                            "Revoke"
+                                        }
+                                    }
                                 }
                             }
                         }

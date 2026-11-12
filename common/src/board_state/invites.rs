@@ -22,6 +22,13 @@ use std::time::SystemTime;
 
 pub type TokenId = [u8; 16];
 
+/// Cap on the admin label stored with a link.
+pub const MAX_INVITE_LABEL: usize = 80;
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Domain separation for the proof a joiner signs with the link key.
 pub fn join_message(board: &VerifyingKey, member_vk: &VerifyingKey) -> Vec<u8> {
     let mut message = b"freetalk-plaza-join-v1".to_vec();
@@ -42,6 +49,17 @@ pub struct InviteToken {
     pub not_after: Option<SystemTime>,
     pub generation: u64,
     pub deleted: bool,
+    /// Human-readable label chosen when the link is created. Omitted when empty
+    /// so tokens signed before the field existed keep verifying.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    /// Creation time, for the admin list. Omitted when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<SystemTime>,
+    /// Whether the link itself carried category keys. The keys are never
+    /// stored in the board; this is only the audit flag.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub includes_category_keys: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -136,6 +154,9 @@ impl ComposableState for InviteTokensV1 {
                 crate::board_state::roles::signer_key(parent_state, parameters, &signer)?;
             verify_struct(&token.token, &token.signature, &signing_key)
                 .map_err(|e| format!("Invalid invite token signature: {}", e))?;
+            if token.token.label.chars().count() > MAX_INVITE_LABEL {
+                return Err("Invite link label is too long".to_string());
+            }
 
             if !ids.insert(token.token.id) {
                 return Err("Duplicate invite token".to_string());
@@ -219,6 +240,9 @@ impl ComposableState for InviteTokensV1 {
                     crate::board_state::roles::signer_key(parent_state, parameters, &signer)?;
                 verify_struct(&token.token, &token.signature, &signing_key)
                     .map_err(|e| format!("Invalid invite token signature: {}", e))?;
+                if token.token.label.chars().count() > MAX_INVITE_LABEL {
+                    return Err("Invite link label is too long".to_string());
+                }
             }
 
             combined.tokens.sort_by_key(|t| t.token.id);
@@ -342,6 +366,9 @@ mod tests {
                 not_after: None,
                 generation: 1,
                 deleted: false,
+                label: String::new(),
+                created_at: None,
+                includes_category_keys: false,
             },
             owner,
         ));
@@ -421,6 +448,9 @@ mod tests {
                     not_after: None,
                     generation: 1,
                     deleted: false,
+                    label: String::new(),
+                    created_at: None,
+                    includes_category_keys: false,
                 },
                 signer_id,
                 signer,
@@ -533,5 +563,53 @@ mod tests {
         state.enforce_invite_caps();
         assert_eq!(state.members.members.len(), 1, "cap of one use applies");
         state.verify(&state.clone(), &params).unwrap();
+    }
+
+    /// Tokens written before labels existed must keep their signed bytes.
+    #[test]
+    fn a_token_without_metadata_roundtrips_unchanged() {
+        let owner = owner();
+        let token = InviteToken {
+            id: [9u8; 16],
+            verifying_key: token_key().verifying_key(),
+            role_id: [5u8; 16],
+            max_uses: Some(2),
+            not_after: None,
+            generation: 1,
+            deleted: false,
+            label: String::new(),
+            created_at: None,
+            includes_category_keys: false,
+        };
+
+        let mut original = Vec::new();
+        ciborium::into_writer(&token, &mut original).unwrap();
+        let text = String::from_utf8_lossy(&original);
+        assert!(!text.contains("label"));
+        assert!(!text.contains("created_at"));
+        assert!(!text.contains("includes_category_keys"));
+
+        let decoded: InviteToken = ciborium::from_reader(&original[..]).unwrap();
+        let mut again = Vec::new();
+        ciborium::into_writer(&decoded, &mut again).unwrap();
+        assert_eq!(original, again);
+
+        let signature = sign_struct(&token, &owner);
+        assert!(verify_struct(&decoded, &signature, &owner.verifying_key()).is_ok());
+    }
+
+    #[test]
+    fn a_link_label_has_a_size_cap() {
+        let owner = owner();
+        let role_id = [5u8; 16];
+        let params = params(&owner);
+        let mut state = base_state(&owner, role_id, None);
+        let long = "x".repeat(MAX_INVITE_LABEL + 1);
+        state.invites.tokens[0].token.label = long;
+        // Re-sign so only the label length can fail.
+        state.invites.tokens[0] =
+            AuthorizedInviteToken::new(state.invites.tokens[0].token.clone(), &owner);
+        let error = state.verify(&state.clone(), &params).unwrap_err();
+        assert!(error.contains("too long"), "{error}");
     }
 }

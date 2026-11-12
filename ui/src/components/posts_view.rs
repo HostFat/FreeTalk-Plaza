@@ -91,11 +91,45 @@ fn get_content(
     (categories, posts)
 }
 
+/// Posts and newest post below a category, descending into subcategories.
+fn category_stats(
+    id: &MessageId,
+    children: &HashMap<MessageId, Vec<&MessageData>>,
+) -> (usize, Option<(String, String)>) {
+    let mut count = 0usize;
+    let mut latest: Option<(String, String, i64)> = None;
+    let mut stack: Vec<&MessageId> = vec![id];
+    while let Some(parent) = stack.pop() {
+        let Some(replies) = children.get(parent) else {
+            continue;
+        };
+        for reply in replies {
+            stack.push(&reply.message_id);
+            if reply.is_category {
+                continue;
+            }
+            count += 1;
+            let timestamp = reply.time.timestamp_millis();
+            if latest
+                .as_ref()
+                .map_or(true, |(_, _, newest)| timestamp > *newest)
+            {
+                latest = Some((
+                    reply.author_name.clone(),
+                    format_utc_as_local_time(timestamp),
+                    timestamp,
+                ));
+            }
+        }
+    }
+    (count, latest.map(|(author, time, _)| (author, time)))
+}
+
 /// Count every reply below `id` and find the newest one.
 fn thread_stats(
     id: &MessageId,
     children: &HashMap<MessageId, Vec<&MessageData>>,
-) -> (usize, Option<(String, String)>) {
+) -> (usize, Option<(String, String)>, i64) {
     let mut count = 0usize;
     let mut latest: Option<(String, String, i64)> = None;
     let mut stack: Vec<&MessageId> = vec![id];
@@ -119,12 +153,21 @@ fn thread_stats(
             stack.push(&reply.message_id);
         }
     }
-    (count, latest.map(|(author, time, _)| (author, time)))
+    let newest = latest
+        .as_ref()
+        .map(|(_, _, timestamp)| *timestamp)
+        .unwrap_or(0);
+    (
+        count,
+        latest.map(|(author, time, _)| (author, time)),
+        newest,
+    )
 }
 
 #[component]
 pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
+    let mut recent_first = use_signal(|| false);
 
     // Get current board data
     let board_data_memo = use_memo(move || {
@@ -401,28 +444,62 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                             let has_categories = !categories.is_empty();
                             let has_posts = !posts.is_empty();
 
-                            // Whole-thread reply count and latest reply per post,
-                            // so the list can show activity without opening it.
-                            let post_stats: HashMap<MessageId, (usize, Option<(String, String)>)> = {
-                                let mut children: HashMap<MessageId, Vec<&MessageData>> =
-                                    HashMap::new();
+                            // Parent -> direct replies, shared by the post and
+                            // category summaries below.
+                            let children: HashMap<MessageId, Vec<&MessageData>> = {
+                                let mut map: HashMap<MessageId, Vec<&MessageData>> = HashMap::new();
                                 for message in &all_messages {
                                     if let Some(parent) = message.reply_to_message_id.as_ref() {
-                                        children
-                                            .entry(parent.clone())
-                                            .or_default()
-                                            .push(message);
+                                        map.entry(parent.clone()).or_default().push(message);
                                     }
                                 }
-                                posts.iter()
-                                    .map(|post| {
-                                        (
-                                            post.message_id.clone(),
-                                            thread_stats(&post.message_id, &children),
-                                        )
-                                    })
-                                    .collect()
+                                map
                             };
+
+                            // Whole-thread reply count and latest reply per post,
+                            // so the list can show activity without opening it.
+                            let post_stats: HashMap<
+                                MessageId,
+                                (usize, Option<(String, String)>, i64),
+                            > = posts
+                                .iter()
+                                .map(|post| {
+                                    (
+                                        post.message_id.clone(),
+                                        thread_stats(&post.message_id, &children),
+                                    )
+                                })
+                                .collect();
+
+                            // Newest first, or most recently active thread first.
+                            let mut displayed_posts = posts.clone();
+                            if *recent_first.read() {
+                                displayed_posts.sort_by(|a, b| {
+                                    let activity = |post: &MessageData| {
+                                        post_stats
+                                            .get(&post.message_id)
+                                            .map(|stats| stats.2)
+                                            .filter(|timestamp| *timestamp > 0)
+                                            .unwrap_or_else(|| post.time.timestamp_millis())
+                                    };
+                                    activity(b).cmp(&activity(a))
+                                });
+                            }
+
+                            // Posts and latest activity inside each category,
+                            // including its subcategories.
+                            let category_summaries: HashMap<
+                                MessageId,
+                                (usize, Option<(String, String)>),
+                            > = categories
+                                .iter()
+                                .map(|category| {
+                                    (
+                                        category.message_id.clone(),
+                                        category_stats(&category.message_id, &children),
+                                    )
+                                })
+                                .collect();
 
                             if let Some((self_member_id, max_title_size, max_message_size, is_owner, is_admin)) = board_info {
                                 if !has_categories && !has_posts {
@@ -450,6 +527,11 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                             let board_id = current_board_id.read().clone();
                                                             let nav = navigator();
                                                             let handle_edit_category = handle_edit_category.clone();
+                                                            let (category_posts, category_last) =
+                                                                category_summaries
+                                                                    .get(&cat.message_id)
+                                                                    .cloned()
+                                                                    .unwrap_or_default();
                                                             rsx! {
                                                                 CategoryCard {
                                                                     key: "{cat_id}",
@@ -457,6 +539,8 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                     self_member_id: self_member_id,
                                                                     is_owner: is_owner,
                                                                     is_admin: is_admin,
+                                                                    post_count: category_posts,
+                                                                    last_activity: category_last,
                                                                     on_click: move |_| {
                                                                         nav.push(Route::PostsInCategory {
                                                                             board_id: board_id.clone(),
@@ -484,8 +568,31 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                     "Posts"
                                                 }
                                             }
+                                            div { class: "flex items-center gap-2 mb-4",
+                                                span { class: "text-sm text-text-muted", "Sort:" }
+                                                button {
+                                                    r#type: "button",
+                                                    class: if !*recent_first.read() {
+                                                        "px-3 py-1 text-xs rounded-md bg-accent text-white"
+                                                    } else {
+                                                        "px-3 py-1 text-xs rounded-md bg-surface text-text-muted hover:text-text"
+                                                    },
+                                                    onclick: move |_| recent_first.set(false),
+                                                    "Newest"
+                                                }
+                                                button {
+                                                    r#type: "button",
+                                                    class: if *recent_first.read() {
+                                                        "px-3 py-1 text-xs rounded-md bg-accent text-white"
+                                                    } else {
+                                                        "px-3 py-1 text-xs rounded-md bg-surface text-text-muted hover:text-text"
+                                                    },
+                                                    onclick: move |_| recent_first.set(true),
+                                                    "Recent activity"
+                                                }
+                                            }
                                             div { class: "space-y-8",
-                                                {posts.iter().map({
+                                                {displayed_posts.iter().map({
                                                     let handle_toggle_reaction = handle_toggle_reaction.clone();
                                                     let handle_edit_message = handle_edit_message.clone();
                                                     let board_id = current_board_id.read().clone();
@@ -495,7 +602,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                         let nav = navigator();
                                                         let handle_toggle_reaction = handle_toggle_reaction.clone();
                                                         let handle_edit_message = handle_edit_message.clone();
-                                                        let (reply_count, last_reply) =
+                                                        let (reply_count, last_reply, _) =
                                                             post_stats.get(&post.message_id).cloned().unwrap_or_default();
                                                         rsx! {
                                                             div { key: "{post_id}",

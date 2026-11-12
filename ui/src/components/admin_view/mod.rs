@@ -48,6 +48,7 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
     let mut show_add_admin_modal = use_signal(|| false);
     let mut admin_error = use_signal(|| None::<String>);
     let mut ban_index = use_signal(|| 0usize);
+    let mut ban_search = use_signal(String::new);
 
     // Check if current user is the owner
     let is_owner = use_memo(move || {
@@ -288,7 +289,17 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
             }
             } else if active == "bans" {
                 {
-                    let candidates = ban_candidates.read().clone();
+                    let query = ban_search.read().trim().to_lowercase();
+                    let candidates: Vec<(MemberId, String)> = ban_candidates
+                        .read()
+                        .iter()
+                        .filter(|(member_id, name)| {
+                            query.is_empty()
+                                || name.to_lowercase().contains(&query)
+                                || member_id.to_string().to_lowercase().contains(&query)
+                        })
+                        .cloned()
+                        .collect();
                     let selected = candidates
                         .get(*ban_index.read())
                         .cloned()
@@ -305,6 +316,15 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                                 }
                             } else {
                                 div { class: "flex flex-wrap items-center gap-2",
+                                    input {
+                                        class: "w-56 px-3 py-2 bg-panel border border-border rounded-lg text-text text-sm",
+                                        placeholder: "Search name or ID",
+                                        value: "{ban_search}",
+                                        oninput: move |evt| {
+                                            ban_search.set(evt.value());
+                                            ban_index.set(0);
+                                        },
+                                    }
                                     select {
                                         class: "flex-1 min-w-48 px-3 py-2 bg-panel border border-border rounded-lg text-text text-sm",
                                         value: "{(*ban_index.read()).min(candidates.len().saturating_sub(1))}",

@@ -41,6 +41,12 @@ pub fn CategoryCard(
     /// Whether the current user is a board admin
     #[props(default)]
     is_admin: bool,
+    /// Number of posts in this category and its subcategories
+    #[props(default)]
+    post_count: usize,
+    /// Time and author of the newest post in this category
+    #[props(default)]
+    last_activity: Option<(String, String)>,
     /// Click handler for navigation
     on_click: EventHandler<()>,
     /// Edit handler with full category data
@@ -231,6 +237,21 @@ pub fn CategoryCard(
                 } else if let Some(desc) = description {
                     p { class: "text-sm text-text-muted line-clamp-2",
                         "{desc}"
+                    }
+                }
+
+                if !*is_editing.read() && (post_count > 0 || last_activity.is_some()) {
+                    div { class: "mt-2 flex flex-wrap items-center gap-2 text-xs text-text-muted",
+                        span {
+                            if post_count == 1 {
+                                "1 post"
+                            } else {
+                                "{post_count} posts"
+                            }
+                        }
+                        if let Some((author, time)) = last_activity.clone() {
+                            span { "· {time} by {author}" }
+                        }
                     }
                 }
             }
