@@ -387,6 +387,7 @@ pub async fn send_category(
                 ciphertext,
                 nonce,
                 secret_version: version,
+                secret_scope: plaza_core::board_state::message::SecretScope::Board,
             }
         }
         None => BoardMessageBody::category(name, description, icon, color, parent_category_id),

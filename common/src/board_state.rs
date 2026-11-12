@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod ban;
 pub mod configuration;
+pub mod category_secrets;
 pub mod content;
 pub mod identity;
 pub mod invites;
@@ -16,6 +17,7 @@ pub mod version;
 use crate::board_state::admin::AdminsV1;
 use crate::board_state::ban::BansV1;
 use crate::board_state::configuration::AuthorizedConfigurationV1;
+use crate::board_state::category_secrets::CategorySecretsV1;
 use crate::board_state::invites::InviteTokensV1;
 use crate::board_state::member::{MemberId, MembersV1};
 use crate::board_state::member_info::MemberInfoV1;
@@ -62,6 +64,11 @@ pub struct ChatBoardStateV1 {
 
     /// Metadata about members like their nickname, can be updated by members themselves.
     pub member_info: MemberInfoV1,
+
+    /// Per-category secrets for restricted categories. Must come before
+    /// recent_messages so message validation can check the category version.
+    #[serde(default)]
+    pub category_secrets: CategorySecretsV1,
 
     /// Secret distribution for private boards. Must come before recent_messages so message
     /// validation can check secret version consistency.
@@ -387,6 +394,7 @@ mod tests {
                 invites: InviteTokensV1::default(),
                 members: MembersV1::default(),
                 member_info: MemberInfoV1::default(),
+                category_secrets: CategorySecretsV1::default(),
                 secrets: BoardSecretsV1::default(),
                 recent_messages: MessagesV1::default(),
                 upgrade: OptionalUpgradeV1(None),

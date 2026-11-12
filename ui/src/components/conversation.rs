@@ -1692,6 +1692,7 @@ mod category_tests {
                 ciphertext,
                 nonce,
                 secret_version,
+                secret_scope: plaza_core::board_state::message::SecretScope::Board,
             },
             _ => unreachable!("seal_bytes always produces a private payload"),
         }

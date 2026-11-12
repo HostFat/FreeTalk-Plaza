@@ -463,7 +463,19 @@ pub enum BoardMessageBody {
         nonce: [u8; 12],
         /// Version of the board secret used for encryption
         secret_version: SecretVersion,
+        /// Which secret sealed this message. Older messages use the board
+        /// secret; restricted categories use their own.
+        #[serde(default)]
+        secret_scope: SecretScope,
     },
+}
+
+/// Which key a private message is sealed with.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
+pub enum SecretScope {
+    #[default]
+    Board,
+    Category(MessageId),
 }
 
 impl BoardMessageBody {
@@ -501,6 +513,7 @@ impl BoardMessageBody {
             ciphertext,
             nonce,
             secret_version,
+            secret_scope: SecretScope::default(),
         }
     }
 
@@ -517,6 +530,7 @@ impl BoardMessageBody {
             ciphertext,
             nonce,
             secret_version,
+            secret_scope: SecretScope::default(),
         }
     }
 
@@ -664,6 +678,7 @@ impl BoardMessageBody {
             ciphertext,
             nonce,
             secret_version,
+            secret_scope: SecretScope::default(),
         }
     }
 

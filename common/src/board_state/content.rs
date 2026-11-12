@@ -269,6 +269,16 @@ pub struct CategoryContentV1 {
     pub color: String,
     /// Parent category ID (None for top-level categories)
     pub parent_category_id: Option<MessageId>,
+    /// Roles allowed to read and post here. Empty means everyone on the board.
+    #[serde(default)]
+    pub allowed_roles: Vec<crate::board_state::roles::RoleId>,
+    /// Sealed real name, used when `allowed_roles` is not empty. Only members
+    /// holding the category secret can read it.
+    #[serde(default)]
+    pub sealed_name: Option<crate::board_state::privacy::SealedBytes>,
+    /// Keep the category out of listings for members without the secret.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 impl CategoryContentV1 {
@@ -280,7 +290,28 @@ impl CategoryContentV1 {
             icon: None,
             color,
             parent_category_id: None,
+            allowed_roles: Vec::new(),
+            sealed_name: None,
+            hidden: false,
         }
+    }
+
+    /// Restrict the category to the given roles. The real name must be supplied
+    /// sealed; `name` is only a placeholder for clients without the secret.
+    pub fn with_allowed_roles(
+        mut self,
+        roles: Vec<crate::board_state::roles::RoleId>,
+        sealed_name: crate::board_state::privacy::SealedBytes,
+        hidden: bool,
+    ) -> Self {
+        self.allowed_roles = roles;
+        self.sealed_name = Some(sealed_name);
+        self.hidden = hidden;
+        self
+    }
+
+    pub fn is_restricted(&self) -> bool {
+        !self.allowed_roles.is_empty()
     }
 
     /// Set the icon, enforcing that it is exactly one grapheme cluster.
