@@ -12,7 +12,7 @@ use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::*;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
-use freenet_stdlib::client_api::{ClientRequest, ContractRequest, HostResponse};
+use freenet_stdlib::client_api::HostResponse;
 use freenet_stdlib::prelude::OutboundDelegateMsg;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::StreamExt;
@@ -239,23 +239,18 @@ impl FreenetSynchronizer {
                             pending.insert(owner_vk);
                         });
                         let contract_key = owner_vk_to_contract_key(&owner_vk);
-                        if let Some(web_api) = WEB_API.write().as_mut() {
-                            let request = ContractRequest::Get {
-                                key: *contract_key.id(),
-                                return_contract_code: false,
-                                subscribe: false,
-                                blocking_subscribe: false,
-                            };
-                            if let Err(e) =
-                                web_api.send(ClientRequest::ContractOp(request)).await
-                            {
-                                error!("Read-only fetch failed: {}", e);
-                                READ_ONLY_FETCHES.with_mut(|pending| {
-                                    pending.remove(&owner_vk);
-                                });
-                            }
-                        } else {
-                            warn!("WebAPI unavailable for read-only fetch");
+                        if let Err(e) = response_handler
+                            .get_board_synchronizer_mut()
+                            .get_contract_state(&contract_key)
+                            .await
+                        {
+                            error!("Read-only fetch failed: {}", e);
+                            READ_ONLY_FETCHES.with_mut(|pending| {
+                                pending.remove(&owner_vk);
+                            });
+                            crate::components::app::READ_ONLY_UNAVAILABLE.with_mut(|failed| {
+                                failed.insert(owner_vk);
+                            });
                         }
                     }
                     SynchronizerMessage::ConnectionLost => {
