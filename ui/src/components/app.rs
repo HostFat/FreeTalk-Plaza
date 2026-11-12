@@ -144,6 +144,13 @@ pub fn App() -> Element {
     // Must be called from within a Dioxus component where the runtime is active.
     crate::util::capture_runtime();
 
+    // The app runs in a sandboxed iframe inside the Freenet shell: keep the
+    // shell's address bar in sync with the app route so refreshes and copied
+    // links point at the same page.
+    use_effect(move || {
+        crate::util::install_shell_hash_bridge_once();
+    });
+
 
 
     // Get auth token from window global (injected by Freenet gateway)

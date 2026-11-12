@@ -47,8 +47,7 @@ export function js_copy_to_clipboard(text) {
     document.execCommand('copy');
     document.body.removeChild(ta);
 }
-export function wrap_textarea_selection(id, before, after) {
-    const el = document.getElementById(id);
+export function wrap_textarea_selection(id, before, after) {    const el = document.getElementById(id);
     if (!el) return '';
     const start = el.selectionStart === null ? el.value.length : el.selectionStart;
     const end = el.selectionEnd === null ? el.value.length : el.selectionEnd;
@@ -61,6 +60,20 @@ export function wrap_textarea_selection(id, before, after) {
     el.dispatchEvent(new Event('input', { bubbles: true }));
     return value;
 }
+export function install_shell_hash_bridge() {
+    if (window.__freetalk_hash_bridge) return;
+    window.__freetalk_hash_bridge = true;
+    const send = () => {
+        try {
+            window.parent.postMessage(
+                { __freenet_shell__: true, type: 'hash', hash: location.hash || '#/' },
+                '*'
+            );
+        } catch (e) {}
+    };
+    window.addEventListener('hashchange', send);
+    send();
+}
 ")]
 extern "C" {
     fn get_current_time() -> f64;
@@ -68,6 +81,19 @@ extern "C" {
     fn format_full_datetime_local(timestamp_ms: f64) -> String;
     fn js_copy_to_clipboard(text: &str);
     fn wrap_textarea_selection(id: &str, before: &str, after: &str) -> String;
+    fn install_shell_hash_bridge();
+}
+
+/// Keep the Freenet shell's address bar in sync with the app's route.
+///
+/// The app runs in a sandboxed iframe, so its hash is invisible to the browser
+/// chrome. The shell listens for `{ __freenet_shell__: true, type: 'hash' }`
+/// and mirrors the hash into its own URL with replaceState.
+pub fn install_shell_hash_bridge_once() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        install_shell_hash_bridge();
+    }
 }
 
 /// Wrap the current selection of a textarea with markdown markers.
