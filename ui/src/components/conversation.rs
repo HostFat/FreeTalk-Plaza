@@ -864,8 +864,8 @@ fn MessageHeader(
 ) -> Element {
     let (avatar_size, name_class) = match size {
         MessageSize::Compact => ("w-8 h-8", "text-sm font-medium text-text"),
-        MessageSize::Normal => ("w-14 h-14", "text-lg font-semibold text-text"),
-        MessageSize::Large => ("w-16 h-16", "text-xl font-semibold text-text"),
+        MessageSize::Normal => ("w-10 h-10", "text-base font-semibold text-text"),
+        MessageSize::Large => ("w-12 h-12", "text-lg font-semibold text-text"),
     };
 
     let time_class = match size {
@@ -892,7 +892,7 @@ fn MessageHeader(
             class: "{avatar_size} rounded-full"
         }
         div { class: if matches!(size, MessageSize::Compact) { "flex items-center gap-3" } else { "flex-1 min-w-0" },
-            div { class: "flex items-center gap-2 min-w-0",
+            div { class: "flex items-center gap-2 min-w-0 flex-wrap",
                 div {
                     class: "{name_class} cursor-pointer hover:text-accent transition-colors flex-shrink-0",
                     onclick: move |e| {
@@ -915,14 +915,23 @@ fn MessageHeader(
                         "{title}"
                     }
                 }
+                if !matches!(size, MessageSize::Compact) {
+                    span {
+                        class: "text-xs text-text-muted flex-shrink-0",
+                        title: "{full_time_str}",
+                        if time_clamped { "~{time_str}" } else { "· {time_str}" }
+                    }
+                }
             }
             if is_self && matches!(size, MessageSize::Compact) {
                 span { class: "text-xs text-accent", "(you)" }
             }
-            span {
-                class: "{time_class}",
-                title: "{full_time_str}",
-                if time_clamped && !matches!(size, MessageSize::Compact) { "~{time_str}" } else { "{time_str}" }
+            if matches!(size, MessageSize::Compact) {
+                span {
+                    class: "{time_class}",
+                    title: "{full_time_str}",
+                    if time_clamped { "~{time_str}" } else { "{time_str}" }
+                }
             }
         }
     }

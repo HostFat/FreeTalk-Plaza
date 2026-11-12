@@ -6,6 +6,7 @@ use crate::components::conversation::{
     get_all_messages, get_category_posts, get_subcategories, get_top_level_categories,
     get_top_level_posts, MessageCard, MessageCardVariant, MessageData,
 };
+use crate::util::avatar::get_avatar;
 use crate::util::format_utc_as_local_time;
 use crate::util::message_actions::{self, ActionContext};
 use dioxus::prelude::*;
@@ -164,6 +165,61 @@ fn thread_stats(
     )
 }
 
+/// One compact forum row: avatar, title, author, creation time, replies and
+/// last reply all on one horizontal line.
+#[component]
+fn PostRow(
+    post: MessageData,
+    reply_count: usize,
+    last_reply: Option<(String, String)>,
+    on_click: EventHandler<()>,
+) -> Element {
+    let title = if post.title_text.trim().is_empty() {
+        "Untitled".to_string()
+    } else {
+        post.title_text.clone()
+    };
+    let created = format_utc_as_local_time(post.time.timestamp_millis());
+    let avatar = get_avatar(&post.author_id);
+    let preview = {
+        let mut text: String = post.content_text.chars().take(400).collect();
+        if post.content_text.chars().count() > 400 {
+            text.push('…');
+        }
+        text
+    };
+
+    rsx! {
+        div {
+            class: "bg-panel border border-border rounded-lg px-3 py-2 hover:border-accent/50 hover:bg-surface/30 transition-colors cursor-pointer",
+            title: preview,
+            onclick: move |_| on_click.call(()),
+            div { class: "flex items-center gap-3",
+                img {
+                    src: "{avatar}",
+                    class: "w-8 h-8 rounded-full flex-shrink-0",
+                    alt: "",
+                }
+                div { class: "flex-1 min-w-0 flex flex-wrap items-baseline gap-x-2 gap-y-0.5",
+                    span { class: "text-base font-semibold text-text truncate", "{title}" }
+                    span { class: "text-xs text-text-muted", "by {post.author_name}" }
+                    span { class: "text-xs text-text-muted", "· {created}" }
+                    span { class: "text-xs text-text-muted",
+                        if reply_count == 1 {
+                            "· 1 reply"
+                        } else {
+                            "· {reply_count} replies"
+                        }
+                    }
+                    if let Some((author, time)) = last_reply {
+                        span { class: "text-xs text-text-muted", "· last {time} by {author}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
@@ -254,31 +310,11 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
         *CURRENT_CATEGORY.write() = CurrentCategoryContext::default();
     });
 
-    // Handler for toggling reactions
-    let handle_toggle_reaction = move |target_message_id: MessageId, emoji: String| {
-        if let Some(ctx) = ActionContext::from_current_board() {
-            spawn_local(async move {
-                message_actions::toggle_reaction(ctx, target_message_id, emoji).await;
-            });
-        }
-    };
-
     // Handler for deleting messages
     let handle_delete_message = move |target_message_id: MessageId| {
         if let Some(ctx) = ActionContext::from_current_board() {
             spawn_local(async move {
                 message_actions::delete_message(ctx, target_message_id).await;
-            });
-        }
-    };
-
-    // Handler for editing messages
-    let handle_edit_message = move |target_message_id: MessageId,
-                                    new_title: String,
-                                    new_text: String| {
-        if let Some(ctx) = ActionContext::from_current_board() {
-            spawn_local(async move {
-                message_actions::edit_message(ctx, target_message_id, new_title, new_text).await;
             });
         }
     };
@@ -322,7 +358,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
             } else {
                 // Categories and Posts list
                 div { class: "flex-1 overflow-y-auto",
-                    div { class: "max-w-4xl mx-auto px-4 py-6",
+                    div { class: "max-w-6xl mx-auto px-4 py-6",
                         // Breadcrumb navigation (only show when viewing a category)
                         if viewing_category {
                             div { class: "flex items-center gap-2 mb-6 text-sm flex-wrap",
@@ -434,19 +470,12 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                             {
                             let board_info = current_board_data.as_ref()
                                 .map(|bd| {
-                                    let config = &bd.board_state.configuration.configuration;
                                     let self_member_id = MemberId::from(&bd.self_sk.verifying_key());
                                     let owner_id = MemberId::from(&bd.owner_vk);
                                     let is_owner = self_member_id == owner_id;
                                     let is_admin = bd.board_state.admin.admins.iter()
                                         .any(|a| a.admin.id() == self_member_id);
-                                    (
-                                        self_member_id,
-                                        config.max_title_size,
-                                        config.max_message_size,
-                                        is_owner,
-                                        is_admin,
-                                    )
+                                    (self_member_id, is_owner, is_admin)
                                 });
 
                             let has_categories = !categories.is_empty();
@@ -509,7 +538,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                 })
                                 .collect();
 
-                            if let Some((self_member_id, max_title_size, max_message_size, is_owner, is_admin)) = board_info {
+                            if let Some((self_member_id, is_owner, is_admin)) = board_info {
                                 if !has_categories && !has_posts {
                                     rsx! {
                                         div { class: "flex flex-col items-center justify-center h-64 text-text-muted",
@@ -599,48 +628,27 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                     "Recent activity"
                                                 }
                                             }
-                                            div { class: "space-y-3",
+                                            div { class: "space-y-2",
                                                 {displayed_posts.iter().take(*posts_limit.read()).map({
-                                                    let handle_toggle_reaction = handle_toggle_reaction.clone();
-                                                    let handle_edit_message = handle_edit_message.clone();
                                                     let board_id = current_board_id.read().clone();
                                                     move |post| {
                                                         let post_id = post.id_string();
                                                         let board_id = board_id.clone();
                                                         let nav = navigator();
-                                                        let handle_toggle_reaction = handle_toggle_reaction.clone();
-                                                        let handle_edit_message = handle_edit_message.clone();
                                                         let (reply_count, last_reply, _) =
                                                             post_stats.get(&post.message_id).cloned().unwrap_or_default();
                                                         rsx! {
-                                                            div { key: "{post_id}",
-                                                                MessageCard {
-                                                                    message: post.clone(),
-                                                                    variant: MessageCardVariant::Card,
-                                                                    self_member_id: self_member_id,
-                                                                    expanded: false,
-                                                                    show_replies: false,
-                                                                    hide_content: true,
-                                                                    max_title_size: max_title_size,
-                                                                    max_message_size: max_message_size,
-                                                                    reply_count: reply_count,
-                                                                    last_reply: last_reply,
-                                                                    on_click: move |_| {
-                                                                        nav.push(Route::Post {
-                                                                            board_id: board_id.clone(),
-                                                                            post_id: post_id.clone(),
-                                                                        });
-                                                                    },
-                                                                    on_react: move |(msg_id, emoji)| {
-                                                                        handle_toggle_reaction(msg_id, emoji);
-                                                                    },
-                                                                    on_request_delete: move |msg_id| {
-                                                                        pending_delete.set(Some(msg_id));
-                                                                    },
-                                                                    on_edit: move |(msg_id, new_title, new_text)| {
-                                                                        handle_edit_message(msg_id, new_title, new_text);
-                                                                    },
-                                                                }
+                                                            PostRow {
+                                                                key: "{post_id}",
+                                                                post: post.clone(),
+                                                                reply_count: reply_count,
+                                                                last_reply: last_reply,
+                                                                on_click: move |_| {
+                                                                    nav.push(Route::Post {
+                                                                        board_id: board_id.clone(),
+                                                                        post_id: post_id.clone(),
+                                                                    });
+                                                                },
                                                             }
                                                         }
                                                     }
