@@ -6,13 +6,13 @@ use super::error::SynchronizerError;
 use super::response_handler::ResponseHandler;
 use crate::components::app::chat_delegate::{mark_legacy_migration_done, set_up_chat_delegate};
 use crate::components::app::sync_info::{BoardSyncStatus, SYNC_INFO};
-use crate::components::app::{BOARDS, SYNC_STATUS, WEB_API};
+use crate::components::app::{BOARDS, READ_ONLY_FETCHES, SYNC_STATUS, WEB_API};
 use crate::util::{owner_vk_to_contract_key, sleep};
 use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::*;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
-use freenet_stdlib::client_api::HostResponse;
+use freenet_stdlib::client_api::{ClientRequest, ContractRequest, HostResponse};
 use freenet_stdlib::prelude::OutboundDelegateMsg;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::StreamExt;
@@ -64,6 +64,10 @@ pub enum SynchronizerMessage {
         authorized_member: Box<AuthorizedMember>,
         invitee_signing_key: Box<SigningKey>,
         nickname: String,
+    },
+    /// Fetch a board's state without joining it, for read-only display.
+    FetchBoardForRead {
+        owner_vk: VerifyingKey,
     },
 }
 
@@ -224,6 +228,34 @@ impl FreenetSynchronizer {
                             }
                         } else {
                             info!("Successfully processed boards");
+                        }
+                    }
+                    SynchronizerMessage::FetchBoardForRead { owner_vk } => {
+                        info!(
+                            "Fetching board {:?} for read-only view",
+                            MemberId::from(owner_vk)
+                        );
+                        READ_ONLY_FETCHES.with_mut(|pending| {
+                            pending.insert(owner_vk);
+                        });
+                        let contract_key = owner_vk_to_contract_key(&owner_vk);
+                        if let Some(web_api) = WEB_API.write().as_mut() {
+                            let request = ContractRequest::Get {
+                                key: *contract_key.id(),
+                                return_contract_code: false,
+                                subscribe: false,
+                                blocking_subscribe: false,
+                            };
+                            if let Err(e) =
+                                web_api.send(ClientRequest::ContractOp(request)).await
+                            {
+                                error!("Read-only fetch failed: {}", e);
+                                READ_ONLY_FETCHES.with_mut(|pending| {
+                                    pending.remove(&owner_vk);
+                                });
+                            }
+                        } else {
+                            warn!("WebAPI unavailable for read-only fetch");
                         }
                     }
                     SynchronizerMessage::ConnectionLost => {

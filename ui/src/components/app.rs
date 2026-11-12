@@ -71,6 +71,16 @@ pub static BOARDS_LOADED: GlobalSignal<bool> = Global::new(|| false);
 /// True when the delegate we loaded from actually contained boards. Used to
 /// refuse writing an empty map over real data if a load ever fails validation.
 pub static DELEGATE_HAD_BOARDS: GlobalSignal<bool> = Global::new(|| false);
+
+/// Board states fetched from the network without a local identity, shown
+/// read-only. Keyed by the board's owner key.
+pub static READ_ONLY_BOARDS: GlobalSignal<
+    std::collections::HashMap<VerifyingKey, plaza_core::ChatBoardStateV1>,
+> = Global::new(std::collections::HashMap::new);
+
+/// Read-only fetches in flight.
+pub static READ_ONLY_FETCHES: GlobalSignal<std::collections::HashSet<VerifyingKey>> =
+    Global::new(std::collections::HashSet::new);
 pub static CURRENT_BOARD: GlobalSignal<CurrentBoard> =
     Global::new(|| CurrentBoard { owner_key: None });
 pub static MEMBER_INFO_MODAL: GlobalSignal<MemberInfoModalSignal> =
@@ -359,6 +369,10 @@ fn WaitingForBoard(board_id: String) -> Element {
     });
     // Once the delegate load is done, a missing board is genuinely unknown.
     let boards_loaded = *crate::components::app::BOARDS_LOADED.read();
+    let read_only_state = use_memo(move || {
+        parsed.and_then(|key| crate::components::app::READ_ONLY_BOARDS.read().get(&key).cloned())
+    });
+    let mut requested = use_signal(|| false);
 
     use_effect(move || {
         if *ready.read() {
@@ -372,12 +386,18 @@ fn WaitingForBoard(board_id: String) -> Element {
         }
     });
 
+    if let Some(state) = read_only_state.read().clone() {
+        return rsx! {
+            ReadOnlyBoardView { board_id: board_id.clone(), state: state }
+        };
+    }
+
     rsx! {
         div { class: "flex-1 flex flex-col items-center justify-center p-8 text-center",
             if boards_loaded {
                 p { class: "text-xl text-text-muted mb-2", "Board not found" }
                 p { class: "text-text-muted mb-6 text-sm",
-                    "This board is not stored on this device. If you were invited, open the invitation link again."
+                    "This board is not stored on this device. You can open it read-only, or open the invitation link again if you have one."
                 }
             } else {
                 p { class: "text-xl text-text-muted mb-2", "Loading board…" }
@@ -385,15 +405,110 @@ fn WaitingForBoard(board_id: String) -> Element {
                     "Waiting for the board state. It appears in the list above as soon as it is loaded."
                 }
             }
-            button {
-                r#type: "button",
-                class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white rounded-lg transition-colors inline-block",
-                onclick: move |_| {
-                    if let Some(win) = web_sys::window() {
-                        let _ = win.location().set_hash("/");
+            div { class: "flex items-center gap-3",
+                button {
+                    r#type: "button",
+                    class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text rounded-lg transition-colors inline-block",
+                    onclick: move |_| {
+                        if let Some(win) = web_sys::window() {
+                            let _ = win.location().set_hash("/");
+                        }
+                    },
+                    "Go to Home"
+                }
+                if boards_loaded {
+                    button {
+                        r#type: "button",
+                        class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white rounded-lg transition-colors inline-block disabled:opacity-50",
+                        disabled: *requested.read(),
+                        onclick: move |_| {
+                            if let Some(key) = parsed {
+                                requested.set(true);
+                                let _ = SYNCHRONIZER
+                                    .write()
+                                    .get_message_sender()
+                                    .unbounded_send(SynchronizerMessage::FetchBoardForRead {
+                                        owner_vk: key,
+                                    });
+                            }
+                        },
+                        if *requested.read() { "Fetching…" } else { "Open read-only" }
                     }
-                },
-                "Go to Home"
+                }
+            }
+        }
+    }
+}
+
+/// Read-only rendering of a board fetched from the network.
+#[component]
+fn ReadOnlyBoardView(board_id: String, state: plaza_core::ChatBoardStateV1) -> Element {
+    fn nickname(state: &plaza_core::ChatBoardStateV1, id: MemberId) -> String {
+        state
+            .member_info
+            .member_info
+            .iter()
+            .find(|info| info.member_info.member_id == id)
+            .map(|info| info.member_info.preferred_nickname.to_string_lossy())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| format!("{id}"))
+    }
+
+    let mut categories: Vec<String> = Vec::new();
+    let mut posts: Vec<(String, String)> = Vec::new();
+    for message in &state.recent_messages.messages {
+        let body = &message.message.content;
+        if body.is_category() {
+            if let Some(decoded) = body.decode_content() {
+                categories.push(decoded.to_display_string());
+            }
+        } else if !body.is_action() {
+            posts.push((
+                nickname(&state, message.message.author),
+                body.to_string_lossy(),
+            ));
+        }
+    }
+    posts.sort_by(|a, b| a.0.cmp(&b.0));
+    let short_id: String = board_id.chars().take(8).collect();
+
+    rsx! {
+        div { class: "flex-1 flex flex-col overflow-y-auto",
+            div { class: "bg-amber-500/10 border-b border-amber-500/30 px-6 py-3 text-sm text-amber-200",
+                "Read-only view: this board is not stored on this device, so you cannot post here."
+            }
+            div { class: "px-6 py-5",
+                h1 { class: "text-2xl font-semibold text-text mb-1", "Board {short_id}…" }
+                p { class: "text-text-muted text-sm mb-4",
+                    "{state.members.members.len()} members · {posts.len()} posts · {categories.len()} categories"
+                }
+
+                if !categories.is_empty() {
+                    div { class: "mb-5",
+                        h2 { class: "text-sm uppercase tracking-wide text-text-muted mb-2", "Categories" }
+                        div { class: "flex flex-wrap gap-2",
+                            for category in categories.iter() {
+                                span {
+                                    class: "px-3 py-1 bg-surface rounded-full text-sm text-text",
+                                    "{category}"
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if posts.is_empty() {
+                    p { class: "text-text-muted", "No posts on this board." }
+                } else {
+                    div { class: "space-y-2",
+                        for (author, text) in posts.iter() {
+                            div { class: "bg-surface rounded-lg p-3",
+                                p { class: "text-text-muted text-xs mb-1", "{author}" }
+                                p { class: "text-text text-sm whitespace-pre-wrap", "{text}" }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
