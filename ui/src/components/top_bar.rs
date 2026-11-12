@@ -1,7 +1,9 @@
 //! Top bar component showing user profile, admin controls, and post input.
 
 use crate::board_data::SendMessageError;
-use crate::components::app::{BOARDS, CURRENT_BOARD, CURRENT_CATEGORY, MEMBER_INFO_MODAL};
+use crate::components::app::{
+    ABOUT_MODAL, BOARDS, CURRENT_BOARD, CURRENT_CATEGORY, MEMBER_INFO_MODAL,
+};
 use crate::components::category_create_modal::CREATE_CATEGORY_MODAL;
 use crate::components::conversation::message_input::PostInput;
 use crate::util::avatar::get_avatar;
@@ -152,9 +154,27 @@ pub fn TopBar() -> Element {
 
     rsx! {
         div { class: "flex justify-between",
-            // User profile header
-            div {
-                class: "flex items-center gap-3 px-6 py-4 cursor-pointer hover:bg-surface/50 transition-colors",
+            // Brand + user profile
+            div { class: "flex items-center min-w-0",
+                button {
+                    class: "hidden sm:flex items-center gap-2 pl-4 md:pl-6 pr-2 py-4 text-left",
+                    title: "About FreeTalk Plaza",
+                    onclick: move |_| *ABOUT_MODAL.write() = true,
+                    img {
+                        src: asset!("/assets/plaza_logo.svg"),
+                        class: "w-9 h-9 flex-shrink-0",
+                        alt: "",
+                    }
+                    div { class: "flex flex-col leading-tight",
+                        span { class: "text-base font-semibold text-text", "FreeTalk Plaza" }
+                        span { class: "text-[10px] uppercase tracking-wide text-text-muted",
+                            "A forum on Freenet"
+                        }
+                    }
+                }
+                // User profile header
+                div {
+                    class: "flex items-center gap-3 px-4 md:px-6 py-4 cursor-pointer hover:bg-surface/50 transition-colors",
                 onclick: move |_| {
                     MEMBER_INFO_MODAL.with_mut(|signal| {
                         signal.member = Some(self_member_id);
@@ -172,6 +192,7 @@ pub fn TopBar() -> Element {
                     span { class: "text-lg", title: "Board Owner", "👑" }
                 } else if is_admin {
                     span { class: "text-lg", title: "Admin", "👑" }
+                }
                 }
             }
 

@@ -14,6 +14,7 @@ use crate::components::app::document_title::DocumentTitleUpdater;
 use crate::components::app::freenet_api::freenet_synchronizer::SynchronizerMessage;
 use crate::components::app::freenet_api::freenet_synchronizer::SynchronizerStatus;
 use crate::components::app::freenet_api::FreenetSynchronizer;
+use crate::components::about_modal::AboutModal;
 use crate::components::board_list::create_board_modal::CreateBoardModal;
 use crate::components::board_list::edit_board_modal::EditBoardModal;
 use crate::components::board_list::receive_invitation_modal::ReceiveInvitationModal;
@@ -66,6 +67,8 @@ pub static CURRENT_BOARD: GlobalSignal<CurrentBoard> =
     Global::new(|| CurrentBoard { owner_key: None });
 pub static MEMBER_INFO_MODAL: GlobalSignal<MemberInfoModalSignal> =
     Global::new(|| MemberInfoModalSignal { member: None });
+/// Whether the "About FreeTalk Plaza" panel is open.
+pub static ABOUT_MODAL: GlobalSignal<bool> = Global::new(|| false);
 pub static EDIT_BOARD_MODAL: GlobalSignal<EditBoardModalSignal> =
     Global::new(|| EditBoardModalSignal { board: None });
 pub static CREATE_BOARD_MODAL: GlobalSignal<CreateBoardModalSignal> =
@@ -226,7 +229,7 @@ pub fn App() -> Element {
 
     rsx! {
         // Favicon
-        Link { rel: "icon", r#type: "image/svg+xml", href: asset!("/assets/river_logo.svg") }
+        Link { rel: "icon", r#type: "image/svg+xml", href: asset!("/assets/plaza_logo.svg") }
         // Stylesheets
         Stylesheet { href: asset!("/assets/styles.css") }
         Stylesheet { href: asset!("/assets/main.css") }
@@ -245,6 +248,7 @@ pub fn App() -> Element {
             MemberInfoModal {}
             CreateBoardModal {}
             CategoryCreateModal {}
+            AboutModal {}
             DocumentTitleUpdater {}
         }
     }
@@ -255,7 +259,9 @@ pub fn App() -> Element {
 fn Home() -> Element {
     rsx! {
         div { class: "flex-1 flex flex-col items-center justify-center h-64 text-text-muted",
-            p { class: "text-xl", "Select a board from the sidebar above or create one" }
+            h1 { class: "text-3xl font-semibold text-text", "FreeTalk Plaza" }
+            p { class: "text-sm mt-1 mb-4", "A forum on Freenet" }
+            p { class: "text-xl", "Select a board above or create one" }
             p { class: "text-sm mt-2", "Posts will appear here" }
         }
     }

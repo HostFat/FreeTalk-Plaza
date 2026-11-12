@@ -1,4 +1,5 @@
 pub mod admin_view;
+pub mod about_modal;
 pub mod app;
 pub mod board_list;
 pub mod category_create_modal;

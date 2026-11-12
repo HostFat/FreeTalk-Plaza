@@ -11,7 +11,7 @@ use crate::util::ecies::unseal_bytes_with_secrets;
 use dioxus::logger::tracing::error;
 use dioxus::prelude::*;
 use dioxus_free_icons::{
-    icons::fa_solid_icons::{FaChevronDown, FaComments, FaFileImport, FaPlus},
+    icons::fa_solid_icons::{FaChevronDown, FaFileImport, FaNewspaper, FaPlus},
     Icon,
 };
 use web_sys::window;
@@ -108,7 +108,11 @@ pub fn BoardList() -> Element {
                     onclick: move |_| {
                         is_open.set(!is_open());
                     },
-                    Icon { width: 48, height: 48, icon: FaComments, class: "text-text-muted" }
+                    img {
+                        src: asset!("/assets/plaza_logo.svg"),
+                        class: "w-12 h-12 flex-shrink-0",
+                        alt: "",
+                    }
                     span { class: "flex-1 text-left text-4xl font-medium truncate", "{current_board_name}" }
                     Icon {
                         width: 16,
@@ -133,6 +137,26 @@ pub fn BoardList() -> Element {
                 div { class: "absolute left-0 right-0 flex justify-center z-20",
                     div { class: "w-full md:w-auto bg-panel shadow-lg md:rounded-b-xl overflow-hidden",
                         style: "min-width: min(100vw, 60vw);",
+
+                        // Brand header, so the product name is visible on mobile too
+                        button {
+                            class: "w-full flex items-center gap-2 px-6 py-4 border-b border-border text-left hover:bg-surface transition-colors",
+                            title: "About FreeTalk Plaza",
+                            onclick: move |_| {
+                                *crate::components::app::ABOUT_MODAL.write() = true;
+                            },
+                            img {
+                                src: asset!("/assets/plaza_logo.svg"),
+                                class: "w-8 h-8",
+                                alt: "",
+                            }
+                            div { class: "flex flex-col leading-tight",
+                                span { class: "text-base font-semibold text-text", "FreeTalk Plaza" }
+                                span { class: "text-[10px] uppercase tracking-wide text-text-muted",
+                                    "A forum on Freenet"
+                                }
+                            }
+                        }
 
                         // Board list
                         div { class: "max-h-96 overflow-y-auto",
@@ -169,7 +193,7 @@ pub fn BoardList() -> Element {
                                         Icon {
                                             width: 32,
                                             height: 32,
-                                            icon: FaComments,
+                                            icon: FaNewspaper,
                                             class: if is_current { "text-accent" } else { "text-text-muted" }
                                         }
                                         if awaiting_sync {

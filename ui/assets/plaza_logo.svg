@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="FreeTalk Plaza">
+  <g fill="none" stroke="#007FFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 54V40a6 6 0 0 1 12 0v14" />
+    <path d="M24 54V40a6 6 0 0 1 12 0v14" />
+    <path d="M36 54V40a6 6 0 0 1 12 0v14" />
+    <path d="M8 54h48" />
+    <path d="M8 22h48" />
+    <path d="M14 22v12M50 22v12" />
+  </g>
+</svg>

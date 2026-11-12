@@ -249,7 +249,7 @@ fn create_notification_internal(
 
     let options = NotificationOptions::new();
     options.set_body(&body);
-    // Could add icon here: options.icon("/assets/river_logo.svg");
+    // Could add icon here: options.icon("/assets/plaza_logo.svg");
 
     match Notification::new_with_options(board_name, &options) {
         Ok(notification) => {
