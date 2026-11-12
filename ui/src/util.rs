@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod access;
 pub mod avatar;
 pub mod ecies;
 pub mod markdown;

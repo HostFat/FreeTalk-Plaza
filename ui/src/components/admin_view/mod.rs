@@ -5,6 +5,7 @@ mod add_admin_modal;
 use add_admin_modal::AddAdminModal;
 
 use crate::board_data::BoardData;
+use crate::components::access_section::AccessSection;
 use crate::components::app::{BOARDS, CURRENT_BOARD, EDIT_BOARD_MODAL};
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
@@ -159,6 +160,9 @@ pub fn AdminView() -> Element {
                     }
                 }
             }
+
+            // Roles and reusable invite links
+            AccessSection {}
 
             // Banned users section
             div { class: "mb-6",

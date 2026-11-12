@@ -41,6 +41,8 @@ pub enum Route {
     Home,
     #[route("/invite/:invite_code")]
     Invite { invite_code: String },
+    #[route("/join/:token")]
+    JoinBoard { token: String },
     #[route("/board/:board_id")]
     Posts { board_id: String },
     #[route("/board/:board_id/post/:post_id")]
@@ -266,6 +268,14 @@ fn Home() -> Element {
             p { class: "text-xl", "Select a board above or create one" }
             p { class: "text-sm mt-2", "Posts will appear here" }
         }
+    }
+}
+
+/// Reusable invite link screen.
+#[component]
+pub fn JoinBoard(token: String) -> Element {
+    rsx! {
+        crate::components::join_screen::JoinScreen { token }
     }
 }
 

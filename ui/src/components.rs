@@ -1,3 +1,4 @@
+pub mod access_section;
 pub mod admin_view;
 pub mod about_modal;
 pub mod app;
@@ -5,6 +6,7 @@ pub mod board_list;
 pub mod category_create_modal;
 pub mod category_view;
 pub mod conversation;
+pub mod join_screen;
 pub mod members;
 pub mod posts_view;
 pub mod top_bar;
