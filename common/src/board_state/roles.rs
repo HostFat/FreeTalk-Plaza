@@ -70,23 +70,16 @@ pub struct RoleAssignment {
     pub member_id: MemberId,
     pub generation: u64,
     pub revoked: bool,
-    /// Who signed this record. `None` means the owner (records written before
-    /// delegation existed). Otherwise the member must hold a role that allows
-    /// managing access.
-    #[serde(default)]
-    pub signer: Option<MemberId>,
-}
-
-impl RoleAssignment {
-    fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
-        self.signer.unwrap_or_else(|| parameters.owner_id())
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct AuthorizedRoleAssignment {
     pub assignment: RoleAssignment,
     pub signature: Signature,
+    /// Who signed it. `None` means the owner. Kept outside the signed payload so
+    /// adding it does not invalidate records written before delegation existed.
+    #[serde(default)]
+    pub signer: Option<MemberId>,
 }
 
 impl AuthorizedRoleAssignment {
@@ -94,7 +87,25 @@ impl AuthorizedRoleAssignment {
         Self {
             signature: sign_struct(&assignment, owner_sk),
             assignment,
+            signer: None,
         }
+    }
+
+    /// A record signed by a member who manages access.
+    pub fn signed_by(
+        assignment: RoleAssignment,
+        signer: MemberId,
+        signing_key: &SigningKey,
+    ) -> Self {
+        Self {
+            signature: sign_struct(&assignment, signing_key),
+            assignment,
+            signer: Some(signer),
+        }
+    }
+
+    pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
+        self.signer.unwrap_or_else(|| parameters.owner_id())
     }
 
     pub fn verify_signature(&self, owner_vk: &VerifyingKey) -> Result<(), String> {
@@ -132,7 +143,7 @@ impl ComposableState for RolesV1 {
 
         let mut assignment_keys = std::collections::HashSet::new();
         for assignment in &self.assignments {
-            let signer = assignment.assignment.signer_id(parameters);
+            let signer = assignment.signer_id(parameters);
             if signer != parameters.owner_id() && !self.can_manage_access(&signer) {
                 return Err("Role assignment signer cannot manage access".to_string());
             }
@@ -279,7 +290,7 @@ impl ComposableState for RolesV1 {
             }
 
             for assignment in &delta.assignments {
-                let signer = assignment.assignment.signer_id(parameters);
+                let signer = assignment.signer_id(parameters);
                 if signer != parameters.owner_id() && !combined.can_manage_access(&signer) {
                     return Err("Role assignment signer cannot manage access".to_string());
                 }
@@ -451,7 +462,6 @@ mod delegation_tests {
                 member_id: manager_id,
                 generation: 1,
                 revoked: false,
-                signer: None,
             },
             owner,
         ));
@@ -471,11 +481,14 @@ mod delegation_tests {
             member_id: MemberId::from(&other.verifying_key()),
             generation: 1,
             revoked: false,
-            signer: Some(MemberId::from(&manager.verifying_key())),
         };
         let delta = RolesDelta {
             roles: vec![],
-            assignments: vec![AuthorizedRoleAssignment::new(assignment, &manager)],
+            assignments: vec![AuthorizedRoleAssignment::signed_by(
+                assignment,
+                MemberId::from(&manager.verifying_key()),
+                &manager,
+            )],
         };
 
         state
@@ -510,11 +523,14 @@ mod delegation_tests {
             member_id: MemberId::from(&target.verifying_key()),
             generation: 1,
             revoked: false,
-            signer: Some(MemberId::from(&outsider.verifying_key())),
         };
         let delta = RolesDelta {
             roles: vec![],
-            assignments: vec![AuthorizedRoleAssignment::new(assignment, &outsider)],
+            assignments: vec![AuthorizedRoleAssignment::signed_by(
+                assignment,
+                MemberId::from(&outsider.verifying_key()),
+                &outsider,
+            )],
         };
 
         assert!(state

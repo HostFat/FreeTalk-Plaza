@@ -197,12 +197,15 @@ pub fn set_role_member(
             member_id,
             generation,
             revoked: !grant,
-            signer: signer_for(self_id, board_key),
+        };
+        let authorized = match signer_for(self_id, board_key) {
+            Some(signer) => AuthorizedRoleAssignment::signed_by(assignment, signer, &self_sk),
+            None => AuthorizedRoleAssignment::new(assignment, &self_sk),
         };
         let delta = ChatBoardStateV1Delta {
             roles: Some(RolesDelta {
                 roles: vec![],
-                assignments: vec![AuthorizedRoleAssignment::new(assignment, &self_sk)],
+                assignments: vec![authorized],
             }),
             ..Default::default()
         };
@@ -229,11 +232,14 @@ pub fn create_invite_link(role_id: RoleId, max_uses: Option<u32>) -> Result<Stri
             not_after: None,
             generation: 1,
             deleted: false,
-            signer: signer_for(self_id, board_key),
+        };
+        let authorized = match signer_for(self_id, board_key) {
+            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &self_sk),
+            None => AuthorizedInviteToken::new(token, &self_sk),
         };
         let delta = ChatBoardStateV1Delta {
             invites: Some(InviteTokensDelta {
-                tokens: vec![AuthorizedInviteToken::new(token, &self_sk)],
+                tokens: vec![authorized],
             }),
             ..Default::default()
         };
@@ -261,12 +267,15 @@ pub fn revoke_invite_link(token_id: TokenId) -> Result<(), String> {
         let token = InviteToken {
             generation: current.generation + 1,
             deleted: true,
-            signer: signer_for(self_id, board_key),
             ..current
+        };
+        let authorized = match signer_for(self_id, board_key) {
+            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &self_sk),
+            None => AuthorizedInviteToken::new(token, &self_sk),
         };
         let delta = ChatBoardStateV1Delta {
             invites: Some(InviteTokensDelta {
-                tokens: vec![AuthorizedInviteToken::new(token, &self_sk)],
+                tokens: vec![authorized],
             }),
             ..Default::default()
         };

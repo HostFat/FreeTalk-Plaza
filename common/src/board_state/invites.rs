@@ -42,21 +42,16 @@ pub struct InviteToken {
     pub not_after: Option<SystemTime>,
     pub generation: u64,
     pub deleted: bool,
-    /// Who signed this record. `None` means the owner.
-    #[serde(default)]
-    pub signer: Option<MemberId>,
-}
-
-impl InviteToken {
-    fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
-        self.signer.unwrap_or_else(|| parameters.owner_id())
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct AuthorizedInviteToken {
     pub token: InviteToken,
     pub signature: Signature,
+    /// Who signed it. `None` means the owner. Outside the signed payload so
+    /// records written before delegation existed keep verifying.
+    #[serde(default)]
+    pub signer: Option<MemberId>,
 }
 
 impl AuthorizedInviteToken {
@@ -64,7 +59,21 @@ impl AuthorizedInviteToken {
         Self {
             signature: sign_struct(&token, owner_sk),
             token,
+            signer: None,
         }
+    }
+
+    /// A link created by a member who manages access.
+    pub fn signed_by(token: InviteToken, signer: MemberId, signing_key: &SigningKey) -> Self {
+        Self {
+            signature: sign_struct(&token, signing_key),
+            token,
+            signer: Some(signer),
+        }
+    }
+
+    pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
+        self.signer.unwrap_or_else(|| parameters.owner_id())
     }
 
     pub fn verify_signature(&self, owner_vk: &VerifyingKey) -> Result<(), String> {
@@ -119,7 +128,7 @@ impl ComposableState for InviteTokensV1 {
     ) -> Result<(), String> {
         let mut ids = std::collections::HashSet::new();
         for token in &self.tokens {
-            let signer = token.token.signer_id(parameters);
+            let signer = token.signer_id(parameters);
             if signer != parameters.owner_id()
                 && !parent_state.roles.can_manage_access(&signer)
             {
@@ -202,7 +211,7 @@ impl ComposableState for InviteTokensV1 {
             }
 
             for token in &delta.tokens {
-                let signer = token.token.signer_id(parameters);
+                let signer = token.signer_id(parameters);
                 if signer != parameters.owner_id()
                     && !parent_state.roles.can_manage_access(&signer)
                 {
@@ -337,7 +346,6 @@ mod tests {
                 not_after: None,
                 generation: 1,
                 deleted: false,
-                signer: None,
             },
             owner,
         ));
@@ -401,25 +409,25 @@ mod tests {
                 member_id: MemberId::from(&manager.verifying_key()),
                 generation: 1,
                 revoked: false,
-                signer: None,
             },
             &owner,
         ));
 
         let token = |signer: &SigningKey, signer_id: MemberId| {
             let token_key = token_key();
-            InviteToken {
-                id: [4u8; 16],
-                verifying_key: token_key.verifying_key(),
-                role_id: [5u8; 16],
-                max_uses: Some(1),
-                not_after: None,
-                generation: 1,
-                deleted: false,
-                signer: Some(signer_id),
-            }
-            .clone()
-            .into_token(signer)
+            AuthorizedInviteToken::signed_by(
+                InviteToken {
+                    id: [4u8; 16],
+                    verifying_key: token_key.verifying_key(),
+                    role_id: [5u8; 16],
+                    max_uses: Some(1),
+                    not_after: None,
+                    generation: 1,
+                    deleted: false,
+                },
+                signer_id,
+                signer,
+            )
         };
 
         // A manager may create a link.
@@ -441,16 +449,6 @@ mod tests {
             .invites
             .apply_delta(&state, &params, &Some(delta))
             .is_err());
-    }
-
-    trait IntoToken {
-        fn into_token(self, signer: &SigningKey) -> AuthorizedInviteToken;
-    }
-
-    impl IntoToken for InviteToken {
-        fn into_token(self, signer: &SigningKey) -> AuthorizedInviteToken {
-            AuthorizedInviteToken::new(self, signer)
-        }
     }
 
     #[test]
