@@ -11,7 +11,7 @@ use crate::components::app::notifications::{
 };
 use crate::components::app::receive_times::record_receive_times;
 use crate::components::app::sync_info::{now_ms, BoardSyncStatus, SYNC_INFO};
-use crate::components::app::{BOARDS, CURRENT_BOARD, PENDING_INVITES, WEB_API};
+use crate::components::app::{mark_needs_sync, BOARDS, CURRENT_BOARD, PENDING_INVITES, WEB_API};
 use crate::constants::BOARD_CONTRACT_WASM;
 use crate::invites::PendingBoardStatus;
 use crate::util::ecies::decrypt_with_symmetric_key;
@@ -65,6 +65,10 @@ impl BoardSynchronizer {
             MemberInfoV1,
             HashMap<u32, [u8; 32]>,
         )> = None;
+
+        // Set when the owner hands the board secret to a newly joined member,
+        // so an update is sent without waiting for the next sync tick.
+        let mut distributed_secrets = false;
 
         BOARDS.with_mut(|boards| {
             if let Some(board_data) = boards.map.get_mut(&owner_vk) {
@@ -158,6 +162,38 @@ impl BoardSynchronizer {
                         // Keep cached self membership data up to date
                         board_data.capture_self_membership_data(&params);
 
+                        // If we own a private board, hand the board secret to
+                        // members who joined since the last distribution. This
+                        // runs on an incoming update; doing it inside
+                        // needs_to_send_update is what caused the render loop
+                        // that made the old implementation get disabled.
+                        if board_data.is_private()
+                            && board_data.owner_vk == board_data.self_sk.verifying_key()
+                        {
+                            if let Some(secrets_delta) =
+                                board_data.generate_missing_member_secrets()
+                            {
+                                let state_before = board_data.board_state.clone();
+                                let delta = ChatBoardStateV1Delta {
+                                    secrets: Some(secrets_delta),
+                                    ..Default::default()
+                                };
+                                match board_data.board_state.apply_delta(
+                                    &state_before,
+                                    &params,
+                                    &Some(delta),
+                                ) {
+                                    Ok(_) => {
+                                        info!("Distributed the board secret to new members");
+                                        distributed_secrets = true;
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to distribute board secrets: {}", e)
+                                    }
+                                }
+                            }
+                        }
+
                         // NOTE: We do not update last_synced_state in the delta path.
                         // We only have a delta (not the full contract state), so we can't
                         // set the baseline to the contract's actual state. The full-state path
@@ -194,6 +230,12 @@ impl BoardSynchronizer {
 
         // Update document title after BOARDS.with_mut completes (update_document_title calls BOARDS.read())
         update_document_title();
+
+        // Push the secret distribution out immediately instead of waiting for
+        // the next sync tick.
+        if distributed_secrets {
+            mark_needs_sync(owner_vk);
+        }
 
         // Now safe to call notify_new_messages (it calls BOARDS.read() internally)
         if let Some((messages, self_member_id, member_info, board_secrets)) = pending_notification {

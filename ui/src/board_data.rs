@@ -795,7 +795,111 @@ impl Boards {
 mod tests {
     use super::*;
     use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
-    use plaza_core::board_state::member::{AuthorizedMember, Member};
+    use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
+
+    /// Two participants: the owner creates a private board, the invitee joins,
+    /// and both read the encrypted board name and a private post while an
+    /// outsider cannot. This is the data path the "Private board" checkbox
+    /// drives.
+    #[test]
+    fn test_private_board_is_readable_by_members_only() {
+        use crate::util::ecies::{
+            decrypt_secret_from_member_blob, decrypt_with_symmetric_key, seal_bytes, unseal_bytes,
+        };
+        use plaza_core::board_state::privacy::SealedBytes;
+        use plaza_core::board_state::ChatBoardStateV1Delta;
+
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let mut boards = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            migrated_boards: vec![],
+        };
+
+        let key = boards.create_new_board_with_name(
+            owner_sk.clone(),
+            "Secret Plans".to_string(),
+            "alice".to_string(),
+            true,
+        );
+        let board = boards.map.get(&key).expect("board created");
+        assert!(board.is_private(), "board must be created private");
+        let (secret, version) = board.get_secret().expect("owner holds the secret");
+        let secret = *secret;
+
+        // The owner reads the sealed board name.
+        match &board.board_state.configuration.configuration.display.name {
+            SealedBytes::Private {
+                ciphertext, nonce, ..
+            } => assert_eq!(
+                decrypt_with_symmetric_key(&secret, ciphertext, nonce).unwrap(),
+                b"Secret Plans"
+            ),
+            _ => panic!("a private board name must be sealed"),
+        }
+
+        // The invitee joins with their own key.
+        let invitee_sk = SigningKey::generate(&mut rng);
+        let owner_id: MemberId = key.into();
+        let board = boards.map.get_mut(&key).unwrap();
+        board.board_state.members.members.push(AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk: invitee_sk.verifying_key(),
+            },
+            &owner_sk,
+        ));
+
+        // The owner distributes the secret (same call the sync path makes when
+        // a member joins) and applies it to the board state.
+        let state_before = board.board_state.clone();
+        let secrets_delta = board
+            .generate_missing_member_secrets()
+            .expect("the invitee needs an encrypted secret");
+        board
+            .board_state
+            .apply_delta(
+                &state_before,
+                &ChatBoardParametersV1 { owner: key },
+                &Some(ChatBoardStateV1Delta {
+                    secrets: Some(secrets_delta),
+                    ..Default::default()
+                }),
+            )
+            .expect("the secrets delta applies cleanly");
+
+        let invitee_id: MemberId = invitee_sk.verifying_key().into();
+        let blob = board
+            .board_state
+            .secrets
+            .encrypted_secrets
+            .iter()
+            .find(|s| s.secret.member_id == invitee_id)
+            .expect("the applied state carries the invitee's secret");
+        assert_eq!(blob.secret.secret_version, version);
+        let ephemeral = x25519_dalek::PublicKey::from(blob.secret.sender_ephemeral_public_key);
+        let invitee_secret = decrypt_secret_from_member_blob(
+            &blob.secret.ciphertext,
+            &blob.secret.nonce,
+            &ephemeral,
+            &invitee_sk,
+        )
+        .expect("the invitee decrypts the board secret");
+        assert_eq!(invitee_secret, secret, "both clients share the secret");
+
+        // A private post from the owner opens for the invitee, not for others.
+        let post = seal_bytes(b"hello from the owner", &secret, version);
+        assert_eq!(
+            unseal_bytes(&post, Some(&invitee_secret)).unwrap(),
+            b"hello from the owner"
+        );
+        assert!(
+            unseal_bytes(&post, Some(&[9u8; 32])).is_err(),
+            "an outsider without the secret must not read the post"
+        );
+    }
 
     /// Regression test for #85: accepting an invitation for a board that already
     /// exists in the boards map must update self_sk so can_send_message() passes.

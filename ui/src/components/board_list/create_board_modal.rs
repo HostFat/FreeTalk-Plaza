@@ -8,6 +8,7 @@ pub fn CreateBoardModal() -> Element {
     let mut board_name = use_signal(String::new);
     let mut nickname = use_signal(String::new);
     let mut error_msg = use_signal(|| None::<String>);
+    let mut is_private = use_signal(|| false);
 
     let create_board = move |_| {
         use dioxus::logger::tracing::info;
@@ -31,7 +32,7 @@ pub fn CreateBoardModal() -> Element {
         // Generate key outside the borrow
         info!("🔵 Generating signing key...");
         let self_sk = SigningKey::generate(&mut rand::thread_rng());
-        let private = false; // Private boards temporarily disabled
+        let private = *is_private.read();
         info!(
             "🔵 Creating {} board with nickname: {}",
             if private { "private" } else { "public" },
@@ -61,6 +62,7 @@ pub fn CreateBoardModal() -> Element {
         info!("🔵 Resetting form fields...");
         board_name.set(String::new());
         nickname.set(String::new());
+        is_private.set(false);
         info!("🔵 Closing modal...");
         CREATE_BOARD_MODAL.with_mut(|modal| {
             modal.show = false;
@@ -126,15 +128,18 @@ pub fn CreateBoardModal() -> Element {
                         }
                     }
 
-                    label { class: "flex items-center gap-3 cursor-not-allowed opacity-50",
+                    label { class: "flex items-start gap-3 cursor-pointer",
                         input {
                             r#type: "checkbox",
-                            class: "w-4 h-4 rounded border-border text-accent focus:ring-accent/50",
-                            checked: false,
-                            disabled: true,
+                            class: "mt-0.5 w-4 h-4 rounded border-border text-accent focus:ring-accent/50",
+                            checked: *is_private.read(),
+                            onchange: move |evt| is_private.set(evt.checked()),
                         }
-                        span { class: "text-sm text-text-muted",
-                            "Private boards temporarily disabled"
+                        div { class: "flex flex-col",
+                            span { class: "text-sm text-text", "Private board" }
+                            span { class: "text-xs text-text-muted",
+                                "The board name and posts are encrypted: only invited members can read them."
+                            }
                         }
                     }
                 }
