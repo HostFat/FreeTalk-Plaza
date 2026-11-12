@@ -797,6 +797,39 @@ mod tests {
     use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
     use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
 
+    /// A freshly created board must already be a cleanup fixpoint: the contract
+    /// rejects published states that cleanup would change, so a PUT of a
+    /// non-normalized new board would never be accepted.
+    #[test]
+    fn test_new_board_state_is_normalized() {
+        let mut rng = rand::thread_rng();
+        for private in [false, true] {
+            let owner_sk = SigningKey::generate(&mut rng);
+            let mut boards = Boards {
+                map: HashMap::new(),
+                current_board_key: None,
+                migrated_boards: vec![],
+            };
+            let key = boards.create_new_board_with_name(
+                owner_sk.clone(),
+                "Normalized?".to_string(),
+                "alice".to_string(),
+                private,
+            );
+            let params = ChatBoardParametersV1 { owner: key };
+            let board = boards.map.get(&key).unwrap();
+            let mut normalized = board.board_state.clone();
+            normalized
+                .normalize(&params)
+                .expect("cleanup must succeed on a fresh board");
+            assert_eq!(
+                normalized, board.board_state,
+                "a freshly created {} board must be a cleanup fixpoint",
+                if private { "private" } else { "public" }
+            );
+        }
+    }
+
     /// Two participants: the owner creates a private board, the invitee joins,
     /// and both read the encrypted board name and a private post while an
     /// outsider cannot. This is the data path the "Private board" checkbox
