@@ -8,6 +8,8 @@ use web_sys::window;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TIMESTAMP: &str = env!("BUILD_TIMESTAMP_ISO");
 const COMMIT: &str = env!("GIT_COMMIT_HASH");
+const COMMIT_COUNT: &str = env!("GIT_COMMIT_COUNT");
+const COMMIT_DATE: &str = env!("GIT_COMMIT_DATE");
 
 /// `id` of the web-container contract when the app is served by a Freenet node,
 /// i.e. from `/v1/contract/web/<id>/...`; `None` for a local dev build.
@@ -35,6 +37,7 @@ pub fn AboutModal() -> Element {
         .and_then(|w| w.location().host().ok())
         .unwrap_or_else(|| "unknown".to_string());
     let site = site_contract_id();
+    let site_label = site.clone().unwrap_or_else(|| "local".to_string());
 
     rsx! {
         div {
@@ -73,8 +76,8 @@ pub fn AboutModal() -> Element {
                     dl { class: "grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 font-mono text-xs",
                         dt { class: "text-text-muted", "Version" }
                         dd { class: "text-text", "{VERSION}" }
-                        dt { class: "text-text-muted", "Commit" }
-                        dd { class: "text-text", "{COMMIT}" }
+                        dt { class: "text-text-muted", "Build" }
+                        dd { class: "text-text", "#{COMMIT_COUNT} · {COMMIT} · {COMMIT_DATE}" }
                         dt { class: "text-text-muted", "Built" }
                         dd { class: "text-text", "{BUILD_TIMESTAMP}" }
                         dt { class: "text-text-muted", "Node" }
@@ -84,9 +87,22 @@ pub fn AboutModal() -> Element {
                             dd { class: "text-text break-all", "{site}" }
                         }
                     }
+                    p { class: "text-xs",
+                        "To check whether this site is current, compare the commit above with the latest commit in the repository."
+                    }
                 }
 
-                div { class: "px-6 py-4 border-t border-border flex justify-end",
+                div { class: "px-6 py-4 border-t border-border flex items-center justify-between gap-3",
+                    button {
+                        class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg transition-colors",
+                        onclick: move |_| {
+                            let details = format!(
+                                "FreeTalk Plaza {VERSION}\nBuild #{COMMIT_COUNT} · {COMMIT} · {COMMIT_DATE}\nBuilt {BUILD_TIMESTAMP}\nNode {node}\nSite {site_label}"
+                            );
+                            crate::util::copy_to_clipboard(&details);
+                        },
+                        "Copy details"
+                    }
                     button {
                         class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg transition-colors",
                         onclick: move |_| *ABOUT_MODAL.write() = false,

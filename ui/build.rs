@@ -27,6 +27,26 @@ fn main() {
 
     println!("cargo:rustc-env=GIT_COMMIT_HASH={}", git_hash);
 
+    // Commit count and date, so the About panel can show something monotonic to
+    // compare against the repository.
+    let git_count = Command::new("git")
+        .args(["rev-list", "--count", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "0".to_string());
+    let git_date = Command::new("git")
+        .args(["log", "-1", "--format=%cs"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    println!("cargo:rustc-env=GIT_COMMIT_COUNT={}", git_count);
+    println!("cargo:rustc-env=GIT_COMMIT_DATE={}", git_date);
+
     generate_legacy_delegates();
 
     // Note: We intentionally do NOT use cargo:rerun-if-changed here.
