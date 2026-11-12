@@ -284,7 +284,13 @@ pub fn App() -> Element {
 #[component]
 fn Home() -> Element {
     rsx! {
-        div { class: "flex-1 flex flex-col items-center justify-center h-64 text-text-muted",
+        div { class: "flex-1 flex flex-col items-center justify-center px-6 py-10 text-text-muted",
+            div { class: "w-full max-w-2xl mb-8 bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 text-sm text-amber-200",
+                p { class: "font-semibold mb-1", "Work in progress" }
+                p {
+                    "FreeTalk Plaza is under active development. Features, contracts and data formats change without notice, and anything can break at any time. There is no support. Please do not create boards you intend to keep for the long term."
+                }
+            }
             h1 { class: "text-3xl font-semibold text-text", "FreeTalk Plaza" }
             p { class: "text-sm mt-1 mb-4", "A forum on Freenet" }
             p { class: "text-xl", "Select a board above or create one" }

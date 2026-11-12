@@ -73,6 +73,9 @@ pub fn AboutModal() -> Element {
 
                 div { class: "px-6 py-5 space-y-3 text-sm text-text-muted",
                     p { "Boards, categories and posts live in Freenet contracts, so no server holds them and no account is needed." }
+                    p { class: "text-amber-200",
+                        "Development preview: things can break and data can be lost without notice. Do not rely on it for long-term content."
+                    }
                     dl { class: "grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 font-mono text-xs",
                         dt { class: "text-text-muted", "Version" }
                         dd { class: "text-text", "{VERSION}" }
