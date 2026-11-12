@@ -50,11 +50,13 @@ pub fn AccessSection() -> Element {
     };
 
     let is_owner = data.owner_vk == data.self_sk.verifying_key();
-    if !is_owner {
+    let self_id = MemberId::from(&data.self_sk.verifying_key());
+    let can_manage = is_owner || data.board_state.roles.can_manage_access(&self_id);
+    if !can_manage {
         return rsx! {
             div { class: "bg-surface rounded-lg p-4",
                 p { class: "text-text-muted text-sm",
-                    "Roles and invite links are managed by the board owner for now."
+                    "Only the board owner and members with the access-management role can manage roles and invite links."
                 }
             }
         };
@@ -81,33 +83,35 @@ pub fn AccessSection() -> Element {
                 }
             }
 
-            div { class: "bg-surface rounded-lg p-3 mb-3 flex flex-wrap items-center gap-2",
-                input {
-                    class: "flex-1 min-w-40 px-3 py-2 bg-panel border border-border rounded-lg text-text placeholder-text-muted",
-                    placeholder: "New role name",
-                    value: "{role_name}",
-                    oninput: move |evt| role_name.set(evt.value()),
-                }
-                label { class: "flex items-center gap-2 text-sm text-text-muted",
+            if is_owner {
+                div { class: "bg-surface rounded-lg p-3 mb-3 flex flex-wrap items-center gap-2",
                     input {
-                        r#type: "checkbox",
-                        checked: *role_manages.read(),
-                        onchange: move |evt| role_manages.set(evt.checked()),
+                        class: "flex-1 min-w-40 px-3 py-2 bg-panel border border-border rounded-lg text-text placeholder-text-muted",
+                        placeholder: "New role name",
+                        value: "{role_name}",
+                        oninput: move |evt| role_name.set(evt.value()),
                     }
-                    "can manage access"
-                }
-                button {
-                    r#type: "button",
-                    class: "px-3 py-2 bg-accent hover:bg-accent/80 text-white text-sm rounded-lg",
-                    onclick: move |_| {
-                        let name = role_name.read().clone();
-                        let manages = *role_manages.read();
-                        match access::create_role(name, manages) {
-                            Ok(()) => { role_name.set(String::new()); role_manages.set(false); error.set(None); }
-                            Err(e) => error.set(Some(e)),
+                    label { class: "flex items-center gap-2 text-sm text-text-muted",
+                        input {
+                            r#type: "checkbox",
+                            checked: *role_manages.read(),
+                            onchange: move |evt| role_manages.set(evt.checked()),
                         }
-                    },
-                    "Create"
+                        "can manage access"
+                    }
+                    button {
+                        r#type: "button",
+                        class: "px-3 py-2 bg-accent hover:bg-accent/80 text-white text-sm rounded-lg",
+                        onclick: move |_| {
+                            let name = role_name.read().clone();
+                            let manages = *role_manages.read();
+                            match access::create_role(name, manages) {
+                                Ok(()) => { role_name.set(String::new()); role_manages.set(false); error.set(None); }
+                                Err(e) => error.set(Some(e)),
+                            }
+                        },
+                        "Create"
+                    }
                 }
             }
 
@@ -132,13 +136,15 @@ pub fn AccessSection() -> Element {
                                         span { class: "text-xs text-text-muted",
                                             "{assigned.len()} members"
                                         }
-                                        button {
-                                            r#type: "button",
-                                            class: "ml-auto text-xs text-red-400 hover:bg-red-500/10 rounded px-2 py-1",
-                                            onclick: move |_| {
-                                                let _ = access::remove_role(role_id);
-                                            },
-                                            "Delete role"
+                                        if is_owner {
+                                            button {
+                                                r#type: "button",
+                                                class: "ml-auto text-xs text-red-400 hover:bg-red-500/10 rounded px-2 py-1",
+                                                onclick: move |_| {
+                                                    let _ = access::remove_role(role_id);
+                                                },
+                                                "Delete role"
+                                            }
                                         }
                                     }
                                     div { class: "flex flex-wrap gap-1 mb-2",

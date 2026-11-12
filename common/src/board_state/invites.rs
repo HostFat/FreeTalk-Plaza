@@ -42,6 +42,15 @@ pub struct InviteToken {
     pub not_after: Option<SystemTime>,
     pub generation: u64,
     pub deleted: bool,
+    /// Who signed this record. `None` means the owner.
+    #[serde(default)]
+    pub signer: Option<MemberId>,
+}
+
+impl InviteToken {
+    fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
+        self.signer.unwrap_or_else(|| parameters.owner_id())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -105,12 +114,25 @@ impl ComposableState for InviteTokensV1 {
 
     fn verify(
         &self,
-        _parent_state: &Self::ParentState,
+        parent_state: &Self::ParentState,
         parameters: &Self::Parameters,
     ) -> Result<(), String> {
         let mut ids = std::collections::HashSet::new();
         for token in &self.tokens {
-            token.verify_signature(&parameters.owner)?;
+            let signer = token.token.signer_id(parameters);
+            if signer != parameters.owner_id()
+                && !parent_state.roles.can_manage_access(&signer)
+            {
+                return Err("Invite link signer cannot manage access".to_string());
+            }
+            let signing_key = crate::board_state::roles::signer_key(
+                parent_state,
+                parameters,
+                &signer,
+            )?;
+            verify_struct(&token.token, &token.signature, &signing_key)
+                .map_err(|e| format!("Invalid invite token signature: {}", e))?;
+
             if !ids.insert(token.token.id) {
                 return Err("Duplicate invite token".to_string());
             }
@@ -163,23 +185,40 @@ impl ComposableState for InviteTokensV1 {
 
     fn apply_delta(
         &mut self,
-        _parent_state: &Self::ParentState,
+        parent_state: &Self::ParentState,
         parameters: &Self::Parameters,
         delta: &Option<Self::Delta>,
     ) -> Result<(), String> {
         if let Some(delta) = delta {
+            let mut combined = self.clone();
             for token in &delta.tokens {
-                token.verify_signature(&parameters.owner)?;
-                match self.tokens.iter().find(|t| t.token.id == token.token.id) {
-                    Some(existing) if existing.token.generation >= token.token.generation => {
-                        continue
+                match combined.tokens.iter().find(|t| t.token.id == token.token.id) {
+                    Some(existing) if existing.token.generation >= token.token.generation => {}
+                    _ => {
+                        combined.tokens.retain(|t| t.token.id != token.token.id);
+                        combined.tokens.push(token.clone());
                     }
-                    _ => {}
                 }
-                self.tokens.retain(|t| t.token.id != token.token.id);
-                self.tokens.push(token.clone());
             }
-            self.tokens.sort_by_key(|t| t.token.id);
+
+            for token in &delta.tokens {
+                let signer = token.token.signer_id(parameters);
+                if signer != parameters.owner_id()
+                    && !parent_state.roles.can_manage_access(&signer)
+                {
+                    return Err("Invite link signer cannot manage access".to_string());
+                }
+                let signing_key = crate::board_state::roles::signer_key(
+                    parent_state,
+                    parameters,
+                    &signer,
+                )?;
+                verify_struct(&token.token, &token.signature, &signing_key)
+                    .map_err(|e| format!("Invalid invite token signature: {}", e))?;
+            }
+
+            combined.tokens.sort_by_key(|t| t.token.id);
+            *self = combined;
         }
         Ok(())
     }
@@ -257,7 +296,7 @@ mod tests {
     use super::*;
     use crate::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
     use crate::board_state::member::{AuthorizedMember, Member};
-    use crate::board_state::roles::{AuthorizedRole, Role};
+    use crate::board_state::roles::{AuthorizedRole, AuthorizedRoleAssignment, Role};
     use freenet_scaffold::ComposableState;
 
     fn owner() -> SigningKey {
@@ -298,6 +337,7 @@ mod tests {
                 not_after: None,
                 generation: 1,
                 deleted: false,
+                signer: None,
             },
             owner,
         ));
@@ -318,6 +358,99 @@ mod tests {
             join_proof: Some(proof),
         };
         AuthorizedMember::new(member, &member_sk)
+    }
+
+    #[test]
+    fn a_manager_can_create_links_and_outsiders_cannot() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let manager = SigningKey::from_bytes(&[7u8; 32]);
+        let outsider = SigningKey::from_bytes(&[8u8; 32]);
+        let params = ChatBoardParametersV1 {
+            owner: owner.verifying_key(),
+        };
+        let owner_id = params.owner_id();
+
+        let mut state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner),
+            ..Default::default()
+        };
+        for sk in [&manager, &outsider] {
+            state.members.members.push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: owner_id,
+                    invited_by: owner_id,
+                    member_vk: sk.verifying_key(),
+                    join_proof: None,
+                },
+                &owner,
+            ));
+        }
+        state.roles.roles.push(AuthorizedRole::new(
+            Role {
+                id: [5u8; 16],
+                name: "staff".to_string(),
+                generation: 1,
+                can_manage_access: true,
+                deleted: false,
+            },
+            &owner,
+        ));
+        state.roles.assignments.push(AuthorizedRoleAssignment::new(
+            crate::board_state::roles::RoleAssignment {
+                role_id: [5u8; 16],
+                member_id: MemberId::from(&manager.verifying_key()),
+                generation: 1,
+                revoked: false,
+                signer: None,
+            },
+            &owner,
+        ));
+
+        let token = |signer: &SigningKey, signer_id: MemberId| {
+            let token_key = token_key();
+            InviteToken {
+                id: [4u8; 16],
+                verifying_key: token_key.verifying_key(),
+                role_id: [5u8; 16],
+                max_uses: Some(1),
+                not_after: None,
+                generation: 1,
+                deleted: false,
+                signer: Some(signer_id),
+            }
+            .clone()
+            .into_token(signer)
+        };
+
+        // A manager may create a link.
+        let mut ok_state = state.clone();
+        let delta = InviteTokensDelta {
+            tokens: vec![token(&manager, MemberId::from(&manager.verifying_key()))],
+        };
+        ok_state
+            .invites
+            .apply_delta(&state.clone(), &params, &Some(delta))
+            .expect("manager can create links");
+
+        // A plain member cannot.
+        let mut bad_state = state.clone();
+        let delta = InviteTokensDelta {
+            tokens: vec![token(&outsider, MemberId::from(&outsider.verifying_key()))],
+        };
+        assert!(bad_state
+            .invites
+            .apply_delta(&state, &params, &Some(delta))
+            .is_err());
+    }
+
+    trait IntoToken {
+        fn into_token(self, signer: &SigningKey) -> AuthorizedInviteToken;
+    }
+
+    impl IntoToken for InviteToken {
+        fn into_token(self, signer: &SigningKey) -> AuthorizedInviteToken {
+            AuthorizedInviteToken::new(self, signer)
+        }
     }
 
     #[test]

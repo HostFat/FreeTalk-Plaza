@@ -48,6 +48,40 @@ impl JoinLink {
     }
 }
 
+fn with_manager_board<T>(
+    f: impl FnOnce(&BoardData, SigningKey, VerifyingKey, MemberId) -> Result<T, String>,
+) -> Result<T, String> {
+    let (board_key, self_sk, data) = {
+        let current_board = CURRENT_BOARD
+            .read()
+            .owner_key
+            .ok_or("No board selected")?;
+        let boards = BOARDS.read();
+        let data = boards
+            .map
+            .get(&current_board)
+            .ok_or("Board not found")?
+            .clone();
+        (current_board, data.self_sk.clone(), data)
+    };
+    let self_id = MemberId::from(&self_sk.verifying_key());
+    let is_owner = self_id == MemberId::from(board_key);
+    if !is_owner && !data.board_state.roles.can_manage_access(&self_id) {
+        return Err("You are not allowed to manage access on this board".to_string());
+    }
+    f(&data, self_sk, board_key, self_id)
+}
+
+fn signer_for(self_id: MemberId, board_key: VerifyingKey) -> Option<MemberId> {
+    if self_id == MemberId::from(board_key) {
+        None
+    } else {
+        Some(self_id)
+    }
+}
+
+/// Role definitions are owner-only: a manager must not be able to widen its own
+/// permissions.
 fn with_owner_board<T>(
     f: impl FnOnce(&BoardData, SigningKey, VerifyingKey) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -65,7 +99,7 @@ fn with_owner_board<T>(
         (current_board, data.self_sk.clone(), data)
     };
     if MemberId::from(&self_sk.verifying_key()) != MemberId::from(board_key) {
-        return Err("Only the board owner can manage roles and invite links".to_string());
+        return Err("Only the board owner can define roles".to_string());
     }
     f(&data, self_sk, board_key)
 }
@@ -153,7 +187,7 @@ pub fn set_role_member(
     member_id: MemberId,
     grant: bool,
 ) -> Result<(), String> {
-    with_owner_board(|data, owner_sk, board_key| {
+    with_manager_board(|data, self_sk, board_key, self_id| {
         let generation = data
             .board_state
             .roles
@@ -163,11 +197,12 @@ pub fn set_role_member(
             member_id,
             generation,
             revoked: !grant,
+            signer: signer_for(self_id, board_key),
         };
         let delta = ChatBoardStateV1Delta {
             roles: Some(RolesDelta {
                 roles: vec![],
-                assignments: vec![AuthorizedRoleAssignment::new(assignment, &owner_sk)],
+                assignments: vec![AuthorizedRoleAssignment::new(assignment, &self_sk)],
             }),
             ..Default::default()
         };
@@ -177,7 +212,7 @@ pub fn set_role_member(
 
 /// Create a link and return its encoded form.
 pub fn create_invite_link(role_id: RoleId, max_uses: Option<u32>) -> Result<String, String> {
-    with_owner_board(|data, owner_sk, board_key| {
+    with_manager_board(|data, self_sk, board_key, self_id| {
         if data.board_state.roles.role(&role_id).is_none() {
             return Err("Role not found".to_string());
         }
@@ -194,10 +229,11 @@ pub fn create_invite_link(role_id: RoleId, max_uses: Option<u32>) -> Result<Stri
             not_after: None,
             generation: 1,
             deleted: false,
+            signer: signer_for(self_id, board_key),
         };
         let delta = ChatBoardStateV1Delta {
             invites: Some(InviteTokensDelta {
-                tokens: vec![AuthorizedInviteToken::new(token, &owner_sk)],
+                tokens: vec![AuthorizedInviteToken::new(token, &self_sk)],
             }),
             ..Default::default()
         };
@@ -213,7 +249,7 @@ pub fn create_invite_link(role_id: RoleId, max_uses: Option<u32>) -> Result<Stri
 }
 
 pub fn revoke_invite_link(token_id: TokenId) -> Result<(), String> {
-    with_owner_board(|data, owner_sk, board_key| {
+    with_manager_board(|data, self_sk, board_key, self_id| {
         let current = data
             .board_state
             .invites
@@ -225,11 +261,12 @@ pub fn revoke_invite_link(token_id: TokenId) -> Result<(), String> {
         let token = InviteToken {
             generation: current.generation + 1,
             deleted: true,
+            signer: signer_for(self_id, board_key),
             ..current
         };
         let delta = ChatBoardStateV1Delta {
             invites: Some(InviteTokensDelta {
-                tokens: vec![AuthorizedInviteToken::new(token, &owner_sk)],
+                tokens: vec![AuthorizedInviteToken::new(token, &self_sk)],
             }),
             ..Default::default()
         };
