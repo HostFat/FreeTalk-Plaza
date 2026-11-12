@@ -40,8 +40,17 @@ pub struct Role {
     pub generation: u64,
     /// Members holding this role may create invite links and grant access.
     pub can_manage_access: bool,
+    /// Members holding this role may sign per-category key distributions.
+    /// Omitted at false so role records signed before the flag existed keep
+    /// verifying byte for byte.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub can_distribute_keys: bool,
     /// A deleted role grants nothing; the tombstone keeps the id reserved.
     pub deleted: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -357,6 +366,13 @@ impl RolesV1 {
             .any(|role| role.can_manage_access)
     }
 
+    /// Whether the member may sign category key distributions.
+    pub fn can_distribute_keys(&self, member_id: &MemberId) -> bool {
+        self.active_roles_of(member_id)
+            .iter()
+            .any(|role| role.can_distribute_keys)
+    }
+
     /// Member ids per role, for role-based permissions and key distribution.
     pub fn members_of_role(&self, role_id: &RoleId) -> Vec<MemberId> {
         self.assignments
@@ -442,6 +458,7 @@ mod delegation_tests {
                 name: "staff".to_string(),
                 generation: 1,
                 can_manage_access: true,
+                can_distribute_keys: false,
                 deleted: false,
             },
             owner,
@@ -541,6 +558,7 @@ mod delegation_tests {
             name: "sneaky".to_string(),
             generation: 1,
             can_manage_access: true,
+            can_distribute_keys: false,
             deleted: false,
         };
         let delta = RolesDelta {
@@ -551,5 +569,32 @@ mod delegation_tests {
             .roles
             .apply_delta(&state.clone(), &params, &Some(delta))
             .is_err());
+    }
+
+    /// The new permission must stay out of the signed bytes when it is off,
+    /// so roles signed before it existed keep verifying.
+    #[test]
+    fn role_without_key_permission_roundtrips_unchanged() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let role = Role {
+            id: [8u8; 16],
+            name: "reader".to_string(),
+            generation: 1,
+            can_manage_access: false,
+            can_distribute_keys: false,
+            deleted: false,
+        };
+
+        let mut original = Vec::new();
+        ciborium::into_writer(&role, &mut original).unwrap();
+        assert!(!String::from_utf8_lossy(&original).contains("can_distribute_keys"));
+
+        let decoded: Role = ciborium::from_reader(&original[..]).unwrap();
+        let mut again = Vec::new();
+        ciborium::into_writer(&decoded, &mut again).unwrap();
+        assert_eq!(original, again);
+
+        let signature = sign_struct(&role, &owner);
+        assert!(verify_struct(&decoded, &signature, &owner.verifying_key()).is_ok());
     }
 }

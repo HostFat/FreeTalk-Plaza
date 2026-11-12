@@ -13,6 +13,7 @@ use freenet_scaffold::ComposableState;
 use plaza_core::board_state::invites::{join_message, InviteToken, JoinProof, TokenId};
 use plaza_core::board_state::invites::{AuthorizedInviteToken, InviteTokensDelta};
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
+use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::roles::{
     AuthorizedRole, AuthorizedRoleAssignment, Role, RoleAssignment, RoleId, RolesDelta,
 };
@@ -20,11 +21,17 @@ use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 use serde::{Deserialize, Serialize};
 
 /// What a link carries: which board, which token, and the token's signing key.
+///
+/// When the admin chooses to include them, the link also carries the keys of
+/// the restricted categories that role can read. The recipient can then open
+/// those categories even while every key holder is offline.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct JoinLink {
     pub board: VerifyingKey,
     pub token_id: TokenId,
     pub token_key: SigningKey,
+    #[serde(default)]
+    pub category_keys: Vec<(MessageId, [u8; 32])>,
 }
 
 impl PartialEq for JoinLink {
@@ -32,6 +39,7 @@ impl PartialEq for JoinLink {
         self.board == other.board
             && self.token_id == other.token_id
             && self.token_key.to_bytes() == other.token_key.to_bytes()
+            && self.category_keys == other.category_keys
     }
 }
 
@@ -137,7 +145,11 @@ fn apply_and_sync(
     }
 }
 
-pub fn create_role(name: String, can_manage_access: bool) -> Result<(), String> {
+pub fn create_role(
+    name: String,
+    can_manage_access: bool,
+    can_distribute_keys: bool,
+) -> Result<(), String> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("Role name cannot be empty".to_string());
@@ -152,7 +164,35 @@ pub fn create_role(name: String, can_manage_access: bool) -> Result<(), String> 
             name,
             generation: 1,
             can_manage_access,
+            can_distribute_keys,
             deleted: false,
+        };
+        let delta = ChatBoardStateV1Delta {
+            roles: Some(RolesDelta {
+                roles: vec![AuthorizedRole::new(role, &owner_sk)],
+                assignments: vec![],
+            }),
+            ..Default::default()
+        };
+        apply_and_sync(board_key, &data.board_state.clone(), delta)
+    })
+}
+
+/// Owner-only: allow or stop a role from signing category key distributions.
+pub fn set_role_can_distribute_keys(role_id: RoleId, value: bool) -> Result<(), String> {
+    with_owner_board(|data, owner_sk, board_key| {
+        let current = data
+            .board_state
+            .roles
+            .roles
+            .iter()
+            .find(|r| r.role.id == role_id)
+            .map(|r| r.role.clone())
+            .ok_or("Role not found")?;
+        let role = Role {
+            generation: current.generation + 1,
+            can_distribute_keys: value,
+            ..current
         };
         let delta = ChatBoardStateV1Delta {
             roles: Some(RolesDelta {
@@ -218,8 +258,26 @@ pub fn set_role_member(role_id: RoleId, member_id: MemberId, grant: bool) -> Res
     })
 }
 
-/// Create a link and return its encoded form.
-pub fn create_invite_link(role_id: RoleId, max_uses: Option<u32>) -> Result<String, String> {
+/// Category keys this link would carry: every restricted category that the
+/// role can read and whose key this client holds.
+fn category_keys_for_role(data: &BoardData, role_id: RoleId) -> Vec<(MessageId, [u8; 32])> {
+    data.restricted_categories()
+        .into_iter()
+        .filter(|(_, category)| category.allowed_roles.contains(&role_id))
+        .filter_map(|(category_id, _)| {
+            data.category_secret(&category_id)
+                .map(|(_, key)| (category_id, key))
+        })
+        .collect()
+}
+
+/// Create a link and return its encoded form. With `include_category_keys`,
+/// the link carries the keys of the categories the role can read.
+pub fn create_invite_link(
+    role_id: RoleId,
+    max_uses: Option<u32>,
+    include_category_keys: bool,
+) -> Result<String, String> {
     with_manager_board(|data, self_sk, board_key, self_id| {
         if data.board_state.roles.role(&role_id).is_none() {
             return Err("Role not found".to_string());
@@ -250,10 +308,17 @@ pub fn create_invite_link(role_id: RoleId, max_uses: Option<u32>) -> Result<Stri
         };
         apply_and_sync(board_key, &data.board_state.clone(), delta)?;
 
+        let category_keys = if include_category_keys {
+            category_keys_for_role(data, role_id)
+        } else {
+            Vec::new()
+        };
+
         Ok(JoinLink {
             board: board_key,
             token_id: id,
             token_key,
+            category_keys,
         }
         .encode())
     })
@@ -325,6 +390,7 @@ pub fn join_with_token(link: &JoinLink, nickname: String) -> Result<(), String> 
                 status: PendingBoardStatus::PendingSubscription,
                 subscribing_since: None,
                 retry_count: 0,
+                category_keys: link.category_keys.clone(),
             },
         );
     });
@@ -342,4 +408,51 @@ pub fn join_with_token(link: &JoinLink, nickname: String) -> Result<(), String> 
 
     info!("Join request sent for board {}", MemberId::from(link.board));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use freenet_scaffold::util::FastHash;
+
+    fn key(byte: u8) -> SigningKey {
+        SigningKey::from_bytes(&[byte; 32])
+    }
+
+    #[test]
+    fn a_link_roundtrips_the_category_keys_it_carries() {
+        let link = JoinLink {
+            board: key(1).verifying_key(),
+            token_id: [2u8; 16],
+            token_key: key(3),
+            category_keys: vec![(MessageId(FastHash(7)), [4u8; 32])],
+        };
+
+        let decoded = JoinLink::decode(&link.encode()).unwrap();
+        assert!(decoded == link);
+        assert_eq!(decoded.category_keys.len(), 1);
+    }
+
+    #[test]
+    fn an_old_link_decodes_without_category_keys() {
+        #[derive(Serialize)]
+        struct OldLink {
+            board: VerifyingKey,
+            token_id: TokenId,
+            token_key: SigningKey,
+        }
+
+        let old = OldLink {
+            board: key(1).verifying_key(),
+            token_id: [2u8; 16],
+            token_key: key(3),
+        };
+        let mut data = Vec::new();
+        ciborium::ser::into_writer(&old, &mut data).unwrap();
+        let encoded = bs58::encode(data).into_string();
+
+        let decoded = JoinLink::decode(&encoded).unwrap();
+        assert!(decoded.category_keys.is_empty());
+        assert_eq!(decoded.board, old.board);
+    }
 }

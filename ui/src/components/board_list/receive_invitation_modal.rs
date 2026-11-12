@@ -355,6 +355,7 @@ fn accept_invitation(inv: Invitation, nickname: String) {
                 status: PendingBoardStatus::PendingSubscription,
                 subscribing_since: None,
                 retry_count: 0,
+                category_keys: Vec::new(),
             },
         );
     });

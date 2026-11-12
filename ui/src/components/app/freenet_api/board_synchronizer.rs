@@ -155,9 +155,10 @@ impl BoardSynchronizer {
                             }
                         }
 
-                        // Same for category secrets: the owner hands the key to
-                        // members who were added to an allowed role.
-                        if board_data.owner_vk == board_data.self_sk.verifying_key() {
+                        // Same for category secrets: the owner or a member of a
+                        // key-distribution role hands the key to members who
+                        // were added to an allowed role.
+                        if board_data.can_distribute_category_keys() {
                             if let Some(category_delta) =
                                 board_data.generate_missing_category_secrets()
                             {
@@ -758,9 +759,10 @@ impl BoardSynchronizer {
                         let params = ChatBoardParametersV1 { owner: board_owner_vk };
                         board_data.capture_self_membership_data(&params);
 
-                        // The owner hands category keys to members who joined
-                        // since the last distribution, then pushes the state.
-                        if board_data.owner_vk == board_data.self_sk.verifying_key() {
+                        // The owner, or a role allowed to distribute keys,
+                        // hands category keys to members who joined since the
+                        // last distribution, then pushes the state.
+                        if board_data.can_distribute_category_keys() {
                             if let Some(category_delta) =
                                 board_data.generate_missing_category_secrets()
                             {

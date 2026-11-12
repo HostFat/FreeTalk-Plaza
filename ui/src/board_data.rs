@@ -48,7 +48,11 @@ pub struct BoardData {
     #[serde(skip)]
     pub secrets: HashMap<u32, [u8; 32]>,
     /// Decrypted per-category secrets: category id -> (version, key).
-    #[serde(skip)]
+    ///
+    /// Persisted in the delegate store because an invite link can deliver a
+    /// key that never becomes an owner-signed blob; without this, it would
+    /// disappear on reload.
+    #[serde(default)]
     pub category_secrets: HashMap<MessageId, (u32, [u8; 32])>,
     /// The current (latest) secret version
     #[serde(skip)]
@@ -118,6 +122,20 @@ impl BoardData {
 
     pub fn category_secret(&self, category: &MessageId) -> Option<(u32, [u8; 32])> {
         self.category_secrets.get(category).copied()
+    }
+
+    /// Store keys that arrived outside the board state, such as the ones an
+    /// invite link can carry.
+    pub fn apply_category_keys(&mut self, keys: &[(MessageId, [u8; 32])]) {
+        for (category_id, key) in keys {
+            let version = self
+                .board_state
+                .category_secrets
+                .current_version(category_id)
+                .unwrap_or(0);
+            self.category_secrets
+                .insert(category_id.clone(), (version, *key));
+        }
     }
 
     /// The newest secret that opens this body, whichever scope sealed it.
@@ -278,12 +296,14 @@ impl BoardData {
                 ciphertext,
                 nonce,
                 sender_ephemeral_public_key: ephemeral_key.to_bytes(),
-                provider: owner_id,
+                provider: MemberId::from(&self.self_sk.verifying_key()),
             };
-            encrypted_secrets.push(AuthorizedEncryptedSecretForMember::new(
-                record,
-                &self.self_sk,
-            ));
+            let self_id = MemberId::from(&self.self_sk.verifying_key());
+            encrypted_secrets.push(if self_id == owner_id {
+                AuthorizedEncryptedSecretForMember::new(record, &self.self_sk)
+            } else {
+                AuthorizedEncryptedSecretForMember::signed_by(record, self_id, &self.self_sk)
+            });
         }
 
         let versions = if include_version {
@@ -367,12 +387,23 @@ impl BoardData {
             );
     }
 
-    /// Blobs for members of a category's roles who joined after the last
-    /// distribution. Only the owner can sign these records.
+    /// Whether this client may sign category key distributions: the owner, or
+    /// a member of a role the owner allowed to distribute keys.
+    pub fn can_distribute_category_keys(&self) -> bool {
+        if self.self_sk.verifying_key() == self.owner_vk {
+            return true;
+        }
+        let self_id = MemberId::from(&self.self_sk.verifying_key());
+        self.board_state.roles.can_distribute_keys(&self_id)
+    }
+
+    /// Blobs for members of a category's roles who still lack a key. The owner
+    /// and members of roles with the distribution permission can sign these.
     pub fn generate_missing_category_secrets(&self) -> Option<CategorySecretsDelta> {
-        if self.self_sk.verifying_key() != self.owner_vk {
+        if !self.can_distribute_category_keys() {
             return None;
         }
+        let is_owner = self.self_sk.verifying_key() == self.owner_vk;
 
         let mut sets = Vec::new();
         for (category_id, category) in self.restricted_categories() {
@@ -391,6 +422,11 @@ impl BoardData {
                 .map(|set| set.versions.iter().any(|v| v.record.version == version))
                 .unwrap_or(false);
             if missing.is_empty() && includes_version {
+                continue;
+            }
+            // Version records stay owner-only. A delegated distributor can add
+            // blobs to an existing set but cannot open a new version.
+            if !includes_version && !is_owner {
                 continue;
             }
             sets.push(self.category_secret_records(
@@ -1349,6 +1385,7 @@ mod tests {
                                 name: "Members".to_string(),
                                 generation: 0,
                                 can_manage_access: false,
+                                can_distribute_keys: true,
                                 deleted: false,
                             },
                             &owner_sk,
@@ -1540,13 +1577,29 @@ mod tests {
             )
             .expect("the role grant applies");
 
-        let delta = board
+        // The distribution comes from the invitee, a member of the role with
+        // the key-distribution permission, not from the owner.
+        let mut distributor_view = boards.map.get(&key).unwrap().clone();
+        distributor_view.self_sk = invitee_sk.clone();
+        distributor_view.category_secrets.clear();
+        distributor_view.decrypt_category_secrets();
+        assert_eq!(
+            distributor_view.category_secret(&category_id),
+            Some((0, category_secret)),
+            "the distributor holds the category key"
+        );
+
+        let delta = distributor_view
             .generate_missing_category_secrets()
             .expect("the new role member needs the category key");
-        assert!(delta.sets[0]
+        let blob = delta.sets[0]
             .encrypted_secrets
             .iter()
-            .any(|blob| blob.secret.member_id == outsider_id));
+            .find(|blob| blob.secret.member_id == outsider_id)
+            .expect("the outsider is the missing recipient");
+        assert_eq!(blob.signer, Some(invitee_id));
+
+        let board = boards.map.get_mut(&key).unwrap();
         let before = board.board_state.clone();
         board
             .board_state

@@ -89,13 +89,14 @@ pub async fn handle_get_response(
             let retrieved_state: ChatBoardStateV1 = from_cbor_slice::<ChatBoardStateV1>(&state);
 
             // Get the pending invite data once to avoid multiple reads
-            let (self_sk, authorized_member, preferred_nickname) = {
+            let (self_sk, authorized_member, preferred_nickname, link_category_keys) = {
                 let pending_invites = PENDING_INVITES.read();
                 let invite = &pending_invites.map[&owner_vk];
                 (
                     invite.invitee_signing_key.clone(),
                     invite.authorized_member.clone(),
                     invite.preferred_nickname.clone(),
+                    invite.category_keys.clone(),
                 )
             };
 
@@ -159,6 +160,11 @@ pub async fn handle_get_response(
                         .merge(&current_state, &params, &retrieved_state)
                         .expect("Failed to merge board states");
                 }
+
+                // Keys carried by the invite link belong to this member. They
+                // are stored even before any key holder distributes an official
+                // blob, so the categories open right away.
+                board_data.apply_category_keys(&link_category_keys);
 
                 // Decrypt ALL board secret versions if this is a private board
                 if board_data.board_state.configuration.configuration.privacy_mode == PrivacyMode::Private {

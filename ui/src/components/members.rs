@@ -361,6 +361,11 @@ fn ExportIdentityModal(is_active: Signal<bool>) -> Element {
                         invite_chain: board_data.invite_chain.clone(),
                         member_info: board_data.self_member_info.clone(),
                         board_name,
+                        category_keys: board_data
+                            .category_secrets
+                            .iter()
+                            .map(|(id, (_, key))| (id.clone(), *key))
+                            .collect(),
                     };
                     token_text.set(export.to_armored_string());
                 }
@@ -464,6 +469,12 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                 let signing_key_for_migration = export.signing_key.clone();
                 let board_key_bytes = owner_key.to_bytes();
 
+                let category_secrets = export
+                    .category_keys
+                    .iter()
+                    .map(|(id, key)| (id.clone(), (0u32, *key)))
+                    .collect();
+
                 let board_data = crate::board_data::BoardData {
                     owner_vk: owner_key,
                     board_state: initial_state, // Will be fully populated on sync
@@ -471,7 +482,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     contract_key,
                     last_read_message_id: None,
                     secrets: HashMap::new(),
-                    category_secrets: HashMap::new(),
+                    category_secrets,
                     current_secret_version: None,
                     last_secret_rotation: None,
                     key_migrated_to_delegate: false,

@@ -47,3 +47,10 @@ description = "Per-category secrets and restricted categories (owner-signed cate
 date = "2026-11-12"
 delegate_key = "aaa265f4052a9310903dee44d9997f88c7755f7271866dee398af4f0a2cbaea6"
 code_hash = "66d2bdd044d8b75392b4e29c02e1449e738e31264621c55e1fb634c4a69adb44"
+
+[[entry]]
+version = "V5"
+description = "Delegated category key distribution and invite links that carry category keys"
+date = "2026-11-12"
+delegate_key = "c8bf8dcd9c13b3ee48ef8cb8e0e6988c06d1468d4d36026ff5780811d9c6f476"
+code_hash = "125665757a756a381595609cbae10daafa6c84609238a72b1e118d9a02634941"

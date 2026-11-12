@@ -40,6 +40,7 @@ pub fn RolesSection() -> Element {
     let board = use_memo(move || current_board());
     let mut role_name = use_signal(String::new);
     let mut role_manages = use_signal(|| false);
+    let mut role_distributes = use_signal(|| false);
     let mut assign_index = use_signal(|| 0usize);
     let mut error = use_signal(|| None::<String>);
 
@@ -92,14 +93,28 @@ pub fn RolesSection() -> Element {
                     }
                     "can manage access"
                 }
+                label { class: "flex items-center gap-2 text-sm text-text-muted",
+                    input {
+                        r#type: "checkbox",
+                        checked: *role_distributes.read(),
+                        onchange: move |evt| role_distributes.set(evt.checked()),
+                    }
+                    "can distribute category keys"
+                }
                 button {
                     r#type: "button",
                     class: "px-3 py-2 bg-accent hover:bg-accent/80 text-white text-sm rounded-lg",
                     onclick: move |_| {
                         let name = role_name.read().clone();
                         let manages = *role_manages.read();
-                        match access::create_role(name, manages) {
-                            Ok(()) => { role_name.set(String::new()); role_manages.set(false); error.set(None); }
+                        let distributes = *role_distributes.read();
+                        match access::create_role(name, manages, distributes) {
+                            Ok(()) => {
+                                role_name.set(String::new());
+                                role_manages.set(false);
+                                role_distributes.set(false);
+                                error.set(None);
+                            }
                             Err(e) => error.set(Some(e)),
                         }
                     },
@@ -117,6 +132,7 @@ pub fn RolesSection() -> Element {
                         let role_id = role.role.id;
                         let role_name = role.role.name.clone();
                         let manages = role.role.can_manage_access;
+                        let distributes = role.role.can_distribute_keys;
                         let assigned = data.board_state.roles.members_of_role(&role_id);
                         rsx! {
                             div { class: "bg-surface rounded-lg p-3",
@@ -125,13 +141,29 @@ pub fn RolesSection() -> Element {
                                     if manages {
                                         span { class: "text-xs text-accent", "manages access" }
                                     }
+                                    if distributes {
+                                        span { class: "text-xs text-accent", "distributes keys" }
+                                    }
                                     span { class: "text-xs text-text-muted",
                                         "{assigned.len()} members"
                                     }
                                     if is_owner {
+                                        label { class: "ml-auto flex items-center gap-1 text-xs text-text-muted",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked: distributes,
+                                                onchange: move |evt| {
+                                                    let _ = access::set_role_can_distribute_keys(
+                                                        role_id,
+                                                        evt.checked(),
+                                                    );
+                                                },
+                                            }
+                                            "keys"
+                                        }
                                         button {
                                             r#type: "button",
-                                            class: "ml-auto text-xs text-red-400 hover:bg-red-500/10 rounded px-2 py-1",
+                                            class: "text-xs text-red-400 hover:bg-red-500/10 rounded px-2 py-1",
                                             onclick: move |_| {
                                                 let _ = access::remove_role(role_id);
                                             },
@@ -197,7 +229,8 @@ pub fn InviteLinksSection() -> Element {
     let board = use_memo(move || current_board());
     let mut link_role = use_signal(String::new);
     let mut link_max = use_signal(String::new);
-    let mut created_link = use_signal(|| None::<String>);
+    let mut link_includes_keys = use_signal(|| false);
+    let mut created_link = use_signal(|| None::<(String, bool, usize)>);
     let mut error = use_signal(|| None::<String>);
 
     let Some(data) = board.read().clone() else {
@@ -251,6 +284,14 @@ pub fn InviteLinksSection() -> Element {
                 value: "{link_max}",
                 oninput: move |evt| link_max.set(evt.value()),
             }
+            label { class: "flex items-center gap-2 text-sm text-text-muted w-full",
+                input {
+                    r#type: "checkbox",
+                    checked: *link_includes_keys.read(),
+                    onchange: move |evt| link_includes_keys.set(evt.checked()),
+                }
+                "Include the category keys this role can read (works while key holders are offline)"
+            }
             button {
                 r#type: "button",
                 class: "px-3 py-2 bg-accent hover:bg-accent/80 text-white text-sm rounded-lg",
@@ -261,8 +302,15 @@ pub fn InviteLinksSection() -> Element {
                         return;
                     };
                     let max = link_max.read().trim().parse::<u32>().ok();
-                    match access::create_invite_link(role_id, max) {
-                        Ok(link) => { created_link.set(Some(link)); error.set(None); }
+                    let include_keys = *link_includes_keys.read();
+                    match access::create_invite_link(role_id, max, include_keys) {
+                        Ok(link) => {
+                            let key_count = access::JoinLink::decode(&link)
+                                .map(|parsed| parsed.category_keys.len())
+                                .unwrap_or(0);
+                            created_link.set(Some((link, include_keys, key_count)));
+                            error.set(None);
+                        }
                         Err(e) => error.set(Some(e)),
                     }
                 },
@@ -270,10 +318,15 @@ pub fn InviteLinksSection() -> Element {
             }
         }
 
-        if let Some(link) = created_link.read().as_ref() {
+        if let Some((link, includes_keys, key_count)) = created_link.read().as_ref() {
             div { class: "bg-panel border border-accent/40 rounded-lg p-3 mb-3",
                 p { class: "text-sm text-text mb-1",
                     "New link. Copy it now: the key is not stored in the board."
+                }
+                if *includes_keys {
+                    p { class: "text-xs text-yellow-400 mb-2",
+                        "This link carries {key_count} category key(s). Treat it as a stronger secret than a link without keys."
+                    }
                 }
                 input {
                     class: "w-full px-2 py-1 bg-surface border border-border rounded text-xs font-mono text-text",

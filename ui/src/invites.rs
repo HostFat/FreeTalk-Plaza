@@ -5,6 +5,7 @@
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use plaza_core::board_state::member::AuthorizedMember;
+use plaza_core::board_state::message::MessageId;
 use std::collections::HashMap;
 
 /// Collection of pending board join requests
@@ -52,6 +53,10 @@ pub struct PendingBoardJoin {
     /// On retry_count >= 1, falls back to requesting contract code from the
     /// network in case the local copy is stale.
     pub retry_count: u32,
+    /// Category keys carried by the invite link. They are stored in the board
+    /// once its state arrives, so the new member can read those categories
+    /// without waiting for a key holder to come online.
+    pub category_keys: Vec<(MessageId, [u8; 32])>,
 }
 
 /// Status of a pending board join request

@@ -179,6 +179,28 @@ impl ChatBoardStateV1 {
         // has revoked. Running it here keeps merged states normalized.
         self.admin.resolve_conflicts();
 
+        // 5d. Category key blobs only make sense for current members, signed
+        // by the owner or by a current key-distribution role. Dropping the
+        // others keeps the state valid after a member is pruned or a role
+        // loses the permission.
+        let authorized_signers: HashSet<MemberId> = std::iter::once(owner_id)
+            .chain(
+                self.members
+                    .members
+                    .iter()
+                    .map(|member| member.member.id())
+                    .filter(|member_id| self.roles.can_distribute_keys(member_id)),
+            )
+            .collect();
+        for set in &mut self.category_secrets.categories {
+            set.encrypted_secrets.retain(|blob| {
+                let signer = blob.signer.unwrap_or(owner_id);
+                authorized_signers.contains(&signer)
+                    && (blob.secret.member_id == owner_id
+                        || current_member_ids.contains(&blob.secret.member_id))
+            });
+        }
+
         // 6. Re-sort for deterministic ordering
         self.members.members.sort_by_key(|m| m.member.id());
         self.member_info

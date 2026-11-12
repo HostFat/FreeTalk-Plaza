@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::member::{AuthorizedMember, MemberId};
 use super::member_info::AuthorizedMemberInfo;
+use super::message::MessageId;
 
 const ARMOR_BEGIN: &str = "-----BEGIN FREETALK IDENTITY-----";
 const ARMOR_END: &str = "-----END FREETALK IDENTITY-----";
@@ -32,6 +33,10 @@ pub struct IdentityExport {
     /// Board display name (shown immediately on import before sync completes)
     #[serde(default)]
     pub board_name: Option<String>,
+    /// Category keys this identity received, including keys delivered by an
+    /// invite link rather than by an owner-signed blob.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub category_keys: Vec<(MessageId, [u8; 32])>,
 }
 
 impl IdentityExport {
@@ -153,6 +158,7 @@ mod tests {
             invite_chain: vec![],
             member_info: None,
             board_name: None,
+            category_keys: vec![],
         };
 
         let armored = export.to_armored_string();
@@ -210,6 +216,7 @@ mod tests {
             invite_chain: vec![],
             member_info: None,
             board_name: None,
+            category_keys: vec![],
         };
 
         let armored = export.to_armored_string();
@@ -258,6 +265,7 @@ mod tests {
             invite_chain: vec![auth_member_a.clone()],
             member_info: Some(auth_member_info.clone()),
             board_name: Some("Test Board".to_string()),
+            category_keys: vec![],
         };
 
         let armored = export.to_armored_string();
@@ -302,6 +310,7 @@ mod tests {
             invite_chain: vec![],
             member_info: None,
             board_name: None,
+            category_keys: vec![],
         };
 
         let armored = export.to_armored_string();
@@ -353,6 +362,7 @@ mod tests {
             invite_chain: vec![],
             member_info: None,
             board_name: None,
+            category_keys: vec![],
         };
 
         let armored = export.to_armored_string();

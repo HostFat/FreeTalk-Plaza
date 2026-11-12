@@ -294,11 +294,16 @@ pub struct EncryptedSecretForMemberV1 {
     pub provider: MemberId,
 }
 
-/// Authorized encrypted secret signed by board owner
+/// Authorized encrypted secret signed by the board owner or by a member whose
+/// role may distribute category keys.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct AuthorizedEncryptedSecretForMember {
     pub secret: EncryptedSecretForMemberV1,
     pub owner_signature: Signature,
+    /// Who signed it. `None` means the owner. Kept outside the signed payload
+    /// so records written before delegated distribution existed still verify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<MemberId>,
 }
 
 impl AuthorizedEncryptedSecretForMember {
@@ -307,6 +312,21 @@ impl AuthorizedEncryptedSecretForMember {
         Self {
             secret,
             owner_signature: signature,
+            signer: None,
+        }
+    }
+
+    /// A record signed by a member of a role that may distribute keys.
+    pub fn signed_by(
+        secret: EncryptedSecretForMemberV1,
+        signer: MemberId,
+        signing_key: &SigningKey,
+    ) -> Self {
+        let signature = sign_struct(&secret, signing_key);
+        Self {
+            secret,
+            owner_signature: signature,
+            signer: Some(signer),
         }
     }
 
@@ -316,12 +336,22 @@ impl AuthorizedEncryptedSecretForMember {
         Self {
             secret,
             owner_signature,
+            signer: None,
         }
     }
 
-    pub fn verify_signature(&self, owner_verifying_key: &VerifyingKey) -> Result<(), String> {
-        verify_struct(&self.secret, &self.owner_signature, owner_verifying_key)
+    pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
+        self.signer.unwrap_or_else(|| parameters.owner_id())
+    }
+
+    /// Verify against the key of the member recorded in `signer`.
+    pub fn verify_signature_with(&self, signing_key: &VerifyingKey) -> Result<(), String> {
+        verify_struct(&self.secret, &self.owner_signature, signing_key)
             .map_err(|e| format!("Invalid signature: {}", e))
+    }
+
+    pub fn verify_signature(&self, owner_verifying_key: &VerifyingKey) -> Result<(), String> {
+        self.verify_signature_with(owner_verifying_key)
     }
 }
 

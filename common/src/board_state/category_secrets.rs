@@ -33,6 +33,73 @@ pub struct CategorySecretSet {
     pub encrypted_secrets: Vec<AuthorizedEncryptedSecretForMember>,
 }
 
+/// Key of the member who signed a blob: the owner, or a member of a role with
+/// the key-distribution permission.
+fn distributor_key(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    signer: &MemberId,
+) -> Result<ed25519_dalek::VerifyingKey, String> {
+    if *signer == parameters.owner_id() {
+        return Ok(parameters.owner);
+    }
+    if !state.roles.can_distribute_keys(signer) {
+        return Err("Category key signer cannot distribute keys".to_string());
+    }
+    state
+        .members
+        .members
+        .iter()
+        .find(|member| member.member.id() == *signer)
+        .map(|member| member.member.member_vk)
+        .ok_or_else(|| "Category key signer is not a board member".to_string())
+}
+
+fn is_board_member(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    member_id: &MemberId,
+) -> bool {
+    *member_id == parameters.owner_id()
+        || state
+            .members
+            .members
+            .iter()
+            .any(|member| member.member.id() == *member_id)
+}
+
+fn verify_blob(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    blob: &AuthorizedEncryptedSecretForMember,
+) -> Result<(), String> {
+    let signer = blob.signer_id(parameters);
+    let signing_key = distributor_key(state, parameters, &signer)?;
+    blob.verify_signature_with(&signing_key)?;
+    if !is_board_member(state, parameters, &blob.secret.member_id) {
+        return Err("Category key recipient is not a board member".to_string());
+    }
+    Ok(())
+}
+
+/// Deterministic order used when two distributors produce a blob for the same
+/// member and version. Lower signer id wins, then the ciphertext bytes.
+fn blob_precedes(
+    candidate: &AuthorizedEncryptedSecretForMember,
+    existing: &AuthorizedEncryptedSecretForMember,
+    owner_id: MemberId,
+) -> bool {
+    let candidate_key = (
+        candidate.signer.unwrap_or(owner_id).0 .0,
+        candidate.secret.ciphertext.as_slice(),
+    );
+    let existing_key = (
+        existing.signer.unwrap_or(owner_id).0 .0,
+        existing.secret.ciphertext.as_slice(),
+    );
+    candidate_key < existing_key
+}
+
 impl ComposableState for CategorySecretsV1 {
     type ParentState = ChatBoardStateV1;
     type Summary = CategorySecretsSummary;
@@ -41,7 +108,7 @@ impl ComposableState for CategorySecretsV1 {
 
     fn verify(
         &self,
-        _parent_state: &Self::ParentState,
+        parent_state: &Self::ParentState,
         parameters: &Self::Parameters,
     ) -> Result<(), String> {
         let mut seen = std::collections::HashSet::new();
@@ -53,7 +120,7 @@ impl ComposableState for CategorySecretsV1 {
                 record.verify_signature(&parameters.owner)?;
             }
             for secret in &set.encrypted_secrets {
-                secret.verify_signature(&parameters.owner)?;
+                verify_blob(parent_state, parameters, secret)?;
             }
             if let Some(max) = set.versions.iter().map(|v| v.record.version).max() {
                 if set.current_version != max {
@@ -139,7 +206,7 @@ impl ComposableState for CategorySecretsV1 {
 
     fn apply_delta(
         &mut self,
-        _parent_state: &Self::ParentState,
+        parent_state: &Self::ParentState,
         parameters: &Self::Parameters,
         delta: &Option<Self::Delta>,
     ) -> Result<(), String> {
@@ -149,7 +216,7 @@ impl ComposableState for CategorySecretsV1 {
                     record.verify_signature(&parameters.owner)?;
                 }
                 for secret in &incoming.encrypted_secrets {
-                    secret.verify_signature(&parameters.owner)?;
+                    verify_blob(parent_state, parameters, secret)?;
                 }
 
                 let set = match self
@@ -179,10 +246,17 @@ impl ComposableState for CategorySecretsV1 {
                     }
                 }
                 for secret in &incoming.encrypted_secrets {
-                    if !set.encrypted_secrets.iter().any(|s| {
+                    // One blob per member and version. When two distributors
+                    // produce one, keep the lowest (signer, ciphertext) so every
+                    // peer converges on the same record.
+                    if let Some(existing) = set.encrypted_secrets.iter_mut().find(|s| {
                         s.secret.secret_version == secret.secret.secret_version
                             && s.secret.member_id == secret.secret.member_id
                     }) {
+                        if blob_precedes(secret, existing, parameters.owner_id()) {
+                            *existing = secret.clone();
+                        }
+                    } else {
                         set.encrypted_secrets.push(secret.clone());
                     }
                 }
@@ -298,8 +372,11 @@ mod tests {
     fn state_with_category(
         owner: &ed25519_dalek::SigningKey,
     ) -> (ChatBoardStateV1, MessageId, MemberId) {
+        use crate::board_state::member::{AuthorizedMember, Member};
+
         let category_id = MessageId(FastHash(7));
-        let member = MemberId(FastHash(9));
+        let member_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let member = MemberId::from(&member_key.verifying_key());
         let version = SecretVersionRecordV1 {
             version: 1,
             cipher_spec: BoardCipherSpec::Aes256Gcm,
@@ -318,6 +395,15 @@ mod tests {
             configuration: AuthorizedConfigurationV1::new(Configuration::default(), owner),
             ..Default::default()
         };
+        state.members.members.push(AuthorizedMember::new(
+            Member {
+                owner_member_id: MemberId::from(&owner.verifying_key()),
+                invited_by: MemberId::from(&owner.verifying_key()),
+                member_vk: member_key.verifying_key(),
+                join_proof: None,
+            },
+            owner,
+        ));
         state.category_secrets.categories.push(CategorySecretSet {
             category_id: category_id.clone(),
             current_version: 1,
@@ -347,10 +433,9 @@ mod tests {
         let params = params(&owner);
         let (source, category, member) = state_with_category(&owner);
 
-        let mut empty = ChatBoardStateV1 {
-            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner),
-            ..Default::default()
-        };
+        // Same board roster, no category secrets yet.
+        let mut empty = source.clone();
+        empty.category_secrets = CategorySecretsV1::default();
 
         let summary = empty.category_secrets.summarize(&empty, &params);
         let delta = source
@@ -379,5 +464,289 @@ mod tests {
             .category_secrets
             .members_missing_secret(&category, &[member, other]);
         assert_eq!(missing, vec![other]);
+    }
+
+    /// Delegated distribution: a member of a role with the permission can sign
+    /// a blob for another board member.
+    #[test]
+    fn a_role_with_permission_can_sign_category_blobs() {
+        use crate::board_state::member::{AuthorizedMember, Member};
+        use crate::board_state::roles::{
+            AuthorizedRole, AuthorizedRoleAssignment, Role, RoleAssignment,
+        };
+
+        let owner = owner();
+        let params = params(&owner);
+        let distributor_sk = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]);
+        let recipient_sk = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let distributor = MemberId::from(&distributor_sk.verifying_key());
+        let recipient = MemberId::from(&recipient_sk.verifying_key());
+        let role_id = [4u8; 16];
+
+        let mut state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner),
+            ..Default::default()
+        };
+        for (sk, id) in [
+            (distributor_sk.clone(), distributor),
+            (recipient_sk.clone(), recipient),
+        ] {
+            state.members.members.push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: owner.verifying_key().into(),
+                    invited_by: owner.verifying_key().into(),
+                    member_vk: sk.verifying_key(),
+                    join_proof: None,
+                },
+                &owner,
+            ));
+            let _ = id;
+        }
+        state.roles.roles.push(AuthorizedRole::new(
+            Role {
+                id: role_id,
+                name: "keys".to_string(),
+                generation: 1,
+                can_manage_access: false,
+                can_distribute_keys: true,
+                deleted: false,
+            },
+            &owner,
+        ));
+        state.roles.assignments.push(AuthorizedRoleAssignment::new(
+            RoleAssignment {
+                role_id,
+                member_id: distributor,
+                generation: 1,
+                revoked: false,
+            },
+            &owner,
+        ));
+
+        let category = MessageId(FastHash(21));
+        state.category_secrets.categories.push(CategorySecretSet {
+            category_id: category.clone(),
+            current_version: 0,
+            versions: vec![AuthorizedSecretVersionRecord::new(
+                SecretVersionRecordV1 {
+                    version: 0,
+                    cipher_spec: BoardCipherSpec::Aes256Gcm,
+                    created_at: SystemTime::now(),
+                },
+                &owner,
+            )],
+            encrypted_secrets: vec![AuthorizedEncryptedSecretForMember::signed_by(
+                EncryptedSecretForMemberV1 {
+                    member_id: recipient,
+                    secret_version: 0,
+                    ciphertext: vec![7, 8, 9],
+                    nonce: [0u8; 12],
+                    sender_ephemeral_public_key: [0u8; 32],
+                    provider: distributor,
+                },
+                distributor,
+                &distributor_sk,
+            )],
+        });
+
+        state.category_secrets.verify(&state, &params).unwrap();
+        assert!(state
+            .category_secrets
+            .authorized_secret_for(&category, &recipient)
+            .is_some());
+    }
+
+    #[test]
+    fn an_unauthorized_member_cannot_sign_category_blobs() {
+        use crate::board_state::member::{AuthorizedMember, Member};
+
+        let owner = owner();
+        let params = params(&owner);
+        let signer_sk = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
+        let signer = MemberId::from(&signer_sk.verifying_key());
+        let recipient =
+            MemberId::from(&ed25519_dalek::SigningKey::from_bytes(&[6u8; 32]).verifying_key());
+
+        let mut state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner),
+            ..Default::default()
+        };
+        for sk in [
+            signer_sk.clone(),
+            ed25519_dalek::SigningKey::from_bytes(&[6u8; 32]),
+        ] {
+            state.members.members.push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: owner.verifying_key().into(),
+                    invited_by: owner.verifying_key().into(),
+                    member_vk: sk.verifying_key(),
+                    join_proof: None,
+                },
+                &owner,
+            ));
+        }
+
+        let category = MessageId(FastHash(21));
+        state.category_secrets.categories.push(CategorySecretSet {
+            category_id: category,
+            current_version: 0,
+            versions: vec![AuthorizedSecretVersionRecord::new(
+                SecretVersionRecordV1 {
+                    version: 0,
+                    cipher_spec: BoardCipherSpec::Aes256Gcm,
+                    created_at: SystemTime::now(),
+                },
+                &owner,
+            )],
+            encrypted_secrets: vec![AuthorizedEncryptedSecretForMember::signed_by(
+                EncryptedSecretForMemberV1 {
+                    member_id: recipient,
+                    secret_version: 0,
+                    ciphertext: vec![1],
+                    nonce: [0u8; 12],
+                    sender_ephemeral_public_key: [0u8; 32],
+                    provider: signer,
+                },
+                signer,
+                &signer_sk,
+            )],
+        });
+
+        let error = state.category_secrets.verify(&state, &params).unwrap_err();
+        assert!(error.contains("cannot distribute keys"), "{error}");
+    }
+
+    /// Cleanup drops blobs for members who left the board, so the state keeps
+    /// verifying after pruning.
+    #[test]
+    fn cleanup_drops_blobs_of_pruned_members() {
+        let owner = owner();
+        let params = params(&owner);
+        let (mut state, _, _) = state_with_category(&owner);
+        assert_eq!(
+            state.category_secrets.categories[0].encrypted_secrets.len(),
+            1
+        );
+
+        state.normalize(&params).unwrap();
+        assert!(
+            state.members.members.is_empty(),
+            "the recipient has no messages and is pruned"
+        );
+        assert!(
+            state.category_secrets.categories[0]
+                .encrypted_secrets
+                .is_empty(),
+            "its blob goes with it"
+        );
+        state.verify(&state, &params).unwrap();
+    }
+
+    /// Two distributors can produce a blob for the same member. Applying the
+    /// same two blobs in different orders must converge on one record.
+    #[test]
+    fn concurrent_distributions_converge() {
+        use crate::board_state::member::{AuthorizedMember, Member};
+        use crate::board_state::roles::{
+            AuthorizedRole, AuthorizedRoleAssignment, Role, RoleAssignment,
+        };
+
+        let owner = owner();
+        let params = params(&owner);
+        let distributor_sk = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]);
+        let recipient_sk = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let distributor = MemberId::from(&distributor_sk.verifying_key());
+        let recipient = MemberId::from(&recipient_sk.verifying_key());
+        let role_id = [4u8; 16];
+        let category = MessageId(FastHash(22));
+
+        let mut base = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner),
+            ..Default::default()
+        };
+        for sk in [distributor_sk.clone(), recipient_sk.clone()] {
+            base.members.members.push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: owner.verifying_key().into(),
+                    invited_by: owner.verifying_key().into(),
+                    member_vk: sk.verifying_key(),
+                    join_proof: None,
+                },
+                &owner,
+            ));
+        }
+        base.roles.roles.push(AuthorizedRole::new(
+            Role {
+                id: role_id,
+                name: "keys".to_string(),
+                generation: 1,
+                can_manage_access: false,
+                can_distribute_keys: true,
+                deleted: false,
+            },
+            &owner,
+        ));
+        base.roles.assignments.push(AuthorizedRoleAssignment::new(
+            RoleAssignment {
+                role_id,
+                member_id: distributor,
+                generation: 1,
+                revoked: false,
+            },
+            &owner,
+        ));
+
+        let version = AuthorizedSecretVersionRecord::new(
+            SecretVersionRecordV1 {
+                version: 0,
+                cipher_spec: BoardCipherSpec::Aes256Gcm,
+                created_at: SystemTime::now(),
+            },
+            &owner,
+        );
+        let blob_owner = AuthorizedEncryptedSecretForMember::new(
+            EncryptedSecretForMemberV1 {
+                member_id: recipient,
+                secret_version: 0,
+                ciphertext: vec![9, 9, 9],
+                nonce: [0u8; 12],
+                sender_ephemeral_public_key: [0u8; 32],
+                provider: owner.verifying_key().into(),
+            },
+            &owner,
+        );
+        let blob_delegate = AuthorizedEncryptedSecretForMember::signed_by(
+            EncryptedSecretForMemberV1 {
+                member_id: recipient,
+                secret_version: 0,
+                ciphertext: vec![1, 1, 1],
+                nonce: [1u8; 12],
+                sender_ephemeral_public_key: [1u8; 32],
+                provider: distributor,
+            },
+            distributor,
+            &distributor_sk,
+        );
+
+        let apply = |secrets: Vec<AuthorizedEncryptedSecretForMember>| {
+            let mut state = base.clone();
+            let delta = CategorySecretsDelta {
+                sets: vec![CategorySecretSetDelta {
+                    category_id: category.clone(),
+                    current_version: 0,
+                    versions: vec![version.clone()],
+                    encrypted_secrets: secrets,
+                }],
+            };
+            state
+                .category_secrets
+                .apply_delta(&state.clone(), &params, &Some(delta))
+                .unwrap();
+            state.category_secrets
+        };
+
+        let first = apply(vec![blob_owner.clone(), blob_delegate.clone()]);
+        let second = apply(vec![blob_delegate, blob_owner]);
+        assert_eq!(first, second, "both orders must keep the same blob");
     }
 }
