@@ -23,6 +23,8 @@ pub fn AdminView() -> Element {
 
     let mut show_add_admin_modal = use_signal(|| false);
     let mut admin_error = use_signal(|| None::<String>);
+    // "admins" | "access"
+    let mut tab = use_signal(|| "admins".to_string());
 
     // Check if current user is the owner
     let is_owner = use_memo(move || {
@@ -81,7 +83,33 @@ pub fn AdminView() -> Element {
     rsx! {
         div { class: "flex-1 flex flex-col p-6 overflow-y-auto",
             // Header
-            h1 { class: "text-2xl font-bold text-text mb-6", "Admin Management" }
+            h1 { class: "text-2xl font-bold text-text mb-4", "Admin Management" }
+
+            // Tabs
+            div { class: "flex gap-1 mb-6 bg-surface rounded-lg p-1 w-fit",
+                button {
+                    r#type: "button",
+                    class: if *tab.read() == "admins" {
+                        "px-4 py-2 rounded-md text-sm bg-accent text-white"
+                    } else {
+                        "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
+                    },
+                    onclick: move |_| tab.set("admins".to_string()),
+                    "Admins"
+                }
+                button {
+                    r#type: "button",
+                    class: if *tab.read() == "access" {
+                        "px-4 py-2 rounded-md text-sm bg-accent text-white"
+                    } else {
+                        "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
+                    },
+                    onclick: move |_| tab.set("access".to_string()),
+                    "Roles & Invite links"
+                }
+            }
+
+            if *tab.read() == "admins" {
 
             // Action buttons row (owner only)
             if *is_owner.read() {
@@ -161,9 +189,6 @@ pub fn AdminView() -> Element {
                 }
             }
 
-            // Roles and reusable invite links
-            AccessSection {}
-
             // Banned users section
             div { class: "mb-6",
                 h2 { class: "text-lg font-semibold text-text mb-3", "Banned Users" }
@@ -199,6 +224,9 @@ pub fn AdminView() -> Element {
                         "Only the board owner can add admins and modify board settings."
                     }
                 }
+            }
+            } else {
+                AccessSection {}
             }
         }
 
