@@ -908,8 +908,8 @@ fn MessageHeader(
                     span {
                         class: match size {
                             MessageSize::Compact => "truncate text-sm font-semibold text-text",
-                            MessageSize::Normal => "truncate text-lg font-semibold text-text",
-                            MessageSize::Large => "truncate text-2xl font-bold text-text",
+                            MessageSize::Normal => "truncate text-base font-semibold text-text",
+                            MessageSize::Large => "truncate text-xl font-bold text-text",
                         },
                         title: "{title}",
                         "{title}"
@@ -980,12 +980,12 @@ fn MessageContentDisplay(
             "prose prose-sm dark:prose-invert max-w-none",
         ),
         MessageSize::Normal => (
-            "text-2xl font-bold text-text mb-4",
-            "prose prose-lg dark:prose-invert max-w-none",
+            "text-xl font-bold text-text mb-3",
+            "prose prose-base dark:prose-invert max-w-none",
         ),
         MessageSize::Large => (
-            "text-3xl font-bold text-text mb-6",
-            "prose prose-xl dark:prose-invert max-w-none",
+            "text-xl font-bold text-text mb-3",
+            "prose prose-base dark:prose-invert max-w-none",
         ),
     };
 
@@ -997,7 +997,7 @@ fn MessageContentDisplay(
     let text_class = if matches!(size, MessageSize::Compact) {
         "text-sm text-text"
     } else {
-        "text-lg text-text leading-relaxed"
+        "text-base text-text leading-relaxed"
     };
 
     // Truncate title and content for non-expanded card views

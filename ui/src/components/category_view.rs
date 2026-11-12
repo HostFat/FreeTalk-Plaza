@@ -77,7 +77,7 @@ pub fn CategoryCard(
 
     rsx! {
         div {
-            class: "bg-panel rounded-xl border border-border shadow-sm overflow-hidden hover:border-accent/50 hover:shadow-md transition-all cursor-pointer group relative",
+            class: "bg-panel rounded-lg border border-border overflow-hidden hover:border-accent/50 transition-colors cursor-pointer group relative",
             onclick: move |_| {
                 if !*is_editing.read() {
                     on_click.call(())
@@ -96,7 +96,7 @@ pub fn CategoryCard(
                 },
             }
 
-            div { class: "p-4",
+            div { class: "px-4 py-3",
                 // Error message
                 if let Some(err) = error_msg.read().as_ref() {
                     div { class: "mb-2 p-2 bg-red-100 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded text-xs text-red-700 dark:text-red-400",
@@ -123,15 +123,38 @@ pub fn CategoryCard(
                             oninput: move |e| edit_name.set(e.value()),
                         }
                     } else {
-                        span { class: "text-3xl", "{icon}" }
-                        h3 { class: "text-lg font-semibold text-text group-hover:text-accent transition-colors truncate",
-                            "{name}"
-                        }
-                        if !category.category_allowed_roles.is_empty() {
-                            span {
-                                class: "ml-auto flex-shrink-0 text-xs px-2 py-0.5 rounded-full bg-surface border border-border text-text-muted",
-                                title: "Visible only to members of the selected roles",
-                                if category.category_locked { "🔒 Locked" } else { "🔒 Restricted" }
+                        div { class: "flex items-center gap-3 min-w-0 w-full flex-wrap",
+                            span { class: "text-2xl flex-shrink-0", "{icon}" }
+                            div { class: "flex-1 min-w-0",
+                                div { class: "flex items-center gap-2 flex-wrap",
+                                    h3 { class: "text-base font-semibold text-text group-hover:text-accent transition-colors truncate",
+                                        "{name}"
+                                    }
+                                    if !category.category_allowed_roles.is_empty() {
+                                        span {
+                                            class: "flex-shrink-0 text-xs px-2 py-0.5 rounded-full bg-surface border border-border text-text-muted",
+                                            title: "Visible only to members of the selected roles",
+                                            if category.category_locked { "🔒 Locked" } else { "🔒 Restricted" }
+                                        }
+                                    }
+                                }
+                                if let Some(desc) = description {
+                                    p { class: "text-xs text-text-muted line-clamp-1 mt-1",
+                                        "{desc}"
+                                    }
+                                }
+                            }
+                            div { class: "flex-shrink-0 text-right text-xs text-text-muted",
+                                p {
+                                    if post_count == 1 {
+                                        "1 post"
+                                    } else {
+                                        "{post_count} posts"
+                                    }
+                                }
+                                if let Some((author, time)) = last_activity.clone() {
+                                    p { class: "mt-0.5", "{time} by {author}" }
+                                }
                             }
                         }
                     }
@@ -234,32 +257,13 @@ pub fn CategoryCard(
                             "Cancel"
                         }
                     }
-                } else if let Some(desc) = description {
-                    p { class: "text-sm text-text-muted line-clamp-2",
-                        "{desc}"
-                    }
-                }
-
-                if !*is_editing.read() && (post_count > 0 || last_activity.is_some()) {
-                    div { class: "mt-2 flex flex-wrap items-center gap-2 text-xs text-text-muted",
-                        span {
-                            if post_count == 1 {
-                                "1 post"
-                            } else {
-                                "{post_count} posts"
-                            }
-                        }
-                        if let Some((author, time)) = last_activity.clone() {
-                            span { "· {time} by {author}" }
-                        }
-                    }
                 }
             }
 
             // Action buttons overlay (on hover)
             if has_actions && *is_hovered.read() && !*is_editing.read() {
                 div {
-                    class: "absolute right-2 top-3 flex gap-1 bg-panel rounded shadow border border-border px-1 py-0.5",
+                    class: "absolute right-3 top-1/2 -translate-y-1/2 flex gap-1 bg-panel rounded shadow border border-border px-1 py-0.5",
                     onclick: move |e| e.stop_propagation(),
 
                     if on_edit.is_some() {

@@ -126,6 +126,24 @@ fn category_stats(
     (count, latest.map(|(author, time, _)| (author, time)))
 }
 
+/// Walk up the reply chain to the category a post belongs to.
+fn category_of(post: &MessageData, all: &[MessageData]) -> Option<MessageId> {
+    let mut target = post.reply_to_message_id.clone();
+    let mut depth = 0;
+    while let Some(id) = target {
+        if depth > 64 {
+            break;
+        }
+        depth += 1;
+        let parent = all.iter().find(|message| message.message_id == id)?;
+        if parent.is_category {
+            return Some(parent.message_id.clone());
+        }
+        target = parent.reply_to_message_id.clone();
+    }
+    None
+}
+
 /// Count every reply below `id` and find the newest one.
 fn thread_stats(
     id: &MessageId,
@@ -191,17 +209,18 @@ fn PostRow(
 
     rsx! {
         div {
-            class: "bg-panel border border-border rounded-lg px-3 py-2 hover:border-accent/50 hover:bg-surface/30 transition-colors cursor-pointer",
+            class: "bg-panel border border-border rounded-lg px-4 py-3 hover:border-accent/50 hover:bg-surface/30 transition-colors cursor-pointer",
             title: preview,
             onclick: move |_| on_click.call(()),
-            div { class: "flex items-center gap-3",
+            div { class: "flex items-center gap-4",
                 img {
                     src: "{avatar}",
                     class: "w-8 h-8 rounded-full flex-shrink-0",
                     alt: "",
                 }
-                div { class: "flex-1 min-w-0 flex flex-wrap items-baseline gap-x-2 gap-y-0.5",
+                div { class: "flex-1 min-w-0 flex flex-wrap items-baseline gap-x-3 gap-y-1",
                     span { class: "text-base font-semibold text-text truncate", "{title}" }
+                    span { class: "text-xs text-text-muted", "·" }
                     span { class: "text-xs text-text-muted", "by {post.author_name}" }
                     span { class: "text-xs text-text-muted", "· {created}" }
                     span { class: "text-xs text-text-muted",
@@ -556,7 +575,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                         if viewing_category { "Subcategories" } else { "Categories" }
                                                     }
                                                 }
-                                                div { class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4",
+                                                div { class: "space-y-2",
                                                     {categories.iter().map({
                                                         let handle_edit_category = handle_edit_category.clone();
                                                         move |cat| {
@@ -754,8 +773,22 @@ pub fn SinglePostView(post_id: String) -> Element {
                     &board_data.secrets,
                     &board_data.category_secrets,
                 );
-                let post = all_messages.into_iter().find(|m| m.id_string() == post_id);
-                return post.map(|p| (p, self_member_id, max_title_size, max_message_size));
+                let post = all_messages
+                    .iter()
+                    .find(|m| m.id_string() == post_id)
+                    .cloned();
+                let category = post
+                    .as_ref()
+                    .and_then(|post| category_of(post, &all_messages));
+                return post.map(|p| {
+                    (
+                        p,
+                        self_member_id,
+                        max_title_size,
+                        max_message_size,
+                        category,
+                    )
+                });
             }
         }
         None
@@ -790,20 +823,41 @@ pub fn SinglePostView(post_id: String) -> Element {
         }
     };
 
+    let category_id = post_data
+        .read()
+        .as_ref()
+        .and_then(|(_, _, _, _, category)| category.clone());
+    let has_category = category_id.is_some();
+    let back_target = match category_id {
+        Some(category) => format!(
+            "/board/{}/category/{}",
+            current_board_id.read(),
+            category.0 .0
+        ),
+        None => format!("/board/{}", current_board_id.read()),
+    };
+    let back_label = if has_category {
+        "← Back to category"
+    } else {
+        "← Back to posts"
+    };
+
     rsx! {
         div { class: "flex-1 flex flex-col min-w-0 min-h-0 bg-bg",
             // Back button header
-            div { class: "flex items-center gap-4 px-6 py-4 border-b border-border",
+            div { class: "flex items-center gap-4 px-6 py-3 border-b border-border",
                 button {
                     r#type: "button",
-                    class: "text-accent hover:text-accent/80 transition-colors text-lg",
-                    onclick: move |_| {
-                        let target = format!("/board/{}", current_board_id.read());
-                        if let Some(win) = web_sys::window() {
-                            let _ = win.location().set_hash(&target);
+                    class: "text-accent hover:text-accent/80 transition-colors text-sm font-medium",
+                    onclick: {
+                        let target = back_target.clone();
+                        move |_| {
+                            if let Some(win) = web_sys::window() {
+                                let _ = win.location().set_hash(&target);
+                            }
                         }
                     },
-                    "← Back to posts"
+                    "{back_label}"
                 }
             }
 
@@ -811,9 +865,9 @@ pub fn SinglePostView(post_id: String) -> Element {
             div { class: "flex-1 overflow-y-auto",
                 {
                     match post_data.read().as_ref() {
-                        Some((post, self_member_id, max_title_size, max_message_size)) => {
+                        Some((post, self_member_id, max_title_size, max_message_size, _)) => {
                             rsx! {
-                                div { class: "max-w-4xl mx-auto px-4 py-6",
+                                div { class: "max-w-5xl mx-auto px-4 py-6",
                                     MessageCard {
                                         message: post.clone(),
                                         variant: MessageCardVariant::Card,
