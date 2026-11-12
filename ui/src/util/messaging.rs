@@ -9,7 +9,8 @@ use dioxus::prelude::ReadableExt;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use plaza_core::board_state::content::{
-    ReplyContentV1, TextContentV1, CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT, REPLY_CONTENT_VERSION,
+    CategoryContentV1, ReplyContentV1, TextContentV1, CATEGORY_CONTENT_VERSION,
+    CONTENT_TYPE_CATEGORY, CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT, REPLY_CONTENT_VERSION,
     TEXT_CONTENT_VERSION,
 };
 use plaza_core::board_state::member::MemberId;
@@ -264,7 +265,7 @@ pub async fn send_category(
     use crate::components::app::CURRENT_BOARD;
 
     // Get required board data
-    let (current_board, board_key, self_sk, board_state_clone, can_create) = {
+    let (current_board, board_key, self_sk, board_state_clone, can_create, secret_opt) = {
         let current_board_read = CURRENT_BOARD.read();
         let boards_read = BOARDS.read();
 
@@ -279,12 +280,25 @@ pub async fn send_category(
 
         let can_create = board_data.can_create_categories();
 
+        // Categories live in the message log, so on a private board they have to
+        // be sealed like any other content.
+        let secret_opt = if board_data.is_private() {
+            board_data
+                .secrets
+                .iter()
+                .max_by_key(|(version, _)| *version)
+                .map(|(version, secret)| (*secret, *version))
+        } else {
+            None
+        };
+
         (
             current_board,
             board_data.board_key(),
             board_data.self_sk.clone(),
             board_data.board_state.clone(),
             can_create,
+            secret_opt,
         )
     };
 
@@ -292,8 +306,30 @@ pub async fn send_category(
         return Err("Only board owners and admins can create categories".to_string());
     }
 
-    // Create the category content
-    let content = BoardMessageBody::category(name, description, icon, color, parent_category_id);
+    // Build the category content, encrypting it on private boards: the contract
+    // rejects public messages there, which is why creation looked like it did
+    // nothing before.
+    let content = match secret_opt {
+        Some((secret, version)) => {
+            let mut cat = CategoryContentV1::new(name, description, color);
+            if let Some(i) = icon {
+                cat = cat.with_icon(i);
+            }
+            if let Some(p) = parent_category_id {
+                cat = cat.with_parent(p);
+            }
+            let bytes = cat.encode();
+            let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &bytes);
+            BoardMessageBody::Private {
+                content_type: CONTENT_TYPE_CATEGORY,
+                content_version: CATEGORY_CONTENT_VERSION,
+                ciphertext,
+                nonce,
+                secret_version: version,
+            }
+        }
+        None => BoardMessageBody::category(name, description, icon, color, parent_category_id),
+    };
 
     let message = MessageV1 {
         board_owner: MemberId::from(current_board),
@@ -320,7 +356,9 @@ pub async fn send_category(
 
     info!("Creating category: {:?}", auth_message);
 
-    // Apply the delta
+    // Apply the delta. Report the failure to the caller instead of closing the
+    // modal as if the category had been created.
+    let mut apply_error: Option<String> = None;
     BOARDS.with_mut(|boards| {
         if let Some(board_data) = boards.map.get_mut(&current_board) {
             if let Err(e) = board_data.board_state.apply_delta(
@@ -331,12 +369,17 @@ pub async fn send_category(
                 &Some(delta),
             ) {
                 error!("Failed to apply category delta: {:?}", e);
+                apply_error = Some(e);
             } else {
                 // Mark board as needing sync
                 mark_needs_sync(current_board);
             }
         }
     });
+
+    if let Some(e) = apply_error {
+        return Err(e);
+    }
 
     Ok(())
 }

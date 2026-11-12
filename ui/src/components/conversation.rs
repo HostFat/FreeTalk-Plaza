@@ -363,9 +363,10 @@ fn extract_reply_context(
 /// Extract category information from message content
 fn extract_category_info(
     content: &BoardMessageBody,
-    _secrets: &HashMap<u32, [u8; 32]>,
+    secrets: &HashMap<u32, [u8; 32]>,
 ) -> (bool, Option<String>, Option<String>, Option<String>, Option<String>, Option<MessageId>) {
     use plaza_core::board_state::content::{CategoryContentV1, CONTENT_TYPE_CATEGORY};
+    use plaza_core::board_state::privacy::SealedBytes;
 
     match content {
         BoardMessageBody::Public {
@@ -382,7 +383,35 @@ fn extract_category_info(
                 );
             }
         }
-        // Categories are always public (no private category support)
+        // Private boards seal their categories like any other content.
+        BoardMessageBody::Private {
+            content_type,
+            ciphertext,
+            nonce,
+            secret_version,
+            ..
+        } if *content_type == CONTENT_TYPE_CATEGORY => {
+            let sealed = SealedBytes::Private {
+                ciphertext: ciphertext.clone(),
+                nonce: *nonce,
+                secret_version: *secret_version,
+                declared_len_bytes: 0,
+            };
+            if let Ok(bytes) = crate::util::ecies::unseal_bytes_with_secrets(&sealed, secrets) {
+                if let Ok(cat) = CategoryContentV1::decode(&bytes) {
+                    return (
+                        true,
+                        Some(cat.name),
+                        cat.description,
+                        cat.icon,
+                        Some(cat.color),
+                        cat.parent_category_id,
+                    );
+                }
+            }
+            // Still a category, just not readable with the secrets we hold.
+            return (true, None, None, None, None, None);
+        }
         _ => {}
     }
     (false, None, None, None, None, None)
@@ -1635,5 +1664,56 @@ pub fn get_category_posts(all_messages: &[MessageData], category_id: &MessageId)
         .collect();
     posts.sort_by_key(|m| std::cmp::Reverse(m.time));
     posts
+}
+
+#[cfg(test)]
+mod category_tests {
+    use super::extract_category_info;
+    use crate::util::ecies::seal_bytes;
+    use plaza_core::board_state::content::{
+        CategoryContentV1, CATEGORY_CONTENT_VERSION, CONTENT_TYPE_CATEGORY,
+    };
+    use plaza_core::board_state::message::BoardMessageBody;
+    use plaza_core::board_state::privacy::SealedBytes;
+    use std::collections::HashMap;
+
+    fn sealed_category(name: &str, secret: &[u8; 32]) -> BoardMessageBody {
+        let cat = CategoryContentV1::new(name.to_string(), None, "#6366f1".to_string());
+        let sealed = seal_bytes(&cat.encode(), secret, 0);
+        match sealed {
+            SealedBytes::Private {
+                ciphertext,
+                nonce,
+                secret_version,
+                ..
+            } => BoardMessageBody::Private {
+                content_type: CONTENT_TYPE_CATEGORY,
+                content_version: CATEGORY_CONTENT_VERSION,
+                ciphertext,
+                nonce,
+                secret_version,
+            },
+            _ => unreachable!("seal_bytes always produces a private payload"),
+        }
+    }
+
+    #[test]
+    fn private_category_is_decoded_with_the_board_secret() {
+        let secret = [7u8; 32];
+        let content = sealed_category("Segreta", &secret);
+
+        let mut secrets = HashMap::new();
+        secrets.insert(0u32, secret);
+        let (is_category, name, _, _, color, _) = extract_category_info(&content, &secrets);
+        assert!(is_category);
+        assert_eq!(name.as_deref(), Some("Segreta"));
+        assert_eq!(color.as_deref(), Some("#6366f1"));
+
+        // Without the secret the message is still recognised as a category, just
+        // without readable content, so it does not show up as a post.
+        let (is_category, name, ..) = extract_category_info(&content, &HashMap::new());
+        assert!(is_category);
+        assert!(name.is_none());
+    }
 }
 
