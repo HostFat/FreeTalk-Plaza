@@ -1509,6 +1509,17 @@ pub fn MessageCard(
     let edited = msg.edited;
     let reactions = msg.reactions.clone();
 
+    // A light preview for the compact post list, where the body is hidden.
+    let preview_tooltip = if hide_content && !content_text.trim().is_empty() {
+        let mut preview: String = content_text.chars().take(500).collect();
+        if content_text.chars().count() > 500 {
+            preview.push('…');
+        }
+        preview
+    } else {
+        String::new()
+    };
+
     // In card views the title moves next to the author. Give untitled posts
     // something to show when the body is hidden.
     let header_title = if title_text.trim().is_empty() {
@@ -1674,6 +1685,7 @@ pub fn MessageCard(
                 div {
                     key: "{msg_id:?}",
                     class: "relative",
+                    title: preview_tooltip,
                     onmouseenter: move |_| is_hovered.set(true),
                     onmouseleave: move |_| is_hovered.set(false),
 

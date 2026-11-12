@@ -227,23 +227,32 @@ button, a, input, textarea, select, [role="button"] {
 /* Ensure smooth momentum scrolling on iOS for scrollable containers */
 .overflow-y-auto, .overflow-auto {
   -webkit-overflow-scrolling: touch;
+  /* Always keep the gutter, so the bar does not appear and shift the layout. */
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a3e transparent;
 }
 
-/* Scrollbar styling */
+/* Always show a very small, dark scrollbar on the main scroll areas. */
+.overflow-y-auto {
+  overflow-y: scroll;
+}
+
+/* Scrollbar styling: 5px, dark thumb on a transparent track. */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--color-surface);
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--color-border-hover);
-  border-radius: 4px;
+  background: #3a3a3e;
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--color-text-muted);
+  background: #55555a;
 }

@@ -168,6 +168,14 @@ fn thread_stats(
 pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
     let mut recent_first = use_signal(|| false);
+    // Posts rendered at a time; "Show more" grows it.
+    let mut posts_limit = use_signal(|| 12usize);
+    let category_for_reset = category_id.clone();
+    use_effect(move || {
+        // Reset the window when the user opens another category.
+        let _ = category_for_reset.clone();
+        posts_limit.set(12);
+    });
 
     // Get current board data
     let board_data_memo = use_memo(move || {
@@ -375,7 +383,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                 let color = cat.category_color.as_deref().unwrap_or("#6366f1");
 
                                 rsx! {
-                                    div { class: "bg-panel rounded-xl border border-border shadow-sm overflow-hidden mb-6",
+                                    div { class: "sticky top-0 z-20 bg-panel rounded-xl border border-border shadow-sm overflow-hidden mb-6",
                                         // Color accent bar
                                         div {
                                             class: "h-2",
@@ -592,7 +600,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                 }
                                             }
                                             div { class: "space-y-3",
-                                                {displayed_posts.iter().map({
+                                                {displayed_posts.iter().take(*posts_limit.read()).map({
                                                     let handle_toggle_reaction = handle_toggle_reaction.clone();
                                                     let handle_edit_message = handle_edit_message.clone();
                                                     let board_id = current_board_id.read().clone();
@@ -637,6 +645,19 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                         }
                                                     }
                                                 })}
+                                                if displayed_posts.len() > *posts_limit.read() {
+                                                    div { class: "flex justify-center mt-4",
+                                                        button {
+                                                            r#type: "button",
+                                                            class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg transition-colors",
+                                                            onclick: move |_| {
+                                                                let next = *posts_limit.read() + 12;
+                                                                posts_limit.set(next);
+                                                            },
+                                                            "Show more ({displayed_posts.len() - *posts_limit.read()} remaining)"
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
