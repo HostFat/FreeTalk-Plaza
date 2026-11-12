@@ -96,7 +96,12 @@ pub fn CategoryCard(
                 },
             }
 
-            div { class: "px-4 py-3",
+            div {
+                class: if has_actions {
+                    "pl-4 pr-28 py-3"
+                } else {
+                    "px-4 py-3"
+                },
                 // Error message
                 if let Some(err) = error_msg.read().as_ref() {
                     div { class: "mb-2 p-2 bg-red-100 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded text-xs text-red-700 dark:text-red-400",
