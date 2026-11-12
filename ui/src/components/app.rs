@@ -472,7 +472,7 @@ fn ReadOnlyBoardView(board_id: String, state: plaza_core::ChatBoardStateV1) -> E
     }
 
     let mut categories: Vec<String> = Vec::new();
-    let mut posts: Vec<(String, String)> = Vec::new();
+    let mut posts: Vec<(std::time::SystemTime, String, String)> = Vec::new();
     for message in &state.recent_messages.messages {
         let body = &message.message.content;
         if body.is_category() {
@@ -481,6 +481,7 @@ fn ReadOnlyBoardView(board_id: String, state: plaza_core::ChatBoardStateV1) -> E
             }
         } else if !body.is_action() {
             posts.push((
+                message.message.time,
                 nickname(&state, message.message.author),
                 body.to_string_lossy(),
             ));
@@ -518,7 +519,7 @@ fn ReadOnlyBoardView(board_id: String, state: plaza_core::ChatBoardStateV1) -> E
                     p { class: "text-text-muted", "No posts on this board." }
                 } else {
                     div { class: "space-y-2",
-                        for (author, text) in posts.iter() {
+                        for (_, author, text) in posts.iter() {
                             div { class: "bg-surface rounded-lg p-3",
                                 p { class: "text-text-muted text-xs mb-1", "{author}" }
                                 p { class: "text-text text-sm whitespace-pre-wrap", "{text}" }
