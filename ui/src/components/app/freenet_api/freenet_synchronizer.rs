@@ -477,6 +477,33 @@ impl FreenetSynchronizer {
                                             contract_id
                                         );
 
+                                        // A read-only fetch for a board the network does not
+                                        // have: stop waiting and tell the UI.
+                                        let read_only_ids: Vec<VerifyingKey> = READ_ONLY_FETCHES
+                                            .read()
+                                            .iter()
+                                            .copied()
+                                            .collect();
+                                        for owner_vk in read_only_ids {
+                                            if owner_vk_to_contract_key(&owner_vk)
+                                                .id()
+                                                .to_string()
+                                                == contract_id
+                                            {
+                                                warn!(
+                                                    "Read-only board {:?} not found on the network",
+                                                    MemberId::from(owner_vk)
+                                                );
+                                                READ_ONLY_FETCHES.with_mut(|pending| {
+                                                    pending.remove(&owner_vk);
+                                                });
+                                                crate::components::app::READ_ONLY_UNAVAILABLE
+                                                    .with_mut(|failed| {
+                                                        failed.insert(owner_vk);
+                                                    });
+                                            }
+                                        }
+
                                         // Check if this contract ID exists in our boards
                                         // Collect board information first to avoid nested borrows
                                         let board_matches: Vec<(VerifyingKey, String)> = {
