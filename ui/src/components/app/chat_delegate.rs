@@ -253,6 +253,14 @@ pub async fn save_boards_to_delegate() -> Result<(), String> {
         return Ok(());
     }
 
+    // Never replace real stored boards with an empty map. If the in-memory map
+    // is empty while the delegate had boards, something rejected them and
+    // overwriting would destroy the user's data for good.
+    if *crate::components::app::DELEGATE_HAD_BOARDS.read() && BOARDS.read().map.is_empty() {
+        warn!("Skipping delegate save: stored boards would be overwritten with an empty map");
+        return Ok(());
+    }
+
     info!("Saving boards to delegate storage");
 
     // Get the current boards data - clone the data to avoid holding the read lock

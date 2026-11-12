@@ -65,6 +65,10 @@ pub static BOARDS: GlobalSignal<Boards> = Global::new(initial_boards);
 /// answered that it has none). Until then `BOARDS` is empty only because the
 /// load has not finished, and persisting it would overwrite real data.
 pub static BOARDS_LOADED: GlobalSignal<bool> = Global::new(|| false);
+
+/// True when the delegate we loaded from actually contained boards. Used to
+/// refuse writing an empty map over real data if a load ever fails validation.
+pub static DELEGATE_HAD_BOARDS: GlobalSignal<bool> = Global::new(|| false);
 pub static CURRENT_BOARD: GlobalSignal<CurrentBoard> =
     Global::new(|| CurrentBoard { owner_key: None });
 pub static MEMBER_INFO_MODAL: GlobalSignal<MemberInfoModalSignal> =

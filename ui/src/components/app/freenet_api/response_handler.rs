@@ -16,7 +16,7 @@ use crate::components::app::chat_delegate::{
 use crate::components::app::document_title::{mark_current_board_as_read, update_document_title};
 use crate::components::app::notifications::mark_initial_sync_complete;
 use crate::components::app::sync_info::{BoardSyncStatus, SYNC_INFO};
-use crate::components::app::{BOARDS, BOARDS_LOADED, CURRENT_BOARD};
+use crate::components::app::{BOARDS, BOARDS_LOADED, CURRENT_BOARD, DELEGATE_HAD_BOARDS};
 use crate::util::ecies::{decrypt_secret_from_member_blob, decrypt_with_symmetric_key};
 use crate::util::owner_vk_to_contract_key;
 use ciborium::de::from_reader;
@@ -237,6 +237,10 @@ impl ResponseHandler {
                                                             info!("Successfully loaded boards from LEGACY delegate - migrating to new delegate");
                                                         } else {
                                                             info!("Successfully loaded boards from delegate");
+                                                        }
+
+                                                        if !loaded_boards.map.is_empty() {
+                                                            *DELEGATE_HAD_BOARDS.write() = true;
                                                         }
 
                                                         // Restore the current board selection if saved
