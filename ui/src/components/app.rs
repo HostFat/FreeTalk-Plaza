@@ -266,6 +266,10 @@ pub fn App() -> Element {
             BoardList {}
             // User profile bar with post input
             TopBar {}
+            // Development warning, visible on every page including boards.
+            div { class: "flex-shrink-0 bg-amber-500/10 border-y border-amber-500/30 px-4 py-1 text-center text-xs text-amber-200",
+                "Work in progress: features and data can break without notice, there is no support. Avoid boards you plan to keep long term."
+            }
             // Main content area (router)
             div { class: "flex-1 min-h-0 overflow-hidden",
                 Router::<Route> {}
@@ -285,12 +289,6 @@ pub fn App() -> Element {
 fn Home() -> Element {
     rsx! {
         div { class: "flex-1 flex flex-col items-center justify-center px-6 py-10 text-text-muted",
-            div { class: "w-full max-w-2xl mb-8 bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 text-sm text-amber-200",
-                p { class: "font-semibold mb-1", "Work in progress" }
-                p {
-                    "FreeTalk Plaza is under active development. Features, contracts and data formats change without notice, and anything can break at any time. There is no support. Please do not create boards you intend to keep for the long term."
-                }
-            }
             h1 { class: "text-3xl font-semibold text-text", "FreeTalk Plaza" }
             p { class: "text-sm mt-1 mb-4", "A forum on Freenet" }
             p { class: "text-xl", "Select a board above or create one" }
