@@ -41,7 +41,16 @@ fn usage() -> Result<(), String> {
 }
 
 fn repo_root() -> PathBuf {
-    // tools/wasm-tool/ -> repo root
+    // Resolve at runtime from the working directory, so moving or cloning the
+    // checkout does not leave a compiled-in path behind.
+    if let Ok(cwd) = std::env::current_dir() {
+        for dir in cwd.ancestors() {
+            if dir.join(REGISTRY).exists() && dir.join("Cargo.toml").exists() {
+                return dir.to_path_buf();
+            }
+        }
+    }
+    // Fallback: tools/wasm-tool/ -> repo root
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
