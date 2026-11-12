@@ -52,3 +52,18 @@ Run `deploy-tool deploy`
 
 The deployment id in `deploy.toml` (`freetalk`) is the live app identity and is
 intentionally unchanged by the rename.
+
+## Publish only
+
+`deploy-tool deploy` rebuilds the UI (`dx build --release`), signs the bundle
+and then publishes it. When the build is already signed and only the state
+needs to be sent again, skip the rebuild:
+
+```powershell
+pwsh ./publish-only.ps1
+```
+
+The script reads the signed artifacts from `%APPDATA%\freetalk`, finds `fdev`,
+prints the build time, warns if sources changed after that build, and runs
+`fdev publish`. Use it for a retry after a stuck publish or for a deliberate
+re-publish. For code changes, run `deploy-tool deploy`.
