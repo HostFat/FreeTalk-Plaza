@@ -20,6 +20,12 @@ pub fn PostInput(
     /// Default reply context - applied when modal opens if replying_to is None
     #[props(default)]
     default_reply_to: Option<ReplyContext>,
+    /// Inside a category: the button starts a new topic, not a reply.
+    #[props(default)]
+    in_category: bool,
+    /// Inside a single post: the button starts a reply to that post.
+    #[props(default)]
+    in_post: bool,
     /// Maximum title length (from board configuration)
     max_title_size: usize,
     /// Maximum message length (from board configuration)
@@ -221,8 +227,17 @@ pub fn PostInput(
     };
 
     rsx! {
-        // Compose button - icon only for new post, with caption for reply
-        if default_reply_to.is_some() {
+        // A category starts a new topic; a post starts a reply. The reply
+        // section keeps its own caption.
+        if in_category {
+            button {
+                class: "flex items-center gap-2 px-4 py-2.5 bg-accent hover:bg-accent-hover text-white font-medium rounded-xl transition-colors",
+                onclick: open_modal,
+                title: if has_draft() { "Compose Post (draft saved)" } else { "Compose Post" },
+                Icon { icon: FaPen, width: 14, height: 14 }
+                "Compose Post"
+            }
+        } else if default_reply_to.is_some() && !in_post {
             button {
                 class: "flex items-center gap-2 px-4 py-2.5 bg-accent hover:bg-accent-hover text-white font-medium rounded-xl transition-colors",
                 onclick: open_modal,
@@ -233,7 +248,13 @@ pub fn PostInput(
             button {
                 class: "relative p-3 bg-accent hover:bg-accent-hover text-white rounded-xl transition-colors",
                 onclick: open_modal,
-                title: if has_draft() { "Compose Post (draft saved)" } else { "Compose Post" },
+                title: if in_post {
+                    if has_draft() { "Compose Reply (draft saved)" } else { "Compose Reply" }
+                } else if has_draft() {
+                    "Compose Post (draft saved)"
+                } else {
+                    "Compose Post"
+                },
                 Icon { icon: FaPen, width: 18, height: 18 }
                 if has_draft() {
                     span { class: "absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-white border border-accent" }

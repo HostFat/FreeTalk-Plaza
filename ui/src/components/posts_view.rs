@@ -1,6 +1,7 @@
 use crate::components::app::chat_delegate::save_boards_to_delegate;
 use crate::components::app::{
-    CurrentCategoryContext, Route, BOARDS, CURRENT_BOARD, CURRENT_CATEGORY,
+    CurrentCategoryContext, CurrentPostContext, Route, BOARDS, CURRENT_BOARD, CURRENT_CATEGORY,
+    CURRENT_POST,
 };
 use crate::components::category_create_modal::CREATE_CATEGORY_MODAL;
 use crate::components::category_view::{CategoryCard, CategoryEditData};
@@ -1703,6 +1704,29 @@ pub fn SinglePostView(post_id: String) -> Element {
         }
         None
     });
+
+    // Publish the opened post as the top-bar reply target.
+    use_effect(move || {
+        let next = post_data
+            .read()
+            .as_ref()
+            .map(|(post, ..)| CurrentPostContext {
+                message_id: Some(post.message_id),
+                author_name: Some(post.author_name.clone()),
+                preview: Some(
+                    format!("{} {}", post.title_text, post.content_text)
+                        .trim()
+                        .chars()
+                        .take(120)
+                        .collect(),
+                ),
+            })
+            .unwrap_or_default();
+        if *CURRENT_POST.read() != next {
+            *CURRENT_POST.write() = next;
+        }
+    });
+    use_drop(|| *CURRENT_POST.write() = CurrentPostContext::default());
 
     // Handler for toggling reactions
     let handle_toggle_reaction = move |target_message_id: MessageId, emoji: String| {

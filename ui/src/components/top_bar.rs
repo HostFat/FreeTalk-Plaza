@@ -2,8 +2,8 @@
 
 use crate::board_data::SendMessageError;
 use crate::components::app::{
-    ABOUT_MODAL, BOARDS, COMPOSE_REQUEST, CURRENT_BOARD, CURRENT_CATEGORY, MEMBER_INFO_MODAL,
-    QUOTE_COLLECTION,
+    ABOUT_MODAL, BOARDS, COMPOSE_REQUEST, CURRENT_BOARD, CURRENT_CATEGORY, CURRENT_POST,
+    MEMBER_INFO_MODAL, QUOTE_COLLECTION,
 };
 use crate::components::category_create_modal::CREATE_CATEGORY_MODAL;
 use crate::components::conversation::message_input::PostInput;
@@ -81,6 +81,16 @@ pub fn TopBar() -> Element {
         } else {
             None
         }
+    });
+
+    // When a single post is open, the top-bar composer replies to it.
+    let post_reply_context = use_memo(move || {
+        let post = CURRENT_POST.read();
+        post.message_id.map(|message_id| ReplyContext {
+            message_id,
+            author_name: post.author_name.clone().unwrap_or_default(),
+            content_preview: post.preview.clone().unwrap_or_default(),
+        })
     });
 
     // Message sending handler
@@ -486,9 +496,16 @@ pub fn TopBar() -> Element {
                             let max_message = current_board_data.read().as_ref()
                                 .map(|bd| bd.board_state.configuration.configuration.max_message_size)
                                 .unwrap_or(10000);
-                            let default_reply = category_reply_context.read().clone();
+                            let in_post = CURRENT_POST.read().message_id.is_some();
+                            let in_category = category_reply_context.read().is_some() && !in_post;
+                            // A category starts a new topic, so its context is
+                            // already carried by CURRENT_CATEGORY. Only an open
+                            // post presets a reply target.
+                            let default_reply = post_reply_context.read().clone();
                             rsx! {
                                 PostInput {
+                                    in_category,
+                                    in_post,
                                     handle_send_message: move |msg: (
                                         String,
                                         String,

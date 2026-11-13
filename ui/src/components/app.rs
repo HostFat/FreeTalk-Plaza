@@ -121,6 +121,10 @@ pub static NEEDS_SYNC: GlobalSignal<std::collections::HashSet<VerifyingKey>> =
 pub static CURRENT_CATEGORY: GlobalSignal<CurrentCategoryContext> =
     Global::new(|| CurrentCategoryContext::default());
 
+/// Tracks the single post being viewed, so the top-bar composer replies to it.
+pub static CURRENT_POST: GlobalSignal<CurrentPostContext> =
+    Global::new(|| CurrentPostContext::default());
+
 /// Bumped by "New post" buttons elsewhere in the app to open the shared
 /// composer in the top bar (which already knows the current category).
 pub static COMPOSE_REQUEST: GlobalSignal<u64> = Global::new(|| 0);
@@ -151,6 +155,14 @@ pub struct CurrentCategoryContext {
     pub category_name: Option<String>,
     /// Author name of the category (for reply context)
     pub author_name: Option<String>,
+}
+
+/// The single post currently open, used as the reply target of the top bar.
+#[derive(Clone, PartialEq, Default)]
+pub struct CurrentPostContext {
+    pub message_id: Option<MessageId>,
+    pub author_name: Option<String>,
+    pub preview: Option<String>,
 }
 
 /// Mark a board as needing sync, deferred via setTimeout(0).
