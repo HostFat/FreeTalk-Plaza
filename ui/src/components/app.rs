@@ -295,7 +295,7 @@ fn Home() -> Element {
     rsx! {
         div { class: "flex-1 flex flex-col items-center justify-center px-6 py-10 text-text-muted",
             h1 { class: "text-3xl font-semibold text-text", "FreeTalk Plaza" }
-            p { class: "text-sm mt-1 mb-4", "A forum on Freenet" }
+            p { class: "text-sm mt-1 mb-4", "Forums on Freenet" }
             p { class: "text-xl", "Select a board above or create one" }
             p { class: "text-sm mt-2", "Posts will appear here" }
         }

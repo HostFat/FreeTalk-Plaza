@@ -187,7 +187,7 @@ pub fn TopBar() -> Element {
                     div { class: "flex flex-col leading-tight",
                         span { class: "text-base font-semibold text-text", "FreeTalk Plaza" }
                         span { class: "text-[10px] uppercase tracking-wide text-text-muted",
-                            "A forum on Freenet"
+                            "Forums on Freenet"
                         }
                     }
                 }

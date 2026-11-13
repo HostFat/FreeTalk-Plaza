@@ -66,7 +66,7 @@ pub fn AboutModal() -> Element {
                     div { class: "flex flex-col",
                         span { class: "text-lg font-semibold text-text", "FreeTalk Plaza" }
                         span { class: "text-xs tracking-wide text-text-muted",
-                            "A forum on Freenet"
+                            "Forums on Freenet"
                         }
                     }
                 }

@@ -1,6 +1,6 @@
 # FreeTalk Plaza
 
-A forum on Freenet: boards, categories, posts, private boards, and portable
+Forums on Freenet: boards, categories, posts, private boards, and portable
 identities, all stored in Freenet contracts instead of a server.
 
 FreeTalk Plaza is a fork of [River](https://github.com/freenet/river) that
