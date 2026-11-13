@@ -1,0 +1,28 @@
+[package]
+name = "pq-spike"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0"
+description = "Post-quantum cost spike for FreeTalk Plaza"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["pq"]
+pq = ["dep:ml-dsa", "dep:ml-kem"]
+
+[dependencies]
+ciborium = "0.2.2"
+serde = { version = "1", features = ["derive"] }
+ed25519-dalek = "2.1.1"
+rand_core = { version = "0.10", default-features = false }
+ml-dsa = { version = "0.1.2", default-features = false, features = ["alloc"], optional = true }
+ml-kem = { version = "0.3.4", default-features = false, optional = true }
+
+[profile.release]
+opt-level = "s"
+lto = false
+codegen-units = 16
