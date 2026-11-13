@@ -93,6 +93,16 @@ pub fn AboutModal() -> Element {
                     p { class: "text-xs",
                         "To check whether this site is current, compare the commit above with the latest commit in the repository."
                     }
+                    p { class: "text-xs",
+                        "Source code: "
+                        a {
+                            href: "https://github.com/HostFat/FreeTalk-Plaza",
+                            target: "_blank",
+                            rel: "noopener noreferrer",
+                            class: "text-accent hover:underline break-all",
+                            "github.com/HostFat/FreeTalk-Plaza"
+                        }
+                    }
                 }
 
                 div { class: "px-6 py-4 border-t border-border flex items-center justify-between gap-3",
