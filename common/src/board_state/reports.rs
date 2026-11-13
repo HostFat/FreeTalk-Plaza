@@ -146,6 +146,14 @@ pub struct ReportsV1 {
 pub struct ReportState {
     pub status: ReportStatus,
     pub generation: u64,
+    #[serde(default)]
+    pub digest: i64,
+}
+
+fn record_digest<T: serde::Serialize>(value: &T) -> i64 {
+    let mut bytes = Vec::new();
+    let _ = ciborium::ser::into_writer(value, &mut bytes);
+    fast_hash(&bytes).0
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -180,6 +188,7 @@ fn resolution_map(resolutions: &[AuthorizedReportResolution]) -> BTreeMap<Messag
                 ReportState {
                     status: entry.resolution.status,
                     generation: entry.resolution.generation,
+                    digest: record_digest(&entry.resolution),
                 },
             )
         })
@@ -391,7 +400,11 @@ impl ComposableState for ReportsV1 {
                 old_state
                     .resolutions
                     .get(&entry.resolution.report_id)
-                    .map(|old| old.generation < entry.resolution.generation)
+                    .map(|old| {
+                        old.generation < entry.resolution.generation
+                            || (old.generation == entry.resolution.generation
+                                && old.digest != record_digest(&entry.resolution))
+                    })
                     .unwrap_or(true)
             })
             .cloned()
@@ -437,8 +450,11 @@ impl ComposableState for ReportsV1 {
                 .iter()
                 .find(|existing| existing.resolution.report_id == entry.resolution.report_id)
             {
-                Some(existing) if existing.resolution.generation >= entry.resolution.generation => {
-                }
+                Some(existing)
+                    if existing.resolution.generation > entry.resolution.generation
+                        || (existing.resolution.generation == entry.resolution.generation
+                            && record_digest(&existing.resolution)
+                                <= record_digest(&entry.resolution)) => {}
                 _ => {
                     self.resolutions.retain(|existing| {
                         existing.resolution.report_id != entry.resolution.report_id

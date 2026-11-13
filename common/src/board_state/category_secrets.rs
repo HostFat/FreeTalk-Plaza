@@ -18,7 +18,7 @@ use crate::board_state::ChatBoardParametersV1;
 use crate::ChatBoardStateV1;
 use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct CategorySecretsV1 {
@@ -165,17 +165,20 @@ impl ComposableState for CategorySecretsV1 {
         _parameters: &Self::Parameters,
     ) -> Self::Summary {
         let mut versions = BTreeSet::new();
-        let mut member_secrets = BTreeSet::new();
+        let mut member_secrets = BTreeMap::new();
         for set in &self.categories {
             for record in &set.versions {
                 versions.insert((set.category_id.clone(), record.record.version));
             }
             for secret in &set.encrypted_secrets {
-                member_secrets.insert((
-                    set.category_id.clone(),
-                    secret.secret.secret_version,
-                    secret.secret.member_id,
-                ));
+                member_secrets.insert(
+                    (
+                        set.category_id.clone(),
+                        secret.secret.secret_version,
+                        secret.secret.member_id,
+                    ),
+                    blob_digest(secret),
+                );
             }
         }
         CategorySecretsSummary {
@@ -206,11 +209,15 @@ impl ComposableState for CategorySecretsV1 {
                 .encrypted_secrets
                 .iter()
                 .filter(|s| {
-                    !old_state_summary.member_secrets.contains(&(
-                        set.category_id.clone(),
-                        s.secret.secret_version,
-                        s.secret.member_id,
-                    ))
+                    old_state_summary
+                        .member_secrets
+                        .get(&(
+                            set.category_id.clone(),
+                            s.secret.secret_version,
+                            s.secret.member_id,
+                        ))
+                        .map(|digest| *digest != blob_digest(*s))
+                        .unwrap_or(true)
                 })
                 .cloned()
                 .collect();
@@ -372,7 +379,15 @@ impl CategorySecretsV1 {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
 pub struct CategorySecretsSummary {
     pub versions: BTreeSet<(MessageId, SecretVersion)>,
-    pub member_secrets: BTreeSet<(MessageId, SecretVersion, MemberId)>,
+    /// Digest of the blob so two distributors' records for the same member and
+    /// version are exchanged and converge on the same one.
+    pub member_secrets: BTreeMap<(MessageId, SecretVersion, MemberId), i64>,
+}
+
+fn blob_digest<T: serde::Serialize>(value: &T) -> i64 {
+    let mut bytes = Vec::new();
+    let _ = ciborium::ser::into_writer(value, &mut bytes);
+    freenet_scaffold::util::fast_hash(&bytes).0
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
