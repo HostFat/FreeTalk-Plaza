@@ -409,13 +409,13 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
             }
         }
     });
-    // Posts rendered at a time; "Show more" grows it.
-    let mut posts_limit = use_signal(|| 12usize);
+    // Page of posts (20 per page).
+    let mut page = use_signal(|| 0usize);
     let category_for_reset = category_id.clone();
     use_effect(move || {
-        // Reset the window when the user opens another category.
+        // Reset the page when the user opens another category.
         let _ = category_for_reset.clone();
-        posts_limit.set(12);
+        page.set(0);
     });
 
     // Get current board data
@@ -870,6 +870,8 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                 // each group.
                                 displayed_posts.sort_by_key(|post| !post.is_pinned);
                             }
+                            let total_pages = displayed_posts.len().div_ceil(20).max(1);
+                            let current_page = (*page.read()).min(total_pages - 1);
 
                             // Posts and latest activity inside each category,
                             // including its subcategories.
@@ -1168,7 +1170,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                 }
                                             }
                                             div { class: "space-y-2",
-                                                {displayed_posts.iter().take(*posts_limit.read()).map({
+                                                {displayed_posts.iter().skip(current_page * 20).take(20).map({
                                                     let board_id = current_board_id.read().clone();
                                                     let roles = viewer_roles.clone();
                                                     let scope_chain = scope_chain.clone();
@@ -1236,16 +1238,38 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                         }
                                                     }
                                                 })}
-                                                if displayed_posts.len() > *posts_limit.read() {
-                                                    div { class: "flex justify-center mt-4",
+                                                if displayed_posts.len() > 20 {
+                                                    div { class: "flex items-center justify-center gap-3 mt-4 text-sm",
                                                         button {
                                                             r#type: "button",
-                                                            class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg transition-colors",
-                                                            onclick: move |_| {
-                                                                let next = *posts_limit.read() + 12;
-                                                                posts_limit.set(next);
+                                                            class: if current_page == 0 {
+                                                                "px-3 py-1.5 rounded bg-surface text-text-muted opacity-50 cursor-default"
+                                                            } else {
+                                                                "px-3 py-1.5 rounded bg-surface hover:bg-surface-hover text-text"
                                                             },
-                                                            "Show more ({displayed_posts.len() - *posts_limit.read()} remaining)"
+                                                            disabled: current_page == 0,
+                                                            onclick: move |_| {
+                                                                let next = page.read().saturating_sub(1);
+                                                                page.set(next);
+                                                            },
+                                                            "← Previous"
+                                                        }
+                                                        span { class: "text-text-muted",
+                                                            "Page {current_page + 1} of {total_pages}"
+                                                        }
+                                                        button {
+                                                            r#type: "button",
+                                                            class: if current_page + 1 >= total_pages {
+                                                                "px-3 py-1.5 rounded bg-surface text-text-muted opacity-50 cursor-default"
+                                                            } else {
+                                                                "px-3 py-1.5 rounded bg-surface hover:bg-surface-hover text-text"
+                                                            },
+                                                            disabled: current_page + 1 >= total_pages,
+                                                            onclick: move |_| {
+                                                                let next = (*page.read()).saturating_add(1);
+                                                                page.set(next);
+                                                            },
+                                                            "Next →"
                                                         }
                                                     }
                                                 }

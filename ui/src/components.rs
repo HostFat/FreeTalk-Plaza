@@ -9,4 +9,6 @@ pub mod conversation;
 pub mod join_screen;
 pub mod members;
 pub mod posts_view;
+pub mod profile_view;
+pub mod search_view;
 pub mod top_bar;

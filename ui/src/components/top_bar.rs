@@ -166,9 +166,11 @@ pub fn TopBar() -> Element {
     // iframe a real anchor navigation reloads the whole app (white flash).
     let nav_posts = format!("/board/{board_id}");
     let nav_members = format!("/board/{board_id}/members");
+    let nav_search = format!("/board/{board_id}/search");
     let nav_admin = format!("/board/{board_id}/admin");
     let nav_posts_mobile = nav_posts.clone();
     let nav_members_mobile = nav_members.clone();
+    let nav_search_mobile = nav_search.clone();
     let nav_admin_mobile = nav_admin.clone();
 
     rsx! {
@@ -232,6 +234,20 @@ pub fn TopBar() -> Element {
                         },
                         span { "📝" }
                         span { "Posts" }
+                    }
+                    // Search button
+                    button {
+                        r#type: "button",
+                        class: "flex items-center gap-2 px-4 py-2.5 bg-surface hover:bg-surface-hover text-text font-medium rounded-xl transition-colors",
+                        title: "Search this board",
+                        onclick: move |ev: MouseEvent| {
+                            ev.prevent_default();
+                            if let Some(win) = web_sys::window() {
+                                let _ = win.location().set_hash(&nav_search);
+                            }
+                        },
+                        span { "🔍" }
+                        span { "Search" }
                     }
                     // Members button
                     button {
@@ -309,6 +325,18 @@ pub fn TopBar() -> Element {
                                 },
                                 span { "📝" }
                                 span { "Posts" }
+                            }
+                            button {
+                                r#type: "button",
+                                class: "flex items-center gap-3 px-4 py-3 text-text hover:bg-surface transition-colors w-full text-left",
+                                onclick: move |_| {
+                                    menu_open.set(false);
+                                    if let Some(win) = web_sys::window() {
+                                        let _ = win.location().set_hash(&nav_search_mobile);
+                                    }
+                                },
+                                span { "🔍" }
+                                span { "Search" }
                             }
                             button {
                                 r#type: "button",

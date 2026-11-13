@@ -277,6 +277,26 @@ pub fn MemberInfoModal() -> Element {
                                 };
 
                                 rsx! {
+                                    button {
+                                        r#type: "button",
+                                        class: "mt-3 mr-2 px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg",
+                                        onclick: move |_| {
+                                            let board = CURRENT_BOARD
+                                                .read()
+                                                .owner_key
+                                                .map(|key| bs58::encode(key.as_bytes()).into_string())
+                                                .unwrap_or_default();
+                                            let target = format!(
+                                                "/board/{board}/member/{}",
+                                                member_id.0 .0
+                                            );
+                                            MEMBER_INFO_MODAL.with_mut(|signal| signal.member = None);
+                                            if let Some(window) = web_sys::window() {
+                                                let _ = window.location().set_hash(&target);
+                                            }
+                                        },
+                                        "View profile"
+                                    }
                                     BanButton {
                                         member_to_ban: member_id,
                                         show_trigger: is_downstream,

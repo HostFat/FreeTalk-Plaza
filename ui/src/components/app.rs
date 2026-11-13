@@ -22,6 +22,8 @@ use crate::components::category_create_modal::CategoryCreateModal;
 use crate::components::members::member_info_modal::MemberInfoModal;
 use crate::components::members::Invitation;
 use crate::components::posts_view::{PostsView, SinglePostView};
+use crate::components::profile_view::ProfileView;
+use crate::components::search_view::SearchView;
 use crate::invites::PendingInvites;
 use dioxus::document::{Link, Stylesheet};
 use dioxus::logger::tracing::{debug, error, info};
@@ -61,6 +63,13 @@ pub enum Route {
     AdminLinks { board_id: String },
     #[route("/board/:board_id/members")]
     Members { board_id: String },
+    #[route("/board/:board_id/search")]
+    Search { board_id: String },
+    #[route("/board/:board_id/member/:member_key")]
+    Profile {
+        board_id: String,
+        member_key: String,
+    },
     #[route("/:..route")]
     NotFound { route: Vec<String> },
 }
@@ -410,6 +419,23 @@ fn Post(board_id: String, post_id: String) -> Element {
 fn PostsInCategory(board_id: String, category_id: String) -> Element {
     rsx! {
         BoardGate { board_id: board_id.clone(), PostsView { category_id: Some(category_id) } }
+    }
+}
+
+/// Route component for local search
+#[component]
+fn Search(board_id: String) -> Element {
+    rsx! { BoardGate { board_id: board_id.clone(), SearchView {} } }
+}
+
+/// Route component for a member profile
+#[component]
+fn Profile(board_id: String, member_key: String) -> Element {
+    rsx! {
+        BoardGate {
+            board_id: board_id.clone(),
+            ProfileView { member_key: member_key.clone() }
+        }
     }
 }
 
