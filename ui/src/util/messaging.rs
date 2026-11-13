@@ -618,6 +618,8 @@ pub async fn send_category(
             } else {
                 // The owner holds the new key; cache it for immediate use.
                 board_data.decrypt_category_secrets();
+                // Add the hybrid PQ set for the new category key.
+                board_data.generate_missing_pq_category_secrets();
                 // Mark board as needing sync
                 mark_needs_sync(current_board);
             }

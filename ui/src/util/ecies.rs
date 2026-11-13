@@ -54,7 +54,7 @@ pub fn encrypt(
 }
 
 #[allow(dead_code)]
-fn ed25519_to_x25519_public_key(ed25519_pk: &VerifyingKey) -> X25519PublicKey {
+pub(crate) fn ed25519_to_x25519_public_key(ed25519_pk: &VerifyingKey) -> X25519PublicKey {
     let ed_y = CompressedEdwardsY(ed25519_pk.to_bytes())
         .decompress()
         .expect("Invalid Edwards point");
@@ -100,7 +100,7 @@ pub fn decrypt(
 }
 
 #[allow(dead_code)]
-fn ed25519_to_x25519_private_key(ed25519_sk: &SigningKey) -> X25519EphemeralSecret {
+pub(crate) fn ed25519_to_x25519_private_key(ed25519_sk: &SigningKey) -> X25519EphemeralSecret {
     let h = Sha512::digest(ed25519_sk.to_bytes());
     let mut key = [0u8; 32];
     key.copy_from_slice(&h[..32]);

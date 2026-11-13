@@ -76,6 +76,15 @@ impl AuthorizedPqMemberKey {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PqSuite {
+    /// ML-KEM shared secret alone (records from the first prototype).
+    #[default]
+    MlKem,
+    /// X25519 ephemeral + ML-KEM shared secrets combined.
+    Hybrid,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct PqSealedSecret {
     pub member_id: MemberId,
@@ -84,6 +93,11 @@ pub struct PqSealedSecret {
     pub nonce: [u8; PQ_NONCE_LEN],
     /// XChaCha20-Poly1305 output.
     pub sealed: Vec<u8>,
+    #[serde(default)]
+    pub suite: PqSuite,
+    /// Ephemeral X25519 public key for the hybrid suite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x25519_public: Option<[u8; 32]>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -186,8 +200,11 @@ fn verify_set(
     let signer = entry.signer_id(parameters);
     let verifying = signer_key(state, parameters, &signer)?;
     entry.verify_signature_with(&verifying)?;
-    if !is_owner_or_admin(state, parameters, &signer) {
-        return Err("Only the owner or an admin can publish PQ secrets".to_string());
+    let is_category = matches!(entry.set.scope, PqScope::Category(_));
+    let can_sign = is_owner_or_admin(state, parameters, &signer)
+        || (is_category && state.roles.can_distribute_keys(&signer));
+    if !can_sign {
+        return Err("Signer cannot publish PQ secrets for this scope".to_string());
     }
     if entry.set.version == 0 {
         return Err("PQ secret set version must be positive".to_string());
@@ -245,6 +262,9 @@ fn verify_set(
         }
         if secret.sealed.len() < PQ_MIN_SEALED_LEN || secret.sealed.len() > PQ_MAX_SEALED_LEN {
             return Err("PQ sealed secret has an invalid length".to_string());
+        }
+        if matches!(secret.suite, PqSuite::Hybrid) && secret.x25519_public.is_none() {
+            return Err("Hybrid PQ secret needs an X25519 ephemeral key".to_string());
         }
     }
     Ok(())
@@ -523,6 +543,8 @@ mod tests {
                     kem_ciphertext: vec![1u8; PQ_KEM_CT_LEN],
                     nonce: [0u8; PQ_NONCE_LEN],
                     sealed: vec![2u8; PQ_MIN_SEALED_LEN],
+                    suite: PqSuite::MlKem,
+                    x25519_public: None,
                 }],
             },
             sk,
@@ -565,6 +587,31 @@ mod tests {
         pq.cleanup(&state, &parameters);
         assert!(pq.keys.is_empty());
         assert!(pq.sets.is_empty());
+    }
+
+    #[test]
+    fn hybrid_sets_need_an_x25519_ephemeral_key() {
+        let (mut state, parameters, owner_sk, member_sk, member_id) = board();
+        state.pq_secrets.keys.push(key(member_id, &member_sk));
+        let mut hybrid_set = set(member_id, &owner_sk).set;
+        hybrid_set.secrets[0].suite = PqSuite::Hybrid;
+        state
+            .pq_secrets
+            .sets
+            .push(AuthorizedPqSecretSet::new(hybrid_set.clone(), &owner_sk));
+        assert!(state.pq_secrets.verify(&state, &parameters).is_err());
+
+        state.pq_secrets.sets.clear();
+        hybrid_set.version = 2;
+        hybrid_set.secrets[0].x25519_public = Some([9u8; 32]);
+        state
+            .pq_secrets
+            .sets
+            .push(AuthorizedPqSecretSet::new(hybrid_set, &owner_sk));
+        state
+            .pq_secrets
+            .verify(&state, &parameters)
+            .expect("hybrid set with an ephemeral key is valid");
     }
 
     #[test]

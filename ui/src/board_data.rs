@@ -181,6 +181,8 @@ impl BoardData {
         // Forget categories that no longer have a secret set.
         self.category_secrets
             .retain(|id, _| self.board_state.category_secrets.set(id).is_some());
+
+        self.decrypt_pq_category_secrets();
     }
 
     pub fn category_secret(&self, category: &MessageId) -> Option<(u32, [u8; 32])> {
@@ -457,6 +459,7 @@ impl BoardData {
             .insert(old_version, old_key);
         self.category_secrets
             .insert(category_id.clone(), (version, secret));
+        self.generate_missing_pq_category_secrets();
         Ok(delta)
     }
 
@@ -733,7 +736,8 @@ impl BoardData {
 
     /// Publish this member's ML-KEM key on a private board. Idempotent.
     pub fn ensure_pq_key(&mut self) -> bool {
-        if !self.is_private() || !self.self_is_member_or_owner() {
+        let has_restricted = !self.restricted_categories().is_empty();
+        if !(self.is_private() || has_restricted) || !self.self_is_member_or_owner() {
             return false;
         }
         let self_id = MemberId::from(&self.self_sk.verifying_key());
@@ -798,6 +802,158 @@ impl BoardData {
         }
     }
 
+    /// Open the PQ sets for restricted categories.
+    pub fn decrypt_pq_category_secrets(&mut self) {
+        use plaza_core::board_state::pq_secrets::PqScope;
+        let self_id = MemberId::from(&self.self_sk.verifying_key());
+        let mut items = Vec::new();
+        for entry in &self.board_state.pq_secrets.sets {
+            if let PqScope::Category(category_id) = &entry.set.scope {
+                if let Some(secret) = entry
+                    .set
+                    .secrets
+                    .iter()
+                    .find(|secret| secret.member_id == self_id)
+                {
+                    items.push((*category_id, entry.set.secret_version, secret.clone()));
+                }
+            }
+        }
+        for (category_id, version, sealed) in items {
+            match crate::util::pq::open_secret(&self.self_sk, &sealed) {
+                Ok(secret) => {
+                    self.category_secrets.insert(category_id, (version, secret));
+                }
+                Err(error) => {
+                    dioxus::logger::tracing::warn!(
+                        "Could not open PQ category secret v{}: {}",
+                        version,
+                        error
+                    );
+                }
+            }
+        }
+    }
+
+    /// Seal every restricted category key to the readers that have a PQ key.
+    /// Owner or members of a key-distribution role can sign these sets.
+    pub fn generate_missing_pq_category_secrets(&mut self) -> bool {
+        use plaza_core::board_state::pq_secrets::{
+            AuthorizedPqSecretSet, PqScope, PqSecretSet, PqSecretsDelta,
+        };
+        use std::collections::HashSet;
+
+        if !self.can_distribute_category_keys() {
+            return false;
+        }
+        let categories = self.restricted_categories();
+        if categories.is_empty() {
+            return false;
+        }
+        self.ensure_pq_key();
+        let owner_id = MemberId::from(&self.owner_vk);
+        let mut sets = Vec::new();
+
+        for (category_id, category) in categories {
+            let Some((secret_version, secret)) = self.category_secret(&category_id) else {
+                continue;
+            };
+            let readers = self.category_readers(&category);
+            let mut recipients = Vec::new();
+            for member_id in readers {
+                let verifying_key = if member_id == owner_id {
+                    Some(self.owner_vk)
+                } else {
+                    self.board_state
+                        .members
+                        .members
+                        .iter()
+                        .find(|member| MemberId::from(&member.member.member_vk) == member_id)
+                        .map(|member| member.member.member_vk)
+                };
+                if let (Some(verifying_key), Some(key)) = (
+                    verifying_key,
+                    self.board_state.pq_secrets.key_for(member_id),
+                ) {
+                    recipients.push((member_id, verifying_key, key.ek.clone()));
+                }
+            }
+            if recipients.is_empty() {
+                continue;
+            }
+
+            let existing = self
+                .board_state
+                .pq_secrets
+                .sets
+                .iter()
+                .filter(|entry| {
+                    entry.set.scope == PqScope::Category(category_id)
+                        && entry.set.secret_version == secret_version
+                })
+                .max_by_key(|entry| entry.set.version);
+            let covered: HashSet<MemberId> = existing
+                .map(|entry| {
+                    entry
+                        .set
+                        .secrets
+                        .iter()
+                        .map(|secret| secret.member_id)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if recipients
+                .iter()
+                .all(|(member_id, _, _)| covered.contains(member_id))
+            {
+                continue;
+            }
+
+            let next_set_version = self
+                .board_state
+                .pq_secrets
+                .sets
+                .iter()
+                .filter(|entry| entry.set.scope == PqScope::Category(category_id))
+                .map(|entry| entry.set.version)
+                .max()
+                .unwrap_or(0)
+                + 1;
+
+            let mut sealed = Vec::new();
+            for (member_id, verifying_key, ek) in recipients {
+                match crate::util::pq::seal_secret(&secret, &ek, member_id, &verifying_key) {
+                    Ok(record) => sealed.push(record),
+                    Err(error) => {
+                        dioxus::logger::tracing::warn!(
+                            "Could not seal category key for {}: {}",
+                            member_id,
+                            error
+                        );
+                    }
+                }
+            }
+            if sealed.is_empty() {
+                continue;
+            }
+            sets.push(AuthorizedPqSecretSet::new(
+                PqSecretSet {
+                    scope: PqScope::Category(category_id),
+                    version: next_set_version,
+                    secret_version,
+                    secrets: sealed,
+                },
+                &self.self_sk,
+            ));
+        }
+
+        if sets.is_empty() {
+            return false;
+        }
+        self.apply_pq_delta(PqSecretsDelta { keys: vec![], sets })
+            .is_ok()
+    }
+
     /// Owner-only: seal the current board secret to every member that has a
     /// PQ key. Members without a key keep using the X25519 blob.
     pub fn generate_missing_pq_secrets(&mut self) -> bool {
@@ -832,10 +988,24 @@ impl BoardData {
         live.sort_by_key(|member| member.0 .0);
         live.dedup();
 
+        let owner_id = MemberId::from(&self.owner_vk);
         let mut recipients = Vec::new();
         for member_id in live {
-            if let Some(key) = self.board_state.pq_secrets.key_for(member_id) {
-                recipients.push((member_id, key.ek.clone()));
+            let verifying_key = if member_id == owner_id {
+                Some(self.owner_vk)
+            } else {
+                self.board_state
+                    .members
+                    .members
+                    .iter()
+                    .find(|member| MemberId::from(&member.member.member_vk) == member_id)
+                    .map(|member| member.member.member_vk)
+            };
+            if let (Some(verifying_key), Some(key)) = (
+                verifying_key,
+                self.board_state.pq_secrets.key_for(member_id),
+            ) {
+                recipients.push((member_id, verifying_key, key.ek.clone()));
             }
         }
         if recipients.is_empty() {
@@ -864,7 +1034,7 @@ impl BoardData {
             .unwrap_or_default();
         if recipients
             .iter()
-            .all(|(member_id, _)| covered.contains(member_id))
+            .all(|(member_id, _, _)| covered.contains(member_id))
         {
             return false;
         }
@@ -881,14 +1051,9 @@ impl BoardData {
             + 1;
 
         let mut sealed = Vec::new();
-        for (member_id, ek) in recipients {
-            match crate::util::pq::seal_secret(&secret, &ek) {
-                Ok((ciphertext, nonce, data)) => sealed.push(PqSealedSecret {
-                    member_id,
-                    kem_ciphertext: ciphertext,
-                    nonce,
-                    sealed: data,
-                }),
+        for (member_id, verifying_key, ek) in recipients {
+            match crate::util::pq::seal_secret(&secret, &ek, member_id, &verifying_key) {
+                Ok(record) => sealed.push(record),
                 Err(error) => {
                     dioxus::logger::tracing::warn!(
                         "Could not seal the board secret for {}: {}",
@@ -1991,6 +2156,47 @@ mod tests {
             "the owner keeps the key"
         );
 
+        // Publish the invitee's PQ key and seal the category key to it with
+        // the hybrid set.
+        use plaza_core::board_state::pq_secrets::{
+            AuthorizedPqMemberKey, PqMemberKey, PqScope, PqSecretsDelta,
+        };
+        let invitee_pq_key = AuthorizedPqMemberKey::new(
+            PqMemberKey {
+                member_id: invitee_id,
+                ek: crate::util::pq::encapsulation_key(&invitee_sk),
+                version: 1,
+            },
+            &invitee_sk,
+        );
+        let before = board.board_state.clone();
+        board
+            .board_state
+            .apply_delta(
+                &before,
+                &params,
+                &Some(ChatBoardStateV1Delta {
+                    pq_secrets: Some(PqSecretsDelta {
+                        keys: vec![invitee_pq_key],
+                        sets: vec![],
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .expect("the invitee PQ key applies");
+        assert!(
+            board.generate_missing_pq_category_secrets(),
+            "the owner seals the category key to the invitee"
+        );
+        assert!(board.board_state.pq_secrets.sets.iter().any(|entry| {
+            entry.set.scope == PqScope::Category(category_id)
+                && entry
+                    .set
+                    .secrets
+                    .iter()
+                    .any(|secret| secret.member_id == invitee_id)
+        }));
+
         let owner_view = boards.map.get(&key).unwrap().clone();
         let content = owner_view
             .board_state
@@ -2011,7 +2217,7 @@ mod tests {
         let mut invitee_view = owner_view.clone();
         invitee_view.self_sk = invitee_sk.clone();
         invitee_view.category_secrets.clear();
-        invitee_view.decrypt_category_secrets();
+        invitee_view.decrypt_pq_category_secrets();
         assert_eq!(
             invitee_view.category_secret(&category_id),
             Some((0, category_secret))

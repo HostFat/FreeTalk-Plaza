@@ -183,6 +183,20 @@ impl BoardSynchronizer {
                             }
                         }
 
+                        // Hybrid PQ sets for the board and restricted categories.
+                        // The owner seals board secrets; owners and key
+                        // distributors seal category secrets.
+                        let mut pq_changed = board_data.generate_missing_pq_category_secrets();
+                        if board_data.is_private()
+                            && board_data.owner_vk == board_data.self_sk.verifying_key()
+                        {
+                            pq_changed |= board_data.generate_missing_pq_secrets();
+                        }
+                        if pq_changed {
+                            info!("Distributed PQ secrets to new members");
+                            distributed_secrets = true;
+                        }
+
                         // NOTE: We do not update last_synced_state in the delta path.
                         // We only have a delta (not the full contract state), so we can't
                         // set the baseline to the contract's actual state. The full-state path

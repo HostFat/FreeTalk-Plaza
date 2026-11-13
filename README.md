@@ -95,11 +95,14 @@ and the fixed lengths (1184-byte encapsulation key, 1088-byte ciphertext,
 ML-KEM implementation: the client encapsulates and decapsulates, and the
 contract stores opaque bytes.
 
-Private boards now use it: the client derives an ML-KEM seed from the board
-identity, publishes a member key, and seals the board secret to every member
-that has one. The X25519 ECIES blobs remain as a fallback, so existing members
-and invites keep working. Rotating the board secret adds a new PQ set next to
-the X25519 blobs. Categories still use X25519 only.
+Private boards and restricted categories use it: the client derives an ML-KEM
+seed from the board identity, publishes a member key, and seals the board and
+category secrets to every member that has one. The payload is hybrid: X25519
+and ML-KEM secrets are combined before the AEAD step, and the record records
+both halves. The X25519 ECIES blobs remain as a fallback, so existing members
+and invites keep working. Rotating a board or category secret adds a new PQ set
+next to the X25519 blobs. The owner and members of a key-distribution role can
+publish category sets.
 
 The contract re-keys when this schema changes; the local state migrates through
 the delegate as usual.

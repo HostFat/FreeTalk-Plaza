@@ -11,7 +11,8 @@ use dioxus::prelude::*;
 use ed25519_dalek::SigningKey;
 use ml_kem::kem::{Decapsulate, Encapsulate, KeyExport};
 use ml_kem::{DecapsulationKey, EncapsulationKey, MlKem768};
-use plaza_core::board_state::pq_secrets::{PqSealedSecret, PQ_KEM_CT_LEN, PQ_KEM_EK_LEN};
+use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::pq_secrets::{PqSealedSecret, PqSuite, PQ_KEM_CT_LEN, PQ_KEM_EK_LEN};
 use sha2::{Digest, Sha512};
 
 const KDF_CONTEXT: &[u8] = b"freetalk plaza pq board secret v1";
@@ -39,11 +40,14 @@ pub fn encapsulation_key(self_sk: &SigningKey) -> Vec<u8> {
         .to_vec()
 }
 
-/// Seal a 32-byte board/category secret to one member KEM key.
+/// Seal a 32-byte secret with hybrid X25519 + ML-KEM-768.
 pub fn seal_secret(
     secret: &[u8; 32],
     ek_bytes: &[u8],
-) -> Result<(Vec<u8>, [u8; 24], Vec<u8>), String> {
+    member_id: MemberId,
+    recipient_vk: &ed25519_dalek::VerifyingKey,
+) -> Result<PqSealedSecret, String> {
+    use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519Secret};
     if ek_bytes.len() != PQ_KEM_EK_LEN {
         return Err("Invalid ML-KEM encapsulation key length".to_string());
     }
@@ -51,12 +55,24 @@ pub fn seal_secret(
         .map_err(|_| "Invalid ML-KEM encapsulation key".to_string())?;
     let ek = EncapsulationKey::<MlKem768>::new(&ek_array)
         .map_err(|_| "Invalid ML-KEM encapsulation key".to_string())?;
+
+    // X25519 half of the hybrid: an ephemeral key against the member's
+    // X25519 public key derived from their Ed25519 identity.
+    let ephemeral_secret = X25519Secret::random_from_rng(rand::rngs::OsRng);
+    let ephemeral_public = X25519PublicKey::from(&ephemeral_secret);
+    let recipient_x25519 = crate::util::ecies::ed25519_to_x25519_public_key(recipient_vk);
+    let x25519_shared = ephemeral_secret.diffie_hellman(&recipient_x25519);
+
     let seed = crate::util::ecies::generate_board_secret();
     let mut rng = SeedRng::from_seed(seed);
-    let (ciphertext, shared) = ek.encapsulate_with_rng(&mut rng);
+    let (ciphertext, kem_shared) = ek.encapsulate_with_rng(&mut rng);
+
+    let mut combined = Vec::with_capacity(64);
+    combined.extend_from_slice(x25519_shared.as_bytes());
+    combined.extend_from_slice(kem_shared.as_slice());
     let key = blake3::derive_key(
         std::str::from_utf8(KDF_CONTEXT).expect("static context"),
-        shared.as_slice(),
+        &combined,
     );
     let nonce_bytes = crate::util::ecies::generate_board_secret();
     let mut nonce = [0u8; 24];
@@ -64,7 +80,14 @@ pub fn seal_secret(
     let sealed = XChaCha20Poly1305::new((&key).into())
         .encrypt(XNonce::from_slice(&nonce), secret.as_slice())
         .map_err(|_| "Could not seal the PQ board secret".to_string())?;
-    Ok((ciphertext.as_slice().to_vec(), nonce, sealed))
+    Ok(PqSealedSecret {
+        member_id,
+        kem_ciphertext: ciphertext.as_slice().to_vec(),
+        nonce,
+        sealed,
+        suite: PqSuite::Hybrid,
+        x25519_public: Some(ephemeral_public.to_bytes()),
+    })
 }
 
 /// Open one sealed secret with this board identity.
@@ -73,12 +96,26 @@ pub fn open_secret(self_sk: &SigningKey, sealed: &PqSealedSecret) -> Result<[u8;
         return Err("Invalid ML-KEM ciphertext length".to_string());
     }
     let dk = decapsulation_key(self_sk);
-    let shared = dk
+    let kem_shared = dk
         .decapsulate_slice(&sealed.kem_ciphertext)
         .map_err(|_| "Invalid ML-KEM ciphertext".to_string())?;
+
+    let combined = if matches!(sealed.suite, PqSuite::Hybrid) {
+        let ephemeral = sealed
+            .x25519_public
+            .ok_or("Hybrid PQ secret is missing its X25519 key")?;
+        let own_secret = crate::util::ecies::ed25519_to_x25519_private_key(self_sk);
+        let x25519_shared = own_secret.diffie_hellman(&x25519_dalek::PublicKey::from(ephemeral));
+        let mut combined = Vec::with_capacity(64);
+        combined.extend_from_slice(x25519_shared.as_bytes());
+        combined.extend_from_slice(kem_shared.as_slice());
+        combined
+    } else {
+        kem_shared.as_slice().to_vec()
+    };
     let key = blake3::derive_key(
         std::str::from_utf8(KDF_CONTEXT).expect("static context"),
-        shared.as_slice(),
+        &combined,
     );
     let plaintext = XChaCha20Poly1305::new((&key).into())
         .decrypt(XNonce::from_slice(&sealed.nonce), sealed.sealed.as_slice())
@@ -135,12 +172,13 @@ pub fn housekeeping() {
         let Some(board) = boards.map.get_mut(&board_key) else {
             return;
         };
-        if !board.is_private() {
+        if !board.is_private() && board.restricted_categories().is_empty() {
             return;
         }
         board.decrypt_pq_board_secrets();
         changed |= board.ensure_pq_key();
         changed |= board.generate_missing_pq_secrets();
+        changed |= board.generate_missing_pq_category_secrets();
     });
     if changed {
         crate::components::app::mark_needs_sync(board_key);
@@ -159,13 +197,8 @@ mod tests {
         let ek = encapsulation_key(&sk);
         assert_eq!(ek.len(), PQ_KEM_EK_LEN);
         let secret = [42u8; 32];
-        let (ciphertext, nonce, sealed) = seal_secret(&secret, &ek).unwrap();
-        let record = PqSealedSecret {
-            member_id: plaza_core::board_state::member::MemberId::from(&sk.verifying_key()),
-            kem_ciphertext: ciphertext,
-            nonce,
-            sealed,
-        };
+        let member_id = MemberId::from(&sk.verifying_key());
+        let record = seal_secret(&secret, &ek, member_id, &sk.verifying_key()).unwrap();
         assert_eq!(open_secret(&sk, &record).unwrap(), secret);
 
         let other = SigningKey::from_bytes(&[8u8; 32]);
