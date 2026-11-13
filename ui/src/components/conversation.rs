@@ -93,6 +93,8 @@ pub struct MessageData {
     pub reply_to_author: Option<String>,
     pub reply_to_preview: Option<String>,
     pub receive_delay_secs: Option<i64>,
+    /// Section this message was posted in, independent of reply links.
+    pub category_id: Option<MessageId>,
     /// Whether this message is a category
     pub is_category: bool,
     /// Category name (if is_category)
@@ -377,6 +379,7 @@ pub fn get_all_messages(
             reply_to_author,
             reply_to_preview,
             receive_delay_secs,
+            category_id: routes.get(&message_id).and_then(|route| route.category_id),
             is_category,
             category_name,
             category_description,
@@ -2241,7 +2244,9 @@ pub fn get_category_posts(
         .filter(|m| {
             !m.is_category
                 && m.merged_into.is_none()
-                && m.reply_to_message_id.as_ref() == Some(category_id)
+                && (m.category_id.as_ref() == Some(category_id)
+                    // Older posts used the category as their reply target.
+                    || m.reply_to_message_id.as_ref() == Some(category_id))
         })
         .cloned()
         .collect();

@@ -186,6 +186,7 @@ mod tests {
             reply_to_author: None,
             reply_to_preview: None,
             receive_delay_secs: None,
+            category_id: None,
             is_category,
             category_name: is_category.then(|| format!("section {id}")),
             category_description: None,
