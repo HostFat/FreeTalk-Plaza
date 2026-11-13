@@ -18,7 +18,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::VisibilityState;
 
-const APP_NAME: &str = "FreeTalk";
+const APP_NAME: &str = "FreeTalk Plaza";
 
 /// Global signal tracking whether the document is currently visible
 pub static DOCUMENT_VISIBLE: GlobalSignal<bool> = Global::new(|| true);
@@ -153,12 +153,12 @@ pub fn update_document_title() {
     *TOTAL_UNREAD_COUNT.write() = unread_count;
 
     let title = match (board_name, is_visible, unread_count) {
-        // Board selected, tab visible (or no unread) - just show board name
-        (Some(name), true, _) => name,
-        (Some(name), false, 0) => name,
+        // Board selected, tab visible (or no unread).
+        (Some(name), true, _) => format!("{name} · {APP_NAME}"),
+        (Some(name), false, 0) => format!("{name} · {APP_NAME}"),
 
-        // Board selected, tab hidden with unread messages - show count
-        (Some(name), false, count) => format!("({}) {}", count, name),
+        // Board selected, tab hidden with unread messages - show count.
+        (Some(name), false, count) => format!("({count}) {name} · {APP_NAME}"),
 
         // No board selected, tab visible (or no unread) - show app name
         (None, true, _) => APP_NAME.to_string(),
@@ -242,6 +242,49 @@ fn on_visibility_change() {
     update_document_title();
 }
 
+/// Give the tab the plaza logo. The shell also receives a favicon message so it
+/// can update the outer tab when it supports one.
+fn set_favicon() {
+    let href = format!("{}", asset!("/assets/plaza_logo.svg"));
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    if let Some(head) = document.head() {
+        let link = document
+            .query_selector("link[rel~='icon']")
+            .ok()
+            .flatten()
+            .or_else(|| {
+                let link = document.create_element("link").ok()?;
+                let _ = link.set_attribute("rel", "icon");
+                let _ = head.append_child(&link);
+                Some(link)
+            });
+        if let Some(link) = link {
+            let _ = link.set_attribute("type", "image/svg+xml");
+            let _ = link.set_attribute("href", &href);
+        }
+    }
+
+    let msg = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &msg,
+        &JsValue::from_str("__freenet_shell__"),
+        &JsValue::TRUE,
+    );
+    let _ = js_sys::Reflect::set(
+        &msg,
+        &JsValue::from_str("type"),
+        &JsValue::from_str("favicon"),
+    );
+    let _ = js_sys::Reflect::set(&msg, &JsValue::from_str("href"), &JsValue::from_str(&href));
+    let target = window.parent().ok().flatten().unwrap_or(window);
+    let _ = target.post_message(&msg, "*");
+}
+
 /// Initialize the document title management system.
 /// Should be called once when the app starts.
 pub fn init_document_title_manager() {
@@ -254,7 +297,8 @@ pub fn init_document_title_manager() {
     // Set initial visibility state
     *DOCUMENT_VISIBLE.write() = get_visibility_state();
 
-    // Set initial title
+    // Set initial title and tab icon
+    set_favicon();
     update_document_title();
 
     // Add visibility change listener
