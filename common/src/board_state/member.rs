@@ -895,6 +895,7 @@ mod tests {
             owner_member_id: owner_id,
             banned_at: SystemTime::now(),
             banned_user: member2.id(),
+            expires_at: None,
         };
         let authorized_ban = AuthorizedUserBan::new(banned_member, owner_id, &owner_signing_key);
         let bans = BansV1(vec![authorized_ban]);
@@ -940,6 +941,7 @@ mod tests {
             owner_member_id: owner_id,
             banned_at: SystemTime::now(),
             banned_user: member2.id(),
+            expires_at: None,
         };
         let authorized_ban = AuthorizedUserBan::new(banned_member, owner_id, &owner_signing_key);
         let bans = BansV1(vec![authorized_ban]);
@@ -975,6 +977,7 @@ mod tests {
             owner_member_id: owner_id,
             banned_at: SystemTime::now(),
             banned_user: member4.id(),
+            expires_at: None,
         };
         let authorized_ban = AuthorizedUserBan::new(banned_member, owner_id, &owner_signing_key);
         let bans = BansV1(vec![authorized_ban]);

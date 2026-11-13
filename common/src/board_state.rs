@@ -54,6 +54,11 @@ pub struct ChatBoardStateV1 {
     /// members list and will be removed from it ifc necessary.
     pub bans: BansV1,
 
+    /// Signed records that lift a ban. Kept as tombstones so a stale peer
+    /// cannot put the ban back.
+    #[serde(default)]
+    pub ban_revocations: crate::board_state::ban::BanRevocationsV1,
+
     /// Named roles and their members, used for access control.
     #[serde(default)]
     pub roles: RolesV1,
@@ -190,6 +195,19 @@ impl ChatBoardStateV1 {
                 || current_member_ids.contains(&ban.banned_by)
                 || !banned_user_ids.contains(&ban.banned_by)
         });
+
+        // 5a-bis. A revocation lifts its ban. Doing this before the cap keeps
+        // revoked bans from evicting active ones.
+        let mut revocations = std::mem::take(&mut self.ban_revocations);
+        revocations.cleanup(self, parameters);
+        self.ban_revocations = revocations;
+        let revoked_ids: HashSet<_> = self
+            .ban_revocations
+            .revocations
+            .iter()
+            .map(|entry| entry.revocation.ban_id.clone())
+            .collect();
+        self.bans.0.retain(|ban| !revoked_ids.contains(&ban.id()));
 
         // 5b. Enforce the ban cap after the removals above. Doing it here (and
         // not only when a delta arrives) means lowering `max_user_bans` in the
@@ -359,6 +377,7 @@ mod tests {
                     owner_member_id: owner_id,
                     banned_at: at(1),
                     banned_user: MemberId(FastHash(21)),
+                    expires_at: None,
                 },
                 member_id,
                 &member_key,
@@ -368,6 +387,7 @@ mod tests {
                     owner_member_id: owner_id,
                     banned_at: at(2),
                     banned_user: MemberId(FastHash(23)),
+                    expires_at: None,
                 },
                 owner_id,
                 &owner_key,
@@ -523,6 +543,7 @@ mod tests {
                 owner_member_id: owner_id,
                 banned_at: std::time::SystemTime::now(),
                 banned_user: b_id,
+                expires_at: None,
             },
             a_id,
             &a_sk,
@@ -551,6 +572,7 @@ mod tests {
                 owner_member_id: owner_id,
                 banned_at: std::time::SystemTime::now() + std::time::Duration::from_secs(1),
                 banned_user: a_id,
+                expires_at: None,
             },
             owner_id,
             &owner_sk,
@@ -786,6 +808,7 @@ mod tests {
                 owner_member_id: owner_id,
                 banned_at: SystemTime::now(),
                 banned_user: c_id,
+                expires_at: None,
             },
             a_id,
             &a_sk,

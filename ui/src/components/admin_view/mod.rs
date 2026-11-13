@@ -8,9 +8,10 @@ use crate::board_data::BoardData;
 use crate::components::access_section::{InviteLinksSection, RolesSection};
 use crate::components::app::{BOARDS, CURRENT_BOARD, EDIT_BOARD_MODAL};
 use crate::components::audit_view::AuditView;
-use crate::components::members::member_info_modal::ban_button::BanButton;
+use crate::components::members::member_info_modal::ban_button::{lift_ban, BanButton};
 use crate::components::moderation_view::ModerationView;
 use crate::components::structure_view::StructureView;
+use crate::util::format_utc_as_local_time;
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
 use wasm_bindgen_futures::spawn_local;
@@ -401,16 +402,55 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                     } else {
                         div { class: "space-y-2",
                             for ban in banned_users.read().iter() {
-                                div { class: "bg-surface rounded-lg p-3 flex items-center gap-3",
-                                    div { class: "w-8 h-8 bg-red-500/20 rounded-full flex items-center justify-center text-red-400 text-sm",
-                                        {get_nickname(ban.ban.banned_user).chars().next().unwrap_or('?').to_string()}
-                                    }
-                                    div { class: "flex-1",
-                                        p { class: "text-text font-medium", "{get_nickname(ban.ban.banned_user)}" }
-                                        p { class: "text-text-muted text-xs", "{ban.ban.banned_user}" }
-                                    }
-                                    div { class: "text-right text-xs text-text-muted",
-                                        p { "Banned by: {get_nickname(ban.banned_by)}" }
+                                {
+                                    let ban_id = ban.id();
+                                    let banned_user = ban.ban.banned_user;
+                                    let expires_ms = ban
+                                        .ban
+                                        .expires_at
+                                        .and_then(|time| {
+                                            time.duration_since(std::time::UNIX_EPOCH).ok()
+                                        })
+                                        .map(|duration| duration.as_millis() as i64);
+                                    let expired = expires_ms
+                                        .map(|until| until <= chrono::Utc::now().timestamp_millis())
+                                        .unwrap_or(false);
+                                    rsx! {
+                                        div { class: "bg-surface rounded-lg p-3 flex items-center gap-3",
+                                            div { class: "w-8 h-8 bg-red-500/20 rounded-full flex items-center justify-center text-red-400 text-sm",
+                                                {get_nickname(banned_user).chars().next().unwrap_or('?').to_string()}
+                                            }
+                                            div { class: "flex-1",
+                                                p { class: "text-text font-medium", "{get_nickname(banned_user)}" }
+                                                p { class: "text-text-muted text-xs", "{banned_user}" }
+                                            }
+                                            div { class: "text-right text-xs text-text-muted",
+                                                p { "Banned by: {get_nickname(ban.banned_by)}" }
+                                                if let Some(until) = expires_ms {
+                                                    p { class: if expired { "text-amber-400" } else { "" },
+                                                        if expired {
+                                                            "Expired {format_utc_as_local_time(until)}"
+                                                        } else {
+                                                            "Until {format_utc_as_local_time(until)}"
+                                                        }
+                                                    }
+                                                } else {
+                                                    p { "Permanent" }
+                                                }
+                                            }
+                                            if *is_owner.read() {
+                                                button {
+                                                    r#type: "button",
+                                                    class: "px-3 py-1.5 bg-panel hover:bg-surface-hover text-text text-xs rounded-lg",
+                                                    onclick: move |_| {
+                                                        if let Err(e) = lift_ban(ban_id.clone(), banned_user) {
+                                                            error!("Failed to lift ban: {}", e);
+                                                        }
+                                                    },
+                                                    "Lift"
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }

@@ -61,3 +61,10 @@ description = "Phase 2: reports, approval queue, announcements and polls"
 date = "2026-11-13"
 delegate_key = "4bcd537a1287c2699e2b90c594a34c081851886b5c1a869ac06f2ef44445e467"
 code_hash = "89a0cc4d05284649e9524befa24aa566f72a755a0cd6f7a1d2dc6487fc1e10cb"
+
+[[entry]]
+version = "V7"
+description = "Phase 4: temporary ban expiry and owner-signed revocations"
+date = "2026-11-13"
+delegate_key = "94722f210cd215b69cefbf9e3663b435aef52e30f784e77fb1e738ae18c398f2"
+code_hash = "a723cbaefff4f53a36c587a3e81afa36fc0c098a0470f5e28323e635a342d3b8"

@@ -508,6 +508,10 @@ pub struct UserBan {
     pub owner_member_id: MemberId,
     pub banned_at: SystemTime,
     pub banned_user: MemberId,
+    /// When the ban should be lifted. The contract cannot use a clock, so a
+    /// moderator publishes a revocation after this moment; the UI offers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<SystemTime>,
 }
 
 /// A unique identifier for a ban
@@ -515,6 +519,156 @@ pub struct UserBan {
 /// Created from a hash of the ban's signature to ensure uniqueness
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Hash, Debug, Ord, PartialOrd)]
 pub struct BanId(pub FastHash);
+
+/// A signed record that lifts one ban. Revocations stay in state as tombstones
+/// so a stale peer cannot reintroduce the ban. The contract cannot use a wall
+/// clock, so a temporary ban ends when a moderator publishes this record.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct BanRevocationV1 {
+    pub ban_id: BanId,
+    pub banned_user: MemberId,
+    pub revoked_at: SystemTime,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct AuthorizedBanRevocation {
+    pub revocation: BanRevocationV1,
+    pub signer: Option<MemberId>,
+    pub signature: Signature,
+}
+
+impl AuthorizedBanRevocation {
+    pub fn new(revocation: BanRevocationV1, signing_key: &SigningKey) -> Self {
+        Self {
+            signature: sign_struct(&revocation, signing_key),
+            revocation,
+            signer: Some(MemberId::from(&signing_key.verifying_key())),
+        }
+    }
+
+    pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
+        self.signer.unwrap_or_else(|| parameters.owner_id())
+    }
+
+    pub fn verify_signature_with(&self, key: &VerifyingKey) -> Result<(), String> {
+        verify_struct(&self.revocation, &self.signature, key)
+            .map_err(|e| format!("Invalid ban revocation signature: {}", e))
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
+pub struct BanRevocationsV1 {
+    pub revocations: Vec<AuthorizedBanRevocation>,
+}
+
+fn verify_revocation(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    entry: &AuthorizedBanRevocation,
+) -> Result<(), String> {
+    let signer = entry.signer_id(parameters);
+    let key = crate::board_state::roles::signer_key(state, parameters, &signer)?;
+    entry.verify_signature_with(&key)?;
+    // Owner-only keeps the tombstone verifiable forever: the owner key is in
+    // the contract parameters even if every member record is pruned.
+    if signer != parameters.owner_id() {
+        return Err("Only the board owner can lift a ban".to_string());
+    }
+    Ok(())
+}
+
+impl BanRevocationsV1 {
+    pub fn revoked(&self, ban_id: &BanId) -> bool {
+        self.revocations
+            .iter()
+            .any(|entry| entry.revocation.ban_id == *ban_id)
+    }
+
+    pub fn cleanup(&mut self, state: &ChatBoardStateV1, parameters: &ChatBoardParametersV1) {
+        self.revocations
+            .retain(|entry| verify_revocation(state, parameters, entry).is_ok());
+        self.revocations.sort_by_key(|entry| {
+            (
+                entry.revocation.ban_id.0 .0,
+                entry.signer_id(parameters).0 .0,
+            )
+        });
+        self.revocations
+            .dedup_by_key(|entry| entry.revocation.ban_id.clone());
+    }
+}
+
+impl ComposableState for BanRevocationsV1 {
+    type ParentState = ChatBoardStateV1;
+    type Summary = BTreeSet<BanId>;
+    type Delta = Vec<AuthorizedBanRevocation>;
+    type Parameters = ChatBoardParametersV1;
+
+    fn verify(
+        &self,
+        parent_state: &Self::ParentState,
+        parameters: &Self::Parameters,
+    ) -> Result<(), String> {
+        let mut ids = HashSet::new();
+        for entry in &self.revocations {
+            if !ids.insert(entry.revocation.ban_id.clone()) {
+                return Err("Duplicate ban revocation".to_string());
+            }
+            verify_revocation(parent_state, parameters, entry)?;
+        }
+        Ok(())
+    }
+
+    fn summarize(
+        &self,
+        _parent_state: &Self::ParentState,
+        _parameters: &Self::Parameters,
+    ) -> Self::Summary {
+        self.revocations
+            .iter()
+            .map(|entry| entry.revocation.ban_id.clone())
+            .collect()
+    }
+
+    fn delta(
+        &self,
+        _parent_state: &Self::ParentState,
+        _parameters: &Self::Parameters,
+        old_state: &Self::Summary,
+    ) -> Option<Self::Delta> {
+        let delta: Vec<AuthorizedBanRevocation> = self
+            .revocations
+            .iter()
+            .filter(|entry| !old_state.contains(&entry.revocation.ban_id))
+            .cloned()
+            .collect();
+        if delta.is_empty() {
+            None
+        } else {
+            Some(delta)
+        }
+    }
+
+    fn apply_delta(
+        &mut self,
+        parent_state: &Self::ParentState,
+        parameters: &Self::Parameters,
+        delta: &Option<Self::Delta>,
+    ) -> Result<(), String> {
+        let Some(delta) = delta else {
+            return Ok(());
+        };
+        for entry in delta {
+            verify_revocation(parent_state, parameters, entry)?;
+            if !self.revoked(&entry.revocation.ban_id) {
+                self.revocations.push(entry.clone());
+            }
+        }
+        self.revocations
+            .sort_by_key(|entry| entry.revocation.ban_id.0 .0);
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -597,6 +751,7 @@ mod tests {
                 owner_member_id: owner_id,
                 banned_at: SystemTime::now(),
                 banned_user: member1_id,
+                expires_at: None,
             },
             owner_id,
             &owner_key,
@@ -617,6 +772,7 @@ mod tests {
                     owner_member_id: owner_id,
                     banned_at: SystemTime::now(),
                     banned_user: member1_id,
+                    expires_at: None,
                 },
                 owner_id,
                 &owner_key,
@@ -638,6 +794,7 @@ mod tests {
                 owner_member_id: owner_id,
                 banned_at: SystemTime::now(),
                 banned_user: member2_id,
+                expires_at: None,
             },
             pruned_id,
             &pruned_key,
@@ -658,6 +815,7 @@ mod tests {
                 owner_member_id: owner_id,
                 banned_at: SystemTime::now(),
                 banned_user: member2_id,
+                expires_at: None,
             },
             orphaned_id,
             &orphaned_key,
@@ -668,6 +826,7 @@ mod tests {
                 owner_member_id: owner_id,
                 banned_at: SystemTime::now(),
                 banned_user: orphaned_id,
+                expires_at: None,
             },
             owner_id,
             &owner_key,
@@ -684,6 +843,7 @@ mod tests {
                 owner_member_id: owner_id,
                 banned_at: SystemTime::now(),
                 banned_user: member2_id,
+                expires_at: None,
             },
             member1_id,
             &member1_key,
@@ -709,6 +869,7 @@ mod tests {
                 owner_member_id: id,
                 banned_at: SystemTime::now(),
                 banned_user: id,
+                expires_at: None,
             },
             id,
             &key,
@@ -719,6 +880,7 @@ mod tests {
                 owner_member_id: id,
                 banned_at: SystemTime::now() + Duration::from_secs(1),
                 banned_user: id,
+                expires_at: None,
             },
             id,
             &key,
@@ -745,6 +907,7 @@ mod tests {
                 owner_member_id: id,
                 banned_at: SystemTime::now(),
                 banned_user: id,
+                expires_at: None,
             },
             id,
             &key,
@@ -755,6 +918,7 @@ mod tests {
                 owner_member_id: id,
                 banned_at: SystemTime::now() + Duration::from_secs(1),
                 banned_user: id,
+                expires_at: None,
             },
             id,
             &key,
@@ -791,6 +955,7 @@ mod tests {
                     owner_member_id: id,
                     banned_at: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
                     banned_user: id,
+                    expires_at: None,
                 },
                 id,
                 &key,
@@ -831,6 +996,7 @@ mod tests {
                 owner_member_id: owner_id,
                 banned_at: at(1),
                 banned_user: MemberId(FastHash(11)),
+                expires_at: None,
             },
             member_id,
             &member_key,
@@ -840,6 +1006,7 @@ mod tests {
                 owner_member_id: owner_id,
                 banned_at: at(2),
                 banned_user: MemberId(FastHash(12)),
+                expires_at: None,
             },
             owner_id,
             &owner_key,
@@ -899,6 +1066,7 @@ mod tests {
                 owner_member_id: owner_id,
                 banned_at: SystemTime::now(),
                 banned_user: member_id,
+                expires_at: None,
             },
             owner_id,
             &owner_key,
@@ -928,6 +1096,7 @@ mod tests {
                     // Give each ban a different timestamp so we can verify oldest are removed
                     banned_at: SystemTime::now() + Duration::from_secs(i as u64 + 10),
                     banned_user: member_id,
+                    expires_at: None,
                 },
                 owner_id,
                 &owner_key,
@@ -974,6 +1143,7 @@ mod tests {
                     owner_member_id: owner_id,
                     banned_at: SystemTime::now() + Duration::from_secs(i as u64 + 100),
                     banned_user: member_id,
+                    expires_at: None,
                 },
                 owner_id,
                 &owner_key,
@@ -1003,6 +1173,7 @@ mod tests {
             owner_member_id: owner_id,
             banned_at: SystemTime::now(),
             banned_user: member_id,
+            expires_at: None,
         };
 
         let authorized_ban = AuthorizedUserBan::new(ban.clone(), owner_id, &owner_key);
@@ -1029,10 +1200,122 @@ mod tests {
                 owner_member_id: owner_id,
                 banned_at: SystemTime::now() + Duration::from_secs(1),
                 banned_user: member_id,
+                expires_at: None,
             },
             owner_id,
             &owner_key,
         );
         assert_ne!(authorized_ban.id(), another_ban.id());
+    }
+}
+
+#[cfg(test)]
+mod revocation_tests {
+    use super::*;
+    use crate::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+    use crate::board_state::member::{AuthorizedMember, Member, MembersV1};
+    use crate::board_state::member_info::MemberInfoV1;
+    use crate::board_state::message::MessagesV1;
+    use crate::board_state::secret::BoardSecretsV1;
+    use std::time::Duration;
+
+    #[test]
+    fn owner_lifts_a_ban_and_the_tombstone_stays() {
+        let owner_sk = SigningKey::generate(&mut rand::thread_rng());
+        let owner_vk = owner_sk.verifying_key();
+        let owner_id = MemberId::from(&owner_vk);
+        let params = ChatBoardParametersV1 { owner: owner_vk };
+        let member_sk = SigningKey::generate(&mut rand::thread_rng());
+        let member_vk = member_sk.verifying_key();
+        let member_id = MemberId::from(&member_vk);
+        let member = AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk,
+                join_proof: None,
+            },
+            &owner_sk,
+        );
+        let ban = AuthorizedUserBan::new(
+            UserBan {
+                owner_member_id: owner_id,
+                banned_at: SystemTime::now(),
+                banned_user: member_id,
+                expires_at: Some(SystemTime::now() + Duration::from_secs(3600)),
+            },
+            owner_id,
+            &owner_sk,
+        );
+        let ban_id = ban.id();
+        let revocation = AuthorizedBanRevocation::new(
+            BanRevocationV1 {
+                ban_id: ban_id.clone(),
+                banned_user: member_id,
+                revoked_at: SystemTime::now(),
+            },
+            &owner_sk,
+        );
+        let mut state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner_sk),
+            bans: BansV1(vec![ban]),
+            ban_revocations: BanRevocationsV1 {
+                revocations: vec![revocation.clone()],
+            },
+            members: MembersV1 {
+                members: vec![member],
+            },
+            member_info: MemberInfoV1::default(),
+            secrets: BoardSecretsV1::default(),
+            recent_messages: MessagesV1::default(),
+            ..Default::default()
+        };
+
+        state
+            .ban_revocations
+            .verify(&state, &params)
+            .expect("the owner can lift a ban");
+        state.post_apply_cleanup(&params).unwrap();
+        assert!(state.bans.0.is_empty(), "the revoked ban is gone");
+        assert!(state.ban_revocations.revoked(&ban_id));
+    }
+
+    #[test]
+    fn members_cannot_lift_bans() {
+        let owner_sk = SigningKey::generate(&mut rand::thread_rng());
+        let owner_vk = owner_sk.verifying_key();
+        let owner_id = MemberId::from(&owner_vk);
+        let params = ChatBoardParametersV1 { owner: owner_vk };
+        let member_sk = SigningKey::generate(&mut rand::thread_rng());
+        let member_vk = member_sk.verifying_key();
+        let member_id = MemberId::from(&member_vk);
+        let member = AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk,
+                join_proof: None,
+            },
+            &owner_sk,
+        );
+        let revocation = AuthorizedBanRevocation::new(
+            BanRevocationV1 {
+                ban_id: BanId(FastHash(7)),
+                banned_user: member_id,
+                revoked_at: SystemTime::now(),
+            },
+            &member_sk,
+        );
+        let state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner_sk),
+            ban_revocations: BanRevocationsV1 {
+                revocations: vec![revocation],
+            },
+            members: MembersV1 {
+                members: vec![member],
+            },
+            ..Default::default()
+        };
+        assert!(state.ban_revocations.verify(&state, &params).is_err());
     }
 }

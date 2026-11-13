@@ -515,6 +515,7 @@ fn test_ban_member_excludes_from_new_secrets() {
         owner_member_id: owner_id,
         banned_at: SystemTime::now(),
         banned_user: member1_id,
+        expires_at: None,
     };
 
     board_state

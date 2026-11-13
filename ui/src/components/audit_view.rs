@@ -85,6 +85,15 @@ pub fn AuditView() -> Element {
             ),
         ));
     }
+    for revocation in &board.board_state.ban_revocations.revocations {
+        entries.push((
+            millis(revocation.revocation.revoked_at),
+            format!(
+                "Lifted the ban on {}",
+                name(&revocation.revocation.banned_user)
+            ),
+        ));
+    }
     for warning in &board.board_state.warnings.warnings {
         entries.push((
             warning.warning.created_at,

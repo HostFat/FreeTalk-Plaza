@@ -3,13 +3,17 @@ use crate::util::get_current_system_time;
 use dioxus::logger::tracing::{error, info};
 use dioxus::prelude::*;
 use freenet_scaffold::ComposableState;
-use plaza_core::board_state::ban::{AuthorizedUserBan, UserBan};
+use plaza_core::board_state::ban::{
+    AuthorizedBanRevocation, AuthorizedUserBan, BanId, BanRevocationV1, UserBan,
+};
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 use wasm_bindgen_futures::spawn_local;
 
 /// Ban a member and, on a private board owned by us, rotate the board secret.
-pub async fn ban_member(member_to_ban: MemberId) -> Result<(), String> {
+/// `duration_days` is None for a permanent ban, otherwise the expiry that the
+/// UI shows; lifting the ban is a separate signed revocation.
+pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> Result<(), String> {
     let (current_board, board_data) = {
         let current = CURRENT_BOARD.read().owner_key.ok_or("No board selected")?;
         let boards = BOARDS.read();
@@ -25,10 +29,14 @@ pub async fn ban_member(member_to_ban: MemberId) -> Result<(), String> {
         owner: current_board,
     };
 
+    let banned_at = get_current_system_time();
+    let expires_at = duration_days
+        .map(|days| banned_at + std::time::Duration::from_secs(days.max(1) as u64 * 24 * 60 * 60));
     let ban = UserBan {
         owner_member_id: MemberId::from(&current_board),
-        banned_at: get_current_system_time(),
+        banned_at,
         banned_user: member_to_ban,
+        expires_at,
     };
 
     let mut ban_bytes = Vec::new();
@@ -89,6 +97,52 @@ pub async fn ban_member(member_to_ban: MemberId) -> Result<(), String> {
     Ok(())
 }
 
+/// Lift a ban with a signed revocation. Owner and admins can do it.
+pub fn lift_ban(ban_id: BanId, banned_user: MemberId) -> Result<(), String> {
+    let current_board = CURRENT_BOARD.read().owner_key.ok_or("No board selected")?;
+    let (board_state, self_sk) = {
+        let boards = BOARDS.read();
+        let data = boards
+            .map
+            .get(&current_board)
+            .ok_or("Board not found")?
+            .clone();
+        (data.board_state.clone(), data.self_sk.clone())
+    };
+    let revocation = AuthorizedBanRevocation::new(
+        BanRevocationV1 {
+            ban_id,
+            banned_user,
+            revoked_at: get_current_system_time(),
+        },
+        &self_sk,
+    );
+    let delta = ChatBoardStateV1Delta {
+        ban_revocations: Some(vec![revocation]),
+        ..Default::default()
+    };
+    let params = ChatBoardParametersV1 {
+        owner: current_board,
+    };
+    let mut error: Option<String> = None;
+    BOARDS.with_mut(|boards| {
+        let Some(data) = boards.map.get_mut(&current_board) else {
+            return;
+        };
+        if let Err(e) = data
+            .board_state
+            .apply_delta(&board_state, &params, &Some(delta))
+        {
+            error = Some(format!("Failed to lift ban: {e}"));
+        }
+    });
+    if let Some(error) = error {
+        return Err(error);
+    }
+    mark_needs_sync(current_board);
+    Ok(())
+}
+
 #[component]
 pub fn BanButton(
     member_to_ban: MemberId,
@@ -99,14 +153,18 @@ pub fn BanButton(
     nickname: String,
 ) -> Element {
     let mut show_confirmation = use_signal(|| false);
+    let mut duration_days = use_signal(|| 0i64);
 
     let execute_ban = move |_| {
+        let days = *duration_days.read();
         // Close the member modal immediately for better UX
         MEMBER_INFO_MODAL.with_mut(|modal| {
             modal.member = None;
         });
         spawn_local(async move {
-            if let Err(e) = ban_member(member_to_ban).await {
+            if let Err(e) =
+                ban_member(member_to_ban, if days > 0 { Some(days) } else { None }).await
+            {
                 error!("Failed to ban member: {}", e);
             }
         });
@@ -152,7 +210,30 @@ pub fn BanButton(
                                     span { class: "font-semibold", "{nickname}" }
                                     " (ID: "
                                     code { class: "text-sm bg-surface px-1 rounded", "{member_to_ban}" }
-                                    ")? This action cannot be undone."
+                                    ")? The member is removed from the board. You can lift the ban later from Admin → Banned."
+                                }
+                                div { class: "flex flex-wrap items-center gap-2 mt-3 text-sm",
+                                    span { class: "text-text-muted", "Duration" }
+                                    for (label, days) in [
+                                        ("Permanent", 0i64),
+                                        ("1 day", 1),
+                                        ("7 days", 7),
+                                        ("30 days", 30),
+                                    ] {
+                                        button {
+                                            r#type: "button",
+                                            class: if *duration_days.read() == days {
+                                                "px-2 py-1 rounded bg-accent text-white"
+                                            } else {
+                                                "px-2 py-1 rounded bg-surface text-text-muted hover:text-text"
+                                            },
+                                            onclick: move |_| duration_days.set(days),
+                                            "{label}"
+                                        }
+                                    }
+                                }
+                                p { class: "text-xs text-text-muted mt-2",
+                                    "A timed ban still needs a lift: the contract cannot read a clock, so an expired ban is shown as expired in Admin → Banned until a moderator lifts it."
                                 }
                             }
 
