@@ -143,6 +143,42 @@ pub fn lift_ban(ban_id: BanId, banned_user: MemberId) -> Result<(), String> {
     Ok(())
 }
 
+/// Lift every ban whose expiry has passed. Only the owner signs revocations,
+/// so other clients do nothing and wait for the owner.
+pub fn auto_lift_expired_bans() {
+    let Some(current_board) = CURRENT_BOARD.read().owner_key else {
+        return;
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    let expired: Vec<(BanId, MemberId)> = {
+        let boards = BOARDS.read();
+        let Some(data) = boards.map.get(&current_board) else {
+            return;
+        };
+        if data.self_sk.verifying_key() != data.owner_vk {
+            return;
+        }
+        data.board_state
+            .bans
+            .0
+            .iter()
+            .filter_map(|ban| {
+                let until = ban
+                    .ban
+                    .expires_at?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?;
+                (until.as_millis() as i64 <= now).then(|| (ban.id(), ban.ban.banned_user))
+            })
+            .collect()
+    };
+    for (ban_id, banned_user) in expired {
+        if let Err(e) = lift_ban(ban_id, banned_user) {
+            error!("Failed to lift an expired ban: {}", e);
+        }
+    }
+}
+
 #[component]
 pub fn BanButton(
     member_to_ban: MemberId,

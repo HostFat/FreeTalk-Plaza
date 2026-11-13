@@ -163,6 +163,72 @@ pub async fn send_message(
     .await;
 }
 
+/// Membership and member-info records that put this client back on the board
+/// after it was pruned or banned. `None` when it is already a member or has no
+/// stored signed membership.
+pub(crate) fn self_membership_delta(
+    board_data: &crate::board_data::BoardData,
+) -> Option<(
+    plaza_core::board_state::member::MembersDelta,
+    Vec<plaza_core::board_state::member_info::AuthorizedMemberInfo>,
+)> {
+    let self_vk = board_data.self_sk.verifying_key();
+    let is_in_members = self_vk == board_data.owner_vk
+        || board_data
+            .board_state
+            .members
+            .members
+            .iter()
+            .any(|member| member.member.member_vk == self_vk);
+    if is_in_members {
+        return None;
+    }
+    let authorized_member = board_data.self_authorized_member.as_ref()?;
+    let current_member_ids: std::collections::HashSet<_> = board_data
+        .board_state
+        .members
+        .members
+        .iter()
+        .map(|member| member.member.id())
+        .collect();
+    let mut members_to_add = vec![authorized_member.clone()];
+    for chain_member in &board_data.invite_chain {
+        if !current_member_ids.contains(&chain_member.member.id()) {
+            members_to_add.push(chain_member.clone());
+        }
+    }
+
+    use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
+    let authorized_info: AuthorizedMemberInfo =
+        if let Some(stored_info) = board_data.self_member_info.as_ref() {
+            stored_info.clone()
+        } else {
+            use plaza_core::board_state::privacy::SealedBytes;
+            let member_id = MemberId::from(&self_vk);
+            let existing_version = board_data
+                .board_state
+                .member_info
+                .member_info
+                .iter()
+                .find(|info| info.member_info.member_id == member_id)
+                .map(|info| info.member_info.version)
+                .unwrap_or(0);
+            AuthorizedMemberInfo::new_with_member_key(
+                MemberInfo {
+                    member_id,
+                    version: existing_version,
+                    preferred_nickname: SealedBytes::public("Member".to_string().into_bytes()),
+                },
+                &board_data.self_sk,
+            )
+        };
+
+    Some((
+        plaza_core::board_state::member::MembersDelta::new(members_to_add),
+        vec![authorized_info],
+    ))
+}
+
 pub(crate) async fn publish_message(
     current_board: VerifyingKey,
     board_key: BoardKey,
@@ -192,79 +258,16 @@ pub(crate) async fn publish_message(
 
     let auth_message = AuthorizedMessageV1::with_signature(message, signature);
 
-    // Check if we need to re-add ourselves (pruned for inactivity)
-    let (members_delta, member_info_delta) = {
-        let boards_read = BOARDS.read();
-        if let Some(board_data) = boards_read.map.get(&current_board) {
-            let self_vk = board_data.self_sk.verifying_key();
-            let is_in_members = self_vk == current_board
-                || board_data
-                    .board_state
-                    .members
-                    .members
-                    .iter()
-                    .any(|m| m.member.member_vk == self_vk);
-
-            if !is_in_members {
-                if let Some(ref authorized_member) = board_data.self_authorized_member {
-                    let current_member_ids: std::collections::HashSet<_> = board_data
-                        .board_state
-                        .members
-                        .members
-                        .iter()
-                        .map(|m| m.member.id())
-                        .collect();
-                    let mut members_to_add: Vec<plaza_core::board_state::member::AuthorizedMember> =
-                        vec![authorized_member.clone()];
-                    for chain_member in &board_data.invite_chain {
-                        if !current_member_ids.contains(&chain_member.member.id()) {
-                            members_to_add.push(chain_member.clone());
-                        }
-                    }
-
-                    // Use stored member_info to preserve nickname, or fall back to "Member"
-                    use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
-                    let authorized_info: AuthorizedMemberInfo = if let Some(ref stored_info) =
-                        board_data.self_member_info
-                    {
-                        stored_info.clone()
-                    } else {
-                        use plaza_core::board_state::privacy::SealedBytes;
-                        let member_id = MemberId::from(&self_vk);
-                        let existing_version = board_data
-                            .board_state
-                            .member_info
-                            .member_info
-                            .iter()
-                            .find(|i| i.member_info.member_id == member_id)
-                            .map(|i| i.member_info.version)
-                            .unwrap_or(0);
-                        let member_info = MemberInfo {
-                            member_id,
-                            version: existing_version,
-                            preferred_nickname: SealedBytes::public(
-                                "Member".to_string().into_bytes(),
-                            ),
-                        };
-                        AuthorizedMemberInfo::new_with_member_key(member_info, &board_data.self_sk)
-                    };
-
-                    (
-                        Some(plaza_core::board_state::member::MembersDelta::new(
-                            members_to_add,
-                        )),
-                        Some(vec![authorized_info]),
-                    )
-                } else {
-                    (None, None)
-                }
-            } else {
-                (None, None)
-            }
-        } else {
-            (None, None)
-        }
-    };
+    // Re-add ourselves when this client was pruned for inactivity (or after
+    // a ban was lifted). The helper returns None when we are already in.
+    let (members_delta, member_info_delta) = BOARDS
+        .read()
+        .map
+        .get(&current_board)
+        .and_then(|board_data| {
+            self_membership_delta(board_data).map(|(members, info)| (Some(members), Some(info)))
+        })
+        .unwrap_or((None, None));
 
     let route = AuthorizedMessageRoute::new(
         MessageRoute {

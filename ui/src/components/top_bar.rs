@@ -21,6 +21,18 @@ pub fn TopBar() -> Element {
     let replying_to = use_signal(|| None::<ReplyContext>);
     let mut menu_open = use_signal(|| false);
 
+    // Housekeeping for bans: the owner lifts expired bans, and a member who is
+    // no longer banned puts its stored membership back. Both are idempotent.
+    use_effect(move || {
+        spawn(async move {
+            loop {
+                crate::components::members::member_info_modal::ban_button::auto_lift_expired_bans();
+                crate::util::membership::restore_self_membership();
+                futures_timer::Delay::new(std::time::Duration::from_secs(60)).await;
+            }
+        });
+    });
+
     // Get current board data
     let current_board_data = use_memo(move || {
         CURRENT_BOARD

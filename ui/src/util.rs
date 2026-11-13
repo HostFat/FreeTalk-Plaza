@@ -6,6 +6,7 @@ pub mod drafts;
 pub mod ecies;
 pub mod markdown;
 pub mod member_moderation;
+pub mod membership;
 pub mod message_actions;
 pub mod messaging;
 pub mod moderation_queue;
