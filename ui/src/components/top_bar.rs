@@ -479,6 +479,7 @@ pub fn TopBar() -> Element {
                                 PostInput {
                                     in_category,
                                     in_post,
+                                    hide_button: true,
                                     handle_send_message: move |msg: (
                                         String,
                                         String,

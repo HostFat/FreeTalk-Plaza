@@ -26,6 +26,9 @@ pub fn PostInput(
     /// Inside a single post: the button starts a reply to that post.
     #[props(default)]
     in_post: bool,
+    /// Only render the modal; the page provides its own compose button.
+    #[props(default)]
+    hide_button: bool,
     /// Maximum title length (from board configuration)
     max_title_size: usize,
     /// Maximum message length (from board configuration)
@@ -229,6 +232,7 @@ pub fn PostInput(
     rsx! {
         // A category starts a new topic; a post starts a reply. The reply
         // section keeps its own caption.
+        if !hide_button {
         if in_category {
             button {
                 class: "flex items-center gap-2 px-4 py-2.5 bg-accent hover:bg-accent-hover text-white font-medium rounded-xl transition-colors",
@@ -260,6 +264,7 @@ pub fn PostInput(
                     span { class: "absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-white border border-accent" }
                 }
             }
+        }
         }
 
         // Compose modal

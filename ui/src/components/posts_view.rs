@@ -653,6 +653,11 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
         })
         .unwrap_or(false);
 
+    let can_write = current_board_data
+        .as_ref()
+        .map(|board| board.can_participate().is_ok())
+        .unwrap_or(false);
+
     // Update CURRENT_CATEGORY for auto-parenting posts/categories
     // Compare before writing to avoid unnecessary updates
     {
@@ -1413,8 +1418,18 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                         // Posts section
                                         if has_posts {
                                             if has_categories {
-                                                h2 { class: "text-lg font-semibold text-text-muted mb-4 flex items-center gap-2",
-                                                    "Posts"
+                                                div { class: "flex items-center justify-between mb-4",
+                                                    h2 { class: "text-lg font-semibold text-text-muted", "Posts" }
+                                                    if can_write {
+                                                        button {
+                                                            r#type: "button",
+                                                            class: "px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
+                                                            onclick: move |_| {
+                                                                *crate::components::app::COMPOSE_REQUEST.write() += 1;
+                                                            },
+                                                            "+ New Post"
+                                                        }
+                                                    }
                                                 }
                                             }
                                             div { class: "flex items-center gap-2 mb-4",
@@ -1438,6 +1453,16 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                     },
                                                     onclick: move |_| recent_first.set(true),
                                                     "Recent activity"
+                                                }
+                                                if can_write && !has_categories {
+                                                    button {
+                                                        r#type: "button",
+                                                        class: "ml-auto px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
+                                                        onclick: move |_| {
+                                                            *crate::components::app::COMPOSE_REQUEST.write() += 1;
+                                                        },
+                                                        "+ New Post"
+                                                    }
                                                 }
                                             }
                                             div { class: "space-y-2",
