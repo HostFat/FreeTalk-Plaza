@@ -138,26 +138,6 @@ pub fn BoardList() -> Element {
                     div { class: "w-full md:w-auto bg-panel shadow-lg md:rounded-b-xl overflow-hidden",
                         style: "min-width: min(100vw, 60vw);",
 
-                        // Brand header, so the product name is visible on mobile too
-                        button {
-                            class: "w-full flex items-center gap-2 px-6 py-4 border-b border-border text-left hover:bg-surface transition-colors",
-                            title: "About FreeTalk Plaza",
-                            onclick: move |_| {
-                                *crate::components::app::ABOUT_MODAL.write() = true;
-                            },
-                            img {
-                                src: asset!("/assets/plaza_logo.svg"),
-                                class: "w-8 h-8",
-                                alt: "",
-                            }
-                            div { class: "flex flex-col leading-tight",
-                                span { class: "text-base font-semibold text-text", "FreeTalk Plaza" }
-                                span { class: "text-[10px] uppercase tracking-wide text-text-muted",
-                                    "Forums on Freenet"
-                                }
-                            }
-                        }
-
                         // Board list
                         div { class: "max-h-96 overflow-y-auto",
                             {board_items.read().iter().map(|(board_key, board_name, is_current, awaiting_sync)| {
