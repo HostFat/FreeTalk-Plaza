@@ -75,9 +75,15 @@ pub struct FeatureFlag {
     pub target: MessageId,
     pub kind: FeatureKind,
     pub value: bool,
+    /// Section chain of the target at signing time, signed with the flag.
+    #[serde(default)]
+    pub scope_chain: Vec<MessageId>,
     /// Destination topic when `kind = Merged` and `value = true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<MessageId>,
+    /// Section chain of that destination at signing time.
+    #[serde(default)]
+    pub destination_scope_chain: Vec<MessageId>,
     pub generation: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub created_at: i64,
@@ -126,9 +132,15 @@ impl AuthorizedFeatureFlag {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct PostMove {
     pub target: MessageId,
+    /// Section chain of the target at signing time.
+    #[serde(default)]
+    pub scope_chain: Vec<MessageId>,
     /// New parent: a category for a topic, a post for a reply. `None` moves a
     /// topic to the board root.
     pub new_parent: Option<MessageId>,
+    /// Section chain of the destination at signing time.
+    #[serde(default)]
+    pub new_scope_chain: Vec<MessageId>,
     pub generation: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub created_at: i64,
@@ -297,6 +309,20 @@ pub(crate) fn is_owner_or_admin(
             .any(|admin| admin.admin.id() == *actor)
 }
 
+/// Every id in a claimed scope chain that still exists must be a section.
+/// Deleted sections are allowed, so an old chain keeps verifying.
+fn verify_scope_chain(state: &ChatBoardStateV1, chain: &[MessageId]) -> Result<(), String> {
+    let routes = state.moderation.routes_map();
+    for id in chain {
+        if let Some(route) = routes.get(id) {
+            if !route.is_category {
+                return Err("Scope chain contains a non-section id".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn target_author(state: &ChatBoardStateV1, target: &MessageId) -> Option<MemberId> {
     state
         .recent_messages
@@ -383,7 +409,8 @@ fn verify_feature_flag(
         return Err("Feature flags apply to posts".to_string());
     }
 
-    let chain = category_chain(routes, &flag.target);
+    let chain = flag.scope_chain.clone();
+    verify_scope_chain(state, &chain)?;
     let proof = entry.authority.as_deref();
     match flag.kind {
         FeatureKind::Pinned => {
@@ -446,7 +473,8 @@ fn verify_feature_flag(
                     }
                     current = route_parent(routes, &id);
                 }
-                let destination_chain = category_chain(routes, &destination);
+                let destination_chain = flag.destination_scope_chain.clone();
+                verify_scope_chain(state, &destination_chain)?;
                 verify_moderation_authority(
                     state,
                     parameters,
@@ -551,8 +579,10 @@ fn verify_move(
                 }
                 current = route_parent(routes, &id);
             }
-            let from = category_chain(routes, &entry.change.target);
-            let to = category_chain(routes, &parent_id);
+            let from = entry.change.scope_chain.clone();
+            let to = entry.change.new_scope_chain.clone();
+            verify_scope_chain(state, &from)?;
+            verify_scope_chain(state, &to)?;
             verify_moderation_authority(
                 state,
                 parameters,
@@ -573,12 +603,14 @@ fn verify_move(
             .map_err(|_| "Signer cannot move this post here".to_string())?;
         }
         None => {
+            let from = entry.change.scope_chain.clone();
+            verify_scope_chain(state, &from)?;
             verify_moderation_authority(
                 state,
                 parameters,
                 &signer,
                 ModerationPower::Move,
-                &[],
+                &from,
                 entry.authority.as_deref(),
             )
             .map_err(|_| "Signer cannot move this post to the board root".to_string())?;
@@ -1035,7 +1067,9 @@ mod tests {
                 target: board.post,
                 kind: FeatureKind::Closed,
                 value: true,
+                scope_chain: Vec::new(),
                 destination: None,
+                destination_scope_chain: Vec::new(),
                 generation: 1,
                 created_at: 1,
             },
@@ -1055,7 +1089,9 @@ mod tests {
         let by_member = AuthorizedPostMove::new(
             PostMove {
                 target: board.post,
+                scope_chain: Vec::new(),
                 new_parent: None,
+                new_scope_chain: Vec::new(),
                 generation: 1,
                 created_at: 1,
             },
@@ -1072,7 +1108,9 @@ mod tests {
         let owner_move = AuthorizedPostMove::new(
             PostMove {
                 target: board.post,
+                scope_chain: Vec::new(),
                 new_parent: None,
+                new_scope_chain: Vec::new(),
                 generation: 1,
                 created_at: 1,
             },
@@ -1094,7 +1132,9 @@ mod tests {
                 target: board.post,
                 kind: FeatureKind::Pinned,
                 value: true,
+                scope_chain: Vec::new(),
                 destination: None,
+                destination_scope_chain: Vec::new(),
                 generation: 1,
                 created_at: 1,
             },
@@ -1105,7 +1145,9 @@ mod tests {
                 target: board.post,
                 kind: FeatureKind::Closed,
                 value: true,
+                scope_chain: Vec::new(),
                 destination: None,
+                destination_scope_chain: Vec::new(),
                 generation: 1,
                 created_at: 2,
             },
@@ -1173,7 +1215,9 @@ mod tests {
                     target: board.post,
                     kind: FeatureKind::Pinned,
                     value: true,
+                    scope_chain: Vec::new(),
                     destination: None,
+                    destination_scope_chain: Vec::new(),
                     generation: 1,
                     created_at: 1,
                 },
@@ -1220,7 +1264,9 @@ mod tests {
                 target: board.post,
                 kind: FeatureKind::Announced,
                 value: true,
+                scope_chain: Vec::new(),
                 destination: None,
+                destination_scope_chain: Vec::new(),
                 generation: 1,
                 created_at: 1,
             },

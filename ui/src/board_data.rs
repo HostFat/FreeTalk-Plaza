@@ -245,8 +245,8 @@ impl BoardData {
                 nonce,
                 ..
             } if *content_type == CONTENT_TYPE_CATEGORY => {
-                let (secret, _) = self.body_secret(content)?;
-                let bytes = decrypt_with_symmetric_key(&secret, ciphertext, nonce).ok()?;
+                let (secret, version) = self.body_secret(content)?;
+                let bytes = decrypt_with_symmetric_key(&secret, ciphertext, nonce, version).ok()?;
                 CategoryContentV1::decode(&bytes).ok()
             }
             _ => None,
@@ -497,8 +497,8 @@ impl BoardData {
                 BoardMessageBody::Private {
                     ciphertext, nonce, ..
                 } => {
-                    let (key, _) = self.body_secret(&message.message.content)?;
-                    decrypt_with_symmetric_key(&key, ciphertext, nonce)
+                    let (key, version) = self.body_secret(&message.message.content)?;
+                    decrypt_with_symmetric_key(&key, ciphertext, nonce, version)
                         .ok()
                         .map(|plaintext| (message.id(), plaintext))
                 }
@@ -530,7 +530,7 @@ impl BoardData {
                                 .map(|(_, key)| key);
                             let key = category_key
                                 .or_else(|| self.get_secret_for_version(secret_version).copied())?;
-                            decrypt_with_symmetric_key(&key, &ciphertext, &nonce)
+                            decrypt_with_symmetric_key(&key, &ciphertext, &nonce, secret_version)
                                 .ok()
                                 .map(|plaintext| (message.id(), plaintext))
                         }
@@ -1772,7 +1772,8 @@ impl Boards {
                 name: if let Some(ref secret) = board_secret {
                     // Encrypt board name for private boards
                     use crate::util::ecies::encrypt_with_symmetric_key;
-                    let (ciphertext, nonce) = encrypt_with_symmetric_key(secret, name.as_bytes());
+                    let (ciphertext, nonce) =
+                        encrypt_with_symmetric_key(secret, name.as_bytes(), 0);
                     SealedBytes::Private {
                         ciphertext,
                         nonce,
@@ -1795,7 +1796,8 @@ impl Boards {
             preferred_nickname: if let Some(ref secret) = board_secret {
                 // Encrypt nickname for private boards
                 use crate::util::ecies::encrypt_with_symmetric_key;
-                let (ciphertext, nonce) = encrypt_with_symmetric_key(secret, nickname.as_bytes());
+                let (ciphertext, nonce) =
+                    encrypt_with_symmetric_key(secret, nickname.as_bytes(), 0);
                 SealedBytes::Private {
                     ciphertext,
                     nonce,
@@ -2006,9 +2008,12 @@ mod tests {
         // The owner reads the sealed board name.
         match &board.board_state.configuration.configuration.display.name {
             SealedBytes::Private {
-                ciphertext, nonce, ..
+                ciphertext,
+                nonce,
+                secret_version,
+                ..
             } => assert_eq!(
-                decrypt_with_symmetric_key(&secret, ciphertext, nonce).unwrap(),
+                decrypt_with_symmetric_key(&secret, ciphertext, nonce, *secret_version).unwrap(),
                 b"Secret Plans"
             ),
             _ => panic!("a private board name must be sealed"),
@@ -2157,7 +2162,7 @@ mod tests {
     /// board members see the placeholder and cannot open them.
     #[test]
     fn restricted_category_reaches_only_role_members() {
-        use crate::util::ecies::{decrypt_with_symmetric_key, seal_bytes};
+        use crate::util::ecies::seal_bytes;
         use plaza_core::board_state::category_secrets::CategorySecretsDelta;
         use plaza_core::board_state::content::{
             CategoryContentV1, CATEGORY_CONTENT_VERSION, CONTENT_TYPE_CATEGORY,
@@ -2389,20 +2394,8 @@ mod tests {
 
         // A post sealed with the category key opens only for key holders.
         let category_post = seal_bytes(b"members only post", &category_secret, 0);
-        let plaintext = decrypt_with_symmetric_key(
-            &category_secret,
-            match &category_post {
-                plaza_core::board_state::privacy::SealedBytes::Private { ciphertext, .. } => {
-                    ciphertext
-                }
-                _ => unreachable!(),
-            },
-            match &category_post {
-                plaza_core::board_state::privacy::SealedBytes::Private { nonce, .. } => nonce,
-                _ => unreachable!(),
-            },
-        )
-        .unwrap();
+        let plaintext =
+            crate::util::ecies::unseal_bytes(&category_post, Some(&category_secret)).unwrap();
         assert_eq!(plaintext, b"members only post");
 
         // Adding a member to the role later: the owner's next distribution

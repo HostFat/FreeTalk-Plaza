@@ -7,6 +7,7 @@ use plaza_core::board_state::approvals::{
 use plaza_core::board_state::configuration::AuthorizedConfigurationV1;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
+use plaza_core::board_state::moderation::category_chain;
 use plaza_core::board_state::reports::{
     AuthorizedReport, AuthorizedReportResolution, ReportReason, ReportResolution, ReportStatus,
     ReportV1, ReportsDelta,
@@ -59,10 +60,17 @@ pub fn resolve_report(
         .iter()
         .find(|entry| entry.id() == report_id)
         .map(|entry| entry.report.target);
+    let chain = target
+        .map(|target| {
+            let routes = ctx.board_state.moderation.routes_map();
+            category_chain(&routes, &target)
+        })
+        .unwrap_or_default();
     let resolution = ReportResolution {
         report_id,
         status,
         generation,
+        scope_chain: chain,
     };
     let authorized = AuthorizedReportResolution::new(resolution, &ctx.self_sk)
         .with_optional_authority(
@@ -89,11 +97,16 @@ pub fn approve_post(ctx: &ActionContext, target: MessageId, approved: bool) -> R
         .max()
         .unwrap_or(0)
         + 1;
+    let chain = {
+        let routes = ctx.board_state.moderation.routes_map();
+        category_chain(&routes, &target)
+    };
     let approval = ApprovalV1 {
         target,
         approved,
         generation,
         scope: message_scope(&ctx.board_state, &target),
+        scope_chain: chain,
     };
     let proof = moderation_proof(ctx, &target, ModerationPower::Delete);
     let delta = ChatBoardStateV1Delta {

@@ -130,7 +130,6 @@ mod tests {
     use super::*;
     use crate::board_state::member::MemberId;
     use ed25519_dalek::SigningKey;
-    use freenet_scaffold::util::FastHash;
     use rand::rngs::OsRng;
 
     fn create_test_upgrade(owner_id: MemberId) -> UpgradeV1 {

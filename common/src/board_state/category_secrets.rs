@@ -390,7 +390,6 @@ mod tests {
     use crate::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
     use crate::board_state::privacy::BoardCipherSpec;
     use crate::board_state::secret::{EncryptedSecretForMemberV1, SecretVersionRecordV1};
-    use freenet_scaffold::util::FastHash;
     use freenet_scaffold::ComposableState;
     use std::time::SystemTime;
 

@@ -467,7 +467,7 @@ fn get_message_preview(
         } => {
             // Look up the secret for this message's version
             if let Some(secret) = board_secrets.get(secret_version) {
-                decrypt_with_symmetric_key(secret, ciphertext.as_slice(), nonce)
+                decrypt_with_symmetric_key(secret, ciphertext.as_slice(), nonce, *secret_version)
                     .map(|bytes| {
                         if *content_type == CONTENT_TYPE_TEXT {
                             TextContentV1::decode(&bytes)

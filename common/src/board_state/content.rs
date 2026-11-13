@@ -774,7 +774,6 @@ impl DecodedContent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use freenet_scaffold::util::fast_hash;
 
     fn test_message_id() -> MessageId {
         MessageId::from_bytes([1u8; 32])
@@ -976,7 +975,6 @@ mod tests {
 #[cfg(test)]
 mod poll_tests {
     use super::*;
-    use freenet_scaffold::util::fast_hash;
 
     fn poll(multiselect: bool) -> PollContentV1 {
         PollContentV1::new(

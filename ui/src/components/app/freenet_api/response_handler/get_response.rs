@@ -226,7 +226,8 @@ pub async fn handle_get_response(
                     // For private boards, encrypt the nickname with the board secret
                     if let Some((secret, version)) = board_data.get_secret() {
                         use crate::util::ecies::encrypt_with_symmetric_key;
-                        let (ciphertext, nonce) = encrypt_with_symmetric_key(secret, preferred_nickname.as_bytes());
+                        let (ciphertext, nonce) =
+                            encrypt_with_symmetric_key(secret, preferred_nickname.as_bytes(), version);
                         SealedBytes::Private {
                             ciphertext,
                             nonce,

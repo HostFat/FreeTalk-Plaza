@@ -491,11 +491,17 @@ fn decrypt_poll(
             content_type,
             ciphertext,
             nonce,
+            secret_version,
             ..
         } if *content_type == CONTENT_TYPE_POLL => {
             let secret = body_secret(content, secrets, category_secrets, old_category_secrets)?;
-            let bytes =
-                crate::util::ecies::decrypt_with_symmetric_key(&secret, ciphertext, nonce).ok()?;
+            let bytes = crate::util::ecies::decrypt_with_symmetric_key(
+                &secret,
+                ciphertext,
+                nonce,
+                *secret_version,
+            )
+            .ok()?;
             PollContentV1::decode(&bytes).ok()
         }
         _ => None,
@@ -517,11 +523,17 @@ fn decrypt_poll_vote(
             content_type,
             ciphertext,
             nonce,
+            secret_version,
             ..
         } if *content_type == CONTENT_TYPE_POLL_VOTE => {
             let secret = body_secret(content, secrets, category_secrets, old_category_secrets)?;
-            let bytes =
-                crate::util::ecies::decrypt_with_symmetric_key(&secret, ciphertext, nonce).ok()?;
+            let bytes = crate::util::ecies::decrypt_with_symmetric_key(
+                &secret,
+                ciphertext,
+                nonce,
+                *secret_version,
+            )
+            .ok()?;
             PollVoteV1::decode(&bytes).ok()
         }
         _ => None,
@@ -564,15 +576,19 @@ fn decrypt_message_title(
             content_type,
             ciphertext,
             nonce,
+            secret_version,
             ..
         } => {
             if let Some(secret) =
                 body_secret(content, secrets, category_secrets, old_category_secrets)
             {
                 use crate::util::ecies::decrypt_with_symmetric_key;
-                if let Ok(decrypted_bytes) =
-                    decrypt_with_symmetric_key(&secret, ciphertext.as_slice(), nonce)
-                {
+                if let Ok(decrypted_bytes) = decrypt_with_symmetric_key(
+                    &secret,
+                    ciphertext.as_slice(),
+                    nonce,
+                    *secret_version,
+                ) {
                     if *content_type == CONTENT_TYPE_TEXT {
                         if let Ok(text_content) = TextContentV1::decode(&decrypted_bytes) {
                             return text_content.title;
@@ -642,9 +658,12 @@ fn decrypt_message_content(
                 body_secret(content, secrets, category_secrets, old_category_secrets)
             {
                 use crate::util::ecies::decrypt_with_symmetric_key;
-                if let Ok(decrypted_bytes) =
-                    decrypt_with_symmetric_key(&secret, ciphertext.as_slice(), nonce)
-                {
+                if let Ok(decrypted_bytes) = decrypt_with_symmetric_key(
+                    &secret,
+                    ciphertext.as_slice(),
+                    nonce,
+                    *secret_version,
+                ) {
                     if *content_type == CONTENT_TYPE_TEXT {
                         if let Ok(text_content) = TextContentV1::decode(&decrypted_bytes) {
                             return text_content.content;
@@ -703,15 +722,19 @@ fn extract_reply_context(
             content_type,
             ciphertext,
             nonce,
+            secret_version,
             ..
         } if *content_type == CONTENT_TYPE_REPLY => {
             if let Some(secret) =
                 body_secret(content, secrets, category_secrets, old_category_secrets)
             {
                 use crate::util::ecies::decrypt_with_symmetric_key;
-                if let Ok(decrypted_bytes) =
-                    decrypt_with_symmetric_key(&secret, ciphertext.as_slice(), nonce)
-                {
+                if let Ok(decrypted_bytes) = decrypt_with_symmetric_key(
+                    &secret,
+                    ciphertext.as_slice(),
+                    nonce,
+                    *secret_version,
+                ) {
                     if let Ok(reply) = ReplyContentV1::decode(&decrypted_bytes) {
                         return (
                             Some(reply.target_author_name),
@@ -789,11 +812,17 @@ fn extract_category_info(
             content_type,
             ciphertext,
             nonce,
+            secret_version,
             ..
         } if *content_type == CONTENT_TYPE_CATEGORY => {
             let secret = body_secret(content, secrets, category_secrets, old_category_secrets)?;
-            let bytes =
-                crate::util::ecies::decrypt_with_symmetric_key(&secret, ciphertext, nonce).ok()?;
+            let bytes = crate::util::ecies::decrypt_with_symmetric_key(
+                &secret,
+                ciphertext,
+                nonce,
+                *secret_version,
+            )
+            .ok()?;
             CategoryContentV1::decode(&bytes).ok()?
         }
         _ => return None,

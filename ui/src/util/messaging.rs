@@ -137,7 +137,7 @@ pub async fn send_message(
     let content = if let Some((category_id, secret, version)) = category_secret {
         // Restricted categories seal their posts with their own key, on public
         // boards too: the board key would expose the post to every member.
-        let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes);
+        let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes, version);
         BoardMessageBody::Private {
             content_type,
             content_version,
@@ -149,7 +149,8 @@ pub async fn send_message(
     } else if is_private {
         match secret_opt {
             Some((secret, version)) => {
-                let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes);
+                let (ciphertext, nonce) =
+                    encrypt_with_symmetric_key(&secret, &content_bytes, version);
                 BoardMessageBody::private(content_type, content_version, ciphertext, nonce, version)
             }
             None => {
@@ -363,7 +364,7 @@ pub async fn send_poll_vote(
 ) {
     let content_bytes = vote.encode();
     let content = if let Some((category_id, secret, version)) = category_secret {
-        let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes);
+        let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes, version);
         BoardMessageBody::Private {
             content_type: CONTENT_TYPE_POLL_VOTE,
             content_version: POLL_VOTE_VERSION,
@@ -375,7 +376,8 @@ pub async fn send_poll_vote(
     } else if is_private {
         match secret_opt {
             Some((secret, version)) => {
-                let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes);
+                let (ciphertext, nonce) =
+                    encrypt_with_symmetric_key(&secret, &content_bytes, version);
                 BoardMessageBody::private(
                     CONTENT_TYPE_POLL_VOTE,
                     POLL_VOTE_VERSION,
@@ -555,7 +557,8 @@ pub async fn send_category(
     // well; the contract rejects public messages there.
     let content = match secret_opt {
         Some((secret, version)) => {
-            let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &category.encode());
+            let (ciphertext, nonce) =
+                encrypt_with_symmetric_key(&secret, &category.encode(), version);
             BoardMessageBody::Private {
                 content_type: CONTENT_TYPE_CATEGORY,
                 content_version: CATEGORY_CONTENT_VERSION,
@@ -712,7 +715,7 @@ pub async fn send_group(
 
     let content = match secret_opt {
         Some((secret, version)) => {
-            let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &group.encode());
+            let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &group.encode(), version);
             BoardMessageBody::Private {
                 content_type: CONTENT_TYPE_CATEGORY,
                 content_version: CATEGORY_CONTENT_VERSION,

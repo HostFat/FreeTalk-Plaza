@@ -97,8 +97,13 @@ impl ActionContext {
                     SecretScope::Board => self.board_secrets.get(secret_version).copied(),
                     SecretScope::Category(id) => self.category_secrets.get(id).map(|(_, key)| *key),
                 }?;
-                let bytes =
-                    crate::util::ecies::decrypt_with_symmetric_key(&key, ciphertext, nonce).ok()?;
+                let bytes = crate::util::ecies::decrypt_with_symmetric_key(
+                    &key,
+                    ciphertext,
+                    nonce,
+                    *secret_version,
+                )
+                .ok()?;
                 CategoryContentV1::decode(&bytes).ok()
             }
             _ => None,
@@ -165,7 +170,7 @@ fn seal_action_with(
     key: &[u8; 32],
     version: u32,
 ) -> BoardMessageBody {
-    let (ciphertext, nonce) = encrypt_with_symmetric_key(key, &action.encode());
+    let (ciphertext, nonce) = encrypt_with_symmetric_key(key, &action.encode(), version);
     BoardMessageBody::Private {
         content_type: CONTENT_TYPE_ACTION,
         content_version: ACTION_CONTENT_VERSION,
@@ -396,6 +401,11 @@ pub(crate) fn moderation_proof(
     moderation_authority_proof(&ctx.board_state, &self_id, power, &chain)
 }
 
+fn scope_chain(ctx: &ActionContext, target: &MessageId) -> Vec<MessageId> {
+    let routes = ctx.board_state.moderation.routes_map();
+    category_chain(&routes, target)
+}
+
 fn admin_proof(ctx: &ActionContext) -> Option<AuthorityProof> {
     admin_authority_proof(&ctx.board_state, &self_member_id(ctx))
 }
@@ -425,7 +435,9 @@ pub fn set_post_flag(
                     target,
                     kind: FeatureKind::Pinned,
                     value,
+                    scope_chain: scope_chain(&ctx, &target),
                     destination: None,
+                    destination_scope_chain: Vec::new(),
                     generation: next_generation(FeatureKind::Pinned),
                     created_at: now,
                 },
@@ -445,7 +457,9 @@ pub fn set_post_flag(
                     target,
                     kind: FeatureKind::Closed,
                     value,
+                    scope_chain: scope_chain(&ctx, &target),
                     destination: None,
+                    destination_scope_chain: Vec::new(),
                     generation: next_generation(FeatureKind::Closed),
                     created_at: now,
                 },
@@ -465,7 +479,9 @@ pub fn set_post_flag(
                     target,
                     kind: FeatureKind::Announced,
                     value,
+                    scope_chain: scope_chain(&ctx, &target),
                     destination: None,
+                    destination_scope_chain: Vec::new(),
                     generation: next_generation(FeatureKind::Announced),
                     created_at: now,
                 },
@@ -536,7 +552,11 @@ pub fn move_post(
 ) -> Result<(), String> {
     let change = PostMove {
         target,
+        scope_chain: scope_chain(ctx, &target),
         new_parent,
+        new_scope_chain: new_parent
+            .map(|parent| scope_chain(ctx, &parent))
+            .unwrap_or_default(),
         generation: next_move_generation(ctx, &target),
         created_at: chrono::Utc::now().timestamp_millis(),
     };
@@ -576,7 +596,9 @@ pub fn merge_topic(
             target: source,
             kind: FeatureKind::Merged,
             value: true,
+            scope_chain: scope_chain(ctx, &source),
             destination: Some(destination),
+            destination_scope_chain: scope_chain(ctx, &destination),
             generation: next_generation(FeatureKind::Merged),
             created_at: now,
         },
@@ -588,7 +610,9 @@ pub fn merge_topic(
             target: source,
             kind: FeatureKind::Closed,
             value: true,
+            scope_chain: scope_chain(ctx, &source),
             destination: None,
+            destination_scope_chain: Vec::new(),
             generation: next_generation(FeatureKind::Closed),
             created_at: now,
         },
@@ -602,7 +626,9 @@ pub fn merge_topic(
             .map(|reply| {
                 let change = PostMove {
                     target: reply,
+                    scope_chain: scope_chain(ctx, &reply),
                     new_parent: Some(destination),
+                    new_scope_chain: scope_chain(ctx, &destination),
                     generation: next_move_generation(ctx, &reply),
                     created_at: chrono::Utc::now().timestamp_millis(),
                 };
@@ -642,7 +668,7 @@ pub async fn split_reply(
     let (content_type, content_version) = (CONTENT_TYPE_REPLY, REPLY_CONTENT_VERSION);
     let category_secret = ctx.category_secret_for(&category);
     let content = if let Some((category_id, secret, version)) = category_secret {
-        let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes);
+        let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes, version);
         BoardMessageBody::Private {
             content_type,
             content_version,
@@ -654,7 +680,8 @@ pub async fn split_reply(
     } else if ctx.is_private {
         match ctx.secret_opt {
             Some((secret, version)) => {
-                let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes);
+                let (ciphertext, nonce) =
+                    encrypt_with_symmetric_key(&secret, &content_bytes, version);
                 BoardMessageBody::private(content_type, content_version, ciphertext, nonce, version)
             }
             None => BoardMessageBody::public_raw(content_type, content_version, content_bytes),

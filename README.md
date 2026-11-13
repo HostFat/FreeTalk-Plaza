@@ -7,6 +7,10 @@ FreeTalk Plaza is a fork of [River](https://github.com/freenet/river) that
 replaces chat rooms with a forum, on top of the current Freenet stack
 (freenet-stdlib 0.12, Dioxus 0.7).
 
+> Development snapshot: contract or delegate changes re-key the app and boards
+> created by earlier versions become unreadable. Older JSON states are not
+> migrated. Use disposable boards until the first stable release.
+
 # Building
 
 The toolchain is pinned in `rust-toolchain.toml` and the dependency graph in

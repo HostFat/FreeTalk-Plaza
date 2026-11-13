@@ -6,10 +6,24 @@ use curve25519_dalek::edwards::CompressedEdwardsY;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use plaza_core::board_state::privacy::SealedBytes;
 
-/// Domain separation for ECIES and symmetric AEAD. The old ciphertexts did not
-/// use AAD; boards from before this change are intentionally not compatible.
-const ECIES_AAD: &[u8] = b"freetalk-ecies-v2";
-const SYMMETRIC_AAD: &[u8] = b"freetalk-symmetric-v2";
+/// Domain separation plus the recipient/key identity and secret version.
+/// Ciphertexts are bound to the key that produced them, so a blob cannot be
+/// moved to another board, category, member or version.
+const ECIES_DOMAIN: &[u8] = b"freetalk-ecies-v3";
+const SYMMETRIC_DOMAIN: &[u8] = b"freetalk-symmetric-v3";
+
+fn symmetric_aad(key: &[u8; 32], version: u32) -> Vec<u8> {
+    let mut aad = SYMMETRIC_DOMAIN.to_vec();
+    aad.extend_from_slice(blake3::hash(key).as_bytes());
+    aad.extend_from_slice(&version.to_le_bytes());
+    aad
+}
+
+fn ecies_aad(recipient: &VerifyingKey) -> Vec<u8> {
+    let mut aad = ECIES_DOMAIN.to_vec();
+    aad.extend_from_slice(blake3::hash(recipient.as_bytes()).as_bytes());
+    aad
+}
 
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256, Sha512};
@@ -57,7 +71,7 @@ pub fn encrypt(
             &Nonce::from(nonce),
             Payload {
                 msg: plaintext,
-                aad: ECIES_AAD,
+                aad: &ecies_aad(recipient_public_key),
             },
         )
         .expect("encryption failure!");
@@ -110,7 +124,7 @@ pub fn decrypt(
             &Nonce::from(*nonce),
             Payload {
                 msg: ciphertext,
-                aad: ECIES_AAD,
+                aad: &ecies_aad(&recipient_private_key.verifying_key()),
             },
         )
         .map_err(|_| "decryption failure".to_string())
@@ -142,8 +156,12 @@ pub(crate) fn ed25519_to_x25519_private_key(ed25519_sk: &SigningKey) -> X25519Ep
 ///
 /// A tuple containing the ciphertext and a 12-byte nonce.
 #[allow(dead_code)]
-pub fn encrypt_with_symmetric_key(key: &[u8; 32], plaintext: &[u8]) -> (Vec<u8>, [u8; 12]) {
-    encrypt_with_aad(key, plaintext, SYMMETRIC_AAD)
+pub fn encrypt_with_symmetric_key(
+    key: &[u8; 32],
+    plaintext: &[u8],
+    version: u32,
+) -> (Vec<u8>, [u8; 12]) {
+    encrypt_with_aad(key, plaintext, &symmetric_aad(key, version))
 }
 
 fn encrypt_with_aad(key: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> (Vec<u8>, [u8; 12]) {
@@ -180,8 +198,9 @@ pub fn decrypt_with_symmetric_key(
     key: &[u8; 32],
     ciphertext: &[u8],
     nonce: &[u8; 12],
+    version: u32,
 ) -> Result<Vec<u8>, String> {
-    decrypt_with_aad(key, ciphertext, nonce, SYMMETRIC_AAD)
+    decrypt_with_aad(key, ciphertext, nonce, &symmetric_aad(key, version))
 }
 
 fn decrypt_with_aad(
@@ -284,7 +303,7 @@ pub fn decrypt_secret_from_member_blob(
 /// A SealedBytes::Private variant containing the encrypted data.
 #[allow(dead_code)]
 pub fn seal_bytes(plaintext: &[u8], secret_key: &[u8; 32], secret_version: u32) -> SealedBytes {
-    let (ciphertext, nonce) = encrypt_with_symmetric_key(secret_key, plaintext);
+    let (ciphertext, nonce) = encrypt_with_symmetric_key(secret_key, plaintext, secret_version);
     let declared_len_bytes = plaintext.len() as u32;
 
     SealedBytes::Private {
@@ -322,7 +341,7 @@ pub fn unseal_bytes(
             ..
         } => {
             let key = secret_key.ok_or("Secret key required to unseal private data")?;
-            decrypt_with_symmetric_key(key, ciphertext, nonce)
+            decrypt_with_symmetric_key(key, ciphertext, nonce, *secret_version)
         }
     }
 }
@@ -360,7 +379,7 @@ pub fn unseal_bytes_with_secrets(
                     secrets.keys().collect::<Vec<_>>()
                 )
             })?;
-            decrypt_with_symmetric_key(key, ciphertext, nonce)
+            decrypt_with_symmetric_key(key, ciphertext, nonce, *secret_version)
         }
     }
 }
@@ -400,8 +419,8 @@ mod tests {
         let key = generate_board_secret();
         let plaintext = b"Board secret message";
 
-        let (ciphertext, nonce) = encrypt_with_symmetric_key(&key, plaintext);
-        let decrypted = decrypt_with_symmetric_key(&key, &ciphertext, &nonce)
+        let (ciphertext, nonce) = encrypt_with_symmetric_key(&key, plaintext, 0);
+        let decrypted = decrypt_with_symmetric_key(&key, &ciphertext, &nonce, 0)
             .expect("Decryption should succeed");
 
         assert_eq!(decrypted, plaintext);
@@ -413,8 +432,8 @@ mod tests {
         let key2 = generate_board_secret();
         let plaintext = b"Board secret message";
 
-        let (ciphertext, nonce) = encrypt_with_symmetric_key(&key1, plaintext);
-        let result = decrypt_with_symmetric_key(&key2, &ciphertext, &nonce);
+        let (ciphertext, nonce) = encrypt_with_symmetric_key(&key1, plaintext, 0);
+        let result = decrypt_with_symmetric_key(&key2, &ciphertext, &nonce, 0);
 
         assert!(result.is_err());
     }

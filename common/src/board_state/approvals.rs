@@ -28,6 +28,9 @@ pub struct ApprovalV1 {
     /// an author board-wide. `None` means the board root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<MessageId>,
+    /// Section chain of the target at signing time.
+    #[serde(default)]
+    pub scope_chain: Vec<MessageId>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -141,8 +144,12 @@ fn verify_approval(
     if approval.approval.scope.is_some() && approval.approval.scope != expected {
         return Err("Approval scope is not the target's section".to_string());
     }
-    let routes = state.moderation.routes_map();
-    let chain = category_chain(&routes, &approval.approval.target);
+    let chain = if approval.approval.scope_chain.is_empty() {
+        let routes = state.moderation.routes_map();
+        category_chain(&routes, &approval.approval.target)
+    } else {
+        approval.approval.scope_chain.clone()
+    };
     verify_moderation_authority(
         state,
         parameters,
@@ -438,6 +445,7 @@ mod tests {
             approved,
             generation,
             scope: None,
+            scope_chain: Vec::new(),
         }
     }
 
@@ -596,6 +604,7 @@ mod tests {
                     approved: true,
                     generation: 1,
                     scope: Some(cat_a),
+                    scope_chain: vec![cat_a],
                 },
                 &board.owner_sk,
             ));

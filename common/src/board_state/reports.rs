@@ -113,6 +113,9 @@ pub struct ReportResolution {
     pub report_id: MessageId,
     pub status: ReportStatus,
     pub generation: u64,
+    /// Section chain of the reported post at signing time.
+    #[serde(default)]
+    pub scope_chain: Vec<MessageId>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -243,8 +246,12 @@ fn verify_resolution(
         .iter()
         .find(|report| report.id() == entry.resolution.report_id)
         .ok_or("Report resolution targets a missing report")?;
-    let routes = state.moderation.routes_map();
-    let chain = category_chain(&routes, &report.report.target);
+    let chain = if entry.resolution.scope_chain.is_empty() {
+        let routes = state.moderation.routes_map();
+        category_chain(&routes, &report.report.target)
+    } else {
+        entry.resolution.scope_chain.clone()
+    };
     verify_moderation_authority(
         state,
         parameters,
@@ -576,6 +583,7 @@ mod tests {
                 report_id,
                 status: ReportStatus::Resolved,
                 generation: 1,
+                scope_chain: Vec::new(),
             },
             &board.member_sk,
         );
@@ -593,6 +601,7 @@ mod tests {
                 report_id,
                 status: ReportStatus::Dismissed,
                 generation: 1,
+                scope_chain: Vec::new(),
             },
             &board.owner_sk,
         );

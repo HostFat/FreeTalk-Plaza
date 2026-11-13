@@ -246,9 +246,17 @@ impl BansV1 {
             .unwrap_or(false);
         let is_admin = admin_ids.contains(&ban.banned_by) || proof_admin;
         if !is_owner && !is_admin {
-            // The banner must still be present so its key can verify the ban.
-            // A ban signed by a pruned member is removed by cleanup instead of
-            // being accepted without a signature check.
+            // A signed membership proof names the target and the invite chain,
+            // so it works after the banner or the target has been pruned.
+            if ban.ban.target_member.is_some() {
+                let _ = banned_user_ids;
+                if let Err(error) = verify_member_proof(parameters, ban) {
+                    let _ = error;
+                    invalid_bans.insert(ban.id(), BanValidationError::InvalidMembershipProof);
+                }
+                return;
+            }
+
             let Some(banning_member) = member_map.get(&ban.banned_by) else {
                 let _ = banned_user_ids;
                 if allow_missing_banner {
@@ -260,17 +268,9 @@ impl BansV1 {
                 return;
             };
 
-            // The target may already be removed by this ban, in which case the
-            // invite chain can no longer be walked. The signature and banner
-            // checks above still apply.
+            // Legacy ban without a proof: walk the current invite chain.
             let Some(banned_member) = member_map.get(&ban.ban.banned_user) else {
-                // The target is gone. A member-issued ban must carry the
-                // signed membership proof so an arbitrary absent id cannot be
-                // banned. Owner/admin bans stay trusted.
-                if let Err(error) = verify_member_proof(parameters, ban) {
-                    let _ = error;
-                    invalid_bans.insert(ban.id(), BanValidationError::InvalidMembershipProof);
-                }
+                invalid_bans.insert(ban.id(), BanValidationError::InvalidMembershipProof);
                 return;
             };
 
