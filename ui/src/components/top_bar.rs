@@ -28,6 +28,7 @@ pub fn TopBar() -> Element {
             loop {
                 crate::components::members::member_info_modal::ban_button::auto_lift_expired_bans();
                 crate::util::membership::restore_self_membership();
+                crate::util::pq::housekeeping();
                 futures_timer::Delay::new(std::time::Duration::from_secs(60)).await;
             }
         });

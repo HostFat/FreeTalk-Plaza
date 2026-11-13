@@ -89,7 +89,10 @@ pub struct PqSealedSecret {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct PqSecretSet {
     pub scope: PqScope,
+    /// Generation of this set for the scope; a newer set replaces an older one.
     pub version: u32,
+    /// Board or category secret version the sealed payloads belong to.
+    pub secret_version: u32,
     pub secrets: Vec<PqSealedSecret>,
 }
 
@@ -189,6 +192,23 @@ fn verify_set(
     if entry.set.version == 0 {
         return Err("PQ secret set version must be positive".to_string());
     }
+    match &entry.set.scope {
+        PqScope::Board => {
+            if entry.set.secret_version > state.secrets.current_version {
+                return Err("PQ set references a future board secret version".to_string());
+            }
+        }
+        PqScope::Category(category_id) => {
+            if !state
+                .category_secrets
+                .current_version(category_id)
+                .map(|version| entry.set.secret_version <= version)
+                .unwrap_or(false)
+            {
+                return Err("PQ set references an unknown category secret version".to_string());
+            }
+        }
+    }
     if let PqScope::Category(category_id) = &entry.set.scope {
         let category = state
             .recent_messages
@@ -251,12 +271,12 @@ impl PqSecretsV1 {
 
     pub fn cleanup(&mut self, state: &ChatBoardStateV1, parameters: &ChatBoardParametersV1) {
         self.keys.retain(|entry| {
-            entry.key.member_id != parameters.owner_id()
-                && state
+            (entry.key.member_id == parameters.owner_id()
+                || state
                     .members
                     .members
                     .iter()
-                    .any(|member| member.member.id() == entry.key.member_id)
+                    .any(|member| member.member.id() == entry.key.member_id))
                 && verify_key(state, parameters, entry).is_ok()
         });
         self.keys.sort_by_key(|entry| {
@@ -497,6 +517,7 @@ mod tests {
             PqSecretSet {
                 scope: PqScope::Board,
                 version: 1,
+                secret_version: 0,
                 secrets: vec![PqSealedSecret {
                     member_id,
                     kem_ciphertext: vec![1u8; PQ_KEM_CT_LEN],

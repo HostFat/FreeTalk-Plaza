@@ -315,6 +315,7 @@ impl ResponseHandler {
 
                                                                         // Ensure current_secret_version is set to the actual current version
                                                                         board_data.current_secret_version = Some(current_version);
+                                                                        board_data.decrypt_pq_board_secrets();
                                                                     }
                                                                 }
 

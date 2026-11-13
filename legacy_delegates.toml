@@ -68,3 +68,10 @@ description = "Phase 4: temporary ban expiry and owner-signed revocations"
 date = "2026-11-13"
 delegate_key = "94722f210cd215b69cefbf9e3663b435aef52e30f784e77fb1e738ae18c398f2"
 code_hash = "a723cbaefff4f53a36c587a3e81afa36fc0c098a0470f5e28323e635a342d3b8"
+
+[[entry]]
+version = "V8"
+description = "Phase 5: PQ KEM client for private boards"
+date = "2026-11-13"
+delegate_key = "e794bc87bda5f509c3e8b48727934347d7d84b18b455f775d6437223848ba8ee"
+code_hash = "1924c4945a568d419292f3405d67b156fd329a6584708c60bf4c31a6aa71fc08"

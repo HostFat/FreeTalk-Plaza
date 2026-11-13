@@ -95,12 +95,14 @@ and the fixed lengths (1184-byte encapsulation key, 1088-byte ciphertext,
 ML-KEM implementation: the client encapsulates and decapsulates, and the
 contract stores opaque bytes.
 
-The field is empty for now; the UI still uses X25519 ECIES. The next step is to
-generate a KEM seed in the delegate, publish the member key, and seal the board
-and category secrets with ML-KEM (hybrid with X25519 during the transition).
+Private boards now use it: the client derives an ML-KEM seed from the board
+identity, publishes a member key, and seals the board secret to every member
+that has one. The X25519 ECIES blobs remain as a fallback, so existing members
+and invites keep working. Rotating the board secret adds a new PQ set next to
+the X25519 blobs. Categories still use X25519 only.
 
-This is a state schema change, so it re-keys the contract; the local state
-migrates through the delegate as usual.
+The contract re-keys when this schema changes; the local state migrates through
+the delegate as usual.
 
 # License
 

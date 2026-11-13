@@ -702,6 +702,221 @@ impl BoardData {
             .and_then(|v| self.secrets.get(&v))
     }
 
+    fn self_is_member_or_owner(&self) -> bool {
+        let self_vk = self.self_sk.verifying_key();
+        self_vk == self.owner_vk
+            || self
+                .board_state
+                .members
+                .members
+                .iter()
+                .any(|member| member.member.member_vk == self_vk)
+    }
+
+    fn apply_pq_delta(
+        &mut self,
+        delta: plaza_core::board_state::pq_secrets::PqSecretsDelta,
+    ) -> Result<(), String> {
+        let params = self.parameters();
+        let before = self.board_state.clone();
+        self.board_state
+            .apply_delta(
+                &before,
+                &params,
+                &Some(plaza_core::board_state::ChatBoardStateV1Delta {
+                    pq_secrets: Some(delta),
+                    ..Default::default()
+                }),
+            )
+            .map_err(|error| format!("PQ secret delta rejected: {error}"))
+    }
+
+    /// Publish this member's ML-KEM key on a private board. Idempotent.
+    pub fn ensure_pq_key(&mut self) -> bool {
+        if !self.is_private() || !self.self_is_member_or_owner() {
+            return false;
+        }
+        let self_id = MemberId::from(&self.self_sk.verifying_key());
+        let ek = crate::util::pq::encapsulation_key(&self.self_sk);
+        let existing = self.board_state.pq_secrets.key_for(self_id);
+        if existing.map(|key| key.ek == ek).unwrap_or(false) {
+            return false;
+        }
+        let version = existing.map(|key| key.version + 1).unwrap_or(1);
+        let entry = plaza_core::board_state::pq_secrets::AuthorizedPqMemberKey::new(
+            plaza_core::board_state::pq_secrets::PqMemberKey {
+                member_id: self_id,
+                ek,
+                version,
+            },
+            &self.self_sk,
+        );
+        self.apply_pq_delta(plaza_core::board_state::pq_secrets::PqSecretsDelta {
+            keys: vec![entry],
+            sets: vec![],
+        })
+        .is_ok()
+    }
+
+    /// Try the PQ sets for the board secret. Old versions stay in `secrets`.
+    pub fn decrypt_pq_board_secrets(&mut self) {
+        if !self.is_private() {
+            return;
+        }
+        let self_id = MemberId::from(&self.self_sk.verifying_key());
+        let sets: Vec<(u32, plaza_core::board_state::pq_secrets::PqSealedSecret)> = self
+            .board_state
+            .pq_secrets
+            .sets
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.set.scope,
+                    plaza_core::board_state::pq_secrets::PqScope::Board
+                )
+            })
+            .flat_map(|entry| {
+                entry
+                    .set
+                    .secrets
+                    .iter()
+                    .filter(|secret| secret.member_id == self_id)
+                    .map(|secret| (entry.set.secret_version, secret.clone()))
+            })
+            .collect();
+        for (version, sealed) in sets {
+            match crate::util::pq::open_secret(&self.self_sk, &sealed) {
+                Ok(secret) => self.set_secret(secret, version),
+                Err(error) => {
+                    dioxus::logger::tracing::warn!(
+                        "Could not open PQ board secret v{}: {}",
+                        version,
+                        error
+                    );
+                }
+            }
+        }
+    }
+
+    /// Owner-only: seal the current board secret to every member that has a
+    /// PQ key. Members without a key keep using the X25519 blob.
+    pub fn generate_missing_pq_secrets(&mut self) -> bool {
+        use plaza_core::board_state::pq_secrets::{
+            AuthorizedPqSecretSet, PqScope, PqSealedSecret, PqSecretSet, PqSecretsDelta,
+        };
+        use std::collections::HashSet;
+
+        if !self.is_private() || self.self_sk.verifying_key() != self.owner_vk {
+            return false;
+        }
+        let Some((secret, secret_version)) = self.get_secret().map(|(s, v)| (*s, v)) else {
+            return false;
+        };
+        if self
+            .board_state
+            .pq_secrets
+            .key_for(MemberId::from(&self.owner_vk))
+            .is_none()
+        {
+            self.ensure_pq_key();
+        }
+
+        let mut live: Vec<MemberId> = self
+            .board_state
+            .members
+            .members
+            .iter()
+            .map(|member| MemberId::from(&member.member.member_vk))
+            .collect();
+        live.push(MemberId::from(&self.owner_vk));
+        live.sort_by_key(|member| member.0 .0);
+        live.dedup();
+
+        let mut recipients = Vec::new();
+        for member_id in live {
+            if let Some(key) = self.board_state.pq_secrets.key_for(member_id) {
+                recipients.push((member_id, key.ek.clone()));
+            }
+        }
+        if recipients.is_empty() {
+            return false;
+        }
+
+        let existing_for_version = self
+            .board_state
+            .pq_secrets
+            .sets
+            .iter()
+            .filter(|entry| {
+                matches!(entry.set.scope, PqScope::Board)
+                    && entry.set.secret_version == secret_version
+            })
+            .max_by_key(|entry| entry.set.version);
+        let covered: HashSet<MemberId> = existing_for_version
+            .map(|entry| {
+                entry
+                    .set
+                    .secrets
+                    .iter()
+                    .map(|secret| secret.member_id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if recipients
+            .iter()
+            .all(|(member_id, _)| covered.contains(member_id))
+        {
+            return false;
+        }
+
+        let next_set_version = self
+            .board_state
+            .pq_secrets
+            .sets
+            .iter()
+            .filter(|entry| matches!(entry.set.scope, PqScope::Board))
+            .map(|entry| entry.set.version)
+            .max()
+            .unwrap_or(0)
+            + 1;
+
+        let mut sealed = Vec::new();
+        for (member_id, ek) in recipients {
+            match crate::util::pq::seal_secret(&secret, &ek) {
+                Ok((ciphertext, nonce, data)) => sealed.push(PqSealedSecret {
+                    member_id,
+                    kem_ciphertext: ciphertext,
+                    nonce,
+                    sealed: data,
+                }),
+                Err(error) => {
+                    dioxus::logger::tracing::warn!(
+                        "Could not seal the board secret for {}: {}",
+                        member_id,
+                        error
+                    );
+                }
+            }
+        }
+        if sealed.is_empty() {
+            return false;
+        }
+        let set = AuthorizedPqSecretSet::new(
+            PqSecretSet {
+                scope: PqScope::Board,
+                version: next_set_version,
+                secret_version,
+                secrets: sealed,
+            },
+            &self.self_sk,
+        );
+        self.apply_pq_delta(PqSecretsDelta {
+            keys: vec![],
+            sets: vec![set],
+        })
+        .is_ok()
+    }
+
     /// Set/add a board secret for a specific version
     pub fn set_secret(&mut self, secret: [u8; 32], version: u32) {
         self.secrets.insert(version, secret);
@@ -1029,6 +1244,8 @@ impl BoardData {
         self.secrets.insert(new_version, new_secret);
         self.current_secret_version = Some(new_version);
         self.last_secret_rotation = Some(get_current_system_time());
+        // Add the PQ set for the new version alongside the X25519 blobs.
+        self.generate_missing_pq_secrets();
 
         Ok(SecretsDelta {
             current_version: Some(new_version),
@@ -1301,7 +1518,7 @@ impl Boards {
         } else {
             HashMap::new()
         };
-        let board_data = BoardData {
+        let mut board_data = BoardData {
             owner_vk,
             board_state,
             self_sk,
@@ -1327,6 +1544,11 @@ impl Boards {
             subscribed_categories: Vec::new(),
         };
 
+        if board_data.is_private() {
+            board_data.ensure_pq_key();
+            board_data.generate_missing_pq_secrets();
+        }
+
         info!("🟢 Inserting board into map...");
         self.map.insert(owner_vk, board_data);
         info!("🟢 create_new_board_with_name completed successfully, returning owner_vk");
@@ -1345,6 +1567,7 @@ impl Boards {
             // Stored state carries category keys; open them on load so the UI can
             // show restricted categories without waiting for a network round trip.
             board_data.decrypt_category_secrets();
+            board_data.decrypt_pq_board_secrets();
 
             // If the contract key changed (WASM was updated), track for upgrade pointer
             if old_contract_key != board_data.contract_key {
@@ -1441,6 +1664,32 @@ mod tests {
         assert!(board.is_private(), "board must be created private");
         let (secret, version) = board.get_secret().expect("owner holds the secret");
         let secret = *secret;
+        assert!(
+            board
+                .board_state
+                .pq_secrets
+                .keys
+                .iter()
+                .any(|entry| entry.key.member_id == MemberId::from(&key)),
+            "the owner must publish a PQ key"
+        );
+        assert!(
+            board.board_state.pq_secrets.sets.iter().any(|entry| {
+                matches!(
+                    entry.set.scope,
+                    plaza_core::board_state::pq_secrets::PqScope::Board
+                ) && entry
+                    .set
+                    .secrets
+                    .iter()
+                    .any(|secret| secret.member_id == MemberId::from(&key))
+            }),
+            "the owner must receive a PQ-sealed board secret"
+        );
+        board
+            .board_state
+            .verify(&board.board_state, &ChatBoardParametersV1 { owner: key })
+            .expect("the PQ records verify in the contract state");
 
         // The owner reads the sealed board name.
         match &board.board_state.configuration.configuration.display.name {
@@ -1455,6 +1704,7 @@ mod tests {
 
         // The invitee joins with their own key.
         let invitee_sk = SigningKey::generate(&mut rng);
+        let invitee_id: MemberId = invitee_sk.verifying_key().into();
         let owner_id: MemberId = key.into();
         let board = boards.map.get_mut(&key).unwrap();
         board
@@ -1470,6 +1720,23 @@ mod tests {
                 },
                 &owner_sk,
             ));
+
+        // A member with no messages is pruned by post-apply cleanup. Give the
+        // invitee one post so they stay in the state, as a real client would.
+        board.board_state.recent_messages.messages.push(
+            plaza_core::board_state::message::AuthorizedMessageV1::new(
+                plaza_core::board_state::message::MessageV1 {
+                    board_owner: owner_id,
+                    author: invitee_id,
+                    time: std::time::SystemTime::now(),
+                    content: plaza_core::board_state::message::BoardMessageBody::public(
+                        "hello".to_string(),
+                        String::new(),
+                    ),
+                },
+                &invitee_sk,
+            ),
+        );
 
         // The owner distributes the secret (same call the sync path makes when
         // a member joins) and applies it to the board state.
@@ -1489,7 +1756,6 @@ mod tests {
             )
             .expect("the secrets delta applies cleanly");
 
-        let invitee_id: MemberId = invitee_sk.verifying_key().into();
         let blob = board
             .board_state
             .secrets
@@ -1507,6 +1773,60 @@ mod tests {
         )
         .expect("the invitee decrypts the board secret");
         assert_eq!(invitee_secret, secret, "both clients share the secret");
+
+        // The invitee publishes its PQ key, the owner re-seals the board
+        // secret, and the invitee opens it from the PQ set.
+        use plaza_core::board_state::pq_secrets::{
+            AuthorizedPqMemberKey, PqMemberKey, PqSecretsDelta,
+        };
+        let invitee_pq_key = AuthorizedPqMemberKey::new(
+            PqMemberKey {
+                member_id: invitee_id,
+                ek: crate::util::pq::encapsulation_key(&invitee_sk),
+                version: 1,
+            },
+            &invitee_sk,
+        );
+        assert!(
+            board
+                .board_state
+                .members
+                .members
+                .iter()
+                .any(|member| member.member.id() == invitee_id),
+            "the invitee is in the members list before the PQ key"
+        );
+        let state_before = board.board_state.clone();
+        board
+            .board_state
+            .apply_delta(
+                &state_before,
+                &ChatBoardParametersV1 { owner: key },
+                &Some(ChatBoardStateV1Delta {
+                    pq_secrets: Some(PqSecretsDelta {
+                        keys: vec![invitee_pq_key],
+                        sets: vec![],
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .expect("the invitee KEM key applies");
+
+        assert!(
+            board.generate_missing_pq_secrets(),
+            "the owner seals the secret to the invitee key"
+        );
+
+        let mut invitee_view = board.clone();
+        invitee_view.self_sk = invitee_sk.clone();
+        invitee_view.secrets.clear();
+        invitee_view.current_secret_version = None;
+        invitee_view.decrypt_pq_board_secrets();
+        assert_eq!(
+            invitee_view.get_secret().map(|(secret, _)| *secret),
+            Some(secret),
+            "the invitee opens the PQ-sealed secret"
+        );
 
         // A private post from the owner opens for the invitee, not for others.
         let post = seal_bytes(b"hello from the owner", &secret, version);
