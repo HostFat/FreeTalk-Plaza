@@ -12,7 +12,6 @@ use crate::util::avatar::get_avatar;
 use crate::util::format_utc_as_local_time;
 use crate::util::message_actions::{self, ActionContext};
 use dioxus::prelude::*;
-use freenet_scaffold::util::FastHash;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
 use std::collections::{HashMap, HashSet};
@@ -54,7 +53,7 @@ fn build_breadcrumbs(
                         .category_name
                         .clone()
                         .unwrap_or_else(|| "Unnamed".to_string()),
-                    icon: cat.category_icon.clone(),
+                    icon: None,
                 });
                 current_id = cat
                     .parent_category_id
@@ -267,6 +266,12 @@ fn SectionRow(
     let nav_category = category_id.clone();
     let child_nav = navigator();
     let child_board = board_id.clone();
+    let on_child_click = EventHandler::new(move |child_id: MessageId| {
+        child_nav.push(Route::PostsInCategory {
+            board_id: child_board.clone(),
+            category_id: child_id.0 .0.to_string(),
+        });
+    });
     rsx! {
         CategoryCard {
             key: "{category_id}",
@@ -286,33 +291,8 @@ fn SectionRow(
             },
             on_edit: move |data| on_edit.call(data),
             on_request_delete: move |id| on_delete.call(id),
-        }
-        if !child_boards.is_empty() {
-            div { class: "mt-1 ml-12 flex flex-wrap items-center gap-2 text-xs text-text-muted",
-                span { "Child Boards:" }
-                for (child_id, child_name) in child_boards.iter() {
-                    {
-                        let child_id = child_id.clone();
-                        let child_name = child_name.clone();
-                        let board = child_board.clone();
-                        let nav = child_nav;
-                        rsx! {
-                            button {
-                                key: "{child_id:?}",
-                                r#type: "button",
-                                class: "hover:text-accent transition-colors",
-                                onclick: move |_| {
-                                    nav.push(Route::PostsInCategory {
-                                        board_id: board.clone(),
-                                        category_id: child_id.0 .0.to_string(),
-                                    });
-                                },
-                                "{child_name}"
-                            }
-                        }
-                    }
-                }
-            }
+            child_boards: child_boards,
+            on_child_click: Some(on_child_click),
         }
     }
 }
@@ -408,6 +388,17 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
         .as_ref()
         .map(|cat| cat.category_locked)
         .unwrap_or(false);
+    // Shared parent -> direct replies map for headers and post summaries.
+    let reply_children: HashMap<MessageId, Vec<&MessageData>> = {
+        let mut map: HashMap<MessageId, Vec<&MessageData>> = HashMap::new();
+        for message in &all_messages {
+            if let Some(parent) = message.reply_to_message_id.as_ref() {
+                map.entry(parent.clone()).or_default().push(message);
+            }
+        }
+        map
+    };
+
     // Used by the category header button, before board_info is destructured.
     let can_manage_structure = current_board_data
         .as_ref()
@@ -590,7 +581,6 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                         // Category header (when viewing a category)
                         if let Some(cat) = current_category.as_ref() {
                             {
-                                let icon = cat.category_icon.as_deref().unwrap_or("📁");
                                 let name = cat.category_name.as_deref().unwrap_or("Unnamed");
                                 let description = cat.category_description.as_deref();
                                 let color = cat.category_color.as_deref().unwrap_or("#6366f1");
@@ -604,7 +594,6 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                         }
                                         div { class: "p-6",
                                             div { class: "flex items-center gap-4",
-                                                span { class: "text-4xl", "{icon}" }
                                                 div { class: "flex-1 min-w-0 flex flex-wrap items-baseline gap-x-3",
                                                     h1 { class: "text-xl font-bold text-text truncate", "{name}" }
                                                     if let Some(desc) = description {
@@ -641,6 +630,53 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                 }
                                             }
 
+                                            // Child boards inside the section card,
+                                            // under the name and description.
+                                            if !categories.is_empty() {
+                                                div { class: "mt-3 pt-3 border-t border-border",
+                                                    h3 { class: "text-sm font-semibold text-text-muted mb-2", "Child Boards" }
+                                                    div { class: "divide-y divide-border",
+                                                        for child in categories.iter() {
+                                                            {
+                                                                let (count, last) = category_stats(
+                                                                    &child.message_id,
+                                                                    &reply_children,
+                                                                );
+                                                                let child_name = child
+                                                                    .category_name
+                                                                    .clone()
+                                                                    .unwrap_or_else(|| "Unnamed".to_string());
+                                                                let child_id = child.message_id.clone();
+                                                                let board = current_board_id.read().clone();
+                                                                let nav = navigator();
+                                                                rsx! {
+                                                                    button {
+                                                                        key: "{child_id:?}",
+                                                                        r#type: "button",
+                                                                        class: "w-full flex items-center gap-3 px-2 py-2 text-left hover:bg-surface rounded transition-colors",
+                                                                        onclick: move |_| {
+                                                                            nav.push(Route::PostsInCategory {
+                                                                                board_id: board.clone(),
+                                                                                category_id: child_id.0 .0.to_string(),
+                                                                            });
+                                                                        },
+                                                                        span { class: "text-sm font-medium text-text",
+                                                                            if !child.category_allowed_roles.is_empty() { "🔒 " }
+                                                                            "{child_name}"
+                                                                        }
+                                                                        span { class: "ml-auto text-xs text-text-muted text-right",
+                                                                            if count == 1 { "1 post" } else { "{count} posts" }
+                                                                            if let Some((author, time)) = last {
+                                                                                " · {time} by {author}"
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -787,17 +823,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                 }
                             }
 
-                            // Parent -> direct replies, shared by the post and
-                            // category summaries below.
-                            let children: HashMap<MessageId, Vec<&MessageData>> = {
-                                let mut map: HashMap<MessageId, Vec<&MessageData>> = HashMap::new();
-                                for message in &all_messages {
-                                    if let Some(parent) = message.reply_to_message_id.as_ref() {
-                                        map.entry(parent.clone()).or_default().push(message);
-                                    }
-                                }
-                                map
-                            };
+                            let children = &reply_children;
 
                             // Whole-thread reply count and latest reply per post,
                             // so the list can show activity without opening it.
@@ -931,40 +957,31 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                         };
                                                         rsx! {
                                                             div { key: "group-{group_key}", class: "mb-5",
-                                                                div { class: "flex items-center gap-2",
-                                                                    button {
-                                                                        r#type: "button",
-                                                                        class: "w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text hover:bg-surface transition-colors flex-shrink-0",
-                                                                        title: if is_collapsed { "Expand group" } else { "Collapse group" },
-                                                                        onclick: toggle_group,
-                                                                        if is_collapsed { "▸" } else { "▾" }
-                                                                    }
-                                                                    div { class: "flex-1 min-w-0",
-                                                                        CategoryCard {
-                                                                            category: group.clone(),
-                                                                            self_member_id: self_member_id,
-                                                                            is_owner: is_owner,
-                                                                            is_admin: is_admin,
-                                                                            post_count: section_count,
-                                                                            last_activity: None,
-                                                                            on_click: move |_| {},
-                                                                            on_new_section: move |_| {
-                                                                                open_group_section(group_id.clone())
-                                                                            },
-                                                                            on_edit: move |data| edit_handler(data),
-                                                                            on_request_delete: {
-                                                                                let children: Vec<MessageId> = sections
-                                                                                    .iter()
-                                                                                    .map(|section| section.message_id.clone())
-                                                                                    .collect();
-                                                                                move |id| {
-                                                                                    pending_delete.set(Some(id));
-                                                                                    pending_delete_group.set(true);
-                                                                                    pending_group_children.set(children.clone());
-                                                                                }
-                                                                            },
+                                                                CategoryCard {
+                                                                    category: group.clone(),
+                                                                    self_member_id: self_member_id,
+                                                                    is_owner: is_owner,
+                                                                    is_admin: is_admin,
+                                                                    post_count: section_count,
+                                                                    last_activity: None,
+                                                                    collapsed: is_collapsed,
+                                                                    on_toggle_collapsed: Some(EventHandler::new(toggle_group)),
+                                                                    on_click: move |_| {},
+                                                                    on_new_section: move |_| {
+                                                                        open_group_section(group_id.clone())
+                                                                    },
+                                                                    on_edit: move |data| edit_handler(data),
+                                                                    on_request_delete: {
+                                                                        let children: Vec<MessageId> = sections
+                                                                            .iter()
+                                                                            .map(|section| section.message_id.clone())
+                                                                            .collect();
+                                                                        move |id| {
+                                                                            pending_delete.set(Some(id));
+                                                                            pending_delete_group.set(true);
+                                                                            pending_group_children.set(children.clone());
                                                                         }
-                                                                    }
+                                                                    },
                                                                 }
                                                                 if !is_collapsed && !sections.is_empty() {
                                                                     div { class: "mt-2 ml-4 pl-4 border-l border-border space-y-2",
@@ -1040,44 +1057,6 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                             pending_delete_group.set(false);
                                                                         },
                                                                     }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        // Child boards as a full list under the
-                                        // section header, before the posts.
-                                        if viewing_category && !categories.is_empty() {
-                                            div { class: "mb-8",
-                                                h2 { class: "text-lg font-semibold text-text-muted mb-3", "Child Boards" }
-                                                div { class: "space-y-2",
-                                                    for category in categories.iter() {
-                                                        {
-                                                            let (count, last) = category_summaries
-                                                                .get(&category.message_id)
-                                                                .cloned()
-                                                                .unwrap_or_default();
-                                                            let edit_handler = handle_edit_category.clone();
-                                                            let board_id = current_board_id.read().clone();
-                                                            rsx! {
-                                                                SectionRow {
-                                                                    category: category.clone(),
-                                                                    self_member_id: self_member_id,
-                                                                    is_owner: is_owner,
-                                                                    is_admin: is_admin,
-                                                                    post_count: count,
-                                                                    last_activity: last,
-                                                                    allow_group_change: false,
-                                                                    child_boards: Vec::new(),
-                                                                    board_id: board_id,
-                                                                    on_edit: move |data| edit_handler(data),
-                                                                    on_delete: move |id| {
-                                                                        pending_delete.set(Some(id));
-                                                                        pending_delete_group.set(false);
-                                                                    },
                                                                 }
                                                             }
                                                         }

@@ -53,6 +53,18 @@ pub fn CategoryCard(
     /// Groups show a "+ Section" action
     #[props(default)]
     on_new_section: Option<EventHandler<()>>,
+    /// Group is collapsed for this user
+    #[props(default)]
+    collapsed: bool,
+    /// Toggle the group collapse state
+    #[props(default)]
+    on_toggle_collapsed: Option<EventHandler<()>>,
+    /// Child boards shown inside the section card on the home page
+    #[props(default)]
+    child_boards: Vec<(MessageId, String)>,
+    /// Click handler for a child board name
+    #[props(default)]
+    on_child_click: Option<EventHandler<MessageId>>,
     /// Groups available for moving this section
     #[props(default)]
     groups: Vec<(MessageId, String)>,
@@ -91,7 +103,15 @@ pub fn CategoryCard(
 
     rsx! {
         div {
-            class: "bg-panel rounded-lg border border-border overflow-hidden hover:border-accent/50 transition-colors cursor-pointer group relative",
+            class: if category.is_group {
+                if *is_editing.read() {
+                    "bg-panel rounded-lg border border-border transition-colors cursor-pointer group relative"
+                } else {
+                    "rounded-lg transition-colors cursor-pointer group relative"
+                }
+            } else {
+                "bg-panel rounded-lg border border-border overflow-hidden hover:border-accent/50 transition-colors cursor-pointer group relative"
+            },
             onclick: move |_| {
                 if !*is_editing.read() && !category.is_group {
                     on_click.call(())
@@ -100,18 +120,22 @@ pub fn CategoryCard(
             onmouseenter: move |_| is_hovered.set(true),
             onmouseleave: move |_| is_hovered.set(false),
 
-            // Color accent bar at top
-            div {
-                class: "h-2",
-                style: if *is_editing.read() {
-                    format!("background-color: {};", edit_color.read())
-                } else {
-                    format!("background-color: {};", color)
-                },
+            // Color accent bar at top (sections only)
+            if !category.is_group {
+                div {
+                    class: "h-2",
+                    style: if *is_editing.read() {
+                        format!("background-color: {};", edit_color.read())
+                    } else {
+                        format!("background-color: {};", color)
+                    },
+                }
             }
 
             div {
-                class: if has_actions {
+                class: if category.is_group {
+                    "px-1 py-1.5 border-b border-border mb-1"
+                } else if has_actions {
                     "pl-4 pr-28 py-3"
                 } else {
                     "px-4 py-3"
@@ -143,9 +167,33 @@ pub fn CategoryCard(
                         }
                     } else {
                         div { class: "flex items-center gap-3 min-w-0 w-full flex-wrap",
-                            span { class: "text-2xl flex-shrink-0", "{icon}" }
+                            if category.is_group {
+                                if let Some(handler) = on_toggle_collapsed.as_ref() {
+                                    button {
+                                        r#type: "button",
+                                        class: "w-5 h-5 flex items-center justify-center rounded text-text-muted hover:text-text hover:bg-surface transition-colors flex-shrink-0",
+                                        title: if collapsed { "Expand group" } else { "Collapse group" },
+                                        onclick: {
+                                            let handler = handler.clone();
+                                            move |evt| {
+                                                evt.stop_propagation();
+                                                handler.call(());
+                                            }
+                                        },
+                                        if collapsed { "▸" } else { "▾" }
+                                    }
+                                }
+                            }
+                            if !category.is_group {
+                                span { class: "text-2xl flex-shrink-0", "{icon}" }
+                            }
                             div { class: "flex-1 min-w-0 flex items-center gap-2",
-                                h3 { class: "text-base font-semibold text-text group-hover:text-accent transition-colors truncate min-w-0",
+                                h3 {
+                                    class: if category.is_group {
+                                        "text-sm font-semibold text-text-muted truncate min-w-0"
+                                    } else {
+                                        "text-base font-semibold text-text group-hover:text-accent transition-colors truncate min-w-0"
+                                    },
                                     "{name}"
                                 }
                                 if !category.category_allowed_roles.is_empty() {
@@ -331,6 +379,31 @@ pub fn CategoryCard(
                                 is_editing.set(false);
                             },
                             "Cancel"
+                        }
+                    }
+                }
+            }
+
+            // Child boards inside the section card (home page)
+            if !category.is_group && !child_boards.is_empty() {
+                div { class: "px-4 pb-2 flex flex-wrap items-center gap-2 text-xs text-text-muted",
+                    span { "Child Boards:" }
+                    for (child_id, child_name) in child_boards.iter() {
+                        if let Some(handler) = on_child_click.as_ref() {
+                            button {
+                                key: "{child_id:?}",
+                                r#type: "button",
+                                class: "hover:text-accent transition-colors",
+                                onclick: {
+                                    let handler = handler.clone();
+                                    let child_id = child_id.clone();
+                                    move |evt| {
+                                        evt.stop_propagation();
+                                        handler.call(child_id.clone());
+                                    }
+                                },
+                                "{child_name}"
+                            }
                         }
                     }
                 }
