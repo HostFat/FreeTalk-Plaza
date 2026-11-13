@@ -328,6 +328,25 @@ pub fn App() -> Element {
             div { class: "flex-1 min-h-0 overflow-hidden flex flex-col",
                 Router::<Route> {}
             }
+            // Brand footer, centered under the board content.
+            if CURRENT_BOARD.read().owner_key.is_some() {
+                button {
+                    class: "flex-shrink-0 flex items-center justify-center gap-2 py-2 border-t border-border hover:bg-surface/50 transition-colors",
+                    title: "About FreeTalk Plaza",
+                    onclick: move |_| *ABOUT_MODAL.write() = true,
+                    img {
+                        src: asset!("/assets/plaza_logo.svg"),
+                        class: "w-7 h-7 flex-shrink-0",
+                        alt: "",
+                    }
+                    div { class: "flex flex-col leading-tight text-left",
+                        span { class: "text-sm font-semibold text-text", "FreeTalk Plaza" }
+                        span { class: "text-[10px] uppercase tracking-wide text-text-muted",
+                            "Forums on Freenet"
+                        }
+                    }
+                }
+            }
             EditBoardModal {}
             MemberInfoModal {}
             CreateBoardModal {}

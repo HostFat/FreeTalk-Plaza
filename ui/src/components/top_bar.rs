@@ -2,8 +2,8 @@
 
 use crate::board_data::SendMessageError;
 use crate::components::app::{
-    ABOUT_MODAL, BOARDS, COMPOSE_REQUEST, CURRENT_BOARD, CURRENT_CATEGORY, CURRENT_HASH,
-    CURRENT_POST, MEMBER_INFO_MODAL, QUOTE_COLLECTION,
+    BOARDS, COMPOSE_REQUEST, CURRENT_BOARD, CURRENT_CATEGORY, CURRENT_HASH, CURRENT_POST,
+    MEMBER_INFO_MODAL, QUOTE_COLLECTION,
 };
 use crate::components::conversation::message_input::PostInput;
 use crate::util::avatar::get_avatar;
@@ -230,7 +230,7 @@ pub fn TopBar() -> Element {
     let nav_notifications_mobile = nav_notifications.clone();
 
     // Highlight the tab matching the current hash route.
-    let active_hash = CURRENT_HASH.read().clone();
+    let active_hash = CURRENT_HASH.read().trim_start_matches('#').to_string();
     let board_active = active_hash == nav_posts
         || (active_hash.starts_with(&format!("/board/{board_id}"))
             && !active_hash.contains("/admin")
@@ -252,24 +252,8 @@ pub fn TopBar() -> Element {
 
     rsx! {
         div { class: "flex justify-between",
-            // Brand + user profile
+            // User profile
             div { class: "flex items-center min-w-0",
-                button {
-                    class: "hidden sm:flex items-center gap-2 pl-4 md:pl-6 pr-2 py-4 text-left",
-                    title: "About FreeTalk Plaza",
-                    onclick: move |_| *ABOUT_MODAL.write() = true,
-                    img {
-                        src: asset!("/assets/plaza_logo.svg"),
-                        class: "w-9 h-9 flex-shrink-0",
-                        alt: "",
-                    }
-                    div { class: "flex flex-col leading-tight",
-                        span { class: "text-base font-semibold text-text", "FreeTalk Plaza" }
-                        span { class: "text-[10px] uppercase tracking-wide text-text-muted",
-                            "Forums on Freenet"
-                        }
-                    }
-                }
                 // User profile header
                 div {
                     class: "flex items-center gap-3 px-4 md:px-6 py-4 cursor-pointer hover:bg-surface/50 transition-colors",
