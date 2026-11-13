@@ -1270,6 +1270,16 @@ impl BoardData {
         Err(SendMessageError::UserNotMember)
     }
 
+    /// One guard for every write path: content, votes, categories and access
+    /// management all go through this instead of repeating the checks.
+    pub fn ensure_can_write(&self) -> Result<(), String> {
+        self.can_participate().map_err(|error| match error {
+            SendMessageError::UserBanned => "You are banned from this board".to_string(),
+            SendMessageError::UserSuspended => "You are suspended from this board".to_string(),
+            SendMessageError::UserNotMember => "You are not a member of this board".to_string(),
+        })
+    }
+
     /// Check if the user can participate in the board (send messages, edit profile).
     /// Returns Ok if user is not banned AND (is owner OR has self_authorized_member OR is in members list).
     pub fn can_participate(&self) -> Result<(), SendMessageError> {

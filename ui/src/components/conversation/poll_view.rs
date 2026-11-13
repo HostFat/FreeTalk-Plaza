@@ -47,8 +47,8 @@ pub fn PollView(poll: PollData, poll_id: MessageId, self_member_id: MemberId) ->
         else {
             return;
         };
-        if board_data.can_participate().is_err() {
-            error.set(Some("You cannot vote on this board".to_string()));
+        if let Err(message) = board_data.ensure_can_write() {
+            error.set(Some(message));
             return;
         }
         let posting = board_data.posting_secret_for(&poll_id);

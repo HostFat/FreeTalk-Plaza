@@ -495,9 +495,7 @@ pub async fn send_category(
         return Err("Only board owners and admins can create categories".to_string());
     }
     if let Some(board_data) = BOARDS.read().map.get(&current_board) {
-        if board_data.can_participate().is_err() {
-            return Err("You cannot post on this board".to_string());
-        }
+        board_data.ensure_can_write()?;
     }
     if !restricted_roles.is_empty() && self_sk.verifying_key() != current_board {
         return Err("Only the board owner can create restricted categories".to_string());

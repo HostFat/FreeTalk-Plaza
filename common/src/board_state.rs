@@ -122,6 +122,45 @@ pub struct ChatBoardStateV1 {
 }
 
 impl ChatBoardStateV1 {
+    /// Fixpoint for members and messages after invite-cap removal or any
+    /// cleanup that drops a member. Messages by absent members are removed,
+    /// then members without messages or invite-chain descendants are pruned.
+    fn renormalize_members_and_messages(&mut self) {
+        let owner_id = self.configuration.configuration.owner_member_id;
+        for _ in 0..8 {
+            let before = self.members.members.len() + self.recent_messages.messages.len();
+            let members_by_id = self.members.members_by_member_id();
+            self.recent_messages.messages.retain(|message| {
+                message.message.author == owner_id
+                    || members_by_id.contains_key(&message.message.author)
+            });
+
+            let mut required: HashSet<MemberId> = self
+                .recent_messages
+                .messages
+                .iter()
+                .map(|message| message.message.author)
+                .filter(|author| *author != owner_id)
+                .collect();
+            let mut to_process: Vec<MemberId> = required.iter().copied().collect();
+            while let Some(member_id) = to_process.pop() {
+                if let Some(member) = members_by_id.get(&member_id) {
+                    let inviter = member.member.invited_by;
+                    if inviter != owner_id && required.insert(inviter) {
+                        to_process.push(inviter);
+                    }
+                }
+            }
+            self.members
+                .members
+                .retain(|member| required.contains(&member.member.id()));
+
+            if before == self.members.members.len() + self.recent_messages.messages.len() {
+                break;
+            }
+        }
+    }
+
     /// Post-apply cleanup: prune members who have no recent messages, clean up
     /// member_info for pruned members, and remove orphaned bans.
     ///
@@ -281,6 +320,11 @@ impl ChatBoardStateV1 {
         let mut suspensions = std::mem::take(&mut self.suspensions);
         suspensions.cleanup(self, parameters);
         self.suspensions = suspensions;
+
+        // 5g. Invite-cap removal happens before the message cleanup. Re-run
+        // the members/messages fixpoint so removed invitees do not leave
+        // messages or orphaned descendants behind.
+        self.renormalize_members_and_messages();
 
         // 6. Re-sort for deterministic ordering
         self.members.members.sort_by_key(|m| m.member.id());

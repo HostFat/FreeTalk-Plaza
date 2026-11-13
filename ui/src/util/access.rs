@@ -72,6 +72,7 @@ fn with_manager_board<T>(
         (current_board, data.self_sk.clone(), data)
     };
     let self_id = MemberId::from(&self_sk.verifying_key());
+    data.ensure_can_write()?;
     let is_owner = self_id == MemberId::from(board_key);
     if !is_owner && !data.board_state.roles.can_manage_access(&self_id) {
         return Err("You are not allowed to manage access on this board".to_string());
@@ -102,6 +103,7 @@ fn with_admin_board<T>(
         (current_board, data.self_sk.clone(), data)
     };
     let self_id = MemberId::from(&self_sk.verifying_key());
+    data.ensure_can_write()?;
     if self_id != MemberId::from(board_key)
         && !plaza_core::board_state::roles::is_board_admin(&data.board_state, &self_id)
     {
@@ -125,6 +127,7 @@ fn with_owner_board<T>(
             .clone();
         (current_board, data.self_sk.clone(), data)
     };
+    data.ensure_can_write()?;
     if MemberId::from(&self_sk.verifying_key()) != MemberId::from(board_key) {
         return Err("Only the board owner can define roles".to_string());
     }
