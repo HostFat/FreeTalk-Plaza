@@ -308,7 +308,10 @@ pub fn App() -> Element {
                 "Work in progress: features and data can break without notice, there is no support. Avoid boards you plan to keep long term."
             }
             // Main content area (router)
-            div { class: "flex-1 min-h-0 overflow-hidden",
+            // The routed views use `flex-1` roots with their own scroll area.
+            // Without a flex column here those roots have no bounded height and
+            // the content is clipped by overflow-hidden instead of scrolling.
+            div { class: "flex-1 min-h-0 overflow-hidden flex flex-col",
                 Router::<Route> {}
             }
             EditBoardModal {}
