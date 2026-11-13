@@ -242,10 +242,15 @@ fn on_visibility_change() {
     update_document_title();
 }
 
-/// Give the tab the plaza logo. The shell also receives a favicon message so it
-/// can update the outer tab when it supports one.
+/// Plaza's logo, embedded so the shell receives a self-contained `data:` URI.
+/// The shell rejects `http:` favicons, which is what a page URL becomes on a
+/// local node, and accepts `data:` on any scheme.
+const PLAZA_LOGO_SVG: &str = include_str!("../../../assets/plaza_logo.svg");
+
+/// Give the in-iframe tab and the parent shell the plaza logo.
 fn set_favicon() {
-    let href = format!("{}", asset!("/assets/plaza_logo.svg"));
+    let encoded = String::from(js_sys::encode_uri_component(PLAZA_LOGO_SVG));
+    let href = format!("data:image/svg+xml,{encoded}");
     let Some(window) = web_sys::window() else {
         return;
     };
