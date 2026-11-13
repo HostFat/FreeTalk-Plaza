@@ -1,6 +1,5 @@
 use crate::components::conversation::MessageData;
 use dioxus::prelude::*;
-use freenet_scaffold::util::FastHash;
 use plaza_core::board_state::content::validate_icon;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
@@ -306,7 +305,7 @@ pub fn CategoryCard(
                                 class: "w-full px-2 py-1 bg-surface border border-border rounded text-sm text-text",
                                 value: (*edit_group.read())
                                     .as_ref()
-                                    .map(|id| id.0 .0.to_string())
+                                    .map(|id| id.to_string())
                                     .unwrap_or_default(),
                                 onclick: move |e| e.stop_propagation(),
                                 onchange: move |e| {
@@ -315,12 +314,12 @@ pub fn CategoryCard(
                                     edit_group.set(if value.is_empty() {
                                         None
                                     } else {
-                                        value.parse::<i64>().ok().map(|id| MessageId(FastHash(id)))
+                                        value.parse::<MessageId>().ok()
                                     });
                                 },
                                 option { value: "", "Ungrouped" }
                                 for (group_id, group_name) in groups.iter() {
-                                    option { value: "{group_id.0 .0}", "{group_name}" }
+                                    option { value: "{group_id}", "{group_name}" }
                                 }
                             }
                         }

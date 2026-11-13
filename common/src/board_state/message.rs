@@ -1,3 +1,4 @@
+use crate::board_state::id::BoardId;
 use crate::board_state::member::MemberId;
 use crate::board_state::privacy::{PrivacyMode, SecretVersion};
 use crate::board_state::ChatBoardParametersV1;
@@ -5,7 +6,7 @@ use crate::util::sign_struct;
 use crate::util::{truncated_base64, verify_struct};
 use crate::ChatBoardStateV1;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
-use freenet_scaffold::util::{fast_hash, FastHash};
+
 use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
@@ -928,8 +929,8 @@ pub struct MessageV1 {
 impl Default for MessageV1 {
     fn default() -> Self {
         Self {
-            board_owner: MemberId(FastHash(0)),
-            author: MemberId(FastHash(0)),
+            board_owner: MemberId::from_bytes([0u8; 32]),
+            author: MemberId::from_bytes([0u8; 32]),
             time: SystemTime::UNIX_EPOCH,
             content: BoardMessageBody::public(String::new(), String::new()),
         }
@@ -954,12 +955,36 @@ impl fmt::Debug for AuthorizedMessageV1 {
     }
 }
 
-#[derive(Eq, PartialEq, Hash, Serialize, Deserialize, Copy, Clone, Debug, Ord, PartialOrd)]
-pub struct MessageId(pub FastHash);
+#[derive(Eq, PartialEq, Hash, Serialize, Deserialize, Copy, Clone, Ord, PartialOrd)]
+pub struct MessageId(pub BoardId);
+
+impl MessageId {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(BoardId::from_bytes(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
+}
 
 impl fmt::Display for MessageId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.0)
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Debug for MessageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "MessageId({})", self.0)
+    }
+}
+
+impl std::str::FromStr for MessageId {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(Self(value.parse::<BoardId>()?))
     }
 }
 
@@ -985,7 +1010,7 @@ impl AuthorizedMessageV1 {
     }
 
     pub fn id(&self) -> MessageId {
-        MessageId(fast_hash(&self.signature.to_bytes()))
+        MessageId(BoardId::hash(&self.signature.to_bytes()))
     }
 }
 
@@ -1043,8 +1068,8 @@ mod tests {
     #[test]
     fn test_authorized_message_v1_debug() {
         let signing_key = SigningKey::generate(&mut OsRng);
-        let owner_id = MemberId(FastHash(0));
-        let author_id = MemberId(FastHash(1));
+        let owner_id = MemberId::from_bytes([0u8; 32]);
+        let author_id = MemberId::from_bytes([1u8; 32]);
 
         let message = create_test_message(owner_id, author_id);
         let authorized_message = AuthorizedMessageV1::new(message, &signing_key);
@@ -1059,8 +1084,8 @@ mod tests {
     fn test_authorized_message_new_and_validate() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let verifying_key = signing_key.verifying_key();
-        let owner_id = MemberId(FastHash(0));
-        let author_id = MemberId(FastHash(1));
+        let owner_id = MemberId::from_bytes([0u8; 32]);
+        let author_id = MemberId::from_bytes([1u8; 32]);
 
         let message = create_test_message(owner_id, author_id);
         let authorized_message = AuthorizedMessageV1::new(message.clone(), &signing_key);
@@ -1082,8 +1107,8 @@ mod tests {
     #[test]
     fn test_message_id() {
         let signing_key = SigningKey::generate(&mut OsRng);
-        let owner_id = MemberId(FastHash(0));
-        let author_id = MemberId(FastHash(1));
+        let owner_id = MemberId::from_bytes([0u8; 32]);
+        let author_id = MemberId::from_bytes([1u8; 32]);
 
         let message = create_test_message(owner_id, author_id);
         let authorized_message = AuthorizedMessageV1::new(message, &signing_key);
@@ -1172,8 +1197,8 @@ mod tests {
     #[test]
     fn test_messages_summarize() {
         let signing_key = SigningKey::generate(&mut OsRng);
-        let owner_id = MemberId(FastHash(0));
-        let author_id = MemberId(FastHash(1));
+        let owner_id = MemberId::from_bytes([0u8; 32]);
+        let author_id = MemberId::from_bytes([1u8; 32]);
 
         let message1 = create_test_message(owner_id, author_id);
         let message2 = create_test_message(owner_id, author_id);
@@ -1208,8 +1233,8 @@ mod tests {
     #[test]
     fn test_messages_delta() {
         let signing_key = SigningKey::generate(&mut OsRng);
-        let owner_id = MemberId(FastHash(0));
-        let author_id = MemberId(FastHash(1));
+        let owner_id = MemberId::from_bytes([0u8; 32]);
+        let author_id = MemberId::from_bytes([1u8; 32]);
 
         let message1 = create_test_message(owner_id, author_id);
         let message2 = create_test_message(owner_id, author_id);

@@ -347,9 +347,10 @@ where
 /// Uses the hash value to determine hue, with fixed saturation and lightness
 /// for good visibility on dark backgrounds.
 pub fn member_id_to_color(member_id: &MemberId) -> String {
-    // Use the hash value to generate a hue (0-360)
-    let hash = member_id.0 .0;
-    let hue = ((hash.abs() as u64) % 360) as u16;
+    // Use the first bytes of the BLAKE3 id to generate a hue (0-360).
+    let mut raw = [0u8; 8];
+    raw.copy_from_slice(&member_id.as_bytes()[..8]);
+    let hue = (u64::from_le_bytes(raw) % 360) as u16;
     // Use moderate saturation and lightness for visibility
     format!("hsl({}, 65%, 55%)", hue)
 }

@@ -5,7 +5,7 @@
 //! Ed25519 identity restores the PQ key too. The seeded RNG keeps the wasm
 //! build free of a second getrandom backend.
 
-use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use dioxus::prelude::*;
 use ed25519_dalek::SigningKey;
@@ -16,6 +16,12 @@ use plaza_core::board_state::pq_secrets::{PqSealedSecret, PqSuite, PQ_KEM_CT_LEN
 use sha2::{Digest, Sha512};
 
 const KDF_CONTEXT: &[u8] = b"freetalk plaza pq board secret v1";
+
+fn sealed_aad(member_id: &MemberId) -> Vec<u8> {
+    let mut aad = b"freetalk-pq-secret-v2".to_vec();
+    aad.extend_from_slice(member_id.as_bytes());
+    aad
+}
 
 /// Derive the board's ML-KEM seed from its Ed25519 identity.
 pub fn kem_seed(self_sk: &SigningKey) -> [u8; 64] {
@@ -77,7 +83,13 @@ pub fn seal_secret(
     let mut nonce = [0u8; 24];
     nonce.copy_from_slice(&nonce_bytes[..24]);
     let sealed = XChaCha20Poly1305::new((&key).into())
-        .encrypt(XNonce::from_slice(&nonce), secret.as_slice())
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: secret.as_slice(),
+                aad: &sealed_aad(&member_id),
+            },
+        )
         .map_err(|_| "Could not seal the PQ board secret".to_string())?;
     Ok(PqSealedSecret {
         member_id,
@@ -117,7 +129,13 @@ pub fn open_secret(self_sk: &SigningKey, sealed: &PqSealedSecret) -> Result<[u8;
         &combined,
     );
     let plaintext = XChaCha20Poly1305::new((&key).into())
-        .decrypt(XNonce::from_slice(&sealed.nonce), sealed.sealed.as_slice())
+        .decrypt(
+            XNonce::from_slice(&sealed.nonce),
+            Payload {
+                msg: sealed.sealed.as_slice(),
+                aad: &sealed_aad(&sealed.member_id),
+            },
+        )
         .map_err(|_| "Could not open the PQ board secret".to_string())?;
     if plaintext.len() != 32 {
         return Err("Unexpected PQ board secret length".to_string());

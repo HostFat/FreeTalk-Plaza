@@ -97,7 +97,9 @@ impl AuthorizedReport {
 
     /// Stable id derived from the signature.
     pub fn id(&self) -> MessageId {
-        MessageId(fast_hash(&self.signature.to_bytes()))
+        MessageId(crate::board_state::id::BoardId::hash(
+            &self.signature.to_bytes(),
+        ))
     }
 
     pub fn verify_signature_with(&self, key: &VerifyingKey) -> Result<(), String> {
@@ -288,9 +290,9 @@ impl ReportsV1 {
         });
 
         // One report per reporter and target; keep the lowest id.
-        let mut by_pair: BTreeMap<(i64, i64), MessageId> = BTreeMap::new();
+        let mut by_pair: BTreeMap<(MemberId, MessageId), MessageId> = BTreeMap::new();
         for entry in &self.reports {
-            let key = (entry.report.reporter.0 .0, entry.report.target.0 .0);
+            let key = (entry.report.reporter, entry.report.target);
             let id = entry.id();
             by_pair
                 .entry(key)

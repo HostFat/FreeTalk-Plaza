@@ -91,6 +91,12 @@ html, body {
   color: var(--color-text);
 }
 
+/* Markdown content wrapping. */
+.prose {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
 /* Link styling for prose content (Markdown messages) */
 .prose a {
   color: var(--color-accent);

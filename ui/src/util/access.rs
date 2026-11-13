@@ -552,7 +552,6 @@ pub fn join_with_token(link: &JoinLink, nickname: String) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use freenet_scaffold::util::FastHash;
 
     fn key(byte: u8) -> SigningKey {
         SigningKey::from_bytes(&[byte; 32])
@@ -564,7 +563,7 @@ mod tests {
             board: key(1).verifying_key(),
             token_id: [2u8; 16],
             token_key: key(3),
-            category_keys: vec![(MessageId(FastHash(7)), [4u8; 32])],
+            category_keys: vec![(MessageId::from_bytes([7u8; 32]), [4u8; 32])],
         };
 
         let decoded = JoinLink::decode(&link.encode()).unwrap();

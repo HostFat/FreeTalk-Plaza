@@ -5,11 +5,11 @@ use plaza_core::board_state::member::MemberId;
 /// Generate an avatar as a base64-encoded PNG data URL from a MemberId.
 /// The avatar is generated using the identicon-rs crate based on the member's ID bytes.
 pub fn get_avatar(member_id: &MemberId) -> String {
-    // Convert MemberId (which wraps FastHash(u64)) to bytes for identicon generation
-    let id_bytes = (member_id.0).0.to_le_bytes();
+    // Identicon input: the full BLAKE3 member id.
+    let id_bytes = member_id.as_bytes();
 
     // Create a string representation for the identicon
-    let id_string = bs58::encode(&id_bytes).into_string();
+    let id_string = bs58::encode(id_bytes).into_string();
 
     // Generate identicon
     let identicon = Identicon::new(&id_string);

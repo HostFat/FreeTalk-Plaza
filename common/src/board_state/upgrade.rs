@@ -145,7 +145,7 @@ mod tests {
     fn test_authorized_upgrade_new_and_validate() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let verifying_key = signing_key.verifying_key();
-        let owner_id = MemberId(FastHash(0));
+        let owner_id = MemberId::from_bytes([0u8; 32]);
 
         let upgrade = create_test_upgrade(owner_id);
         let authorized_upgrade = AuthorizedUpgradeV1::new(upgrade.clone(), &signing_key);
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn test_optional_upgrade_summarize() {
         let signing_key = SigningKey::generate(&mut OsRng);
-        let owner_id = MemberId(FastHash(0));
+        let owner_id = MemberId::from_bytes([0u8; 32]);
 
         let upgrade = create_test_upgrade(owner_id);
         let authorized_upgrade = AuthorizedUpgradeV1::new(upgrade, &signing_key);
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn test_optional_upgrade_delta() {
         let signing_key = SigningKey::generate(&mut OsRng);
-        let owner_id = MemberId(FastHash(0));
+        let owner_id = MemberId::from_bytes([0u8; 32]);
 
         let upgrade = create_test_upgrade(owner_id);
         let authorized_upgrade = AuthorizedUpgradeV1::new(upgrade, &signing_key);
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn test_optional_upgrade_apply_delta() {
         let signing_key = SigningKey::generate(&mut OsRng);
-        let owner_id = MemberId(FastHash(0));
+        let owner_id = MemberId::from_bytes([0u8; 32]);
 
         let upgrade = create_test_upgrade(owner_id);
         let authorized_upgrade = AuthorizedUpgradeV1::new(upgrade, &signing_key);

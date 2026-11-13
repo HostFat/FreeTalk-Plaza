@@ -61,10 +61,7 @@ fn build_breadcrumbs(
                     icon: None,
                     is_group: cat.is_group,
                 });
-                current_id = cat
-                    .parent_category_id
-                    .as_ref()
-                    .map(|id| format!("{}", id.0 .0));
+                current_id = cat.parent_category_id.as_ref().map(|id| id.to_string());
             } else {
                 break;
             }
@@ -85,11 +82,7 @@ fn get_content(
 ) -> (Vec<MessageData>, Vec<MessageData>) {
     if let Some(cat_id_str) = category_id {
         // Parse category_id to MessageId
-        if let Some(cat_msg_id) = cat_id_str
-            .parse::<i64>()
-            .ok()
-            .map(|hash| MessageId(freenet_scaffold::util::FastHash(hash)))
-        {
+        if let Some(cat_msg_id) = cat_id_str.parse::<MessageId>().ok() {
             let categories = get_subcategories(all_messages, &cat_msg_id);
             let posts = get_category_posts(all_messages, &cat_msg_id);
             return (categories, posts);
@@ -468,7 +461,7 @@ fn SectionRow(
         mark_category_read(child_id);
         child_nav.push(Route::PostsInCategory {
             board_id: child_board.clone(),
-            category_id: child_id.0 .0.to_string(),
+            category_id: child_id.to_string(),
         });
     });
     rsx! {
@@ -1746,11 +1739,7 @@ pub fn SinglePostView(post_id: String) -> Element {
         .and_then(|(_, _, _, _, category, _)| category.clone());
     let has_category = category_id.is_some();
     let back_target = match category_id {
-        Some(category) => format!(
-            "/board/{}/category/{}",
-            current_board_id.read(),
-            category.0 .0
-        ),
+        Some(category) => format!("/board/{}/category/{}", current_board_id.read(), category),
         None => format!("/board/{}", current_board_id.read()),
     };
     let back_label = if has_category {

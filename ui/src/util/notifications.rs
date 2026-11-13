@@ -153,7 +153,6 @@ fn followed_section(
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use freenet_scaffold::util::FastHash;
     use std::collections::HashMap;
 
     fn member(seed: u8) -> MemberId {
@@ -172,7 +171,7 @@ mod tests {
         parent: Option<MessageId>,
     ) -> MessageData {
         MessageData {
-            message_id: MessageId(FastHash(id)),
+            message_id: MessageId::from_bytes([id as u8; 32]),
             author_id: author,
             author_name: format!("member-{id}"),
             is_self: false,
@@ -210,7 +209,7 @@ mod tests {
     fn collect_finds_replies_mentions_and_followed_topics() {
         let me = member(1);
         let other = member(2);
-        let section = MessageId(FastHash(100));
+        let section = MessageId::from_bytes([100u8; 32]);
 
         let messages = vec![
             message(100, other, 500, None, "", true, None),
@@ -221,7 +220,7 @@ mod tests {
                 102,
                 other,
                 3_000,
-                Some(MessageId(FastHash(101))),
+                Some(MessageId::from_bytes([101u8; 32])),
                 "reply",
                 false,
                 None,
@@ -234,7 +233,7 @@ mod tests {
                 105,
                 other,
                 5_000,
-                Some(MessageId(FastHash(104))),
+                Some(MessageId::from_bytes([104u8; 32])),
                 "answer",
                 false,
                 None,
@@ -242,11 +241,18 @@ mod tests {
         ];
 
         let notices = collect(&messages, me, "Alice", 1_000, &[section], &HashMap::new());
-        let ids: Vec<i64> = notices
+        let ids: Vec<MessageId> = notices
             .iter()
-            .map(|notice| notice.message.message_id.0 .0)
+            .map(|notice| notice.message.message_id)
             .collect();
-        assert_eq!(ids, vec![105, 103, 101]);
+        assert_eq!(
+            ids,
+            vec![
+                MessageId::from_bytes([105u8; 32]),
+                MessageId::from_bytes([103u8; 32]),
+                MessageId::from_bytes([101u8; 32])
+            ]
+        );
         assert_eq!(notices[0].kind, NoticeKind::Reply);
         assert_eq!(notices[1].kind, NoticeKind::Mention);
         assert_eq!(notices[2].kind, NoticeKind::Section);
@@ -256,8 +262,8 @@ mod tests {
     fn following_a_parent_section_covers_subsections() {
         let me = member(1);
         let other = member(2);
-        let parent = MessageId(FastHash(100));
-        let child = MessageId(FastHash(110));
+        let parent = MessageId::from_bytes([100u8; 32]);
+        let child = MessageId::from_bytes([110u8; 32]);
 
         let messages = vec![
             message(100, other, 500, None, "", true, None),
@@ -269,14 +275,17 @@ mod tests {
 
         let notices = collect(&messages, me, "Alice", 1_000, &[parent], &HashMap::new());
         assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0].message.message_id.0 .0, 111);
+        assert_eq!(
+            notices[0].message.message_id,
+            MessageId::from_bytes([111u8; 32])
+        );
     }
 
     #[test]
     fn reading_a_followed_section_clears_its_notices() {
         let me = member(1);
         let other = member(2);
-        let section = MessageId(FastHash(100));
+        let section = MessageId::from_bytes([100u8; 32]);
         let messages = vec![
             message(100, other, 500, None, "", true, None),
             message(101, other, 2_000, Some(section), "hello", false, None),
@@ -301,7 +310,7 @@ mod tests {
     fn without_followed_sections_only_personal_notices_remain() {
         let me = member(1);
         let other = member(2);
-        let section = MessageId(FastHash(100));
+        let section = MessageId::from_bytes([100u8; 32]);
         let messages = vec![
             message(100, other, 500, None, "", true, None),
             message(101, other, 2_000, Some(section), "hello", false, None),

@@ -13,7 +13,6 @@ use crate::board_state::ChatBoardParametersV1;
 use crate::util::{sign_struct, verify_struct};
 use crate::ChatBoardStateV1;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
-use freenet_scaffold::util::fast_hash;
 use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -61,7 +60,9 @@ impl AuthorizedWarning {
     }
 
     pub fn id(&self) -> MessageId {
-        MessageId(fast_hash(&self.signature.to_bytes()))
+        MessageId(crate::board_state::id::BoardId::hash(
+            &self.signature.to_bytes(),
+        ))
     }
 
     pub fn verify_signature_with(&self, key: &VerifyingKey) -> Result<(), String> {

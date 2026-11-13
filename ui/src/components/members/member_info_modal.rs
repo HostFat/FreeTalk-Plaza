@@ -292,7 +292,7 @@ pub fn MemberInfoModal() -> Element {
                                                 .unwrap_or_default();
                                             let target = format!(
                                                 "/board/{board}/member/{}",
-                                                member_id.0 .0
+                                                member_id
                                             );
                                             MEMBER_INFO_MODAL.with_mut(|signal| signal.member = None);
                                             if let Some(window) = web_sys::window() {

@@ -295,7 +295,6 @@ pub fn App() -> Element {
         Link { rel: "icon", r#type: "image/svg+xml", href: asset!("/assets/plaza_logo.svg") }
         // Stylesheets
         Stylesheet { href: asset!("/assets/styles.css") }
-        Stylesheet { href: asset!("/assets/main.css") }
 
         // Main layout with router - app-root fixes iOS Safari viewport issues
         div { class: "flex flex-col bg-bg overflow-hidden app-root",

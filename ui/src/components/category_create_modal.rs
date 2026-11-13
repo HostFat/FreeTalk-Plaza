@@ -1,7 +1,6 @@
 use crate::components::app::{BOARDS, CURRENT_BOARD, CURRENT_CATEGORY};
 use crate::util::messaging::{send_category, send_group};
 use dioxus::prelude::*;
-use freenet_scaffold::util::FastHash;
 use plaza_core::board_state::content::validate_icon;
 use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::roles::RoleId;
@@ -344,20 +343,20 @@ pub fn CategoryCreateModal() -> Element {
                                 class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text text-sm",
                                 value: (*selected_group.read())
                                     .as_ref()
-                                    .map(|id| id.0 .0.to_string())
+                                    .map(|id| id.to_string())
                                     .unwrap_or_default(),
                                 onchange: move |evt| {
                                     let value = evt.value();
                                     selected_group.set(if value.is_empty() {
                                         None
                                     } else {
-                                        value.parse::<i64>().ok().map(|id| MessageId(FastHash(id)))
+                                        value.parse::<MessageId>().ok()
                                     });
                                 },
                                 option { value: "", "Ungrouped" }
                                 for (group_id, group_name) in groups.iter() {
                                     option {
-                                        value: "{group_id.0 .0}",
+                                        value: "{group_id}",
                                         "{group_name}"
                                     }
                                 }

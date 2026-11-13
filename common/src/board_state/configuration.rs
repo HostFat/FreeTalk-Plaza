@@ -173,7 +173,7 @@ impl Default for AuthorizedConfigurationV1 {
 impl Default for Configuration {
     fn default() -> Self {
         Configuration {
-            owner_member_id: MemberId(FastHash(0)), // Default value, should be overwritten
+            owner_member_id: MemberId::from_bytes([0u8; 32]), // Default value, should be overwritten
             configuration_version: 1,
             privacy_mode: PrivacyMode::default(),
             display: BoardDisplayMetadata::default(),
@@ -439,7 +439,7 @@ mod tests {
         let owner_signing_key = SigningKey::generate(&mut OsRng);
         let owner_verifying_key = VerifyingKey::from(&owner_signing_key);
         let configuration = Configuration {
-            owner_member_id: MemberId(FastHash(1)),
+            owner_member_id: MemberId::from_bytes([1u8; 32]),
             ..Configuration::default()
         };
         let mut authorized_configuration =
@@ -455,7 +455,7 @@ mod tests {
 
         let mut new_configuration = configuration.clone();
         new_configuration.configuration_version += 1;
-        new_configuration.owner_member_id = MemberId(FastHash(2));
+        new_configuration.owner_member_id = MemberId::from_bytes([2u8; 32]);
         let new_authorized_configuration =
             AuthorizedConfigurationV1::new(new_configuration, &owner_signing_key);
 

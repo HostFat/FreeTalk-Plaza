@@ -777,7 +777,7 @@ mod tests {
     use freenet_scaffold::util::fast_hash;
 
     fn test_message_id() -> MessageId {
-        MessageId(fast_hash(&[1, 2, 3, 4]))
+        MessageId::from_bytes([1u8; 32])
     }
 
     #[test]
@@ -1007,7 +1007,7 @@ mod poll_tests {
     fn votes_check_the_range_and_the_option_count() {
         let poll = poll(false);
         let vote = PollVoteV1 {
-            poll: MessageId(fast_hash(&[9, 9])),
+            poll: MessageId::from_bytes([9u8; 32]),
             options: vec![1],
             generation: 1,
             created_at: 10,

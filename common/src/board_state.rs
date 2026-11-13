@@ -4,6 +4,7 @@ pub mod ban;
 pub mod category_secrets;
 pub mod configuration;
 pub mod content;
+pub mod id;
 pub mod identity;
 pub mod invites;
 pub mod member;
@@ -436,7 +437,7 @@ mod tests {
                 UserBan {
                     owner_member_id: owner_id,
                     banned_at: at(1),
-                    banned_user: MemberId(FastHash(21)),
+                    banned_user: MemberId::from_bytes([21u8; 32]),
                     expires_at: None,
                     target_member: None,
                     invite_chain: Vec::new(),
@@ -448,7 +449,7 @@ mod tests {
                 UserBan {
                     owner_member_id: owner_id,
                     banned_at: at(2),
-                    banned_user: MemberId(FastHash(23)),
+                    banned_user: MemberId::from_bytes([23u8; 32]),
                     expires_at: None,
                     target_member: None,
                     invite_chain: Vec::new(),

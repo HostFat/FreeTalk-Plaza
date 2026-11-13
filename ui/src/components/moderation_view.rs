@@ -8,6 +8,7 @@ use crate::util::format_utc_as_local_time;
 use crate::util::message_actions::ActionContext;
 use crate::util::moderation_queue;
 use dioxus::prelude::*;
+use plaza_core::board_state::approvals::message_scope;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::reports::ReportStatus;
 use std::collections::HashMap;
@@ -150,13 +151,17 @@ pub fn ModerationView() -> Element {
                                 let title = post_label(message);
                                 let author = message.author_name.clone();
                                 let time = format_utc_as_local_time(message.time.timestamp_millis());
+                                let scope = message_scope(&board.board_state, &target)
+                                    .and_then(|id| by_id.get(&id))
+                                    .and_then(|category| category.category_name.clone())
+                                    .unwrap_or_else(|| "Board root".to_string());
                                 rsx! {
                                     div {
-                                        key: "{target.0 .0}",
+                                        key: "{target}",
                                         class: "flex flex-wrap items-center gap-3 bg-panel border border-border rounded-lg px-3 py-2",
                                         div { class: "flex-1 min-w-48",
                                             p { class: "text-text font-medium", "{title}" }
-                                            p { class: "text-xs text-text-muted", "by {author} · {time}" }
+                                            p { class: "text-xs text-text-muted", "by {author} · {time} · in {scope}" }
                                         }
                                         button {
                                             r#type: "button",
@@ -288,7 +293,7 @@ pub fn ModerationView() -> Element {
                                 };
                                 rsx! {
                                     div {
-                                        key: "{report_id.0 .0}",
+                                        key: "{report_id}",
                                         class: "bg-panel border border-border rounded-lg px-3 py-2",
                                         div { class: "flex flex-wrap items-center gap-2",
                                             span { class: "text-xs uppercase tracking-wide text-accent",

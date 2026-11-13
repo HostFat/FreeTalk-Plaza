@@ -1,9 +1,9 @@
+use crate::board_state::id::BoardId;
 use crate::board_state::member::{AuthorizedMember, MemberId};
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::{sign_struct, verify_struct};
 use crate::ChatBoardStateV1;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
-use freenet_scaffold::util::{fast_hash, FastHash};
 use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -633,7 +633,7 @@ impl AuthorizedUserBan {
 
     /// Generates a unique identifier for this ban based on its signature
     pub fn id(&self) -> BanId {
-        BanId(fast_hash(&self.signature.to_bytes()))
+        BanId(BoardId::hash(&self.signature.to_bytes()))
     }
 }
 
@@ -663,7 +663,13 @@ pub struct UserBan {
 ///
 /// Created from a hash of the ban's signature to ensure uniqueness
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Hash, Debug, Ord, PartialOrd)]
-pub struct BanId(pub FastHash);
+pub struct BanId(pub BoardId);
+
+impl BanId {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(BoardId::from_bytes(bytes))
+    }
+}
 
 /// A signed record that lifts one ban. Revocations stay in state as tombstones
 /// so a stale peer cannot reintroduce the ban. The contract cannot use a wall
@@ -1171,7 +1177,7 @@ mod tests {
             UserBan {
                 owner_member_id: owner_id,
                 banned_at: at(1),
-                banned_user: MemberId(FastHash(11)),
+                banned_user: MemberId::from_bytes([11u8; 32]),
                 expires_at: None,
                 target_member: None,
                 invite_chain: Vec::new(),
@@ -1183,7 +1189,7 @@ mod tests {
             UserBan {
                 owner_member_id: owner_id,
                 banned_at: at(2),
-                banned_user: MemberId(FastHash(12)),
+                banned_user: MemberId::from_bytes([12u8; 32]),
                 expires_at: None,
                 target_member: None,
                 invite_chain: Vec::new(),
@@ -1494,7 +1500,7 @@ mod revocation_tests {
         );
         let revocation = AuthorizedBanRevocation::new(
             BanRevocationV1 {
-                ban_id: BanId(FastHash(7)),
+                ban_id: BanId::from_bytes([7u8; 32]),
                 banned_user: member_id,
                 revoked_at: SystemTime::now(),
             },

@@ -142,7 +142,7 @@ impl MessageData {
 
     /// Get a string ID suitable for use in URLs/routes
     pub fn id_string(&self) -> String {
-        format!("{}", self.message_id.0 .0)
+        self.message_id.to_string()
     }
 }
 
@@ -352,7 +352,7 @@ pub fn get_all_messages(
                 .get(&message_id)
                 .map(|votes| votes.values().cloned().collect())
                 .unwrap_or_default();
-            votes.sort_by_key(|ballot| ballot.voter.0 .0);
+            votes.sort_by_key(|ballot| ballot.voter);
             PollData {
                 options: content.options,
                 closes_at: content.closes_at,
@@ -2253,7 +2253,7 @@ mod category_tests {
     }
 
     fn message_id() -> MessageId {
-        MessageId(freenet_scaffold::util::FastHash(42))
+        MessageId::from_bytes([42u8; 32])
     }
 
     #[test]

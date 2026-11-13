@@ -409,7 +409,7 @@ mod tests {
     ) -> (ChatBoardStateV1, MessageId, MemberId) {
         use crate::board_state::member::{AuthorizedMember, Member};
 
-        let category_id = MessageId(FastHash(7));
+        let category_id = MessageId::from_bytes([7u8; 32]);
         let member_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
         let member = MemberId::from(&member_key.verifying_key());
         let version = SecretVersionRecordV1 {
@@ -495,7 +495,7 @@ mod tests {
     fn a_member_without_a_blob_is_reported_as_missing() {
         let owner = owner();
         let (state, category, member) = state_with_category(&owner);
-        let other = MemberId(FastHash(11));
+        let other = MemberId::from_bytes([11u8; 32]);
 
         let missing = state
             .category_secrets
@@ -566,7 +566,7 @@ mod tests {
             &owner,
         ));
 
-        let category = MessageId(FastHash(21));
+        let category = MessageId::from_bytes([21u8; 32]);
         state.category_secrets.categories.push(CategorySecretSet {
             category_id: category.clone(),
             current_version: 0,
@@ -631,7 +631,7 @@ mod tests {
             ));
         }
 
-        let category = MessageId(FastHash(21));
+        let category = MessageId::from_bytes([21u8; 32]);
         state.category_secrets.categories.push(CategorySecretSet {
             category_id: category,
             current_version: 0,
@@ -705,7 +705,7 @@ mod tests {
         let distributor = MemberId::from(&distributor_sk.verifying_key());
         let recipient = MemberId::from(&recipient_sk.verifying_key());
         let role_id = [4u8; 16];
-        let category = MessageId(FastHash(22));
+        let category = MessageId::from_bytes([22u8; 32]);
 
         let mut base = ChatBoardStateV1 {
             configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner),

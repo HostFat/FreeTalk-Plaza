@@ -24,6 +24,14 @@ use plaza_core::board_state::moderation::{AuthorizedMessageRoute, MessageRoute, 
 use plaza_core::board_state::roles::RoleId;
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
 use plaza_core::chat_delegate::BoardKey;
+use std::cell::Cell;
+
+/// Client-side anti double-submit window. The contract has no trusted clock,
+/// so a real time-based rate limit cannot be verified there.
+const MIN_SEND_INTERVAL_MS: i64 = 2000;
+thread_local! {
+    static LAST_SEND_MS: Cell<i64> = const { Cell::new(0) };
+}
 
 /// Context for a reply message
 #[derive(Clone, PartialEq, Debug)]
@@ -72,6 +80,13 @@ pub async fn send_message(
             return;
         }
     }
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if now_ms - LAST_SEND_MS.with(Cell::get) < MIN_SEND_INTERVAL_MS {
+        warn!("Ignoring a second send inside the cooldown window");
+        return;
+    }
+    LAST_SEND_MS.with(|last| last.set(now_ms));
 
     let max_message_size = board_state_clone
         .configuration

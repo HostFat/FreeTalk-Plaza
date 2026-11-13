@@ -5,15 +5,12 @@ use crate::components::app::{Route, BOARDS, CURRENT_BOARD};
 use crate::components::conversation::get_all_messages;
 use crate::util::format_utc_as_local_time;
 use dioxus::prelude::*;
-use freenet_scaffold::util::FastHash;
 use plaza_core::board_state::member::MemberId;
+use std::str::FromStr;
 
 #[component]
 pub fn ProfileView(member_key: String) -> Element {
-    let member_id = member_key
-        .parse::<i64>()
-        .ok()
-        .map(|value| MemberId(FastHash(value)));
+    let member_id = MemberId::from_str(&member_key).ok();
 
     let board = use_memo(move || {
         let current = CURRENT_BOARD.read().owner_key?;

@@ -142,7 +142,7 @@ fn TopicStructure(
                         div { class: "mt-2 space-y-1",
                             for reply in replies.iter() {
                                 ReplySplitRow {
-                                    key: "{reply.message_id.0 .0}",
+                                    key: "{reply.message_id}",
                                     reply: reply.clone(),
                                     section_id: section_id,
                                     section_name: section_name.clone(),
@@ -332,7 +332,7 @@ pub fn StructureView() -> Element {
                         .collect();
                     rsx! {
                         TopicStructure {
-                            key: "{topic.message_id.0 .0}",
+                            key: "{topic.message_id}",
                             topic: topic.clone(),
                             section_id: section_id,
                             section_name: section_name,

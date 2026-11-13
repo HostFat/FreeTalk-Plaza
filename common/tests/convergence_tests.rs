@@ -859,8 +859,8 @@ fn test_ban_convergence_stress_same_timestamps() {
 
     // Helper to extract BanIds from error message
     fn extract_ban_ids(err: &str) -> HashSet<String> {
-        // Error format: "Invalid bans: BanId(FastHash(123)): ..., BanId(FastHash(456)): ..."
-        err.split("BanId(FastHash(")
+        // Error format: "Invalid bans: BanId(BoardId(...)): ..."
+        err.split("BanId(BoardId(")
             .skip(1)
             .filter_map(|s| s.split("))").next())
             .map(|s| s.to_string())
@@ -1596,7 +1596,7 @@ fn test_regression_ban_excess_identification() {
 
     // Helper to extract BanIds from error message
     fn extract_ban_ids(err: &str) -> HashSet<String> {
-        err.split("BanId(FastHash(")
+        err.split("BanId(BoardId(")
             .skip(1)
             .filter_map(|s| s.split("))").next())
             .map(|s| s.to_string())

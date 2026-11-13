@@ -120,7 +120,7 @@ pub fn NotificationsView() -> Element {
                         } else {
                             for (section_id, name) in followed_names.iter() {
                                 button {
-                                    key: "{section_id.0 .0}",
+                                    key: "{section_id}",
                                     r#type: "button",
                                     class: "flex items-center gap-1 px-2 py-1 bg-surface border border-border rounded-full text-text hover:border-accent/50 transition-colors",
                                     title: "Unfollow this section",

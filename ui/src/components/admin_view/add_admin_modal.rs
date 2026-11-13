@@ -2,7 +2,6 @@ use crate::board_data::BoardData;
 use crate::components::app::{mark_needs_sync, BOARDS, CURRENT_BOARD};
 use dioxus::logger::tracing::{error, info};
 use dioxus::prelude::*;
-use freenet_scaffold::util::FastHash;
 use freenet_scaffold::ComposableState;
 use plaza_core::board_state::admin::{Admin, AdminsDelta, AuthorizedAdmin};
 use plaza_core::board_state::member::MemberId;
@@ -171,14 +170,14 @@ pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
                             select {
                                 class: "w-full bg-surface border border-border rounded-lg px-3 py-2 text-text focus:outline-none focus:ring-2 focus:ring-accent",
                                 onchange: move |evt| {
-                                    if let Ok(hash_value) = evt.value().parse::<i64>() {
-                                        selected_member.set(Some(MemberId(FastHash(hash_value))));
+                                    if let Ok(member) = evt.value().parse::<MemberId>() {
+                                        selected_member.set(Some(member));
                                     }
                                 },
                                 option { value: "", "-- Select a member --" }
                                 for member_id in available_members.read().iter() {
                                     option {
-                                        value: "{member_id.0.0}",
+                                        value: "{member_id}",
                                         "{get_nickname(*member_id)} ({member_id})"
                                     }
                                 }

@@ -1,15 +1,17 @@
 use crate::board_state::ban::BansV1;
+use crate::board_state::id::BoardId;
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::{sign_struct, truncated_base32, verify_struct};
 use crate::ChatBoardStateV1;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
-use freenet_scaffold::util::{fast_hash, FastHash};
+
 use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
+use std::str::FromStr;
 
 /*
 Note that the owner should not be in the members list but for most purposes (eg. sending messages)
@@ -474,33 +476,47 @@ Finding a VerifyingKey that would have a MemberId collision would require approx
 3 * 10^59 years on current hardware.
 */
 #[derive(Eq, PartialEq, Hash, Serialize, Deserialize, Clone, Ord, PartialOrd, Copy)]
-pub struct MemberId(pub FastHash);
+pub struct MemberId(pub BoardId);
+
+impl MemberId {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(BoardId::from_bytes(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
+}
 
 impl Display for MemberId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", truncated_base32(&self.0 .0.to_le_bytes()))
+        write!(f, "{}", self.0)
     }
 }
 
 impl Debug for MemberId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "MemberId({})",
-            truncated_base32(&self.0 .0.to_le_bytes())
-        )
+        write!(f, "MemberId({})", truncated_base32(self.0.as_bytes()))
+    }
+}
+
+impl FromStr for MemberId {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(Self(value.parse::<BoardId>()?))
     }
 }
 
 impl From<&VerifyingKey> for MemberId {
     fn from(vk: &VerifyingKey) -> Self {
-        MemberId(fast_hash(&vk.to_bytes()))
+        MemberId(BoardId::hash(&vk.to_bytes()))
     }
 }
 
 impl From<VerifyingKey> for MemberId {
     fn from(vk: VerifyingKey) -> Self {
-        MemberId(fast_hash(&vk.to_bytes()))
+        MemberId(BoardId::hash(&vk.to_bytes()))
     }
 }
 
@@ -722,7 +738,7 @@ mod tests {
 
     #[test]
     fn test_member_id() {
-        let owner_id = MemberId(FastHash(0));
+        let owner_id = MemberId::from_bytes([0u8; 32]);
         let (member, _) = create_test_member(owner_id, owner_id);
         let member_id = member.id();
 
@@ -839,7 +855,7 @@ mod tests {
             .contains("Circular invite chain detected"));
 
         // Test case 3: Missing inviter
-        let non_existent_inviter_id = MemberId(FastHash(999));
+        let non_existent_inviter_id = MemberId::from_bytes([0x99u8; 32]);
         let (orphan_member, _) = create_test_member(owner_id, non_existent_inviter_id);
         let orphan_authorized_member = AuthorizedMember {
             member: orphan_member,

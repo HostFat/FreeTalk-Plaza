@@ -1,10 +1,16 @@
 use aes_gcm::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Nonce,
 };
 use curve25519_dalek::edwards::CompressedEdwardsY;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use plaza_core::board_state::privacy::SealedBytes;
+
+/// Domain separation for ECIES and symmetric AEAD. The old ciphertexts did not
+/// use AAD; boards from before this change are intentionally not compatible.
+const ECIES_AAD: &[u8] = b"freetalk-ecies-v2";
+const SYMMETRIC_AAD: &[u8] = b"freetalk-symmetric-v2";
+
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256, Sha512};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519EphemeralSecret};
@@ -47,7 +53,13 @@ pub fn encrypt(
     // Encrypt the plaintext using AES-GCM
     let cipher = Aes256Gcm::new_from_slice(&symmetric_key).expect("Failed to create cipher");
     let ciphertext = cipher
-        .encrypt(&Nonce::from(nonce), plaintext)
+        .encrypt(
+            &Nonce::from(nonce),
+            Payload {
+                msg: plaintext,
+                aad: ECIES_AAD,
+            },
+        )
         .expect("encryption failure!");
 
     (ciphertext, nonce, sender_public_key)
@@ -94,7 +106,13 @@ pub fn decrypt(
     let cipher = Aes256Gcm::new_from_slice(&symmetric_key)
         .map_err(|_| "Failed to create cipher".to_string())?;
     cipher
-        .decrypt(&Nonce::from(*nonce), ciphertext.as_ref())
+        .decrypt(
+            &Nonce::from(*nonce),
+            Payload {
+                msg: ciphertext,
+                aad: ECIES_AAD,
+            },
+        )
         .map_err(|_| "decryption failure".to_string())
 }
 
@@ -125,12 +143,22 @@ pub(crate) fn ed25519_to_x25519_private_key(ed25519_sk: &SigningKey) -> X25519Ep
 /// A tuple containing the ciphertext and a 12-byte nonce.
 #[allow(dead_code)]
 pub fn encrypt_with_symmetric_key(key: &[u8; 32], plaintext: &[u8]) -> (Vec<u8>, [u8; 12]) {
+    encrypt_with_aad(key, plaintext, SYMMETRIC_AAD)
+}
+
+fn encrypt_with_aad(key: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> (Vec<u8>, [u8; 12]) {
     let cipher = Aes256Gcm::new_from_slice(key).expect("Failed to create cipher");
     let nonce_bytes = rand::random::<[u8; 12]>();
     let nonce = Nonce::from(nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(&nonce, plaintext)
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .expect("Symmetric encryption failure");
 
     (ciphertext, nonce_bytes)
@@ -153,12 +181,27 @@ pub fn decrypt_with_symmetric_key(
     ciphertext: &[u8],
     nonce: &[u8; 12],
 ) -> Result<Vec<u8>, String> {
+    decrypt_with_aad(key, ciphertext, nonce, SYMMETRIC_AAD)
+}
+
+fn decrypt_with_aad(
+    key: &[u8; 32],
+    ciphertext: &[u8],
+    nonce: &[u8; 12],
+    aad: &[u8],
+) -> Result<Vec<u8>, String> {
     let cipher =
         Aes256Gcm::new_from_slice(key).map_err(|e| format!("Failed to create cipher: {}", e))?;
     let nonce_obj = Nonce::from(*nonce);
 
     cipher
-        .decrypt(&nonce_obj, ciphertext)
+        .decrypt(
+            &nonce_obj,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|e| format!("Decryption failed: {}", e))
 }
 
@@ -273,7 +316,10 @@ pub fn unseal_bytes(
     match sealed {
         SealedBytes::Public { value } => Ok(value.clone()),
         SealedBytes::Private {
-            ciphertext, nonce, ..
+            ciphertext,
+            nonce,
+            secret_version,
+            ..
         } => {
             let key = secret_key.ok_or("Secret key required to unseal private data")?;
             decrypt_with_symmetric_key(key, ciphertext, nonce)

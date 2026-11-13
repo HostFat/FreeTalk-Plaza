@@ -10,7 +10,7 @@ const STORAGE_KEY: &str = "river_receive_times";
 const MAX_AGE_MS: f64 = 24.0 * 60.0 * 60.0 * 1000.0; // 24 hours
 
 /// Maps message ID inner value (i64) to receive timestamp in milliseconds since epoch.
-pub static RECEIVE_TIMES: GlobalSignal<HashMap<i64, f64>> = Global::new(load_from_storage);
+pub static RECEIVE_TIMES: GlobalSignal<HashMap<String, f64>> = Global::new(load_from_storage);
 
 fn now_ms() -> f64 {
     #[cfg(target_arch = "wasm32")]
@@ -29,7 +29,7 @@ fn now_ms() -> f64 {
 
 /// Parse "key:value,key:value,..." format
 #[cfg(target_arch = "wasm32")]
-fn parse_map(s: &str) -> HashMap<i64, f64> {
+fn parse_map(s: &str) -> HashMap<String, f64> {
     let mut map = HashMap::new();
     if s.is_empty() {
         return map;
@@ -37,7 +37,7 @@ fn parse_map(s: &str) -> HashMap<i64, f64> {
     for pair in s.split(',') {
         let mut parts = pair.splitn(2, ':');
         if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-            if let (Ok(key), Ok(val)) = (k.parse::<i64>(), v.parse::<f64>()) {
+            if let (Ok(val), key) = (v.parse::<f64>(), k.to_string()) {
                 map.insert(key, val);
             }
         }
@@ -47,14 +47,14 @@ fn parse_map(s: &str) -> HashMap<i64, f64> {
 
 /// Serialize to "key:value,key:value,..." format
 #[cfg(target_arch = "wasm32")]
-fn serialize_map(map: &HashMap<i64, f64>) -> String {
+fn serialize_map(map: &HashMap<String, f64>) -> String {
     map.iter()
         .map(|(k, v)| format!("{}:{}", k, *v as i64))
         .collect::<Vec<_>>()
         .join(",")
 }
 
-fn load_from_storage() -> HashMap<i64, f64> {
+fn load_from_storage() -> HashMap<String, f64> {
     #[cfg(target_arch = "wasm32")]
     {
         let window = match web_sys::window() {
@@ -82,7 +82,7 @@ fn load_from_storage() -> HashMap<i64, f64> {
     }
 }
 
-fn save_to_storage(#[allow(unused_variables)] map: &HashMap<i64, f64>) {
+fn save_to_storage(#[allow(unused_variables)] map: &HashMap<String, f64>) {
     #[cfg(target_arch = "wasm32")]
     {
         let window = match web_sys::window() {
@@ -107,7 +107,7 @@ pub fn record_receive_times(message_ids: &[MessageId]) {
     RECEIVE_TIMES.with_mut(|map| {
         let mut new_count = 0;
         for id in message_ids {
-            if map.entry(id.0 .0).or_insert(now) == &now {
+            if map.entry(id.to_string()).or_insert(now) == &now {
                 new_count += 1;
             }
         }
@@ -124,7 +124,7 @@ pub fn record_receive_times(message_ids: &[MessageId]) {
 /// Get the propagation delay for a message, if known.
 /// Returns delay in seconds, or None if unknown or negative (clock skew).
 pub fn get_delay_secs(message_id: &MessageId, send_time_ms: i64) -> Option<i64> {
-    let recv_ms = *RECEIVE_TIMES.read().get(&message_id.0 .0)?;
+    let recv_ms = *RECEIVE_TIMES.read().get(&message_id.to_string())?;
     let delay_ms = recv_ms as i64 - send_time_ms;
     let delay_secs = delay_ms / 1000;
     if delay_secs >= 0 {
