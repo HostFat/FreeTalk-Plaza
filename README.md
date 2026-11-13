@@ -53,6 +53,23 @@ Run `deploy-tool deploy`
 The deployment id in `deploy.toml` (`freetalk`) is the live app identity and is
 intentionally unchanged by the rename.
 
+## Fast deploy
+
+`deploy-tool deploy` builds into a temporary Cargo target dir, so it recompiles
+the UI from scratch on every run. For day-to-day work use:
+
+```powershell
+pwsh ./deploy-fast.ps1
+```
+
+It keeps the Cargo target in `target/dx-fast`, rebuilds CSS, builds the UI,
+signs the web container, merges the state and publishes. The first run is a
+full build; later runs reuse compiled dependencies (about 20 seconds for the
+UI build instead of two minutes).
+
+Options: `-Version N` to force the version, `-SkipCss` when the CSS is already
+built, `-StateDir` and `-TargetDir` to override the defaults.
+
 ## Publish only
 
 `deploy-tool deploy` rebuilds the UI (`dx build --release`), signs the bundle
