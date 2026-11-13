@@ -163,26 +163,19 @@ pub fn AuditView() -> Element {
             ),
         ));
     }
-    for file in &board.board_state.moderation.flags {
-        let mut actions = Vec::new();
-        if file.flag.pinned {
-            actions.push("pinned");
-        }
-        if file.flag.closed {
-            actions.push("closed");
-        }
-        if file.flag.announced {
-            actions.push("announced");
-        }
-        if file.flag.merged_into.is_some() {
-            actions.push("merged");
-        }
-        if actions.is_empty() {
+    for flag in &board.board_state.moderation.feature_flags {
+        if !flag.flag.value {
             continue;
         }
+        let action = match flag.flag.kind {
+            plaza_core::board_state::moderation::FeatureKind::Pinned => "pinned",
+            plaza_core::board_state::moderation::FeatureKind::Closed => "closed",
+            plaza_core::board_state::moderation::FeatureKind::Announced => "announced",
+            plaza_core::board_state::moderation::FeatureKind::Merged => "merged",
+        };
         entries.push((
-            0,
-            format!("{}: {}", title(&file.flag.target), actions.join(", ")),
+            flag.flag.created_at,
+            format!("{}: {}", title(&flag.flag.target), action),
         ));
     }
     for change in &board.board_state.moderation.moves {

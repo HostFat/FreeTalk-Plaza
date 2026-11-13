@@ -91,12 +91,6 @@ pub fn RolesSection() -> Element {
     };
     let is_owner = data.owner_vk == data.self_sk.verifying_key();
     let self_id = MemberId::from(&data.self_sk.verifying_key());
-    let is_admin = data
-        .board_state
-        .admin
-        .admins
-        .iter()
-        .any(|admin| admin.admin.id() == self_id);
     // Admins do not get role definition or assignment powers implicitly. The
     // owner enables them per person through a role with can_manage_access.
     let can_define_roles = is_owner;

@@ -551,8 +551,10 @@ impl BoardData {
         let routes = self.board_state.moderation.routes_map();
         let mut closed = HashSet::new();
         let mut grants = Vec::new();
-        for flag in &self.board_state.moderation.flags {
-            if flag.flag.closed {
+        for flag in &self.board_state.moderation.feature_flags {
+            if flag.flag.kind == plaza_core::board_state::moderation::FeatureKind::Closed
+                && flag.flag.value
+            {
                 closed.insert(flag.flag.target);
             }
         }

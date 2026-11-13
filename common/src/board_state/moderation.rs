@@ -55,34 +55,39 @@ impl AuthorizedMessageRoute {
     }
 }
 
+/// One moderation feature per record. Separate generations mean an author
+/// closing a post cannot clear a moderator's pin or announcement.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum FeatureKind {
+    Pinned,
+    Closed,
+    Announced,
+    Merged,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct PostFlag {
+pub struct FeatureFlag {
     pub target: MessageId,
-    pub pinned: bool,
-    pub closed: bool,
-    /// Board-wide announcement, shown above every section.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub announced: bool,
-    /// Destination topic when this topic was merged. The source is hidden.
+    pub kind: FeatureKind,
+    pub value: bool,
+    /// Destination topic when `kind = Merged` and `value = true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merged_into: Option<MessageId>,
+    pub destination: Option<MessageId>,
     pub generation: u64,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub created_at: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-pub struct AuthorizedPostFlag {
-    pub flag: PostFlag,
+pub struct AuthorizedFeatureFlag {
+    pub flag: FeatureFlag,
     pub signature: Signature,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
 }
 
-impl AuthorizedPostFlag {
-    pub fn new(flag: PostFlag, signing_key: &SigningKey) -> Self {
+impl AuthorizedFeatureFlag {
+    pub fn new(flag: FeatureFlag, signing_key: &SigningKey) -> Self {
         Self {
             signature: sign_struct(&flag, signing_key),
             flag,
@@ -96,7 +101,7 @@ impl AuthorizedPostFlag {
 
     pub fn verify_signature_with(&self, key: &VerifyingKey) -> Result<(), String> {
         verify_struct(&self.flag, &self.signature, key)
-            .map_err(|e| format!("Invalid post flag signature: {}", e))
+            .map_err(|e| format!("Invalid feature flag signature: {}", e))
     }
 }
 
@@ -147,7 +152,8 @@ impl AuthorizedPostMove {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
 pub struct ModerationV1 {
     pub routes: Vec<AuthorizedMessageRoute>,
-    pub flags: Vec<AuthorizedPostFlag>,
+    #[serde(default)]
+    pub feature_flags: Vec<AuthorizedFeatureFlag>,
     #[serde(default)]
     pub moves: Vec<AuthorizedPostMove>,
 }
@@ -163,11 +169,9 @@ pub struct RouteState {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub struct FlagState {
-    pub pinned: bool,
-    pub closed: bool,
-    pub announced: bool,
-    pub merged_into: Option<MessageId>,
+pub struct FeatureFlagState {
+    pub value: bool,
+    pub destination: Option<MessageId>,
     pub generation: u64,
 }
 
@@ -180,7 +184,7 @@ pub struct MoveState {
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct ModerationSummary {
     pub routes: BTreeMap<MessageId, RouteState>,
-    pub flags: BTreeMap<MessageId, BTreeMap<u64, FlagState>>,
+    pub feature_flags: BTreeMap<(MessageId, FeatureKind), FeatureFlagState>,
     pub moves: BTreeMap<MessageId, MoveState>,
 }
 
@@ -189,7 +193,7 @@ pub struct ModerationDelta {
     #[serde(default)]
     pub routes: Vec<AuthorizedMessageRoute>,
     #[serde(default)]
-    pub flags: Vec<AuthorizedPostFlag>,
+    pub feature_flags: Vec<AuthorizedFeatureFlag>,
     #[serde(default)]
     pub moves: Vec<AuthorizedPostMove>,
 }
@@ -212,21 +216,22 @@ fn route_map(routes: &[AuthorizedMessageRoute]) -> BTreeMap<MessageId, RouteStat
     map
 }
 
-fn flag_map(flags: &[AuthorizedPostFlag]) -> BTreeMap<MessageId, BTreeMap<u64, FlagState>> {
-    let mut map: BTreeMap<MessageId, BTreeMap<u64, FlagState>> = BTreeMap::new();
-    for flag in flags {
-        map.entry(flag.flag.target).or_default().insert(
-            flag.flag.generation,
-            FlagState {
-                pinned: flag.flag.pinned,
-                closed: flag.flag.closed,
-                announced: flag.flag.announced,
-                merged_into: flag.flag.merged_into,
-                generation: flag.flag.generation,
-            },
-        );
-    }
-    map
+fn feature_flag_map(
+    flags: &[AuthorizedFeatureFlag],
+) -> BTreeMap<(MessageId, FeatureKind), FeatureFlagState> {
+    flags
+        .iter()
+        .map(|entry| {
+            (
+                (entry.flag.target, entry.flag.kind),
+                FeatureFlagState {
+                    value: entry.flag.value,
+                    destination: entry.flag.destination,
+                    generation: entry.flag.generation,
+                },
+            )
+        })
+        .collect()
 }
 
 pub fn category_chain(
@@ -349,111 +354,117 @@ fn verify_route(
     Ok(())
 }
 
-fn check_flag_permission(
+fn verify_feature_flag(
     state: &ChatBoardStateV1,
     parameters: &ChatBoardParametersV1,
     routes: &BTreeMap<MessageId, RouteState>,
-    existing: Option<&FlagState>,
-    flag: &PostFlag,
-    signer: &MemberId,
+    entry: &AuthorizedFeatureFlag,
 ) -> Result<(), String> {
-    if is_owner_or_admin(state, parameters, signer) {
-        return Ok(());
+    let signer = entry.signer_id(parameters);
+    let key = signer_key(state, parameters, &signer)?;
+    entry.verify_signature_with(&key)?;
+    let flag = &entry.flag;
+    if flag.generation == 0 {
+        return Err("Feature flag generation must be positive".to_string());
     }
-    let current = existing.cloned().unwrap_or_default();
-    let pinned_changed = current.pinned != flag.pinned;
-    let closed_changed = current.closed != flag.closed;
-    let announced_changed = current.announced != flag.announced;
-    let merged_changed = current.merged_into != flag.merged_into;
-    if !pinned_changed && !closed_changed && !announced_changed && !merged_changed {
-        return Err("Post flag does not change anything".to_string());
+    let Some(target) = state
+        .recent_messages
+        .messages
+        .iter()
+        .find(|message| message.id() == flag.target)
+    else {
+        return Err("Feature flag targets a missing message".to_string());
+    };
+    if target.message.content.is_category() {
+        return Err("Feature flags apply to posts".to_string());
     }
-    if announced_changed {
-        // Announcements are board-wide, so only the owner and admins set them.
-        return Err("Signer cannot announce this post".to_string());
-    }
-    if merged_changed {
-        let Some(destination) = flag.merged_into else {
-            return Err("Only the owner or an admin can undo a merge".to_string());
-        };
-        if !can_move(
-            state,
-            parameters,
-            routes,
-            signer,
-            &flag.target,
-            &destination,
-        ) {
-            return Err("Signer cannot merge this post".to_string());
+
+    let owner_or_admin = is_owner_or_admin(state, parameters, &signer);
+    let chain = category_chain(routes, &flag.target);
+    match flag.kind {
+        FeatureKind::Pinned => {
+            if !owner_or_admin
+                && !state
+                    .roles
+                    .has_moderation_power(&signer, ModerationPower::Pin, &chain)
+            {
+                return Err("Signer cannot pin this post".to_string());
+            }
+            if flag.destination.is_some() {
+                return Err("A pin has no destination".to_string());
+            }
+        }
+        FeatureKind::Closed => {
+            if !owner_or_admin
+                && target_author(state, &flag.target).as_ref() != Some(&signer)
+                && !state
+                    .roles
+                    .has_moderation_power(&signer, ModerationPower::Close, &chain)
+            {
+                return Err("Signer cannot close this post".to_string());
+            }
+            if flag.destination.is_some() {
+                return Err("A close flag has no destination".to_string());
+            }
+        }
+        FeatureKind::Announced => {
+            if !owner_or_admin {
+                return Err("Only the owner or an admin can announce a post".to_string());
+            }
+            if flag.destination.is_some() {
+                return Err("An announcement has no destination".to_string());
+            }
+        }
+        FeatureKind::Merged => {
+            if flag.value {
+                let destination = flag
+                    .destination
+                    .ok_or("A merge needs a destination topic")?;
+                if destination == flag.target {
+                    return Err("A topic cannot be merged into itself".to_string());
+                }
+                let destination_message = state
+                    .recent_messages
+                    .messages
+                    .iter()
+                    .find(|message| message.id() == destination)
+                    .ok_or("Merge destination is missing")?;
+                if destination_message.message.content.is_category() {
+                    return Err("Merge destination must be a topic".to_string());
+                }
+                let mut current = Some(destination);
+                for _ in 0..64 {
+                    let Some(id) = current else { break };
+                    if id == flag.target {
+                        return Err("Merge would create a cycle".to_string());
+                    }
+                    current = route_parent(routes, &id);
+                }
+                if !can_move(
+                    state,
+                    parameters,
+                    routes,
+                    &signer,
+                    &flag.target,
+                    &destination,
+                ) {
+                    return Err("Signer cannot merge this post".to_string());
+                }
+            } else {
+                if flag.destination.is_some() {
+                    return Err("An unmerge has no destination".to_string());
+                }
+                if !owner_or_admin
+                    && !state
+                        .roles
+                        .has_moderation_power(&signer, ModerationPower::Move, &chain)
+                {
+                    return Err("Signer cannot undo a merge".to_string());
+                }
+            }
         }
     }
-    let author = target_author(state, &flag.target);
-    if closed_changed && !pinned_changed && author.as_ref() == Some(signer) {
-        return Ok(());
-    }
-    let chain = category_chain(routes, &flag.target);
-    if pinned_changed
-        && state
-            .roles
-            .has_moderation_power(signer, ModerationPower::Pin, &chain)
-    {
-        return Ok(());
-    }
-    if closed_changed
-        && state
-            .roles
-            .has_moderation_power(signer, ModerationPower::Close, &chain)
-    {
-        return Ok(());
-    }
-    Err("Signer cannot change this post flag".to_string())
-}
-
-fn verify_flag(
-    state: &ChatBoardStateV1,
-    parameters: &ChatBoardParametersV1,
-    routes: &BTreeMap<MessageId, RouteState>,
-    flag: &AuthorizedPostFlag,
-) -> Result<(), String> {
-    verify_flag_against(state, parameters, routes, &state.moderation.flags, flag)
-}
-
-fn verify_flag_against(
-    state: &ChatBoardStateV1,
-    parameters: &ChatBoardParametersV1,
-    routes: &BTreeMap<MessageId, RouteState>,
-    previous_flags: &[AuthorizedPostFlag],
-    flag: &AuthorizedPostFlag,
-) -> Result<(), String> {
-    let signer = flag.signer_id(parameters);
-    let key = signer_key(state, parameters, &signer)?;
-    flag.verify_signature_with(&key)?;
-    if target_author(state, &flag.flag.target).is_none() {
-        return Err("Post flag targets a missing message".to_string());
-    }
-    // Compare with the previous generation only: when the contract verifies a
-    // whole state, the flag being checked is already in that state.
-    let existing = previous_flags
-        .iter()
-        .filter(|entry| {
-            entry.flag.target == flag.flag.target && entry.flag.generation < flag.flag.generation
-        })
-        .max_by_key(|entry| entry.flag.generation)
-        .map(|entry| FlagState {
-            pinned: entry.flag.pinned,
-            closed: entry.flag.closed,
-            announced: entry.flag.announced,
-            merged_into: entry.flag.merged_into,
-            generation: entry.flag.generation,
-        });
-    check_flag_permission(
-        state,
-        parameters,
-        routes,
-        existing.as_ref(),
-        &flag.flag,
-        &signer,
-    )
+    Ok(())
 }
 
 fn move_map(moves: &[AuthorizedPostMove]) -> BTreeMap<MessageId, MoveState> {
@@ -557,7 +568,9 @@ impl ModerationV1 {
     }
 
     pub fn is_merged_into(&self, target: &MessageId) -> Option<MessageId> {
-        self.flag_for(target).and_then(|flag| flag.merged_into)
+        self.feature_flag_for(target, FeatureKind::Merged)
+            .filter(|flag| flag.value)
+            .and_then(|flag| flag.destination)
     }
 
     pub fn route(&self, message_id: &MessageId) -> Option<&MessageRoute> {
@@ -568,29 +581,29 @@ impl ModerationV1 {
             .map(|route| &route.route)
     }
 
-    pub fn flag_for(&self, target: &MessageId) -> Option<&PostFlag> {
-        self.flags
+    pub fn feature_flag_for(&self, target: &MessageId, kind: FeatureKind) -> Option<&FeatureFlag> {
+        self.feature_flags
             .iter()
-            .filter(|flag| flag.flag.target == *target)
-            .max_by_key(|flag| flag.flag.generation)
-            .map(|flag| &flag.flag)
+            .filter(|entry| entry.flag.target == *target && entry.flag.kind == kind)
+            .max_by_key(|entry| entry.flag.generation)
+            .map(|entry| &entry.flag)
     }
 
     pub fn is_pinned(&self, target: &MessageId) -> bool {
-        self.flag_for(target)
-            .map(|flag| flag.pinned)
+        self.feature_flag_for(target, FeatureKind::Pinned)
+            .map(|flag| flag.value)
             .unwrap_or(false)
     }
 
     pub fn is_closed(&self, target: &MessageId) -> bool {
-        self.flag_for(target)
-            .map(|flag| flag.closed)
+        self.feature_flag_for(target, FeatureKind::Closed)
+            .map(|flag| flag.value)
             .unwrap_or(false)
     }
 
     pub fn is_announced(&self, target: &MessageId) -> bool {
-        self.flag_for(target)
-            .map(|flag| flag.announced)
+        self.feature_flag_for(target, FeatureKind::Announced)
+            .map(|flag| flag.value)
             .unwrap_or(false)
     }
 
@@ -605,18 +618,15 @@ impl ModerationV1 {
         parameters: &ChatBoardParametersV1,
     ) -> Result<(), String> {
         let routes = route_map(&self.routes);
-        let flags = flag_map(&self.flags);
+        let flags = feature_flag_map(&self.feature_flags);
 
         for message in &state.recent_messages.messages {
             let message_id = message.id();
             if let Some(route) = routes.get(&message_id) {
                 if let Some(target) = route.reply_to {
                     if flags
-                        .get(&target)
-                        .and_then(|generations| {
-                            generations.values().max_by_key(|flag| flag.generation)
-                        })
-                        .map(|flag| flag.closed)
+                        .get(&(target, FeatureKind::Closed))
+                        .map(|flag| flag.value)
                         .unwrap_or(false)
                     {
                         return Err("Cannot reply to a closed post".to_string());
@@ -638,9 +648,8 @@ impl ModerationV1 {
                 continue;
             };
             if flags
-                .get(&action.target)
-                .and_then(|generations| generations.values().max_by_key(|flag| flag.generation))
-                .map(|flag| flag.closed)
+                .get(&(action.target, FeatureKind::Closed))
+                .map(|flag| flag.value)
                 .unwrap_or(false)
             {
                 return Err("Cannot modify a closed post".to_string());
@@ -696,22 +705,22 @@ impl ModerationV1 {
         self.routes.sort_by_key(|entry| entry.route.message_id.0 .0);
 
         let routes = route_map(&self.routes);
-        let previous_flags = self.flags.clone();
-        self.flags.retain(|entry| {
+        self.feature_flags.retain(|entry| {
             live.contains(&entry.flag.target)
-                && verify_flag_against(state, parameters, &routes, &previous_flags, entry).is_ok()
+                && verify_feature_flag(state, parameters, &routes, entry).is_ok()
         });
-        self.flags.sort_by_key(|entry| {
+        self.feature_flags.sort_by_key(|entry| {
             (
                 entry.flag.target.0 .0,
+                entry.flag.kind,
                 entry.flag.generation,
                 entry.signer_id(parameters).0 .0,
             )
         });
-        // Keep one record per (target, generation), preserving history.
-        self.flags.dedup_by(|a, b| {
-            a.flag.target == b.flag.target && a.flag.generation == b.flag.generation
-        });
+        self.feature_flags
+            .dedup_by_key(|entry| (entry.flag.target, entry.flag.kind));
+        self.feature_flags
+            .sort_by_key(|entry| (entry.flag.target.0 .0, entry.flag.kind));
 
         self.moves.retain(|entry| {
             live.contains(&entry.change.target)
@@ -749,13 +758,11 @@ impl ComposableState for ModerationV1 {
         }
         let routes = route_map(&self.routes);
         let mut flag_ids = std::collections::HashSet::new();
-        for flag in &self.flags {
-            // Keep the history of flags per target: each generation is a
-            // distinct record so a full state can verify what changed.
-            if !flag_ids.insert((flag.flag.target, flag.flag.generation)) {
-                return Err("Duplicate post flag generation".to_string());
+        for flag in &self.feature_flags {
+            if !flag_ids.insert((flag.flag.target, flag.flag.kind)) {
+                return Err("Duplicate feature flag".to_string());
             }
-            verify_flag(parent_state, parameters, &routes, flag)?;
+            verify_feature_flag(parent_state, parameters, &routes, flag)?;
         }
         let mut move_ids = std::collections::HashSet::new();
         for entry in &self.moves {
@@ -774,7 +781,7 @@ impl ComposableState for ModerationV1 {
     ) -> Self::Summary {
         ModerationSummary {
             routes: route_map(&self.routes),
-            flags: flag_map(&self.flags),
+            feature_flags: feature_flag_map(&self.feature_flags),
             moves: move_map(&self.moves),
         }
     }
@@ -797,22 +804,18 @@ impl ComposableState for ModerationV1 {
             })
             .cloned()
             .collect();
-        let flags: Vec<AuthorizedPostFlag> = self
-            .flags
+        let flags: Vec<AuthorizedFeatureFlag> = self
+            .feature_flags
             .iter()
-            .filter(|flag| {
+            .filter(|entry| {
                 old_state
-                    .flags
-                    .get(&flag.flag.target)
-                    .and_then(|generations| generations.get(&flag.flag.generation))
+                    .feature_flags
+                    .get(&(entry.flag.target, entry.flag.kind))
                     .map(|old| {
-                        old != &FlagState {
-                            pinned: flag.flag.pinned,
-                            closed: flag.flag.closed,
-                            announced: flag.flag.announced,
-                            merged_into: flag.flag.merged_into,
-                            generation: flag.flag.generation,
-                        }
+                        old.generation < entry.flag.generation
+                            || (old.generation == entry.flag.generation
+                                && (old.value != entry.flag.value
+                                    || old.destination != entry.flag.destination))
                     })
                     .unwrap_or(true)
             })
@@ -835,7 +838,7 @@ impl ComposableState for ModerationV1 {
         } else {
             Some(ModerationDelta {
                 routes,
-                flags,
+                feature_flags: flags,
                 moves,
             })
         }
@@ -866,24 +869,23 @@ impl ComposableState for ModerationV1 {
             }
         }
         let routes = route_map(&self.routes);
-        for flag in &delta.flags {
-            verify_flag(parent_state, parameters, &routes, flag)?;
-            match self.flags.iter().find(|existing| {
-                existing.flag.target == flag.flag.target
-                    && existing.flag.generation == flag.flag.generation
+        for flag in &delta.feature_flags {
+            verify_feature_flag(parent_state, parameters, &routes, flag)?;
+            match self.feature_flags.iter().find(|existing| {
+                existing.flag.target == flag.flag.target && existing.flag.kind == flag.flag.kind
             }) {
-                Some(existing) if existing == flag => {}
+                Some(existing) if existing.flag.generation > flag.flag.generation => {}
                 Some(existing)
-                    if existing.signature.to_bytes().as_slice()
-                        <= flag.signature.to_bytes().as_slice() => {}
-                Some(_) => {
-                    self.flags.retain(|existing| {
+                    if existing.flag.generation == flag.flag.generation
+                        && existing.signature.to_bytes().as_slice()
+                            <= flag.signature.to_bytes().as_slice() => {}
+                _ => {
+                    self.feature_flags.retain(|existing| {
                         !(existing.flag.target == flag.flag.target
-                            && existing.flag.generation == flag.flag.generation)
+                            && existing.flag.kind == flag.flag.kind)
                     });
-                    self.flags.push(flag.clone());
+                    self.feature_flags.push(flag.clone());
                 }
-                None => self.flags.push(flag.clone()),
             }
         }
         for entry in &delta.moves {
@@ -999,18 +1001,18 @@ mod tests {
             .verify(&board.state, &board.parameters)
             .expect("a member route is signed with the member key");
 
-        let flag = AuthorizedPostFlag::new(
-            PostFlag {
+        let flag = AuthorizedFeatureFlag::new(
+            FeatureFlag {
                 target: board.post,
-                pinned: false,
-                closed: true,
-                announced: false,
-                merged_into: None,
+                kind: FeatureKind::Closed,
+                value: true,
+                destination: None,
                 generation: 1,
+                created_at: 1,
             },
             &board.member_sk,
         );
-        board.state.moderation.flags.push(flag);
+        board.state.moderation.feature_flags.push(flag);
         board
             .state
             .moderation
@@ -1056,20 +1058,56 @@ mod tests {
     }
 
     #[test]
-    fn members_cannot_announce_posts() {
+    fn feature_flags_are_independent() {
         let mut board = board();
-        let flag = AuthorizedPostFlag::new(
-            PostFlag {
+        let pinned = AuthorizedFeatureFlag::new(
+            FeatureFlag {
                 target: board.post,
-                pinned: false,
-                closed: false,
-                announced: true,
-                merged_into: None,
+                kind: FeatureKind::Pinned,
+                value: true,
+                destination: None,
                 generation: 1,
+                created_at: 1,
+            },
+            &board.owner_sk,
+        );
+        let closed = AuthorizedFeatureFlag::new(
+            FeatureFlag {
+                target: board.post,
+                kind: FeatureKind::Closed,
+                value: true,
+                destination: None,
+                generation: 1,
+                created_at: 2,
             },
             &board.member_sk,
         );
-        board.state.moderation.flags.push(flag);
+        board.state.moderation.feature_flags.push(pinned);
+        board.state.moderation.feature_flags.push(closed);
+        board
+            .state
+            .moderation
+            .verify(&board.state, &board.parameters)
+            .expect("independent pin and close flags verify");
+        assert!(board.state.moderation.is_pinned(&board.post));
+        assert!(board.state.moderation.is_closed(&board.post));
+    }
+
+    #[test]
+    fn members_cannot_announce_posts() {
+        let mut board = board();
+        let flag = AuthorizedFeatureFlag::new(
+            FeatureFlag {
+                target: board.post,
+                kind: FeatureKind::Announced,
+                value: true,
+                destination: None,
+                generation: 1,
+                created_at: 1,
+            },
+            &board.member_sk,
+        );
+        board.state.moderation.feature_flags.push(flag);
         assert!(board
             .state
             .moderation

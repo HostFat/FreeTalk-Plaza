@@ -17,7 +17,7 @@ use plaza_core::board_state::message::{
     AuthorizedMessageV1, BoardMessageBody, MessageId, MessageV1, SecretScope,
 };
 use plaza_core::board_state::moderation::{
-    AuthorizedPostFlag, AuthorizedPostMove, ModerationDelta, PostFlag, PostMove,
+    AuthorizedFeatureFlag, AuthorizedPostMove, FeatureFlag, FeatureKind, ModerationDelta, PostMove,
 };
 use plaza_core::board_state::privacy::SealedBytes;
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
@@ -316,55 +316,66 @@ pub fn set_post_flag(
     closed: Option<bool>,
     announced: Option<bool>,
 ) -> Result<(), String> {
-    let current = ctx
-        .board_state
-        .moderation
-        .flag_for(&target)
-        .cloned()
-        .unwrap_or(PostFlag {
-            target,
-            pinned: false,
-            closed: false,
-            announced: false,
-            merged_into: None,
-            generation: 0,
-        });
-    let flag = PostFlag {
-        target,
-        pinned: pinned.unwrap_or(current.pinned),
-        closed: closed.unwrap_or(current.closed),
-        announced: announced.unwrap_or(current.announced),
-        merged_into: current.merged_into,
-        generation: current.generation + 1,
+    let next_generation = |kind: FeatureKind| {
+        ctx.board_state
+            .moderation
+            .feature_flag_for(&target, kind)
+            .map(|flag| flag.generation + 1)
+            .unwrap_or(1)
     };
-    let authorized = AuthorizedPostFlag::new(flag, &ctx.self_sk);
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut flags = Vec::new();
+    if let Some(value) = pinned {
+        flags.push(AuthorizedFeatureFlag::new(
+            FeatureFlag {
+                target,
+                kind: FeatureKind::Pinned,
+                value,
+                destination: None,
+                generation: next_generation(FeatureKind::Pinned),
+                created_at: now,
+            },
+            &ctx.self_sk,
+        ));
+    }
+    if let Some(value) = closed {
+        flags.push(AuthorizedFeatureFlag::new(
+            FeatureFlag {
+                target,
+                kind: FeatureKind::Closed,
+                value,
+                destination: None,
+                generation: next_generation(FeatureKind::Closed),
+                created_at: now,
+            },
+            &ctx.self_sk,
+        ));
+    }
+    if let Some(value) = announced {
+        flags.push(AuthorizedFeatureFlag::new(
+            FeatureFlag {
+                target,
+                kind: FeatureKind::Announced,
+                value,
+                destination: None,
+                generation: next_generation(FeatureKind::Announced),
+                created_at: now,
+            },
+            &ctx.self_sk,
+        ));
+    }
+    if flags.is_empty() {
+        return Ok(());
+    }
     let delta = ChatBoardStateV1Delta {
         moderation: Some(ModerationDelta {
             routes: Vec::new(),
-            flags: vec![authorized],
+            feature_flags: flags,
             moves: Vec::new(),
         }),
         ..Default::default()
     };
-    let parent = ctx.board_state.clone();
-    let owner = ctx.current_board;
-    let mut error: Option<String> = None;
-    BOARDS.with_mut(|boards| {
-        if let Some(board) = boards.map.get_mut(&owner) {
-            if let Err(e) = board.board_state.apply_delta(
-                &parent,
-                &ChatBoardParametersV1 { owner },
-                &Some(delta),
-            ) {
-                error = Some(e);
-            }
-        }
-    });
-    if let Some(e) = error {
-        return Err(e);
-    }
-    crate::components::app::mark_needs_sync(owner);
-    Ok(())
+    apply_state_delta(&ctx, delta)
 }
 
 fn next_move_generation(ctx: &ActionContext, target: &MessageId) -> u64 {
@@ -419,7 +430,7 @@ pub fn move_post(
     let delta = ChatBoardStateV1Delta {
         moderation: Some(ModerationDelta {
             routes: Vec::new(),
-            flags: Vec::new(),
+            feature_flags: Vec::new(),
             moves: vec![AuthorizedPostMove::new(change, &ctx.self_sk)],
         }),
         ..Default::default()
@@ -438,27 +449,36 @@ pub fn merge_topic(
     if source == destination {
         return Err("A topic cannot be merged into itself".to_string());
     }
-    let current = ctx
-        .board_state
-        .moderation
-        .flag_for(&source)
-        .cloned()
-        .unwrap_or(PostFlag {
-            target: source,
-            pinned: false,
-            closed: false,
-            announced: false,
-            merged_into: None,
-            generation: 0,
-        });
-    let flag = PostFlag {
-        target: source,
-        pinned: current.pinned,
-        closed: true,
-        announced: current.announced,
-        merged_into: Some(destination),
-        generation: current.generation + 1,
+    let now = chrono::Utc::now().timestamp_millis();
+    let next_generation = |kind: FeatureKind| {
+        ctx.board_state
+            .moderation
+            .feature_flag_for(&source, kind)
+            .map(|flag| flag.generation + 1)
+            .unwrap_or(1)
     };
+    let merged = AuthorizedFeatureFlag::new(
+        FeatureFlag {
+            target: source,
+            kind: FeatureKind::Merged,
+            value: true,
+            destination: Some(destination),
+            generation: next_generation(FeatureKind::Merged),
+            created_at: now,
+        },
+        &ctx.self_sk,
+    );
+    let closed = AuthorizedFeatureFlag::new(
+        FeatureFlag {
+            target: source,
+            kind: FeatureKind::Closed,
+            value: true,
+            destination: None,
+            generation: next_generation(FeatureKind::Closed),
+            created_at: now,
+        },
+        &ctx.self_sk,
+    );
     let moves: Vec<AuthorizedPostMove> = direct_replies
         .into_iter()
         .filter(|reply| *reply != destination)
@@ -475,7 +495,7 @@ pub fn merge_topic(
     let delta = ChatBoardStateV1Delta {
         moderation: Some(ModerationDelta {
             routes: Vec::new(),
-            flags: vec![AuthorizedPostFlag::new(flag, &ctx.self_sk)],
+            feature_flags: vec![merged, closed],
             moves,
         }),
         ..Default::default()

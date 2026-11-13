@@ -287,7 +287,7 @@ pub(crate) async fn publish_message(
         member_info: member_info_delta,
         moderation: Some(ModerationDelta {
             routes: vec![route],
-            flags: Vec::new(),
+            feature_flags: Vec::new(),
             moves: Vec::new(),
         }),
         ..Default::default()
@@ -595,7 +595,7 @@ pub async fn send_category(
         category_secrets,
         moderation: Some(ModerationDelta {
             routes: vec![route],
-            flags: Vec::new(),
+            feature_flags: Vec::new(),
             moves: Vec::new(),
         }),
         ..Default::default()
@@ -730,7 +730,7 @@ pub async fn send_group(
         recent_messages: Some(vec![auth_message]),
         moderation: Some(ModerationDelta {
             routes: vec![route],
-            flags: Vec::new(),
+            feature_flags: Vec::new(),
             moves: Vec::new(),
         }),
         ..Default::default()
