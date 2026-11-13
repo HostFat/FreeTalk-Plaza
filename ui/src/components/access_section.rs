@@ -17,6 +17,17 @@ fn nickname_of(data: &BoardData, id: MemberId) -> String {
         .unwrap_or_else(|| format!("{id}"))
 }
 
+/// Full pasteable invite URL: current page base plus the join route.
+fn full_join_link(token: &str) -> String {
+    web_sys::window()
+        .and_then(|window| window.location().href().ok())
+        .map(|href| {
+            let base = href.split('#').next().unwrap_or("");
+            format!("{base}#/join/{token}")
+        })
+        .unwrap_or_else(|| token.to_string())
+}
+
 fn role_id_of(text: &str) -> Option<RoleId> {
     let bytes = bs58::decode(text).into_vec().ok()?;
     if bytes.len() != 16 {
@@ -495,7 +506,7 @@ pub fn InviteLinksSection() -> Element {
     let mut link_max = use_signal(String::new);
     let mut link_label = use_signal(String::new);
     let mut link_includes_keys = use_signal(|| false);
-    let mut created_link = use_signal(|| None::<(String, bool, usize)>);
+    let mut created_link = use_signal(|| None::<(String, String, bool, usize)>);
     let mut copied = use_signal(|| false);
     let mut editing_label = use_signal(|| None::<plaza_core::board_state::invites::TokenId>);
     let mut label_edit = use_signal(String::new);
@@ -590,7 +601,8 @@ pub fn InviteLinksSection() -> Element {
                             let key_count = access::JoinLink::decode(&link)
                                 .map(|parsed| parsed.category_keys.len())
                                 .unwrap_or(0);
-                            created_link.set(Some((link, include_keys, key_count)));
+                            let url = full_join_link(&link);
+                            created_link.set(Some((link, url, include_keys, key_count)));
                             copied.set(false);
                             link_label.set(String::new());
                             error.set(None);
@@ -602,10 +614,10 @@ pub fn InviteLinksSection() -> Element {
             }
         }
 
-        if let Some((link, includes_keys, key_count)) = created_link.read().as_ref() {
+        if let Some((_link, url, includes_keys, key_count)) = created_link.read().as_ref() {
             div { class: "bg-panel border border-accent/40 rounded-lg p-3 mb-3",
                 p { class: "text-sm text-text mb-1",
-                    "New link. Copy it now: the key is not stored in the board."
+                    "New link. Copy it now: the board stores the token, not the link."
                 }
                 if *includes_keys {
                     p { class: "text-xs text-yellow-400 mb-2",
@@ -616,13 +628,13 @@ pub fn InviteLinksSection() -> Element {
                     input {
                         class: "flex-1 px-2 py-1 bg-surface border border-border rounded text-xs font-mono text-text",
                         readonly: true,
-                        value: "{link}",
+                        value: "{url}",
                     }
                     button {
                         r#type: "button",
                         class: "px-3 py-1 bg-surface hover:bg-surface-hover text-text text-xs rounded",
                         onclick: {
-                            let link = link.clone();
+                            let link = url.clone();
                             move |_| {
                                 crate::util::copy_to_clipboard(&link);
                                 copied.set(true);
