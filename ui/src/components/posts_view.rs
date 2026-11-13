@@ -579,6 +579,42 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                     }
                                                 }
                                             }
+
+                                            // Child boards, like the board page on
+                                            // Bitcointalk: under the name/description.
+                                            if !categories.is_empty() {
+                                                div { class: "mt-3 pt-3 border-t border-border flex flex-wrap items-center gap-2",
+                                                    span { class: "text-xs font-medium text-text-muted", "Child Boards:" }
+                                                    for child in categories.iter() {
+                                                        {
+                                                            let child_id = child.id_string();
+                                                            let child_name = child
+                                                                .category_name
+                                                                .clone()
+                                                                .unwrap_or_else(|| "Unnamed".to_string());
+                                                            let board_id = current_board_id.read().clone();
+                                                            let nav = navigator();
+                                                            rsx! {
+                                                                button {
+                                                                    key: "{child_id}",
+                                                                    r#type: "button",
+                                                                    class: "px-2.5 py-1 text-xs rounded-md bg-surface hover:bg-surface-hover text-text transition-colors",
+                                                                    onclick: move |_| {
+                                                                        nav.push(Route::PostsInCategory {
+                                                                            board_id: board_id.clone(),
+                                                                            category_id: child_id.clone(),
+                                                                        });
+                                                                    },
+                                                                    if !child.category_allowed_roles.is_empty() {
+                                                                        "🔒 "
+                                                                    }
+                                                                    "{child_name}"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -888,63 +924,6 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                         last_activity: last,
                                                                         groups: group_options.clone(),
                                                                         allow_group_change: true,
-                                                                        board_id: board_id,
-                                                                        on_edit: move |data| edit_handler(data),
-                                                                        on_delete: move |id| {
-                                                                            pending_delete.set(Some(id));
-                                                                            pending_delete_group.set(false);
-                                                                        },
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        // Section page: its subsections.
-                                        if viewing_category {
-                                            div { class: "mb-8",
-                                                div { class: "flex items-center justify-between mb-3",
-                                                    h2 { class: "text-lg font-semibold text-text-muted", "Subsections" }
-                                                    if is_owner || is_admin {
-                                                        button {
-                                                            r#type: "button",
-                                                            class: "px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
-                                                            onclick: move |_| {
-                                                                let parent = CURRENT_CATEGORY
-                                                                    .read()
-                                                                    .category_id
-                                                                    .clone();
-                                                                CREATE_CATEGORY_MODAL.with_mut(|modal| {
-                                                                    modal.show = true;
-                                                                    modal.is_group = false;
-                                                                    modal.parent_category_id = parent;
-                                                                });
-                                                            },
-                                                            "+ Subsection"
-                                                        }
-                                                    }
-                                                }
-                                                if !categories.is_empty() {
-                                                    div { class: "space-y-2",
-                                                        for category in categories.iter() {
-                                                            {
-                                                                let (count, last) = category_summaries
-                                                                    .get(&category.message_id)
-                                                                    .cloned()
-                                                                    .unwrap_or_default();
-                                                                let edit_handler = handle_edit_category.clone();
-                                                                let board_id = current_board_id.read().clone();
-                                                                rsx! {
-                                                                    SectionRow {
-                                                                        category: category.clone(),
-                                                                        self_member_id: self_member_id,
-                                                                        is_owner: is_owner,
-                                                                        is_admin: is_admin,
-                                                                        post_count: count,
-                                                                        last_activity: last,
                                                                         board_id: board_id,
                                                                         on_edit: move |data| edit_handler(data),
                                                                         on_delete: move |id| {

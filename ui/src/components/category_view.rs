@@ -162,21 +162,15 @@ pub fn CategoryCard(
                                 }
                             }
                             div { class: "flex items-center gap-2 flex-shrink-0 text-right text-xs text-text-muted",
-                                div {
-                                    p {
-                                        if category.is_group {
+                                if !category.is_group {
+                                    div {
+                                        p {
                                             if post_count == 1 {
-                                                "1 section"
+                                                "1 post"
                                             } else {
-                                                "{post_count} sections"
+                                                "{post_count} posts"
                                             }
-                                        } else if post_count == 1 {
-                                            "1 post"
-                                        } else {
-                                            "{post_count} posts"
                                         }
-                                    }
-                                    if !category.is_group {
                                         if let Some((author, time)) = last_activity.clone() {
                                             p { class: "mt-0.5", "{time} by {author}" }
                                         }
