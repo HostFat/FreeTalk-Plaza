@@ -447,10 +447,12 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                         div { class: "p-6",
                                             div { class: "flex items-center gap-4",
                                                 span { class: "text-4xl", "{icon}" }
-                                                div { class: "flex-1 min-w-0",
-                                                    h1 { class: "text-2xl font-bold text-text truncate", "{name}" }
+                                                div { class: "flex-1 min-w-0 flex flex-wrap items-baseline gap-x-3",
+                                                    h1 { class: "text-xl font-bold text-text truncate", "{name}" }
                                                     if let Some(desc) = description {
-                                                        p { class: "text-text-muted mt-1", "{desc}" }
+                                                        span { class: "text-sm text-text-muted truncate min-w-0",
+                                                            "{desc}"
+                                                        }
                                                     }
                                                 }
                                                 if !category_is_locked {
