@@ -21,6 +21,11 @@ pub struct ApprovalV1 {
     pub target: MessageId,
     pub approved: bool,
     pub generation: u64,
+    /// Section the approval applies to. Trust from an approved post covers only
+    /// this section and its subsections, so a scoped moderator cannot vouch for
+    /// an author board-wide. `None` means the board root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<MessageId>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -112,6 +117,13 @@ fn can_approve(
         .has_moderation_power(signer, ModerationPower::Delete, &chain)
 }
 
+/// Section a message belongs to: its nearest category, or `None` at the root.
+pub fn message_scope(state: &ChatBoardStateV1, target: &MessageId) -> Option<MessageId> {
+    category_chain(&state.moderation.routes_map(), target)
+        .first()
+        .copied()
+}
+
 fn verify_approval(
     state: &ChatBoardStateV1,
     parameters: &ChatBoardParametersV1,
@@ -127,6 +139,10 @@ fn verify_approval(
         .any(|message| message.id() == approval.approval.target)
     {
         return Err("Approval targets a missing message".to_string());
+    }
+    let expected = message_scope(state, &approval.approval.target);
+    if approval.approval.scope.is_some() && approval.approval.scope != expected {
+        return Err("Approval scope is not the target's section".to_string());
     }
     if !can_approve(state, parameters, &signer, &approval.approval.target) {
         return Err("Signer cannot approve this post".to_string());
@@ -145,18 +161,34 @@ impl ApprovalsV1 {
             .unwrap_or(false)
     }
 
-    /// True when the author already has an approved post. Such an author is
-    /// trusted and their later posts skip the queue.
-    pub fn author_is_trusted(&self, state: &ChatBoardStateV1, author: &MemberId) -> bool {
+    /// True when the author already has an approved post in the target's
+    /// section or one of its ancestors. Confidence gained in one section does
+    /// not cover another.
+    pub fn author_is_trusted(
+        &self,
+        state: &ChatBoardStateV1,
+        author: &MemberId,
+        target: &MessageId,
+    ) -> bool {
+        let routes = state.moderation.routes_map();
+        let target_chain = category_chain(&routes, target);
         self.approvals.iter().any(|entry| {
-            entry.approval.approved
-                && state
-                    .recent_messages
-                    .messages
-                    .iter()
-                    .find(|message| message.id() == entry.approval.target)
-                    .map(|message| message.message.author == *author)
-                    .unwrap_or(false)
+            if !entry.approval.approved {
+                return false;
+            }
+            let approved_author = state
+                .recent_messages
+                .messages
+                .iter()
+                .find(|message| message.id() == entry.approval.target)
+                .map(|message| message.message.author);
+            if approved_author != Some(*author) {
+                return false;
+            }
+            match entry.approval.scope {
+                None => target_chain.is_empty(),
+                Some(scope) => target_chain.contains(&scope),
+            }
         })
     }
 
@@ -315,7 +347,8 @@ pub fn is_pending(state: &ChatBoardStateV1, owner: MemberId, target: &MessageId)
     {
         return false;
     }
-    !state.approvals.is_approved(target) && !state.approvals.author_is_trusted(state, &author)
+    !state.approvals.is_approved(target)
+        && !state.approvals.author_is_trusted(state, &author, target)
 }
 
 #[cfg(test)]
@@ -327,6 +360,7 @@ mod tests {
     use crate::board_state::message::{
         AuthorizedMessageV1, BoardMessageBody, MessageV1, MessagesV1,
     };
+    use crate::board_state::moderation::{AuthorizedMessageRoute, MessageRoute};
     use crate::board_state::secret::BoardSecretsV1;
     use crate::ChatBoardStateV1;
     use ed25519_dalek::SigningKey;
@@ -400,6 +434,7 @@ mod tests {
             target: board.post,
             approved,
             generation,
+            scope: None,
         }
     }
 
@@ -431,7 +466,7 @@ mod tests {
         assert!(board
             .state
             .approvals
-            .author_is_trusted(&board.state, &member_id));
+            .author_is_trusted(&board.state, &member_id, &board.post));
 
         // A new post by a trusted author is not pending even without its own
         // approval record.
@@ -458,6 +493,126 @@ mod tests {
         config.configuration_version += 1;
         board.state.configuration = AuthorizedConfigurationV1::new(config, &board.owner_sk);
         assert!(!is_pending(&board.state, owner_id, &board.post));
+    }
+
+    fn add_category(
+        board: &mut Board,
+        owner_id: MemberId,
+        name: &str,
+        parent: Option<MessageId>,
+    ) -> MessageId {
+        let message = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author: owner_id,
+                time: SystemTime::now(),
+                content: BoardMessageBody::category(
+                    name.to_string(),
+                    None,
+                    None,
+                    "#ef4444".to_string(),
+                    parent,
+                ),
+            },
+            &board.owner_sk,
+        );
+        let id = message.id();
+        board.state.recent_messages.messages.push(message);
+        board
+            .state
+            .moderation
+            .routes
+            .push(AuthorizedMessageRoute::new(
+                MessageRoute {
+                    message_id: id,
+                    reply_to: None,
+                    category_id: Some(id),
+                    is_category: true,
+                    parent_category_id: parent,
+                    is_group: false,
+                    generation: 1,
+                },
+                &board.owner_sk,
+            ));
+        id
+    }
+
+    fn add_post_in(board: &mut Board, title: &str, category: Option<MessageId>) -> MessageId {
+        let owner_id = MemberId::from(&board.owner_sk.verifying_key());
+        let author = MemberId::from(&board.member_sk.verifying_key());
+        let message = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author,
+                time: SystemTime::now(),
+                content: BoardMessageBody::public(title.to_string(), "Body".into()),
+            },
+            &board.member_sk,
+        );
+        let id = message.id();
+        board.state.recent_messages.messages.push(message);
+        board
+            .state
+            .moderation
+            .routes
+            .push(AuthorizedMessageRoute::new(
+                MessageRoute {
+                    message_id: id,
+                    reply_to: None,
+                    category_id: category,
+                    is_category: false,
+                    parent_category_id: None,
+                    is_group: false,
+                    generation: 1,
+                },
+                &board.member_sk,
+            ));
+        id
+    }
+
+    #[test]
+    fn approval_trust_covers_only_its_section_and_subsections() {
+        let mut board = board();
+        let owner_id = MemberId::from(&board.owner_sk.verifying_key());
+        let member_id = MemberId::from(&board.member_sk.verifying_key());
+
+        let cat_a = add_category(&mut board, owner_id, "A", None);
+        let cat_b = add_category(&mut board, owner_id, "B", None);
+        let child_a = add_category(&mut board, owner_id, "A child", Some(cat_a));
+        let post_a = add_post_in(&mut board, "In A", Some(cat_a));
+        let post_child = add_post_in(&mut board, "In A child", Some(child_a));
+        let post_b = add_post_in(&mut board, "In B", Some(cat_b));
+
+        board
+            .state
+            .approvals
+            .approvals
+            .push(AuthorizedApproval::new(
+                ApprovalV1 {
+                    target: post_a,
+                    approved: true,
+                    generation: 1,
+                    scope: Some(cat_a),
+                },
+                &board.owner_sk,
+            ));
+        board
+            .state
+            .approvals
+            .verify(&board.state, &board.parameters)
+            .expect("the owner may approve a scoped post");
+
+        assert!(board
+            .state
+            .approvals
+            .author_is_trusted(&board.state, &member_id, &post_child));
+        assert!(!is_pending(&board.state, owner_id, &post_child));
+        assert!(!is_pending(&board.state, owner_id, &post_a));
+        assert!(!board
+            .state
+            .approvals
+            .author_is_trusted(&board.state, &member_id, &post_b));
+        assert!(is_pending(&board.state, owner_id, &post_b));
     }
 
     #[test]

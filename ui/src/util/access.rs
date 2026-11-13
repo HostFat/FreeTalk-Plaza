@@ -15,7 +15,8 @@ use plaza_core::board_state::invites::{AuthorizedInviteToken, InviteTokensDelta}
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
 use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::roles::{
-    AuthorizedRole, AuthorizedRoleAssignment, Role, RoleAssignment, RoleId, RolesDelta,
+    admin_authority_proof, manager_authority_proof, AuthorizedRole, AuthorizedRoleAssignment, Role,
+    RoleAssignment, RoleId, RolesDelta,
 };
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 use serde::{Deserialize, Serialize};
@@ -209,7 +210,8 @@ pub fn create_role(
             deleted: false,
         };
         let authorized = match signer_for(self_id, board_key) {
-            Some(signer) => AuthorizedRole::signed_by(role, signer, &signing_key),
+            Some(signer) => AuthorizedRole::signed_by(role, signer, &signing_key)
+                .with_optional_authority(admin_authority_proof(&data.board_state, &signer)),
             None => AuthorizedRole::new(role, &signing_key),
         };
         let delta = ChatBoardStateV1Delta {
@@ -256,7 +258,8 @@ pub fn update_role_moderation(
             ..current
         };
         let authorized = match signer_for(self_id, board_key) {
-            Some(signer) => AuthorizedRole::signed_by(role, signer, &signing_key),
+            Some(signer) => AuthorizedRole::signed_by(role, signer, &signing_key)
+                .with_optional_authority(admin_authority_proof(&data.board_state, &signer)),
             None => AuthorizedRole::new(role, &signing_key),
         };
         let delta = ChatBoardStateV1Delta {
@@ -336,7 +339,8 @@ pub fn set_role_member(role_id: RoleId, member_id: MemberId, grant: bool) -> Res
             revoked: !grant,
         };
         let authorized = match signer_for(self_id, board_key) {
-            Some(signer) => AuthorizedRoleAssignment::signed_by(assignment, signer, &self_sk),
+            Some(signer) => AuthorizedRoleAssignment::signed_by(assignment, signer, &self_sk)
+                .with_optional_authority(manager_authority_proof(&data.board_state, &signer)),
             None => AuthorizedRoleAssignment::new(assignment, &self_sk),
         };
         let delta = ChatBoardStateV1Delta {
@@ -382,7 +386,8 @@ pub fn rename_invite_link(token_id: TokenId, label: String) -> Result<(), String
             ..current
         };
         let authorized = match signer_for(self_id, board_key) {
-            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &self_sk),
+            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &self_sk)
+                .with_optional_authority(manager_authority_proof(&data.board_state, &signer)),
             None => AuthorizedInviteToken::new(token, &self_sk),
         };
         let delta = ChatBoardStateV1Delta {
@@ -429,7 +434,8 @@ pub fn create_invite_link(
             includes_category_keys: include_category_keys,
         };
         let authorized = match signer_for(self_id, board_key) {
-            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &self_sk),
+            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &self_sk)
+                .with_optional_authority(manager_authority_proof(&data.board_state, &signer)),
             None => AuthorizedInviteToken::new(token, &self_sk),
         };
         let delta = ChatBoardStateV1Delta {
@@ -472,7 +478,8 @@ pub fn revoke_invite_link(token_id: TokenId) -> Result<(), String> {
             ..current
         };
         let authorized = match signer_for(self_id, board_key) {
-            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &self_sk),
+            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &self_sk)
+                .with_optional_authority(manager_authority_proof(&data.board_state, &signer)),
             None => AuthorizedInviteToken::new(token, &self_sk),
         };
         let delta = ChatBoardStateV1Delta {

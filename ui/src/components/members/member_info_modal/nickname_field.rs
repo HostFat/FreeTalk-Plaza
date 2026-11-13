@@ -146,6 +146,10 @@ pub fn NicknameField(member_info: AuthorizedMemberInfo) -> Element {
                     // Use with_mut for atomic update
                     BOARDS.with_mut(|boards| {
                         if let Some(board_data) = boards.map.get_mut(&owner_key) {
+                            if let Err(error) = board_data.ensure_can_write() {
+                                error!("{error}");
+                                return;
+                            }
                             info!(
                                 "State before applying nickname delta: {:?}",
                                 board_data.board_state

@@ -1,7 +1,9 @@
 //! Signed records for reports, report resolutions and post approvals.
 
 use crate::util::message_actions::{apply_state_delta, ActionContext};
-use plaza_core::board_state::approvals::{ApprovalV1, ApprovalsDelta, AuthorizedApproval};
+use plaza_core::board_state::approvals::{
+    message_scope, ApprovalV1, ApprovalsDelta, AuthorizedApproval,
+};
 use plaza_core::board_state::configuration::AuthorizedConfigurationV1;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
@@ -79,6 +81,7 @@ pub fn approve_post(ctx: &ActionContext, target: MessageId, approved: bool) -> R
         target,
         approved,
         generation,
+        scope: message_scope(&ctx.board_state, &target),
     };
     let delta = ChatBoardStateV1Delta {
         approvals: Some(ApprovalsDelta {

@@ -203,7 +203,7 @@ pub fn ModerationView() -> Element {
                 div { class: "bg-surface rounded-lg p-4 space-y-2",
                     h2 { class: "text-lg font-semibold text-text", "Restricted category keys" }
                     p { class: "text-text-muted text-xs",
-                        "A new version protects future posts. Old posts stay readable with the key kept on your device; edit a section name after rotating so new members see it."
+                        "A new version protects future posts. Old posts stay readable with the key kept on your device; the section name is re-sealed with the new key automatically."
                     }
                     for (category_id, category) in restricted.iter() {
                         {
@@ -246,8 +246,9 @@ pub fn ModerationView() -> Element {
                                             if changed {
                                                 error.set(None);
                                                 crate::components::app::mark_needs_sync(board_key);
-                                                spawn_local(async {
+                                                spawn_local(async move {
                                                     let _ = crate::components::app::chat_delegate::save_boards_to_delegate().await;
+                                                    crate::util::message_actions::reseal_category_name(category_id).await;
                                                 });
                                             }
                                         },

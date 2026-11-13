@@ -3,6 +3,7 @@
 use crate::components::app::{mark_needs_sync, BOARDS};
 use crate::util::ecies::encrypt_with_symmetric_key;
 use crate::util::ecies::seal_bytes;
+use crate::util::ecies::unseal_bytes;
 use crate::util::get_current_system_time;
 use dioxus::prelude::*;
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -34,6 +35,8 @@ pub struct ActionContext {
     pub secret_opt: Option<([u8; 32], u32)>,
     pub board_secrets: std::collections::HashMap<u32, [u8; 32]>,
     pub category_secrets: std::collections::HashMap<MessageId, (u32, [u8; 32])>,
+    pub old_category_secrets:
+        std::collections::HashMap<MessageId, std::collections::HashMap<u32, [u8; 32]>>,
 }
 
 impl ActionContext {
@@ -45,6 +48,9 @@ impl ActionContext {
         if let Some(key) = current_board.owner_key {
             let boards = BOARDS.read();
             if let Some(board_data) = boards.map.get(&key) {
+                // One gate for every action: banned, suspended and non-member
+                // identities get no context, so no action can be sent.
+                board_data.ensure_can_write().ok()?;
                 return Some(Self {
                     current_board: key,
                     board_key: board_data.board_key(),
@@ -54,6 +60,7 @@ impl ActionContext {
                     secret_opt: board_data.get_secret().map(|(s, v)| (*s, v)),
                     board_secrets: board_data.secrets.clone(),
                     category_secrets: board_data.category_secrets.clone(),
+                    old_category_secrets: board_data.old_category_secrets.clone(),
                 });
             }
         }
@@ -208,6 +215,64 @@ pub async fn toggle_reaction(ctx: ActionContext, target_message_id: MessageId, e
     }
 
     send_actions(ctx, actions).await;
+}
+
+/// Owner-only, after a key rotation: publish an edit that re-seals the real
+/// category name with the current key, so members who join later read it.
+pub async fn reseal_category_name(category_id: MessageId) {
+    let Some(ctx) = ActionContext::from_current_board() else {
+        return;
+    };
+    if ctx.self_sk.verifying_key() != ctx.current_board {
+        return;
+    }
+    let Some(category) = ctx.category_content(&category_id) else {
+        return;
+    };
+    if !category.is_restricted() {
+        return;
+    }
+    let Some(sealed) = category.sealed_name.clone() else {
+        return;
+    };
+    let Some((_, new_key, version)) = ctx.category_secret_for(&category_id) else {
+        return;
+    };
+    // The old name may be sealed with an earlier version; keep every old key
+    // on this device for exactly this case.
+    let old_key = sealed.secret_version().and_then(|sealed_version| {
+        if sealed_version == version {
+            Some(new_key)
+        } else {
+            ctx.old_category_secrets
+                .get(&category_id)
+                .and_then(|versions| versions.get(&sealed_version).copied())
+        }
+    });
+    let Some(old_key) = old_key else {
+        return;
+    };
+    let Ok(name_bytes) = unseal_bytes(&sealed, Some(&old_key)) else {
+        return;
+    };
+    let Ok(name) = String::from_utf8(name_bytes) else {
+        return;
+    };
+    if name.is_empty() {
+        return;
+    }
+    let sealed_name = seal_bytes(name.as_bytes(), &new_key, version);
+    let action = ActionContentV1::edit_category_sealed(
+        category_id.clone(),
+        CategoryEditPayload::placeholder_name(category.hidden),
+        category.description.clone(),
+        category.icon.clone(),
+        category.color.clone(),
+        sealed_name,
+        category.allowed_roles.clone(),
+        category.hidden,
+    );
+    send_actions(ctx, vec![action]).await;
 }
 
 /// Delete a message
@@ -394,6 +459,9 @@ pub(crate) fn apply_state_delta(
     ctx: &ActionContext,
     delta: ChatBoardStateV1Delta,
 ) -> Result<(), String> {
+    if let Some(board) = BOARDS.read().map.get(&ctx.current_board) {
+        board.ensure_can_write()?;
+    }
     let parent = ctx.board_state.clone();
     let owner = ctx.current_board;
     let mut error: Option<String> = None;

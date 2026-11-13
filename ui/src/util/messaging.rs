@@ -66,6 +66,13 @@ pub async fn send_message(
         return;
     }
 
+    if let Some(board_data) = BOARDS.read().map.get(&current_board) {
+        if let Err(error) = board_data.ensure_can_write() {
+            warn!("{error}");
+            return;
+        }
+    }
+
     let max_message_size = board_state_clone
         .configuration
         .configuration
@@ -238,6 +245,12 @@ pub(crate) async fn publish_message(
     reply_target: Option<MessageId>,
     category_id: Option<MessageId>,
 ) -> Option<MessageId> {
+    if let Some(board_data) = BOARDS.read().map.get(&current_board) {
+        if let Err(error) = board_data.ensure_can_write() {
+            warn!("{error}");
+            return None;
+        }
+    }
     let message = MessageV1 {
         board_owner: MemberId::from(current_board),
         author: MemberId::from(&self_sk.verifying_key()),

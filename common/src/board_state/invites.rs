@@ -10,7 +10,7 @@
 //! disagree.
 
 use crate::board_state::member::MemberId;
-use crate::board_state::roles::RoleId;
+use crate::board_state::roles::{AuthorityProof, RoleId};
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::{sign_struct, verify_struct};
 use crate::ChatBoardStateV1;
@@ -70,6 +70,13 @@ pub struct AuthorizedInviteToken {
     /// records written before delegation existed keep verifying.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
+    /// Signer's public key, kept so the record still verifies after the member
+    /// is pruned from the board. It must hash to `signer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    /// Authority the signer held when the link was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
 }
 
 impl AuthorizedInviteToken {
@@ -78,6 +85,8 @@ impl AuthorizedInviteToken {
             signature: sign_struct(&token, owner_sk),
             token,
             signer: None,
+            signer_key: None,
+            authority: None,
         }
     }
 
@@ -87,7 +96,21 @@ impl AuthorizedInviteToken {
             signature: sign_struct(&token, signing_key),
             token,
             signer: Some(signer),
+            signer_key: Some(signing_key.verifying_key()),
+            authority: None,
         }
+    }
+
+    pub fn with_authority(mut self, proof: AuthorityProof) -> Self {
+        self.authority = Some(Box::new(proof));
+        self
+    }
+
+    pub fn with_optional_authority(mut self, proof: Option<AuthorityProof>) -> Self {
+        if self.signer.is_some() {
+            self.authority = proof.map(Box::new);
+        }
+        self
     }
 
     pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
@@ -147,13 +170,21 @@ impl ComposableState for InviteTokensV1 {
         let mut ids = std::collections::HashSet::new();
         for token in &self.tokens {
             let signer = token.signer_id(parameters);
-            if signer != parameters.owner_id() && !parent_state.roles.can_manage_access(&signer) {
-                return Err("Invite link signer cannot manage access".to_string());
-            }
-            let signing_key =
-                crate::board_state::roles::signer_key(parent_state, parameters, &signer)?;
+            let signing_key = crate::board_state::roles::resolve_signer_key(
+                parent_state,
+                parameters,
+                &signer,
+                token.signer_key.as_ref(),
+            )?;
             verify_struct(&token.token, &token.signature, &signing_key)
                 .map_err(|e| format!("Invalid invite token signature: {}", e))?;
+            crate::board_state::roles::verify_manager_authority(
+                parent_state,
+                parameters,
+                &signer,
+                token.authority.as_deref(),
+                8,
+            )?;
             if token.token.label.chars().count() > MAX_INVITE_LABEL {
                 return Err("Invite link label is too long".to_string());
             }
@@ -324,7 +355,9 @@ mod tests {
     use super::*;
     use crate::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
     use crate::board_state::member::{AuthorizedMember, Member};
-    use crate::board_state::roles::{AuthorizedRole, AuthorizedRoleAssignment, Role};
+    use crate::board_state::roles::{
+        manager_authority_proof, AuthorizedRole, AuthorizedRoleAssignment, Role,
+    };
     use freenet_scaffold::ComposableState;
 
     fn owner() -> SigningKey {
@@ -395,6 +428,104 @@ mod tests {
             join_proof: Some(proof),
         };
         AuthorizedMember::new(member, &member_sk)
+    }
+
+    #[test]
+    fn manager_link_verifies_after_the_manager_loses_access() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let manager = SigningKey::from_bytes(&[7u8; 32]);
+        let params = ChatBoardParametersV1 {
+            owner: owner.verifying_key(),
+        };
+        let owner_id = params.owner_id();
+        let manager_id = MemberId::from(&manager.verifying_key());
+
+        let mut state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner),
+            ..Default::default()
+        };
+        state.members.members.push(AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk: manager.verifying_key(),
+                join_proof: None,
+            },
+            &owner,
+        ));
+        state.roles.roles.push(AuthorizedRole::new(
+            Role {
+                id: [5u8; 16],
+                name: "staff".to_string(),
+                generation: 1,
+                can_manage_access: true,
+                can_distribute_keys: false,
+                can_edit_posts: false,
+                can_delete_posts: false,
+                can_close_posts: false,
+                can_pin_posts: false,
+                can_move_posts: false,
+                scope: Vec::new(),
+                deleted: false,
+            },
+            &owner,
+        ));
+        state.roles.assignments.push(AuthorizedRoleAssignment::new(
+            crate::board_state::roles::RoleAssignment {
+                role_id: [5u8; 16],
+                member_id: manager_id,
+                generation: 1,
+                revoked: false,
+            },
+            &owner,
+        ));
+
+        let link_key = SigningKey::from_bytes(&[4u8; 32]);
+        let proof = manager_authority_proof(&state, &manager_id).expect("manager proof");
+        state.invites.tokens.push(
+            AuthorizedInviteToken::signed_by(
+                InviteToken {
+                    id: [4u8; 16],
+                    verifying_key: link_key.verifying_key(),
+                    role_id: [5u8; 16],
+                    max_uses: None,
+                    not_after: None,
+                    generation: 1,
+                    deleted: false,
+                    label: "staff".to_string(),
+                    created_at: None,
+                    includes_category_keys: false,
+                },
+                manager_id,
+                &manager,
+            )
+            .with_authority(proof),
+        );
+        state.invites.verify(&state.clone(), &params).unwrap();
+
+        // Revoke the manager's role and prune the member.
+        state
+            .roles
+            .assignments
+            .retain(|a| a.assignment.member_id != manager_id);
+        state.roles.assignments.push(AuthorizedRoleAssignment::new(
+            crate::board_state::roles::RoleAssignment {
+                role_id: [5u8; 16],
+                member_id: manager_id,
+                generation: 2,
+                revoked: true,
+            },
+            &owner,
+        ));
+        state
+            .members
+            .members
+            .retain(|m| m.member.id() != manager_id);
+
+        state
+            .invites
+            .verify(&state.clone(), &params)
+            .expect("historical manager proof keeps the link verifiable");
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
         let data = boards.map.get(&current).ok_or("Board not found")?.clone();
         (current, data)
     };
+    board_data.ensure_can_write()?;
 
     let board_key = board_data.board_key();
     let self_sk = board_data.self_sk.clone();
@@ -134,6 +135,7 @@ pub fn lift_ban(ban_id: BanId, banned_user: MemberId) -> Result<(), String> {
             .get(&current_board)
             .ok_or("Board not found")?
             .clone();
+        data.ensure_can_write()?;
         (data.board_state.clone(), data.self_sk.clone())
     };
     let revocation = AuthorizedBanRevocation::new(

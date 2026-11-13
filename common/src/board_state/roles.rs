@@ -3,6 +3,7 @@
 //! Records are owner-signed and carry a generation, like admins: the highest
 //! generation wins and a tombstone wins ties, so merging is order independent.
 
+use crate::board_state::admin::AuthorizedAdmin;
 use crate::board_state::member::MemberId;
 use crate::board_state::message::MessageId;
 use crate::board_state::ChatBoardParametersV1;
@@ -79,6 +80,189 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Proof that a member was allowed to sign a management record when they did.
+///
+/// Authority is checked against the current state first. When the signer has
+/// since lost their admin seat or role, this proof keeps the record verifiable:
+/// the admin record is owner-signed, and the role grant carries the role
+/// definition plus the signer's assignment, which recursively carry their own
+/// proofs.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct AuthorityProof {
+    /// Owner-signed record that appointed the signer as an admin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin: Option<AuthorizedAdmin>,
+    /// Role definition and assignment that granted access management.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<Box<RoleGrantProof>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct RoleGrantProof {
+    pub role: AuthorizedRole,
+    pub assignment: AuthorizedRoleAssignment,
+}
+
+/// Cap on nested authority proofs; each level is a signed grant.
+const MAX_AUTHORITY_DEPTH: u8 = 8;
+
+/// Resolve the key that signed a record: the board owner, the embedded key when
+/// the record carries one, or the current member record.
+pub fn resolve_signer_key(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    signer: &MemberId,
+    embedded: Option<&VerifyingKey>,
+) -> Result<VerifyingKey, String> {
+    if *signer == parameters.owner_id() {
+        return Ok(parameters.owner);
+    }
+    if let Some(key) = embedded {
+        return if MemberId::from(key) == *signer {
+            Ok(*key)
+        } else {
+            Err("Embedded signer key does not match the signer".to_string())
+        };
+    }
+    signer_key(state, parameters, signer)
+}
+
+/// Proof for a signer who is currently a board admin.
+pub fn admin_authority_proof(
+    state: &ChatBoardStateV1,
+    signer: &MemberId,
+) -> Option<AuthorityProof> {
+    state
+        .admin
+        .admins
+        .iter()
+        .find(|admin| admin.admin.id() == *signer)
+        .map(|admin| AuthorityProof {
+            admin: Some(admin.clone()),
+            grant: None,
+        })
+}
+
+/// Proof for a signer who currently manages access through a role.
+pub fn manager_authority_proof(
+    state: &ChatBoardStateV1,
+    signer: &MemberId,
+) -> Option<AuthorityProof> {
+    let assignment = state.roles.assignments.iter().find(|entry| {
+        entry.assignment.member_id == *signer
+            && !entry.assignment.revoked
+            && state.roles.roles.iter().any(|role| {
+                role.role.id == entry.assignment.role_id
+                    && role.role.can_manage_access
+                    && !role.role.deleted
+            })
+    })?;
+    let role = state
+        .roles
+        .roles
+        .iter()
+        .find(|role| role.role.id == assignment.assignment.role_id)?;
+    Some(AuthorityProof {
+        admin: None,
+        grant: Some(Box::new(RoleGrantProof {
+            role: role.clone(),
+            assignment: assignment.clone(),
+        })),
+    })
+}
+
+pub(crate) fn verify_admin_authority(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    signer: &MemberId,
+    proof: Option<&AuthorityProof>,
+    depth: u8,
+) -> Result<(), String> {
+    if *signer == parameters.owner_id() || is_board_admin(state, signer) {
+        return Ok(());
+    }
+    if depth == 0 {
+        return Err("Authority proof is nested too deeply".to_string());
+    }
+    let proof = proof.ok_or("Signer is not an admin and carries no proof")?;
+    if let Some(admin) = &proof.admin {
+        admin.verify_signature(&parameters.owner)?;
+        if admin.admin.id() == *signer {
+            return Ok(());
+        }
+    }
+    Err("Signer was not an admin when the record was signed".to_string())
+}
+
+pub(crate) fn verify_manager_authority(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    signer: &MemberId,
+    proof: Option<&AuthorityProof>,
+    depth: u8,
+) -> Result<(), String> {
+    if *signer == parameters.owner_id() || state.roles.can_manage_access(signer) {
+        return Ok(());
+    }
+    if depth == 0 {
+        return Err("Authority proof is nested too deeply".to_string());
+    }
+    let proof = proof.ok_or("Signer cannot manage access and carries no proof")?;
+    let grant = proof
+        .grant
+        .as_ref()
+        .ok_or("Authority proof has no role grant")?;
+    if grant.role.role.deleted || !grant.role.role.can_manage_access {
+        return Err("The proof role does not grant access management".to_string());
+    }
+    if grant.assignment.assignment.role_id != grant.role.role.id
+        || grant.assignment.assignment.member_id != *signer
+        || grant.assignment.assignment.revoked
+    {
+        return Err("The proof assignment does not grant this role".to_string());
+    }
+
+    let role_signer = grant.role.signer_id(parameters);
+    let role_key = resolve_signer_key(
+        state,
+        parameters,
+        &role_signer,
+        grant.role.signer_key.as_ref(),
+    )?;
+    grant.role.verify_signature_with(&role_key)?;
+    verify_admin_authority(
+        state,
+        parameters,
+        &role_signer,
+        grant.role.authority.as_deref(),
+        depth - 1,
+    )?;
+
+    let assign_signer = grant.assignment.signer_id(parameters);
+    if assign_signer == *signer {
+        return Err("The proof assignment is self-granted".to_string());
+    }
+    let assign_key = resolve_signer_key(
+        state,
+        parameters,
+        &assign_signer,
+        grant.assignment.signer_key.as_ref(),
+    )?;
+    verify_struct(
+        &grant.assignment.assignment,
+        &grant.assignment.signature,
+        &assign_key,
+    )
+    .map_err(|e| format!("Invalid role assignment signature: {}", e))?;
+    verify_manager_authority(
+        state,
+        parameters,
+        &assign_signer,
+        grant.assignment.authority.as_deref(),
+        depth - 1,
+    )
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct AuthorizedRole {
     pub role: Role,
@@ -86,6 +270,13 @@ pub struct AuthorizedRole {
     /// Who signed it. `None` means the owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
+    /// Signer's public key, kept so the record still verifies after the member
+    /// is pruned from the board. It must hash to `signer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    /// Authority the signer held when the record was signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
 }
 
 impl AuthorizedRole {
@@ -94,6 +285,8 @@ impl AuthorizedRole {
             signature: sign_struct(&role, owner_sk),
             role,
             signer: None,
+            signer_key: None,
+            authority: None,
         }
     }
 
@@ -103,7 +296,21 @@ impl AuthorizedRole {
             signature: sign_struct(&role, signing_key),
             role,
             signer: Some(signer),
+            signer_key: Some(signing_key.verifying_key()),
+            authority: None,
         }
+    }
+
+    pub fn with_authority(mut self, proof: AuthorityProof) -> Self {
+        self.authority = Some(Box::new(proof));
+        self
+    }
+
+    pub fn with_optional_authority(mut self, proof: Option<AuthorityProof>) -> Self {
+        if self.signer.is_some() {
+            self.authority = proof.map(Box::new);
+        }
+        self
     }
 
     pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
@@ -146,6 +353,13 @@ pub struct AuthorizedRoleAssignment {
     /// adding it does not invalidate records written before delegation existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
+    /// Signer's public key, kept so the record still verifies after the member
+    /// is pruned from the board. It must hash to `signer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    /// Authority the signer held when the record was signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
 }
 
 impl AuthorizedRoleAssignment {
@@ -154,6 +368,8 @@ impl AuthorizedRoleAssignment {
             signature: sign_struct(&assignment, owner_sk),
             assignment,
             signer: None,
+            signer_key: None,
+            authority: None,
         }
     }
 
@@ -167,7 +383,21 @@ impl AuthorizedRoleAssignment {
             signature: sign_struct(&assignment, signing_key),
             assignment,
             signer: Some(signer),
+            signer_key: Some(signing_key.verifying_key()),
+            authority: None,
         }
+    }
+
+    pub fn with_authority(mut self, proof: AuthorityProof) -> Self {
+        self.authority = Some(Box::new(proof));
+        self
+    }
+
+    pub fn with_optional_authority(mut self, proof: Option<AuthorityProof>) -> Self {
+        if self.signer.is_some() {
+            self.authority = proof.map(Box::new);
+        }
+        self
     }
 
     pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
@@ -201,12 +431,19 @@ impl ComposableState for RolesV1 {
         for role in &self.roles {
             // Owner and board admins may define roles. Managers cannot, so a
             // delegated access manager cannot grant itself moderation powers.
+            // A proof keeps records signed by an admin who has since lost the
+            // seat verifiable.
             let signer = role.signer_id(parameters);
-            if signer != parameters.owner_id() && !is_board_admin(parent_state, &signer) {
-                return Err("Role definition signer must be the owner or an admin".to_string());
-            }
-            let signing_key = signer_key(parent_state, parameters, &signer)?;
+            let signing_key =
+                resolve_signer_key(parent_state, parameters, &signer, role.signer_key.as_ref())?;
             role.verify_signature_with(&signing_key)?;
+            verify_admin_authority(
+                parent_state,
+                parameters,
+                &signer,
+                role.authority.as_deref(),
+                MAX_AUTHORITY_DEPTH,
+            )?;
             if !role_ids.insert(role.role.id) {
                 return Err("Duplicate role record".to_string());
             }
@@ -215,9 +452,6 @@ impl ComposableState for RolesV1 {
         let mut assignment_keys = std::collections::HashSet::new();
         for assignment in &self.assignments {
             let signer = assignment.signer_id(parameters);
-            if signer != parameters.owner_id() && !self.can_manage_access(&signer) {
-                return Err("Role assignment signer cannot manage access".to_string());
-            }
             // Evaluating authority against the list that contains this record
             // would let a manager grant a role to themselves. Delegation to
             // another member is allowed; self-promotion is not.
@@ -227,9 +461,21 @@ impl ComposableState for RolesV1 {
             {
                 return Err("A manager cannot assign a role to themselves".to_string());
             }
-            let signing_key = signer_key(parent_state, parameters, &signer)?;
+            let signing_key = resolve_signer_key(
+                parent_state,
+                parameters,
+                &signer,
+                assignment.signer_key.as_ref(),
+            )?;
             verify_struct(&assignment.assignment, &assignment.signature, &signing_key)
                 .map_err(|e| format!("Invalid role assignment signature: {}", e))?;
+            verify_manager_authority(
+                parent_state,
+                parameters,
+                &signer,
+                assignment.authority.as_deref(),
+                MAX_AUTHORITY_DEPTH,
+            )?;
 
             let key = (
                 assignment.assignment.role_id,
@@ -559,6 +805,7 @@ fn record_digest<T: serde::Serialize>(value: &T) -> i64 {
 #[cfg(test)]
 mod delegation_tests {
     use super::*;
+    use crate::board_state::admin::{Admin, AuthorizedAdmin, AuthorizedAdminRevocation};
     use crate::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
     use crate::board_state::member::{AuthorizedMember, Member};
     use freenet_scaffold::ComposableState;
@@ -771,6 +1018,169 @@ mod delegation_tests {
             .roles
             .apply_delta(&state.clone(), &params, &Some(delta))
             .is_err());
+    }
+
+    fn member_record(sk: &SigningKey, owner_id: MemberId, owner: &SigningKey) -> AuthorizedMember {
+        AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk: sk.verifying_key(),
+                join_proof: None,
+            },
+            owner,
+        )
+    }
+
+    fn role_record(id: RoleId, name: &str, can_manage_access: bool) -> Role {
+        Role {
+            id,
+            name: name.to_string(),
+            generation: 1,
+            can_manage_access,
+            can_distribute_keys: false,
+            can_edit_posts: false,
+            can_delete_posts: false,
+            can_close_posts: false,
+            can_pin_posts: false,
+            can_move_posts: false,
+            scope: Vec::new(),
+            deleted: false,
+        }
+    }
+
+    #[test]
+    fn admin_signed_role_verifies_after_the_admin_is_removed() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let admin_sk = SigningKey::from_bytes(&[6u8; 32]);
+        let params = params(&owner);
+        let owner_id = params.owner_id();
+        let admin_id = MemberId::from(&admin_sk.verifying_key());
+
+        let mut state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner),
+            ..Default::default()
+        };
+        state
+            .members
+            .members
+            .push(member_record(&admin_sk, owner_id, &owner));
+        state.admin.admins.push(AuthorizedAdmin::new(
+            Admin {
+                member_id: admin_id,
+                generation: 1,
+            },
+            &owner,
+        ));
+
+        let proof = admin_authority_proof(&state, &admin_id).expect("admin proof");
+        state.roles.roles.push(
+            AuthorizedRole::signed_by(role_record([9u8; 16], "staff", true), admin_id, &admin_sk)
+                .with_authority(proof),
+        );
+        state.verify(&state.clone(), &params).unwrap();
+
+        // The owner demotes the admin and the member record is pruned.
+        state.admin.admins.clear();
+        state
+            .admin
+            .revoked
+            .push(AuthorizedAdminRevocation::new(admin_id, 2, &owner));
+        state.members.members.clear();
+
+        state
+            .verify(&state.clone(), &params)
+            .expect("historical admin proof keeps the role verifiable");
+    }
+
+    #[test]
+    fn admin_signed_role_without_proof_fails_after_demotion() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let admin_sk = SigningKey::from_bytes(&[6u8; 32]);
+        let params = params(&owner);
+        let owner_id = params.owner_id();
+        let admin_id = MemberId::from(&admin_sk.verifying_key());
+
+        let mut state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner),
+            ..Default::default()
+        };
+        state
+            .members
+            .members
+            .push(member_record(&admin_sk, owner_id, &owner));
+        state.roles.roles.push(AuthorizedRole::signed_by(
+            role_record([9u8; 16], "staff", true),
+            admin_id,
+            &admin_sk,
+        ));
+        state.admin.admins.push(AuthorizedAdmin::new(
+            Admin {
+                member_id: admin_id,
+                generation: 1,
+            },
+            &owner,
+        ));
+        state.verify(&state.clone(), &params).unwrap();
+
+        state.admin.admins.clear();
+        assert!(state.verify(&state.clone(), &params).is_err());
+    }
+
+    #[test]
+    fn manager_assignment_verifies_after_the_manager_loses_the_role() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let manager = SigningKey::from_bytes(&[7u8; 32]);
+        let other = SigningKey::from_bytes(&[8u8; 32]);
+        let params = params(&owner);
+        let owner_id = params.owner_id();
+        let manager_id = MemberId::from(&manager.verifying_key());
+        let other_id = MemberId::from(&other.verifying_key());
+
+        let mut state = state_with_manager(&owner, &manager);
+        state
+            .members
+            .members
+            .push(member_record(&other, owner_id, &owner));
+
+        let proof = manager_authority_proof(&state, &manager_id).expect("manager proof");
+        state.roles.assignments.push(
+            AuthorizedRoleAssignment::signed_by(
+                RoleAssignment {
+                    role_id: [5u8; 16],
+                    member_id: other_id,
+                    generation: 1,
+                    revoked: false,
+                },
+                manager_id,
+                &manager,
+            )
+            .with_authority(proof),
+        );
+        state.verify(&state.clone(), &params).unwrap();
+
+        // Revoke the manager's own assignment, then prune the member.
+        state
+            .roles
+            .assignments
+            .retain(|a| a.assignment.member_id != manager_id);
+        state.roles.assignments.push(AuthorizedRoleAssignment::new(
+            RoleAssignment {
+                role_id: [5u8; 16],
+                member_id: manager_id,
+                generation: 2,
+                revoked: true,
+            },
+            &owner,
+        ));
+        state
+            .members
+            .members
+            .retain(|m| m.member.id() != manager_id);
+
+        state
+            .verify(&state.clone(), &params)
+            .expect("historical manager proof keeps the assignment verifiable");
     }
 
     /// The new permission must stay out of the signed bytes when it is off,
