@@ -588,9 +588,7 @@ impl ApiClient {
 
                         // Validate the board state is properly initialized
                         if board_state.configuration.configuration.owner_member_id
-                            == plaza_core::board_state::member::MemberId(
-                                freenet_scaffold::util::FastHash(0),
-                            )
+                            == plaza_core::board_state::member::MemberId::from_bytes([0u8; 32])
                         {
                             return Err(anyhow!("Board state has invalid owner_member_id"));
                         }
@@ -1694,7 +1692,7 @@ impl ApiClient {
                     .map(|r| r.iter().map(|(k, v)| (k.clone(), v.len())).collect())
                     .unwrap_or_default();
 
-                let message_id_str = msg_id.0 .0.to_string();
+                let message_id_str = msg_id.to_string();
 
                 // Output as JSONL (one JSON object per line)
                 let json_msg = json!({

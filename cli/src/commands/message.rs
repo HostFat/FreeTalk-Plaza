@@ -321,7 +321,7 @@ pub async fn execute(command: MessageCommands, api: ApiClient, format: OutputFor
                                 .unwrap_or_default();
 
                             // Encode message ID for use in edit/delete/react commands
-                            let message_id_str = msg_id.0 .0.to_string();
+                            let message_id_str = msg_id.to_string();
 
                             json!({
                                 "message_id": message_id_str,
@@ -511,5 +511,5 @@ fn parse_message_id(message_id: &str) -> Result<MessageId> {
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid message ID (expected integer): {}", e))?;
 
-    Ok(MessageId(freenet_scaffold::util::FastHash(hash_value)))
+    Ok(MessageId::from_bytes([hash_value as u8; 32]))
 }
