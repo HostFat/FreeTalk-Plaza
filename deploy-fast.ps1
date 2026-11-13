@@ -19,6 +19,8 @@ param(
     [int]$Version = 0,
     # Skip `npm run build:css` (only if the CSS is already up to date).
     [switch]$SkipCss,
+    # Use the size-optimized release profile (slower) instead of release-fast.
+    [switch]$Production,
     [string]$StateDir = (Join-Path $env:APPDATA 'freetalk'),
     [string]$TargetDir = (Join-Path $PSScriptRoot 'target\dx-fast')
 )
@@ -133,9 +135,16 @@ if (-not $SkipCss) {
 New-Item -ItemType Directory -Force $TargetDir | Out-Null
 $env:CARGO_TARGET_DIR = $TargetDir
 
-Write-Host "Building UI (first run is a full build, later runs are incremental)..."
+$buildProfile = if ($Production) { "release" } else { "release-fast" }
+Write-Host "Building UI with profile $buildProfile (first run is a full build, later runs are incremental)..."
 $buildTimer = [System.Diagnostics.Stopwatch]::StartNew()
-& $dx build --package plaza-ui --base-path "/v1/contract/web/$contractId/" --release
+# DWARF debug info is on by default in dx and roughly doubles the wasm. The
+# published bundle does not need it.
+if ($Production) {
+    & $dx build --package plaza-ui --base-path "/v1/contract/web/$contractId/" --release --debug-symbols false
+} else {
+    & $dx build --package plaza-ui --base-path "/v1/contract/web/$contractId/" --profile release-fast --debug-symbols false
+}
 if ($LASTEXITCODE -ne 0) { throw "dx build failed." }
 $buildTimer.Stop()
 Write-Host ("Build finished in {0:n1}s" -f $buildTimer.Elapsed.TotalSeconds)
@@ -149,6 +158,27 @@ if (-not $publicDir) {
     throw "Could not find the built public directory under $TargetDir."
 }
 Write-Host "Bundle: $($publicDir.FullName)"
+
+# dx leaves the hashed JS/wasm of every earlier build in assets/. Remove the
+# ones index.html does not load: the archive would otherwise carry dozens of
+# multi-megabyte wasm files.
+$assetsDir = Join-Path $publicDir.FullName 'assets'
+$indexHtml = Get-Content (Join-Path $publicDir.FullName 'index.html') -Raw
+$currentJs = [regex]::Match($indexHtml, 'assets/(plaza-ui-[A-Za-z0-9]+\.js)').Groups[1].Value
+if ($currentJs) {
+    $currentJsPath = Join-Path $assetsDir $currentJs
+    $jsText = Get-Content $currentJsPath -Raw
+    $currentWasm = [regex]::Match($jsText, 'plaza-ui_bg-[A-Za-z0-9]+\.wasm').Value
+    $stale = Get-ChildItem $assetsDir -File | Where-Object {
+        ($_.Name -like 'plaza-ui-*.js' -and $_.Name -ne $currentJs) -or
+        ($_.Name -like 'plaza-ui_bg-*.wasm' -and $_.Name -ne $currentWasm)
+    }
+    if ($stale) {
+        $freed = ($stale | Measure-Object Length -Sum).Sum
+        $stale | Remove-Item -Force
+        Write-Host ("Removed {0} stale bundle files ({1:n0} MB)." -f $stale.Count, ($freed / 1MB))
+    }
+}
 
 # Build the tar.xz exactly like deploy-tool: entries relative to public, no ./.
 $items = Get-ChildItem $publicDir.FullName -Force | Select-Object -ExpandProperty Name

@@ -2,6 +2,7 @@
 name = "plaza-contract"
 version = "0.1.0"
 edition = "2021"
+license = "LGPL-3.0"
 
 [dependencies]
 ciborium.workspace = true

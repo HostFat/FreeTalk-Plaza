@@ -84,3 +84,10 @@ The script reads the signed artifacts from `%APPDATA%\freetalk`, finds `fdev`,
 prints the build time, warns if sources changed after that build, and runs
 `fdev publish`. Use it for a retry after a stuck publish or for a deliberate
 re-publish. For code changes, run `deploy-tool deploy`.
+
+# License
+
+FreeTalk Plaza is a fork of [River](https://github.com/freenet/river) and is
+distributed under the GNU Lesser General Public License v3.0 (LGPL-3.0).
+See [LICENSE](LICENSE). The original River copyright and license notices are
+retained.
