@@ -625,10 +625,14 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
         for message in &all_messages {
             if let Some(parent) = message.reply_to_message_id.as_ref() {
                 map.entry(parent.clone()).or_default().push(message);
-            } else if let Some(category) = message.category_id.as_ref() {
-                // A new topic belongs to its section even though it is not a
-                // reply. Feed category stats and the section post list.
-                map.entry(category.clone()).or_default().push(message);
+            } else if !message.is_category {
+                if let Some(category) = message.category_id.as_ref() {
+                    // A new topic belongs to its section even though it is not
+                    // a reply. Categories also carry their own id as
+                    // `category_id`; only topics are attached, or the stats
+                    // walk would loop on the category itself.
+                    map.entry(category.clone()).or_default().push(message);
+                }
             }
         }
         map
