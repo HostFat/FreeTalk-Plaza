@@ -130,21 +130,19 @@ pub fn CategoryCard(
                     } else {
                         div { class: "flex items-center gap-3 min-w-0 w-full flex-wrap",
                             span { class: "text-2xl flex-shrink-0", "{icon}" }
-                            div { class: "flex-1 min-w-0",
-                                div { class: "flex items-center gap-2 flex-wrap",
-                                    h3 { class: "text-base font-semibold text-text group-hover:text-accent transition-colors truncate",
-                                        "{name}"
-                                    }
-                                    if !category.category_allowed_roles.is_empty() {
-                                        span {
-                                            class: "flex-shrink-0 text-xs px-2 py-0.5 rounded-full bg-surface border border-border text-text-muted",
-                                            title: "Visible only to members of the selected roles",
-                                            if category.category_locked { "🔒 Locked" } else { "🔒 Restricted" }
-                                        }
+                            div { class: "flex-1 min-w-0 flex items-center gap-2",
+                                h3 { class: "text-base font-semibold text-text group-hover:text-accent transition-colors truncate min-w-0",
+                                    "{name}"
+                                }
+                                if !category.category_allowed_roles.is_empty() {
+                                    span {
+                                        class: "flex-shrink-0 text-xs px-2 py-0.5 rounded-full bg-surface border border-border text-text-muted",
+                                        title: "Visible only to members of the selected roles",
+                                        if category.category_locked { "🔒 Locked" } else { "🔒 Restricted" }
                                     }
                                 }
                                 if let Some(desc) = description {
-                                    p { class: "text-xs text-text-muted line-clamp-1 mt-1",
+                                    span { class: "text-xs text-text-muted truncate min-w-0",
                                         "{desc}"
                                     }
                                 }
