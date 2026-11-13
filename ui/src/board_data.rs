@@ -378,6 +378,7 @@ impl BoardData {
                 nonce,
                 sender_ephemeral_public_key: ephemeral_key.to_bytes(),
                 provider: MemberId::from(&self.self_sk.verifying_key()),
+                category_id: Some(*category_id),
             };
             let self_id = MemberId::from(&self.self_sk.verifying_key());
             encrypted_secrets.push(if self_id == owner_id {
@@ -393,6 +394,7 @@ impl BoardData {
                     version,
                     cipher_spec: BoardCipherSpec::Aes256Gcm,
                     created_at: get_current_system_time(),
+                    category_id: Some(*category_id),
                 },
                 &self.self_sk,
             )]
@@ -1441,6 +1443,7 @@ impl BoardData {
             version: new_version,
             cipher_spec: BoardCipherSpec::Aes256Gcm,
             created_at: get_current_system_time(),
+            category_id: None,
         };
 
         let authorized_version = AuthorizedSecretVersionRecord::new(secret_version, &self.self_sk);
@@ -1504,6 +1507,7 @@ impl BoardData {
                     nonce,
                     sender_ephemeral_public_key: ephemeral_key.to_bytes(),
                     provider: self.owner_vk.into(),
+                    category_id: None,
                 };
 
                 let authorized_encrypted_secret =
@@ -1601,6 +1605,7 @@ impl BoardData {
                     nonce,
                     sender_ephemeral_public_key: ephemeral_key.to_bytes(),
                     provider: self.owner_vk.into(),
+                    category_id: None,
                 };
 
                 let authorized_encrypted_secret =
@@ -1692,6 +1697,7 @@ impl Boards {
                 version: 0,
                 cipher_spec: BoardCipherSpec::Aes256Gcm,
                 created_at: get_current_system_time(),
+                category_id: None,
             };
 
             let authorized_version = AuthorizedSecretVersionRecord::new(secret_version, &self_sk);
@@ -1704,6 +1710,7 @@ impl Boards {
                 nonce,
                 sender_ephemeral_public_key: ephemeral_key.to_bytes(),
                 provider: owner_vk.into(),
+                category_id: None,
             };
 
             let authorized_encrypted_secret =

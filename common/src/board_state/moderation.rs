@@ -180,7 +180,7 @@ pub struct MoveState {
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct ModerationSummary {
     pub routes: BTreeMap<MessageId, RouteState>,
-    pub flags: BTreeMap<MessageId, FlagState>,
+    pub flags: BTreeMap<MessageId, BTreeMap<u64, FlagState>>,
     pub moves: BTreeMap<MessageId, MoveState>,
 }
 
@@ -212,11 +212,11 @@ fn route_map(routes: &[AuthorizedMessageRoute]) -> BTreeMap<MessageId, RouteStat
     map
 }
 
-fn flag_map(flags: &[AuthorizedPostFlag]) -> BTreeMap<MessageId, FlagState> {
-    let mut map = BTreeMap::new();
+fn flag_map(flags: &[AuthorizedPostFlag]) -> BTreeMap<MessageId, BTreeMap<u64, FlagState>> {
+    let mut map: BTreeMap<MessageId, BTreeMap<u64, FlagState>> = BTreeMap::new();
     for flag in flags {
-        map.insert(
-            flag.flag.target,
+        map.entry(flag.flag.target).or_default().insert(
+            flag.flag.generation,
             FlagState {
                 pinned: flag.flag.pinned,
                 closed: flag.flag.closed,
@@ -611,7 +611,14 @@ impl ModerationV1 {
             let message_id = message.id();
             if let Some(route) = routes.get(&message_id) {
                 if let Some(target) = route.reply_to {
-                    if flags.get(&target).map(|flag| flag.closed).unwrap_or(false) {
+                    if flags
+                        .get(&target)
+                        .and_then(|generations| {
+                            generations.values().max_by_key(|flag| flag.generation)
+                        })
+                        .map(|flag| flag.closed)
+                        .unwrap_or(false)
+                    {
                         return Err("Cannot reply to a closed post".to_string());
                     }
                 }
@@ -632,6 +639,7 @@ impl ModerationV1 {
             };
             if flags
                 .get(&action.target)
+                .and_then(|generations| generations.values().max_by_key(|flag| flag.generation))
                 .map(|flag| flag.closed)
                 .unwrap_or(false)
             {
@@ -700,8 +708,10 @@ impl ModerationV1 {
                 entry.signer_id(parameters).0 .0,
             )
         });
-        self.flags.dedup_by_key(|entry| entry.flag.target);
-        self.flags.sort_by_key(|entry| entry.flag.target.0 .0);
+        // Keep one record per (target, generation), preserving history.
+        self.flags.dedup_by(|a, b| {
+            a.flag.target == b.flag.target && a.flag.generation == b.flag.generation
+        });
 
         self.moves.retain(|entry| {
             live.contains(&entry.change.target)
@@ -740,8 +750,10 @@ impl ComposableState for ModerationV1 {
         let routes = route_map(&self.routes);
         let mut flag_ids = std::collections::HashSet::new();
         for flag in &self.flags {
-            if !flag_ids.insert(flag.flag.target) {
-                return Err("Duplicate post flag".to_string());
+            // Keep the history of flags per target: each generation is a
+            // distinct record so a full state can verify what changed.
+            if !flag_ids.insert((flag.flag.target, flag.flag.generation)) {
+                return Err("Duplicate post flag generation".to_string());
             }
             verify_flag(parent_state, parameters, &routes, flag)?;
         }
@@ -792,7 +804,16 @@ impl ComposableState for ModerationV1 {
                 old_state
                     .flags
                     .get(&flag.flag.target)
-                    .map(|old| old.generation < flag.flag.generation)
+                    .and_then(|generations| generations.get(&flag.flag.generation))
+                    .map(|old| {
+                        old != &FlagState {
+                            pinned: flag.flag.pinned,
+                            closed: flag.flag.closed,
+                            announced: flag.flag.announced,
+                            merged_into: flag.flag.merged_into,
+                            generation: flag.flag.generation,
+                        }
+                    })
                     .unwrap_or(true)
             })
             .cloned()
@@ -847,17 +868,22 @@ impl ComposableState for ModerationV1 {
         let routes = route_map(&self.routes);
         for flag in &delta.flags {
             verify_flag(parent_state, parameters, &routes, flag)?;
-            match self
-                .flags
-                .iter()
-                .find(|existing| existing.flag.target == flag.flag.target)
-            {
-                Some(existing) if existing.flag.generation >= flag.flag.generation => {}
-                _ => {
-                    self.flags
-                        .retain(|existing| existing.flag.target != flag.flag.target);
+            match self.flags.iter().find(|existing| {
+                existing.flag.target == flag.flag.target
+                    && existing.flag.generation == flag.flag.generation
+            }) {
+                Some(existing) if existing == flag => {}
+                Some(existing)
+                    if existing.signature.to_bytes().as_slice()
+                        <= flag.signature.to_bytes().as_slice() => {}
+                Some(_) => {
+                    self.flags.retain(|existing| {
+                        !(existing.flag.target == flag.flag.target
+                            && existing.flag.generation == flag.flag.generation)
+                    });
                     self.flags.push(flag.clone());
                 }
+                None => self.flags.push(flag.clone()),
             }
         }
         for entry in &delta.moves {

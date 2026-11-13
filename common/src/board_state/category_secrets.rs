@@ -73,12 +73,18 @@ fn verify_blob(
     parameters: &ChatBoardParametersV1,
     blob: &AuthorizedEncryptedSecretForMember,
     current_version: u32,
+    category_id: MessageId,
 ) -> Result<(), String> {
     let signer = blob.signer_id(parameters);
     let signing_key = distributor_key(state, parameters, &signer)?;
     blob.verify_signature_with(&signing_key)?;
     if !is_board_member(state, parameters, &blob.secret.member_id) {
         return Err("Category key recipient is not a board member".to_string());
+    }
+    if let Some(bound_category) = blob.secret.category_id {
+        if bound_category != category_id {
+            return Err("Category key blob belongs to another category".to_string());
+        }
     }
     if blob.secret.secret_version > current_version {
         return Err("Category key blob references a future version".to_string());
@@ -125,9 +131,22 @@ impl ComposableState for CategorySecretsV1 {
             }
             for record in &set.versions {
                 record.verify_signature(&parameters.owner)?;
+                if let Some(bound_category) = record.record.category_id {
+                    if bound_category != set.category_id {
+                        return Err(
+                            "Category version record belongs to another category".to_string()
+                        );
+                    }
+                }
             }
             for secret in &set.encrypted_secrets {
-                verify_blob(parent_state, parameters, secret, set.current_version)?;
+                verify_blob(
+                    parent_state,
+                    parameters,
+                    secret,
+                    set.current_version,
+                    set.category_id,
+                )?;
             }
             if let Some(max) = set.versions.iter().map(|v| v.record.version).max() {
                 if set.current_version != max {
@@ -221,9 +240,22 @@ impl ComposableState for CategorySecretsV1 {
             for incoming in &delta.sets {
                 for record in &incoming.versions {
                     record.verify_signature(&parameters.owner)?;
+                    if let Some(bound_category) = record.record.category_id {
+                        if bound_category != incoming.category_id {
+                            return Err(
+                                "Category version record belongs to another category".to_string()
+                            );
+                        }
+                    }
                 }
                 for secret in &incoming.encrypted_secrets {
-                    verify_blob(parent_state, parameters, secret, incoming.current_version)?;
+                    verify_blob(
+                        parent_state,
+                        parameters,
+                        secret,
+                        incoming.current_version,
+                        incoming.category_id,
+                    )?;
                 }
 
                 let set = match self
@@ -388,6 +420,7 @@ mod tests {
             version: 1,
             cipher_spec: BoardCipherSpec::Aes256Gcm,
             created_at: SystemTime::now(),
+            category_id: None,
         };
         let blob = EncryptedSecretForMemberV1 {
             member_id: member,
@@ -396,6 +429,7 @@ mod tests {
             nonce: [0u8; 12],
             sender_ephemeral_public_key: [0u8; 32],
             provider: MemberId::from(&owner.verifying_key()),
+            category_id: None,
         };
 
         let mut state = ChatBoardStateV1 {
@@ -545,6 +579,7 @@ mod tests {
                     version: 0,
                     cipher_spec: BoardCipherSpec::Aes256Gcm,
                     created_at: SystemTime::now(),
+                    category_id: None,
                 },
                 &owner,
             )],
@@ -556,6 +591,7 @@ mod tests {
                     nonce: [0u8; 12],
                     sender_ephemeral_public_key: [0u8; 32],
                     provider: distributor,
+                    category_id: None,
                 },
                 distributor,
                 &distributor_sk,
@@ -608,6 +644,7 @@ mod tests {
                     version: 0,
                     cipher_spec: BoardCipherSpec::Aes256Gcm,
                     created_at: SystemTime::now(),
+                    category_id: None,
                 },
                 &owner,
             )],
@@ -619,6 +656,7 @@ mod tests {
                     nonce: [0u8; 12],
                     sender_ephemeral_public_key: [0u8; 32],
                     provider: signer,
+                    category_id: None,
                 },
                 signer,
                 &signer_sk,
@@ -720,6 +758,7 @@ mod tests {
                 version: 0,
                 cipher_spec: BoardCipherSpec::Aes256Gcm,
                 created_at: SystemTime::now(),
+                category_id: None,
             },
             &owner,
         );
@@ -731,6 +770,7 @@ mod tests {
                 nonce: [0u8; 12],
                 sender_ephemeral_public_key: [0u8; 32],
                 provider: owner.verifying_key().into(),
+                category_id: None,
             },
             &owner,
         );
@@ -742,6 +782,7 @@ mod tests {
                 nonce: [1u8; 12],
                 sender_ephemeral_public_key: [1u8; 32],
                 provider: distributor,
+                category_id: None,
             },
             distributor,
             &distributor_sk,

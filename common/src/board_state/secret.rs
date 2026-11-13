@@ -1,4 +1,5 @@
 use crate::board_state::member::MemberId;
+use crate::board_state::message::MessageId;
 use crate::board_state::privacy::{BoardCipherSpec, SecretVersion};
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::{sign_struct, verify_struct};
@@ -250,6 +251,10 @@ pub struct SecretVersionRecordV1 {
     pub version: SecretVersion,
     pub cipher_spec: BoardCipherSpec,
     pub created_at: SystemTime,
+    /// Category this version belongs to. `None` for the board secret and for
+    /// records written before category binding existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<MessageId>,
 }
 
 /// Authorized secret version record signed by board owner
@@ -292,6 +297,10 @@ pub struct EncryptedSecretForMemberV1 {
     pub nonce: [u8; 12],
     pub sender_ephemeral_public_key: [u8; 32],
     pub provider: MemberId,
+    /// Category this blob belongs to. `None` for board secrets and legacy
+    /// records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<MessageId>,
 }
 
 /// Authorized encrypted secret signed by the board owner or by a member whose
@@ -405,6 +414,7 @@ mod tests {
             version,
             cipher_spec: BoardCipherSpec::Aes256Gcm,
             created_at: SystemTime::now(),
+            category_id: None,
         };
         AuthorizedSecretVersionRecord::new(record, owner_sk)
     }
@@ -421,6 +431,7 @@ mod tests {
             nonce: [0u8; 12],
             sender_ephemeral_public_key: [0u8; 32],
             provider: member_id,
+            category_id: None,
         };
         AuthorizedEncryptedSecretForMember::new(secret, owner_sk)
     }
@@ -442,6 +453,7 @@ mod tests {
             version: 1,
             cipher_spec: BoardCipherSpec::Aes256Gcm,
             created_at: SystemTime::now(),
+            category_id: None,
         };
 
         let authorized_record =
@@ -470,6 +482,7 @@ mod tests {
             nonce: [0u8; 12],
             sender_ephemeral_public_key: [0u8; 32],
             provider: member_id,
+            category_id: None,
         };
 
         let authorized_secret =

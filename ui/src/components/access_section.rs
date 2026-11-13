@@ -97,8 +97,10 @@ pub fn RolesSection() -> Element {
         .admins
         .iter()
         .any(|admin| admin.admin.id() == self_id);
-    let can_define_roles = is_owner || is_admin;
-    let can_manage = can_define_roles || data.board_state.roles.can_manage_access(&self_id);
+    // Admins do not get role definition or assignment powers implicitly. The
+    // owner enables them per person through a role with can_manage_access.
+    let can_define_roles = is_owner;
+    let can_manage = is_owner || data.board_state.roles.can_manage_access(&self_id);
     if !can_manage {
         return rsx! {
             div { class: "bg-surface rounded-lg p-4",

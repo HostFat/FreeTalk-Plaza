@@ -79,6 +79,7 @@ fn test_private_board_creation_and_encryption() {
         nonce,
         sender_ephemeral_public_key: ephemeral_key,
         provider: owner_id,
+        category_id: None,
     };
 
     let auth_encrypted_secret =
@@ -89,6 +90,7 @@ fn test_private_board_creation_and_encryption() {
         version: 0,
         cipher_spec: BoardCipherSpec::Aes256Gcm,
         created_at: SystemTime::now(),
+        category_id: None,
     };
 
     let auth_secret_version = AuthorizedSecretVersionRecord::new(secret_version, &owner_sk);
@@ -168,6 +170,7 @@ fn test_private_board_member_addition_with_secrets() {
         version: 0,
         cipher_spec: BoardCipherSpec::Aes256Gcm,
         created_at: SystemTime::now(),
+        category_id: None,
     };
 
     board_state.secrets = BoardSecretsV1 {
@@ -184,6 +187,7 @@ fn test_private_board_member_addition_with_secrets() {
                 nonce,
                 sender_ephemeral_public_key: ephemeral_key,
                 provider: owner_id,
+                category_id: None,
             },
             &owner_sk,
         )],
@@ -214,6 +218,7 @@ fn test_private_board_member_addition_with_secrets() {
         nonce,
         sender_ephemeral_public_key: ephemeral_key,
         provider: owner_id,
+        category_id: None,
     };
 
     board_state
@@ -297,6 +302,7 @@ fn test_secret_rotation() {
                 version: 0,
                 cipher_spec: BoardCipherSpec::Aes256Gcm,
                 created_at: SystemTime::now(),
+                category_id: None,
             },
             &owner_sk,
         )],
@@ -309,6 +315,7 @@ fn test_secret_rotation() {
                     nonce: n1,
                     sender_ephemeral_public_key: ek1,
                     provider: owner_id,
+                    category_id: None,
                 },
                 &owner_sk,
             ),
@@ -320,6 +327,7 @@ fn test_secret_rotation() {
                     nonce: n2,
                     sender_ephemeral_public_key: ek2,
                     provider: owner_id,
+                    category_id: None,
                 },
                 &owner_sk,
             ),
@@ -338,6 +346,7 @@ fn test_secret_rotation() {
                 version: 1,
                 cipher_spec: BoardCipherSpec::Aes256Gcm,
                 created_at: SystemTime::now(),
+                category_id: None,
             },
             &owner_sk,
         )],
@@ -350,6 +359,7 @@ fn test_secret_rotation() {
                     nonce: n1_v1,
                     sender_ephemeral_public_key: ek1_v1,
                     provider: owner_id,
+                    category_id: None,
                 },
                 &owner_sk,
             ),
@@ -361,6 +371,7 @@ fn test_secret_rotation() {
                     nonce: n2_v1,
                     sender_ephemeral_public_key: ek2_v1,
                     provider: owner_id,
+                    category_id: None,
                 },
                 &owner_sk,
             ),
@@ -470,6 +481,7 @@ fn test_ban_member_excludes_from_new_secrets() {
                 version: 0,
                 cipher_spec: BoardCipherSpec::Aes256Gcm,
                 created_at: SystemTime::now(),
+                category_id: None,
             },
             &owner_sk,
         )],
@@ -482,6 +494,7 @@ fn test_ban_member_excludes_from_new_secrets() {
                     nonce: n1,
                     sender_ephemeral_public_key: ek1,
                     provider: owner_id,
+                    category_id: None,
                 },
                 &owner_sk,
             ),
@@ -493,6 +506,7 @@ fn test_ban_member_excludes_from_new_secrets() {
                     nonce: n2,
                     sender_ephemeral_public_key: ek2,
                     provider: owner_id,
+                    category_id: None,
                 },
                 &owner_sk,
             ),
@@ -504,6 +518,7 @@ fn test_ban_member_excludes_from_new_secrets() {
                     nonce: n3,
                     sender_ephemeral_public_key: ek3,
                     provider: owner_id,
+                    category_id: None,
                 },
                 &owner_sk,
             ),
@@ -535,6 +550,7 @@ fn test_ban_member_excludes_from_new_secrets() {
                 version: 1,
                 cipher_spec: BoardCipherSpec::Aes256Gcm,
                 created_at: SystemTime::now(),
+                category_id: None,
             },
             &owner_sk,
         )],
@@ -547,6 +563,7 @@ fn test_ban_member_excludes_from_new_secrets() {
                     nonce: n1_v1,
                     sender_ephemeral_public_key: ek1_v1,
                     provider: owner_id,
+                    category_id: None,
                 },
                 &owner_sk,
             ),
@@ -559,6 +576,7 @@ fn test_ban_member_excludes_from_new_secrets() {
                     nonce: n3_v1,
                     sender_ephemeral_public_key: ek3_v1,
                     provider: owner_id,
+                    category_id: None,
                 },
                 &owner_sk,
             ),
