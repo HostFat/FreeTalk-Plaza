@@ -10,6 +10,7 @@ pub mod emoji_picker;
 mod message_actions;
 pub mod message_input;
 mod not_member_notification;
+pub mod poll_view;
 use self::emoji_picker::FREQUENT_EMOJIS;
 use self::not_member_notification::NotMemberNotification;
 use crate::board_data::SendMessageError;
@@ -23,6 +24,57 @@ use plaza_core::board_state::message::{BoardMessageBody, MessageId, MessagesV1, 
 use plaza_core::board_state::roles::RoleId;
 use std::collections::HashMap;
 use wasm_bindgen_futures::spawn_local;
+
+/// One member's current vote in a poll.
+#[derive(Clone, PartialEq, Debug)]
+pub struct PollBallot {
+    pub voter: MemberId,
+    pub options: Vec<u16>,
+    pub generation: u64,
+    pub created_at: i64,
+}
+
+/// Poll question data with the latest vote per member.
+#[derive(Clone, PartialEq, Debug)]
+pub struct PollData {
+    pub options: Vec<String>,
+    pub closes_at: Option<i64>,
+    pub multiselect: bool,
+    pub votes: Vec<PollBallot>,
+}
+
+impl PollData {
+    pub fn is_closed(&self, now_ms: i64) -> bool {
+        self.closes_at
+            .map(|closes| now_ms > closes)
+            .unwrap_or(false)
+    }
+
+    /// Votes cast before the deadline, one per member.
+    pub fn counted(&self) -> impl Iterator<Item = &PollBallot> {
+        self.votes.iter().filter(|ballot| {
+            self.closes_at
+                .map(|closes| ballot.created_at <= closes)
+                .unwrap_or(true)
+        })
+    }
+
+    pub fn counts(&self) -> Vec<usize> {
+        let mut counts = vec![0usize; self.options.len()];
+        for ballot in self.counted() {
+            for index in &ballot.options {
+                if let Some(count) = counts.get_mut(*index as usize) {
+                    *count += 1;
+                }
+            }
+        }
+        counts
+    }
+
+    pub fn my_ballot(&self, voter: MemberId) -> Option<&PollBallot> {
+        self.votes.iter().find(|ballot| ballot.voter == voter)
+    }
+}
 
 /// A single message for display
 #[derive(Clone, PartialEq, Debug)]
@@ -66,6 +118,12 @@ pub struct MessageData {
     pub is_pinned: bool,
     /// Post is closed: readable but not editable, deletable or reactable
     pub is_closed: bool,
+    /// Post waits for a moderator before other members see it
+    pub is_pending: bool,
+    /// Post is announced above every section
+    pub is_announced: bool,
+    /// Poll question and current votes
+    pub poll: Option<PollData>,
 }
 
 /// A message with its nested replies
@@ -89,24 +147,72 @@ impl MessageData {
 
 /// Build a flat list of all messages
 pub fn get_all_messages(
-    messages_state: &MessagesV1,
-    member_info: &MemberInfoV1,
+    state: &plaza_core::ChatBoardStateV1,
     self_member_id: MemberId,
     secrets: &HashMap<u32, [u8; 32]>,
     category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
-    moderation: &plaza_core::board_state::moderation::ModerationV1,
 ) -> Vec<MessageData> {
     let mut messages = Vec::new();
+    let owner_id = state.configuration.configuration.owner_member_id;
+    let routes = state.moderation.routes_map();
+    let is_admin = state
+        .admin
+        .admins
+        .iter()
+        .any(|admin| admin.admin.id() == self_member_id);
 
-    for message in messages_state.display_messages() {
+    // Latest vote per member and poll. Ties prefer the later timestamp, then
+    // the lower message id, so peers that see votes in any order agree.
+    let mut ballots: HashMap<MessageId, HashMap<MemberId, PollBallot>> = HashMap::new();
+    for message in &state.recent_messages.messages {
+        let Some(vote) = decrypt_poll_vote(&message.message.content, secrets, category_secrets)
+        else {
+            continue;
+        };
+        let ballot = PollBallot {
+            voter: message.message.author,
+            options: vote.options,
+            generation: vote.generation,
+            created_at: vote.created_at,
+        };
+        let by_voter = ballots.entry(vote.poll).or_default();
+        let replace = by_voter.get(&ballot.voter).map_or(true, |old| {
+            (ballot.generation, ballot.created_at) > (old.generation, old.created_at)
+        });
+        if replace {
+            by_voter.insert(ballot.voter, ballot);
+        }
+    }
+
+    for message in state.recent_messages.display_messages() {
         let author_id = message.message.author;
         let now = Utc::now();
         let raw_time = DateTime::<Utc>::from(message.message.time);
         let time_clamped = raw_time > now;
         let message_time = if time_clamped { now } else { raw_time };
         let message_id = message.id();
+        let is_self = author_id == self_member_id;
 
-        let author_name = member_info
+        // Posts from untrusted authors wait for a moderator. The author and
+        // moderators with delete power still see them.
+        let is_pending =
+            plaza_core::board_state::approvals::is_pending(state, owner_id, &message_id);
+        if is_pending && !is_self {
+            let chain = plaza_core::board_state::moderation::category_chain(&routes, &message_id);
+            let can_moderate = self_member_id == owner_id
+                || is_admin
+                || state.roles.has_moderation_power(
+                    &self_member_id,
+                    plaza_core::board_state::roles::ModerationPower::Delete,
+                    &chain,
+                );
+            if !can_moderate {
+                continue;
+            }
+        }
+
+        let author_name = state
+            .member_info
             .member_info
             .iter()
             .find(|ami| ami.member_info.member_id == author_id)
@@ -118,14 +224,17 @@ pub fn get_all_messages(
             })
             .unwrap_or_else(|| "Unknown".to_string());
 
-        let content_text = messages_state.effective_text(message).unwrap_or_else(|| {
-            decrypt_message_content(&message.message.content, secrets, category_secrets)
-        });
+        let content_text = state
+            .recent_messages
+            .effective_text(message)
+            .unwrap_or_else(|| {
+                decrypt_message_content(&message.message.content, secrets, category_secrets)
+            });
         let content_html = text_to_html(&content_text);
         let title_text = decrypt_message_title(&message.message.content, secrets, category_secrets);
-        let is_self = author_id == self_member_id;
 
-        let reactions = messages_state
+        let reactions = state
+            .recent_messages
             .reactions(&message_id)
             .cloned()
             .unwrap_or_default();
@@ -156,7 +265,7 @@ pub fn get_all_messages(
             category_is_group,
         ) = match category_info {
             Some(mut info) => {
-                if let Some(edit) = messages_state.edited_category(&message_id) {
+                if let Some(edit) = state.recent_messages.edited_category(&message_id) {
                     // A sealed edit carries the real name encrypted; without
                     // the key we keep the placeholder the edit publishes.
                     match (edit.sealed_name.as_ref(), category_secrets.get(&message_id)) {
@@ -205,8 +314,23 @@ pub fn get_all_messages(
         };
 
         // Mark as edited if category was edited
-        let edited =
-            messages_state.is_edited(&message_id) || messages_state.is_category_edited(&message_id);
+        let edited = state.recent_messages.is_edited(&message_id)
+            || state.recent_messages.is_category_edited(&message_id);
+
+        let poll =
+            decrypt_poll(&message.message.content, secrets, category_secrets).map(|content| {
+                let mut votes: Vec<PollBallot> = ballots
+                    .get(&message_id)
+                    .map(|votes| votes.values().cloned().collect())
+                    .unwrap_or_default();
+                votes.sort_by_key(|ballot| ballot.voter.0 .0);
+                PollData {
+                    options: content.options,
+                    closes_at: content.closes_at,
+                    multiselect: content.multiselect,
+                    votes,
+                }
+            });
 
         messages.push(MessageData {
             message_id,
@@ -234,8 +358,11 @@ pub fn get_all_messages(
             category_hidden,
             category_locked,
             is_group: category_is_group,
-            is_pinned: moderation.is_pinned(&message_id),
-            is_closed: moderation.is_closed(&message_id),
+            is_pinned: state.moderation.is_pinned(&message_id),
+            is_closed: state.moderation.is_closed(&message_id),
+            is_pending,
+            is_announced: state.moderation.is_announced(&message_id),
+            poll,
         });
     }
 
@@ -309,13 +436,64 @@ fn body_secret(
     }
 }
 
+fn decrypt_poll(
+    content: &BoardMessageBody,
+    secrets: &HashMap<u32, [u8; 32]>,
+    category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+) -> Option<plaza_core::board_state::content::PollContentV1> {
+    use plaza_core::board_state::content::{PollContentV1, CONTENT_TYPE_POLL};
+    match content {
+        BoardMessageBody::Public {
+            content_type, data, ..
+        } if *content_type == CONTENT_TYPE_POLL => PollContentV1::decode(data).ok(),
+        BoardMessageBody::Private {
+            content_type,
+            ciphertext,
+            nonce,
+            ..
+        } if *content_type == CONTENT_TYPE_POLL => {
+            let secret = body_secret(content, secrets, category_secrets)?;
+            let bytes =
+                crate::util::ecies::decrypt_with_symmetric_key(&secret, ciphertext, nonce).ok()?;
+            PollContentV1::decode(&bytes).ok()
+        }
+        _ => None,
+    }
+}
+
+fn decrypt_poll_vote(
+    content: &BoardMessageBody,
+    secrets: &HashMap<u32, [u8; 32]>,
+    category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+) -> Option<plaza_core::board_state::content::PollVoteV1> {
+    use plaza_core::board_state::content::{PollVoteV1, CONTENT_TYPE_POLL_VOTE};
+    match content {
+        BoardMessageBody::Public {
+            content_type, data, ..
+        } if *content_type == CONTENT_TYPE_POLL_VOTE => PollVoteV1::decode(data).ok(),
+        BoardMessageBody::Private {
+            content_type,
+            ciphertext,
+            nonce,
+            ..
+        } if *content_type == CONTENT_TYPE_POLL_VOTE => {
+            let secret = body_secret(content, secrets, category_secrets)?;
+            let bytes =
+                crate::util::ecies::decrypt_with_symmetric_key(&secret, ciphertext, nonce).ok()?;
+            PollVoteV1::decode(&bytes).ok()
+        }
+        _ => None,
+    }
+}
+
 fn decrypt_message_title(
     content: &BoardMessageBody,
     secrets: &HashMap<u32, [u8; 32]>,
     category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
 ) -> String {
     use plaza_core::board_state::content::{
-        ReplyContentV1, TextContentV1, CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT,
+        PollContentV1, ReplyContentV1, TextContentV1, CONTENT_TYPE_POLL, CONTENT_TYPE_REPLY,
+        CONTENT_TYPE_TEXT,
     };
 
     match content {
@@ -330,6 +508,11 @@ fn decrypt_message_title(
             if *content_type == CONTENT_TYPE_REPLY {
                 if let Ok(reply) = ReplyContentV1::decode(data) {
                     return reply.title;
+                }
+            }
+            if *content_type == CONTENT_TYPE_POLL {
+                if let Ok(poll) = PollContentV1::decode(data) {
+                    return poll.title;
                 }
             }
             String::new()
@@ -355,6 +538,11 @@ fn decrypt_message_title(
                             return reply.title;
                         }
                     }
+                    if *content_type == CONTENT_TYPE_POLL {
+                        if let Ok(poll) = PollContentV1::decode(&decrypted_bytes) {
+                            return poll.title;
+                        }
+                    }
                 }
             }
             String::new()
@@ -368,7 +556,8 @@ fn decrypt_message_content(
     category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
 ) -> String {
     use plaza_core::board_state::content::{
-        ReplyContentV1, TextContentV1, CONTENT_TYPE_ACTION, CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT,
+        PollContentV1, ReplyContentV1, TextContentV1, CONTENT_TYPE_ACTION, CONTENT_TYPE_POLL,
+        CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT,
     };
 
     match content {
@@ -386,6 +575,11 @@ fn decrypt_message_content(
             if *content_type == CONTENT_TYPE_REPLY {
                 if let Ok(reply) = ReplyContentV1::decode(data) {
                     return reply.content;
+                }
+            }
+            if *content_type == CONTENT_TYPE_POLL {
+                if let Ok(poll) = PollContentV1::decode(data) {
+                    return poll.description;
                 }
             }
             content.to_string_lossy()
@@ -411,6 +605,11 @@ fn decrypt_message_content(
                     if *content_type == CONTENT_TYPE_REPLY {
                         if let Ok(reply) = ReplyContentV1::decode(&decrypted_bytes) {
                             return reply.content;
+                        }
+                    }
+                    if *content_type == CONTENT_TYPE_POLL {
+                        if let Ok(poll) = PollContentV1::decode(&decrypted_bytes) {
+                            return poll.description;
                         }
                     }
                     return String::from_utf8_lossy(&decrypted_bytes).to_string();
@@ -590,12 +789,10 @@ pub fn Conversation(
                     let max_title_size = config.max_title_size;
                     let max_message_size = config.max_message_size;
                     let all_messages = get_all_messages(
-                        &board_data.board_state.recent_messages,
-                        &board_data.board_state.member_info,
+                        &board_data.board_state,
                         self_member_id,
                         &board_data.secrets,
                         &board_data.category_secrets,
-                        &board_data.board_state.moderation,
                     );
 
                     // Build member name lookup
@@ -667,7 +864,12 @@ pub fn Conversation(
     // Message sending handler
     let handle_send_message = {
         let current_board_data = current_board_data.clone();
-        move |(title_text, message_text, reply_ctx): (String, String, Option<ReplyContext>)| {
+        move |(title_text, message_text, reply_ctx, poll): (
+            String,
+            String,
+            Option<ReplyContext>,
+            Option<crate::util::messaging::PollDraft>,
+        )| {
             if let (Some(current_board), Some(current_board_data)) =
                 (CURRENT_BOARD.read().owner_key, current_board_data.clone())
             {
@@ -701,6 +903,7 @@ pub fn Conversation(
                         title_text,
                         message_text,
                         reply_ctx,
+                        poll,
                     )
                     .await;
                 });
@@ -798,7 +1001,12 @@ pub fn Conversation(
                                 rsx! {
                                     div { class: "flex justify-center",
                                         PostInput {
-                                            handle_send_message: move |msg: (String, String, Option<ReplyContext>)| {
+                                            handle_send_message: move |msg: (
+                                                String,
+                                                String,
+                                                Option<ReplyContext>,
+                                                Option<crate::util::messaging::PollDraft>,
+                                            )| {
                                                 let handle = handle_send_message.clone();
                                                 handle(msg)
                                             },
@@ -1801,6 +2009,15 @@ pub fn MessageCard(
                                         size: size,
                                         expanded: expanded,
                                         show_title: false,
+                                    }
+                                    if !hide_content {
+                                        if let Some(poll) = msg.poll.as_ref() {
+                                            poll_view::PollView {
+                                                poll: poll.clone(),
+                                                poll_id: msg_id,
+                                                self_member_id: self_member_id,
+                                            }
+                                        }
                                     }
                                 }
                             }

@@ -41,7 +41,7 @@ impl AuthorizedMessageRoute {
         Self {
             signature: sign_struct(&route, signing_key),
             route,
-            signer: None,
+            signer: Some(MemberId::from(&signing_key.verifying_key())),
         }
     }
 
@@ -60,7 +60,14 @@ pub struct PostFlag {
     pub target: MessageId,
     pub pinned: bool,
     pub closed: bool,
+    /// Board-wide announcement, shown above every section.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub announced: bool,
     pub generation: u64,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -76,7 +83,7 @@ impl AuthorizedPostFlag {
         Self {
             signature: sign_struct(&flag, signing_key),
             flag,
-            signer: None,
+            signer: Some(MemberId::from(&signing_key.verifying_key())),
         }
     }
 
@@ -110,6 +117,7 @@ pub struct RouteState {
 pub struct FlagState {
     pub pinned: bool,
     pub closed: bool,
+    pub announced: bool,
     pub generation: u64,
 }
 
@@ -153,6 +161,7 @@ fn flag_map(flags: &[AuthorizedPostFlag]) -> BTreeMap<MessageId, FlagState> {
             FlagState {
                 pinned: flag.flag.pinned,
                 closed: flag.flag.closed,
+                announced: flag.flag.announced,
                 generation: flag.flag.generation,
             },
         );
@@ -183,7 +192,7 @@ pub fn category_chain(
     chain
 }
 
-fn is_owner_or_admin(
+pub(crate) fn is_owner_or_admin(
     state: &ChatBoardStateV1,
     parameters: &ChatBoardParametersV1,
     actor: &MemberId,
@@ -271,8 +280,13 @@ fn check_flag_permission(
     let current = existing.cloned().unwrap_or_default();
     let pinned_changed = current.pinned != flag.pinned;
     let closed_changed = current.closed != flag.closed;
-    if !pinned_changed && !closed_changed {
+    let announced_changed = current.announced != flag.announced;
+    if !pinned_changed && !closed_changed && !announced_changed {
         return Err("Post flag does not change anything".to_string());
+    }
+    if announced_changed {
+        // Announcements are board-wide, so only the owner and admins set them.
+        return Err("Signer cannot announce this post".to_string());
     }
     let author = target_author(state, &flag.target);
     if closed_changed && author.as_ref() == Some(signer) {
@@ -308,15 +322,20 @@ fn verify_flag(
     if target_author(state, &flag.flag.target).is_none() {
         return Err("Post flag targets a missing message".to_string());
     }
+    // Compare with the previous generation only: when the contract verifies a
+    // whole state, the flag being checked is already in that state.
     let existing = state
         .moderation
         .flags
         .iter()
-        .filter(|entry| entry.flag.target == flag.flag.target)
+        .filter(|entry| {
+            entry.flag.target == flag.flag.target && entry.flag.generation < flag.flag.generation
+        })
         .max_by_key(|entry| entry.flag.generation)
         .map(|entry| FlagState {
             pinned: entry.flag.pinned,
             closed: entry.flag.closed,
+            announced: entry.flag.announced,
             generation: entry.flag.generation,
         });
     check_flag_permission(
@@ -355,6 +374,12 @@ impl ModerationV1 {
     pub fn is_closed(&self, target: &MessageId) -> bool {
         self.flag_for(target)
             .map(|flag| flag.closed)
+            .unwrap_or(false)
+    }
+
+    pub fn is_announced(&self, target: &MessageId) -> bool {
+        self.flag_for(target)
+            .map(|flag| flag.announced)
             .unwrap_or(false)
     }
 
@@ -547,5 +572,137 @@ impl ComposableState for ModerationV1 {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+    use crate::board_state::member::{AuthorizedMember, Member, MembersV1};
+    use crate::board_state::message::{
+        AuthorizedMessageV1, BoardMessageBody, MessageV1, MessagesV1,
+    };
+    use crate::board_state::secret::BoardSecretsV1;
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+    use std::time::SystemTime;
+
+    struct Board {
+        state: ChatBoardStateV1,
+        parameters: ChatBoardParametersV1,
+        member_sk: SigningKey,
+        post: MessageId,
+    }
+
+    fn board() -> Board {
+        let owner_sk = SigningKey::generate(&mut OsRng);
+        let owner_vk = owner_sk.verifying_key();
+        let owner_id = MemberId::from(&owner_vk);
+        let parameters = ChatBoardParametersV1 { owner: owner_vk };
+        let member_sk = SigningKey::generate(&mut OsRng);
+        let member_vk = member_sk.verifying_key();
+        let member_id = MemberId::from(&member_vk);
+
+        let member = AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk,
+                join_proof: None,
+            },
+            &owner_sk,
+        );
+        let post = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author: member_id,
+                time: SystemTime::now(),
+                content: BoardMessageBody::public("Post".into(), "Body".into()),
+            },
+            &member_sk,
+        );
+        let post_id = post.id();
+
+        let state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner_sk),
+            members: MembersV1 {
+                members: vec![member],
+            },
+            secrets: BoardSecretsV1::default(),
+            recent_messages: MessagesV1 {
+                messages: vec![post],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        Board {
+            state,
+            parameters,
+            member_sk,
+            post: post_id,
+        }
+    }
+
+    #[test]
+    fn member_routes_and_author_flags_use_the_member_key() {
+        let mut board = board();
+        let route = AuthorizedMessageRoute::new(
+            MessageRoute {
+                message_id: board.post,
+                reply_to: None,
+                category_id: None,
+                is_category: false,
+                parent_category_id: None,
+                is_group: false,
+                generation: 1,
+            },
+            &board.member_sk,
+        );
+        board.state.moderation.routes.push(route);
+        board
+            .state
+            .moderation
+            .verify(&board.state, &board.parameters)
+            .expect("a member route is signed with the member key");
+
+        let flag = AuthorizedPostFlag::new(
+            PostFlag {
+                target: board.post,
+                pinned: false,
+                closed: true,
+                announced: false,
+                generation: 1,
+            },
+            &board.member_sk,
+        );
+        board.state.moderation.flags.push(flag);
+        board
+            .state
+            .moderation
+            .verify(&board.state, &board.parameters)
+            .expect("the author can close their own post");
+    }
+
+    #[test]
+    fn members_cannot_announce_posts() {
+        let mut board = board();
+        let flag = AuthorizedPostFlag::new(
+            PostFlag {
+                target: board.post,
+                pinned: false,
+                closed: false,
+                announced: true,
+                generation: 1,
+            },
+            &board.member_sk,
+        );
+        board.state.moderation.flags.push(flag);
+        assert!(board
+            .state
+            .moderation
+            .verify(&board.state, &board.parameters)
+            .is_err());
     }
 }

@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod approvals;
 pub mod ban;
 pub mod category_secrets;
 pub mod configuration;
@@ -10,6 +11,7 @@ pub mod member_info;
 pub mod message;
 pub mod moderation;
 pub mod privacy;
+pub mod reports;
 pub mod roles;
 pub mod secret;
 pub mod upgrade;
@@ -81,6 +83,14 @@ pub struct ChatBoardStateV1 {
     /// Public routing and post flags used by the contract to verify moderation.
     #[serde(default)]
     pub moderation: crate::board_state::moderation::ModerationV1,
+
+    /// Reports for moderators, with reason codes and resolutions.
+    #[serde(default)]
+    pub reports: crate::board_state::reports::ReportsV1,
+
+    /// Approvals for posts by new members.
+    #[serde(default)]
+    pub approvals: crate::board_state::approvals::ApprovalsV1,
 
     /// If this contract has been replaced by a new contract this will contain the new contract address.
     /// This can only be set by the owner.
@@ -205,6 +215,17 @@ impl ChatBoardStateV1 {
                         || current_member_ids.contains(&blob.secret.member_id))
             });
         }
+
+        // 5e. Reports and approvals lose their target or their signer when a
+        // message is pruned or a moderator loses the power. Dropping them here
+        // keeps the state verifiable and converges on every peer.
+        let mut reports = std::mem::take(&mut self.reports);
+        reports.cleanup(self, parameters);
+        self.reports = reports;
+
+        let mut approvals = std::mem::take(&mut self.approvals);
+        approvals.cleanup(self, parameters);
+        self.approvals = approvals;
 
         // 6. Re-sort for deterministic ordering
         self.members.members.sort_by_key(|m| m.member.id());

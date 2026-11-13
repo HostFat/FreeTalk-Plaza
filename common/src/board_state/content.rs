@@ -19,9 +19,13 @@ pub const CONTENT_TYPE_TEXT: u32 = 1;
 pub const CONTENT_TYPE_ACTION: u32 = 2;
 pub const CONTENT_TYPE_REPLY: u32 = 3;
 pub const CONTENT_TYPE_CATEGORY: u32 = 4;
+/// Poll post: question, description, options and an optional deadline.
+pub const CONTENT_TYPE_POLL: u32 = 6;
+/// Vote for a poll. Hidden from post lists, counted by clients.
+pub const CONTENT_TYPE_POLL_VOTE: u32 = 7;
 /// Public moderation action envelope: type and target in clear, payload sealed.
 pub const CONTENT_TYPE_MODERATION_ACTION: u32 = 9;
-// Future: CONTENT_TYPE_BLOB = 5, CONTENT_TYPE_POLL = 6, etc.
+// Future: CONTENT_TYPE_BLOB = 5, etc.
 
 /// Current version for text content
 pub const TEXT_CONTENT_VERSION: u32 = 1;
@@ -34,6 +38,16 @@ pub const REPLY_CONTENT_VERSION: u32 = 1;
 
 /// Current version for category content
 pub const CATEGORY_CONTENT_VERSION: u32 = 1;
+
+/// Current version for poll content
+pub const POLL_CONTENT_VERSION: u32 = 1;
+/// Current version for poll votes
+pub const POLL_VOTE_VERSION: u32 = 1;
+
+pub const MAX_POLL_OPTIONS: usize = 10;
+pub const MAX_POLL_OPTION_LEN: usize = 100;
+pub const MAX_POLL_TITLE_LEN: usize = 100;
+pub const MAX_POLL_DESCRIPTION_LEN: usize = 2000;
 
 /// Action type constants
 pub const ACTION_TYPE_EDIT: u32 = 1;
@@ -95,6 +109,127 @@ impl ModerationActionV1 {
 
     pub fn decode(data: &[u8]) -> Result<Self, String> {
         decode_cbor(data, "ModerationActionV1")
+    }
+}
+
+/// Poll post content (content_type = 6). Votes are separate messages.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct PollContentV1 {
+    pub title: String,
+    pub description: String,
+    pub options: Vec<String>,
+    /// Unix milliseconds after which votes are ignored.
+    pub closes_at: Option<i64>,
+    pub multiselect: bool,
+}
+
+impl PollContentV1 {
+    pub fn new(
+        title: String,
+        description: String,
+        options: Vec<String>,
+        closes_at: Option<i64>,
+        multiselect: bool,
+    ) -> Self {
+        Self {
+            title,
+            description,
+            options,
+            closes_at,
+            multiselect,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.title.trim().is_empty() {
+            return Err("A poll needs a question".to_string());
+        }
+        if self.title.chars().count() > MAX_POLL_TITLE_LEN {
+            return Err(format!(
+                "Poll title is longer than {} characters",
+                MAX_POLL_TITLE_LEN
+            ));
+        }
+        if self.description.chars().count() > MAX_POLL_DESCRIPTION_LEN {
+            return Err(format!(
+                "Poll description is longer than {} characters",
+                MAX_POLL_DESCRIPTION_LEN
+            ));
+        }
+        if self.options.len() < 2 {
+            return Err("A poll needs at least two options".to_string());
+        }
+        if self.options.len() > MAX_POLL_OPTIONS {
+            return Err(format!(
+                "A poll can have at most {} options",
+                MAX_POLL_OPTIONS
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for option in &self.options {
+            let trimmed = option.trim();
+            if trimmed.is_empty() {
+                return Err("Poll options cannot be empty".to_string());
+            }
+            if trimmed.chars().count() > MAX_POLL_OPTION_LEN {
+                return Err(format!(
+                    "Poll options are limited to {} characters",
+                    MAX_POLL_OPTION_LEN
+                ));
+            }
+            if !seen.insert(trimmed.to_lowercase()) {
+                return Err("Poll options must be different".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        encode_cbor(self)
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self, String> {
+        decode_cbor(data, "PollContentV1")
+    }
+}
+
+/// A vote for a poll (content_type = 7). Indexes refer to the poll options.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct PollVoteV1 {
+    pub poll: MessageId,
+    pub options: Vec<u16>,
+    pub generation: u64,
+    pub created_at: i64,
+}
+
+impl PollVoteV1 {
+    pub fn encode(&self) -> Vec<u8> {
+        encode_cbor(self)
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self, String> {
+        decode_cbor(data, "PollVoteV1")
+    }
+
+    /// Check one vote against the poll it targets. The caller also checks the
+    /// deadline, so a late vote is ignored rather than treated as corrupt.
+    pub fn validate_for(&self, poll: &PollContentV1) -> Result<(), String> {
+        if self.options.is_empty() {
+            return Err("A vote needs at least one option".to_string());
+        }
+        if !poll.multiselect && self.options.len() != 1 {
+            return Err("This poll accepts one option per vote".to_string());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for index in &self.options {
+            if *index as usize >= poll.options.len() {
+                return Err("Vote option is out of range".to_string());
+            }
+            if !seen.insert(*index) {
+                return Err("Vote repeats an option".to_string());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -835,5 +970,64 @@ mod tests {
         assert!(dc.is_category());
         assert_eq!(dc.as_category(), Some(&cat));
         assert_eq!(dc.to_display_string(), "🎯 Test");
+    }
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use super::*;
+    use freenet_scaffold::util::fast_hash;
+
+    fn poll(multiselect: bool) -> PollContentV1 {
+        PollContentV1::new(
+            "Best option?".to_string(),
+            "Pick one".to_string(),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+            None,
+            multiselect,
+        )
+    }
+
+    #[test]
+    fn poll_roundtrips_and_validates_options() {
+        let poll = poll(false);
+        assert!(poll.validate().is_ok());
+        assert_eq!(poll, PollContentV1::decode(&poll.encode()).unwrap());
+
+        let mut duplicate = poll.clone();
+        duplicate.options = vec!["A".to_string(), "a".to_string()];
+        assert!(duplicate.validate().is_err());
+
+        let mut one = poll;
+        one.options = vec!["Only".to_string()];
+        assert!(one.validate().is_err());
+    }
+
+    #[test]
+    fn votes_check_the_range_and_the_option_count() {
+        let poll = poll(false);
+        let vote = PollVoteV1 {
+            poll: MessageId(fast_hash(&[9, 9])),
+            options: vec![1],
+            generation: 1,
+            created_at: 10,
+        };
+        assert!(vote.validate_for(&poll).is_ok());
+
+        let mut outside = vote.clone();
+        outside.options = vec![3];
+        assert!(outside.validate_for(&poll).is_err());
+
+        let mut many = vote;
+        many.options = vec![0, 1];
+        assert!(many.validate_for(&poll).is_err());
+        let multiselect = PollContentV1::new(
+            "Best option?".to_string(),
+            String::new(),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+            None,
+            true,
+        );
+        assert!(many.validate_for(&multiselect).is_ok());
     }
 }

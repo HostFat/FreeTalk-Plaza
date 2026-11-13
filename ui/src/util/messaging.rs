@@ -11,9 +11,10 @@ use freenet_scaffold::ComposableState;
 use plaza_core::board_state::admin::{AdminsDelta, AuthorizedAdminRevocation};
 use plaza_core::board_state::category_secrets::CategorySecretsDelta;
 use plaza_core::board_state::content::{
-    CategoryContentV1, CategoryEditPayload, ReplyContentV1, TextContentV1,
-    CATEGORY_CONTENT_VERSION, CONTENT_TYPE_CATEGORY, CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT,
-    REPLY_CONTENT_VERSION, TEXT_CONTENT_VERSION,
+    CategoryContentV1, CategoryEditPayload, PollContentV1, PollVoteV1, ReplyContentV1,
+    TextContentV1, CATEGORY_CONTENT_VERSION, CONTENT_TYPE_CATEGORY, CONTENT_TYPE_POLL,
+    CONTENT_TYPE_POLL_VOTE, CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT, POLL_CONTENT_VERSION,
+    POLL_VOTE_VERSION, REPLY_CONTENT_VERSION, TEXT_CONTENT_VERSION,
 };
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::{
@@ -30,6 +31,15 @@ pub struct ReplyContext {
     pub message_id: MessageId,
     pub author_name: String,
     pub content_preview: String,
+}
+
+/// Poll settings chosen in the composer. The title and description become the
+/// poll question and body.
+#[derive(Clone, PartialEq, Debug)]
+pub struct PollDraft {
+    pub options: Vec<String>,
+    pub closes_at: Option<i64>,
+    pub multiselect: bool,
 }
 
 /// Send a message to a board.
@@ -49,8 +59,9 @@ pub async fn send_message(
     title_text: String,
     message_text: String,
     reply_ctx: Option<ReplyContext>,
+    poll: Option<PollDraft>,
 ) {
-    if message_text.is_empty() {
+    if message_text.is_empty() && poll.is_none() {
         warn!("Message is empty");
         return;
     }
@@ -62,29 +73,48 @@ pub async fn send_message(
 
     let reply_target = reply_ctx.as_ref().map(|reply| reply.message_id.clone());
 
-    // Build content based on whether this is a reply or regular message
+    // Build the typed payload once, then seal it with the right key.
+    let poll_content = poll.filter(|_| reply_ctx.is_none()).map(|poll| {
+        PollContentV1::new(
+            title_text.clone(),
+            message_text.clone(),
+            poll.options,
+            poll.closes_at,
+            poll.multiselect,
+        )
+    });
+    if let Some(poll) = &poll_content {
+        if let Err(error) = poll.validate() {
+            warn!("Invalid poll: {}", error);
+            return;
+        }
+    }
+    let (content_type, content_version, content_bytes) = if let Some(poll) = &poll_content {
+        (CONTENT_TYPE_POLL, POLL_CONTENT_VERSION, poll.encode())
+    } else if let Some(reply) = &reply_ctx {
+        (
+            CONTENT_TYPE_REPLY,
+            REPLY_CONTENT_VERSION,
+            ReplyContentV1::new(
+                title_text.clone(),
+                message_text.clone(),
+                reply.message_id,
+                reply.author_name.clone(),
+                reply.content_preview.clone(),
+            )
+            .encode(),
+        )
+    } else {
+        (
+            CONTENT_TYPE_TEXT,
+            TEXT_CONTENT_VERSION,
+            TextContentV1::new(title_text.clone(), message_text.clone()).encode(),
+        )
+    };
+
     let content = if let Some((category_id, secret, version)) = category_secret {
         // Restricted categories seal their posts with their own key, on public
         // boards too: the board key would expose the post to every member.
-        let (content_type, content_version, content_bytes) = match reply_ctx {
-            Some(reply) => (
-                CONTENT_TYPE_REPLY,
-                REPLY_CONTENT_VERSION,
-                ReplyContentV1::new(
-                    title_text.clone(),
-                    message_text.clone(),
-                    reply.message_id,
-                    reply.author_name,
-                    reply.content_preview,
-                )
-                .encode(),
-            ),
-            None => (
-                CONTENT_TYPE_TEXT,
-                TEXT_CONTENT_VERSION,
-                TextContentV1::new(title_text.clone(), message_text.clone()).encode(),
-            ),
-        };
         let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes);
         BoardMessageBody::Private {
             content_type,
@@ -94,66 +124,19 @@ pub async fn send_message(
             secret_version: version,
             secret_scope: plaza_core::board_state::message::SecretScope::Category(category_id),
         }
-    } else if let Some(reply) = reply_ctx {
-        // Reply message
-        if is_private {
-            if let Some((secret, version)) = secret_opt {
-                let reply_content = ReplyContentV1::new(
-                    title_text.clone(),
-                    message_text.clone(),
-                    reply.message_id,
-                    reply.author_name,
-                    reply.content_preview,
-                );
-                let content_bytes = reply_content.encode();
+    } else if is_private {
+        match secret_opt {
+            Some((secret, version)) => {
                 let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes);
-                BoardMessageBody::private(
-                    CONTENT_TYPE_REPLY,
-                    REPLY_CONTENT_VERSION,
-                    ciphertext,
-                    nonce,
-                    version,
-                )
-            } else {
-                warn!("Board is private but no secret available, sending reply as public");
-                BoardMessageBody::reply(
-                    title_text.clone(),
-                    message_text.clone(),
-                    reply.message_id,
-                    reply.author_name,
-                    reply.content_preview,
-                )
+                BoardMessageBody::private(content_type, content_version, ciphertext, nonce, version)
             }
-        } else {
-            BoardMessageBody::reply(
-                title_text.clone(),
-                message_text.clone(),
-                reply.message_id,
-                reply.author_name,
-                reply.content_preview,
-            )
+            None => {
+                warn!("Board is private but no secret available, sending as public");
+                BoardMessageBody::public_raw(content_type, content_version, content_bytes)
+            }
         }
     } else {
-        // Regular text message
-        if is_private {
-            if let Some((secret, version)) = secret_opt {
-                let text_content = TextContentV1::new(title_text.clone(), message_text.clone());
-                let content_bytes = text_content.encode();
-                let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes);
-                BoardMessageBody::private(
-                    CONTENT_TYPE_TEXT,
-                    TEXT_CONTENT_VERSION,
-                    ciphertext,
-                    nonce,
-                    version,
-                )
-            } else {
-                warn!("Board is private but no secret available, sending as public");
-                BoardMessageBody::public(title_text.clone(), message_text.clone())
-            }
-        } else {
-            BoardMessageBody::public(title_text.clone(), message_text.clone())
-        }
+        BoardMessageBody::public_raw(content_type, content_version, content_bytes)
     };
 
     // Safety net: check encoded content size before signing.
@@ -168,6 +151,27 @@ pub async fn send_message(
         return;
     }
 
+    publish_message(
+        current_board,
+        board_key,
+        self_sk,
+        board_state_clone,
+        content,
+        reply_target,
+        category_id,
+    )
+    .await;
+}
+
+async fn publish_message(
+    current_board: VerifyingKey,
+    board_key: BoardKey,
+    self_sk: SigningKey,
+    board_state_clone: ChatBoardStateV1,
+    content: BoardMessageBody,
+    reply_target: Option<MessageId>,
+    category_id: Option<MessageId>,
+) {
     let message = MessageV1 {
         board_owner: MemberId::from(current_board),
         author: MemberId::from(&self_sk.verifying_key()),
@@ -306,6 +310,68 @@ pub async fn send_message(
             }
         }
     });
+}
+
+/// Send one vote for a poll. Votes are hidden from post lists and counted by
+/// clients, so the deadline and the option range are checked by the sender and
+/// ignored when aggregating.
+pub async fn send_poll_vote(
+    current_board: VerifyingKey,
+    board_key: BoardKey,
+    self_sk: SigningKey,
+    board_state_clone: ChatBoardStateV1,
+    is_private: bool,
+    secret_opt: Option<([u8; 32], u32)>,
+    category_secret: Option<(MessageId, [u8; 32], u32)>,
+    category_id: Option<MessageId>,
+    vote: PollVoteV1,
+) {
+    let content_bytes = vote.encode();
+    let content = if let Some((category_id, secret, version)) = category_secret {
+        let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes);
+        BoardMessageBody::Private {
+            content_type: CONTENT_TYPE_POLL_VOTE,
+            content_version: POLL_VOTE_VERSION,
+            ciphertext,
+            nonce,
+            secret_version: version,
+            secret_scope: plaza_core::board_state::message::SecretScope::Category(category_id),
+        }
+    } else if is_private {
+        match secret_opt {
+            Some((secret, version)) => {
+                let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes);
+                BoardMessageBody::private(
+                    CONTENT_TYPE_POLL_VOTE,
+                    POLL_VOTE_VERSION,
+                    ciphertext,
+                    nonce,
+                    version,
+                )
+            }
+            None => {
+                warn!("Board is private but no secret available, sending vote as public");
+                BoardMessageBody::public_raw(
+                    CONTENT_TYPE_POLL_VOTE,
+                    POLL_VOTE_VERSION,
+                    content_bytes,
+                )
+            }
+        }
+    } else {
+        BoardMessageBody::public_raw(CONTENT_TYPE_POLL_VOTE, POLL_VOTE_VERSION, content_bytes)
+    };
+
+    publish_message(
+        current_board,
+        board_key,
+        self_sk,
+        board_state_clone,
+        content,
+        None,
+        category_id,
+    )
+    .await;
 }
 
 /// Remove an admin's rights.

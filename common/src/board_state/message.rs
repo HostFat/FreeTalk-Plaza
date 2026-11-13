@@ -785,10 +785,12 @@ impl BoardMessageBody {
 
     /// Check if this is an action message (content_type = ACTION)
     pub fn is_action(&self) -> bool {
-        use crate::board_state::content::{CONTENT_TYPE_ACTION, CONTENT_TYPE_MODERATION_ACTION};
+        use crate::board_state::content::{
+            CONTENT_TYPE_ACTION, CONTENT_TYPE_MODERATION_ACTION, CONTENT_TYPE_POLL_VOTE,
+        };
         matches!(
             self.content_type(),
-            CONTENT_TYPE_ACTION | CONTENT_TYPE_MODERATION_ACTION
+            CONTENT_TYPE_ACTION | CONTENT_TYPE_MODERATION_ACTION | CONTENT_TYPE_POLL_VOTE
         )
     }
 
@@ -891,8 +893,8 @@ impl BoardMessageBody {
     /// Returns None for private messages or non-text/reply/category content.
     pub fn title(&self) -> Option<String> {
         use crate::board_state::content::{
-            CategoryContentV1, ReplyContentV1, TextContentV1, CONTENT_TYPE_CATEGORY,
-            CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT,
+            CategoryContentV1, PollContentV1, ReplyContentV1, TextContentV1, CONTENT_TYPE_CATEGORY,
+            CONTENT_TYPE_POLL, CONTENT_TYPE_REPLY, CONTENT_TYPE_TEXT,
         };
         match self {
             Self::Public {
@@ -901,6 +903,7 @@ impl BoardMessageBody {
                 CONTENT_TYPE_TEXT => TextContentV1::decode(data).ok().map(|t| t.title),
                 CONTENT_TYPE_REPLY => ReplyContentV1::decode(data).ok().map(|r| r.title),
                 CONTENT_TYPE_CATEGORY => CategoryContentV1::decode(data).ok().map(|c| c.name),
+                CONTENT_TYPE_POLL => PollContentV1::decode(data).ok().map(|p| p.title),
                 _ => None,
             },
             Self::Private { .. } => None,

@@ -184,6 +184,7 @@ impl Default for Configuration {
             max_admins: 40,
             max_board_name: 100,
             max_board_description: 500,
+            approval_required: false,
         }
     }
 }
@@ -213,6 +214,14 @@ pub struct Configuration {
     pub max_admins: usize,
     pub max_board_name: usize,
     pub max_board_description: usize,
+    /// Hide posts from members without an approved post until a moderator
+    /// approves them. Skipped when false so old signed configs keep verifying.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub approval_required: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[cfg(test)]

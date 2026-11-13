@@ -243,8 +243,10 @@ fn PostRow(
     last_reply: Option<(String, String)>,
     #[props(default)] can_pin: bool,
     #[props(default)] can_close: bool,
+    #[props(default)] can_announce: bool,
     #[props(default)] on_pin: Option<EventHandler<bool>>,
     #[props(default)] on_close: Option<EventHandler<bool>>,
+    #[props(default)] on_announce: Option<EventHandler<bool>>,
     on_click: EventHandler<()>,
 ) -> Element {
     let title = if post.title_text.trim().is_empty() {
@@ -284,6 +286,12 @@ fn PostRow(
                     }
                     if post.is_closed {
                         span { title: "Closed", "🔒" }
+                    }
+                    if post.is_announced {
+                        span { title: "Announcement", "📢" }
+                    }
+                    if post.is_pending {
+                        span { class: "text-amber-400", title: "Waiting for a moderator", "Pending" }
                     }
                     span { class: "text-base font-semibold text-text truncate", "{title}" }
                     span { class: "text-xs text-text-muted", "·" }
@@ -354,10 +362,39 @@ fn PostRow(
                         },
                         "🔗"
                     }
+                    button {
+                        r#type: "button",
+                        class: "px-1.5 py-1 text-xs rounded hover:bg-surface",
+                        title: "Report post",
+                        onclick: {
+                            let target = post.message_id;
+                            move |evt| {
+                                evt.stop_propagation();
+                                crate::components::app::REPORT_TARGET
+                                    .with_mut(|current| *current = Some(target));
+                            }
+                        },
+                        "🚩"
+                    }
                 }
-                if can_pin || can_close {
+                if can_pin || can_close || can_announce {
                     div { class: "flex items-center gap-1 flex-shrink-0",
                         onclick: move |evt| evt.stop_propagation(),
+                        if can_announce {
+                            if let Some(handler) = on_announce.as_ref() {
+                                button {
+                                    r#type: "button",
+                                    class: "px-1.5 py-1 text-xs rounded hover:bg-surface",
+                                    title: if post.is_announced { "Remove announcement" } else { "Announce board-wide" },
+                                    onclick: {
+                                        let handler = handler.clone();
+                                        let next = !post.is_announced;
+                                        move |_| handler.call(next)
+                                    },
+                                    if post.is_announced { "🔔" } else { "📢" }
+                                }
+                            }
+                        }
                         if can_pin {
                             if let Some(handler) = on_pin.as_ref() {
                                 button {
@@ -457,6 +494,7 @@ fn SectionRow(
 
 #[component]
 pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
+    let announcement_nav = navigator();
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
     let mut pending_delete_group = use_signal(|| false);
     let mut pending_group_children: Signal<Vec<MessageId>> = use_signal(Vec::new);
@@ -543,12 +581,10 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
     let all_messages: Vec<MessageData> = if let Some(ref board_data) = current_board_data {
         let self_member_id = MemberId::from(&board_data.self_sk.verifying_key());
         get_all_messages(
-            &board_data.board_state.recent_messages,
-            &board_data.board_state.member_info,
+            &board_data.board_state,
             self_member_id,
             &board_data.secrets,
             &board_data.category_secrets,
-            &board_data.board_state.moderation,
         )
     } else {
         Vec::new()
@@ -569,6 +605,12 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
 
     // Get content
     let (categories, posts) = get_content(category_id.as_ref(), &all_messages);
+
+    // Board-wide announcements, shown above the breadcrumbs on every list.
+    let announcements: Vec<&MessageData> = all_messages
+        .iter()
+        .filter(|message| message.is_announced && !message.is_category)
+        .collect();
 
     // A restricted category we cannot open stays read-only: it gets no reply
     // context, so the composer cannot post into it.
@@ -729,6 +771,43 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                 // Categories and Posts list
                 div { class: "flex-1 overflow-y-auto",
                     div { class: "max-w-6xl mx-auto px-4 py-6",
+                        if !announcements.is_empty() {
+                            div { class: "space-y-2 mb-5",
+                                for announcement in announcements.iter() {
+                                    {
+                                        let post_id = announcement.id_string();
+                                        let board_id = current_board_id.read().clone();
+                                        let nav = announcement_nav;
+                                        rsx! {
+                                            button {
+                                                key: "{post_id}",
+                                                r#type: "button",
+                                                class: "w-full text-left bg-accent/10 border border-accent/40 rounded-lg px-4 py-2.5 hover:bg-accent/15 transition-colors",
+                                                onclick: move |_| {
+                                                    nav.push(Route::Post {
+                                                        board_id: board_id.clone(),
+                                                        post_id: post_id.clone(),
+                                                    });
+                                                },
+                                                div { class: "flex items-baseline gap-2 flex-wrap",
+                                                    span { "📢" }
+                                                    span { class: "text-sm font-semibold text-text",
+                                                        if announcement.title_text.trim().is_empty() {
+                                                            "Announcement"
+                                                        } else {
+                                                            "{announcement.title_text}"
+                                                        }
+                                                    }
+                                                    span { class: "text-xs text-text-muted",
+                                                        "by {announcement.author_name}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         // Breadcrumb navigation (only show when viewing a category)
                         if viewing_category {
                             div { class: "flex items-center gap-2 mb-6 text-sm flex-wrap",
@@ -1362,8 +1441,10 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                 ModerationPower::Close,
                                                                 &scope_chain,
                                                             );
+                                                        let can_announce = is_owner || is_admin;
                                                         let pin_target = post.message_id.clone();
                                                         let close_target = post.message_id.clone();
+                                                        let announce_target = post.message_id.clone();
                                                         rsx! {
                                                             PostRow {
                                                                 key: "{post_id}",
@@ -1373,6 +1454,19 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                 last_reply: last_reply,
                                                                 can_pin: can_pin,
                                                                 can_close: can_close,
+                                                                can_announce: can_announce,
+                                                                on_announce: move |value| {
+                                                                    let target = announce_target.clone();
+                                                                    if let Some(ctx) = ActionContext::from_current_board() {
+                                                                        let _ = message_actions::set_post_flag(
+                                                                            ctx,
+                                                                            target,
+                                                                            None,
+                                                                            None,
+                                                                            Some(value),
+                                                                        );
+                                                                    }
+                                                                },
                                                                 on_pin: move |value| {
                                                                     let target = pin_target.clone();
                                                                     if let Some(ctx) = ActionContext::from_current_board() {
@@ -1380,6 +1474,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                             ctx,
                                                                             target,
                                                                             Some(value),
+                                                                            None,
                                                                             None,
                                                                         );
                                                                     }
@@ -1392,6 +1487,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                             target,
                                                                             None,
                                                                             Some(value),
+                                                                            None,
                                                                         );
                                                                     }
                                                                 },
@@ -1544,12 +1640,10 @@ pub fn SinglePostView(post_id: String) -> Element {
                 let max_title_size = config.max_title_size;
                 let max_message_size = config.max_message_size;
                 let all_messages = get_all_messages(
-                    &board_data.board_state.recent_messages,
-                    &board_data.board_state.member_info,
+                    &board_data.board_state,
                     self_member_id,
                     &board_data.secrets,
                     &board_data.category_secrets,
-                    &board_data.board_state.moderation,
                 );
                 let post = all_messages
                     .iter()

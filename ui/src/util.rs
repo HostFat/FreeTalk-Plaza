@@ -7,6 +7,7 @@ pub mod ecies;
 pub mod markdown;
 pub mod message_actions;
 pub mod messaging;
+pub mod moderation_queue;
 pub mod notifications;
 pub mod subscriptions;
 

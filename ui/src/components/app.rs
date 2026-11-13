@@ -58,6 +58,8 @@ pub enum Route {
     Admin { board_id: String },
     #[route("/board/:board_id/admin/banned")]
     AdminBanned { board_id: String },
+    #[route("/board/:board_id/admin/moderation")]
+    AdminModeration { board_id: String },
     #[route("/board/:board_id/admin/roles")]
     AdminRoles { board_id: String },
     #[route("/board/:board_id/admin/links")]
@@ -132,6 +134,9 @@ pub struct QuoteRequest {
     pub text: String,
 }
 pub static QUOTE_COLLECTION: GlobalSignal<Vec<QuoteRequest>> = Global::new(Vec::new);
+
+/// Post the report modal is open for.
+pub static REPORT_TARGET: GlobalSignal<Option<MessageId>> = Global::new(|| None);
 
 /// Context for the currently viewed category
 #[derive(Clone, Default)]
@@ -478,6 +483,14 @@ fn Admin(board_id: String) -> Element {
 fn AdminBanned(board_id: String) -> Element {
     rsx! {
         BoardGate { board_id: board_id.clone(), AdminView { tab: "bans".to_string() } }
+    }
+}
+
+/// Admin view, moderation queue tab
+#[component]
+fn AdminModeration(board_id: String) -> Element {
+    rsx! {
+        BoardGate { board_id: board_id.clone(), AdminView { tab: "moderation".to_string() } }
     }
 }
 

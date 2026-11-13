@@ -108,12 +108,10 @@ pub fn unread_count(board: &BoardData) -> usize {
     let self_id = MemberId::from(&board.self_sk.verifying_key());
     let nickname = self_nickname(board, self_id);
     let messages = get_all_messages(
-        &board.board_state.recent_messages,
-        &board.board_state.member_info,
+        &board.board_state,
         self_id,
         &board.secrets,
         &board.category_secrets,
-        &board.board_state.moderation,
     );
     collect(
         &messages,
@@ -200,6 +198,9 @@ mod tests {
             is_group: false,
             is_pinned: false,
             is_closed: false,
+            is_pending: false,
+            is_announced: false,
+            poll: None,
         }
     }
 

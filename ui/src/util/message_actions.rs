@@ -311,6 +311,7 @@ pub fn set_post_flag(
     target: MessageId,
     pinned: Option<bool>,
     closed: Option<bool>,
+    announced: Option<bool>,
 ) -> Result<(), String> {
     let current = ctx
         .board_state
@@ -321,12 +322,14 @@ pub fn set_post_flag(
             target,
             pinned: false,
             closed: false,
+            announced: false,
             generation: 0,
         });
     let flag = PostFlag {
         target,
         pinned: pinned.unwrap_or(current.pinned),
         closed: closed.unwrap_or(current.closed),
+        announced: announced.unwrap_or(current.announced),
         generation: current.generation + 1,
     };
     let authorized = AuthorizedPostFlag::new(flag, &ctx.self_sk);

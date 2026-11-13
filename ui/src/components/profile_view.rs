@@ -21,12 +21,10 @@ pub fn ProfileView(member_key: String) -> Element {
         let board = boards.map.get(&current)?.clone();
         let self_id = MemberId::from(&board.self_sk.verifying_key());
         let messages = get_all_messages(
-            &board.board_state.recent_messages,
-            &board.board_state.member_info,
+            &board.board_state,
             self_id,
             &board.secrets,
             &board.category_secrets,
-            &board.board_state.moderation,
         );
         Some((board.owner_vk, messages))
     });

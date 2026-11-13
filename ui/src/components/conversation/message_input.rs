@@ -9,7 +9,12 @@ use super::ReplyContext;
 /// The modal contains fields for title and content.
 #[component]
 pub fn PostInput(
-    handle_send_message: EventHandler<(String, String, Option<ReplyContext>)>,
+    handle_send_message: EventHandler<(
+        String,
+        String,
+        Option<ReplyContext>,
+        Option<crate::util::messaging::PollDraft>,
+    )>,
     replying_to: Signal<Option<ReplyContext>>,
     on_request_edit_last: EventHandler<()>,
     /// Default reply context - applied when modal opens if replying_to is None
@@ -27,6 +32,11 @@ pub fn PostInput(
     let mut show_preview = use_signal(|| false);
     let mut draft_restored = use_signal(|| false);
     let mut save_generation = use_signal(|| 0u64);
+    let mut poll_enabled = use_signal(|| false);
+    let mut poll_options = use_signal(|| vec![String::new(), String::new()]);
+    let mut poll_multiselect = use_signal(|| false);
+    let mut poll_days = use_signal(String::new);
+    let mut poll_error = use_signal(|| None::<String>);
 
     // Keep the draft in BoardData and write the delegate store. The compose
     // path uses this directly; typing waits for a pause so every keystroke
@@ -149,15 +159,57 @@ pub fn PostInput(
     let mut send_message = move || {
         let title = title_text.peek().to_string();
         let content = message_text.peek().to_string();
-        if !content.is_empty() {
-            let reply_ctx = replying_to.peek().clone();
+        let reply_ctx = replying_to.peek().clone();
+        let wants_poll = *poll_enabled.peek() && reply_ctx.is_none();
+
+        let poll = if wants_poll {
+            let options: Vec<String> = poll_options
+                .peek()
+                .iter()
+                .map(|option| option.trim().to_string())
+                .filter(|option| !option.is_empty())
+                .collect();
+            let days = poll_days.peek().trim().parse::<i64>().unwrap_or(0);
+            let closes_at = if days > 0 {
+                Some(chrono::Utc::now().timestamp_millis() + days * 24 * 60 * 60 * 1000)
+            } else {
+                None
+            };
+            let draft = crate::util::messaging::PollDraft {
+                options,
+                closes_at,
+                multiselect: *poll_multiselect.peek(),
+            };
+            let poll_content = plaza_core::board_state::content::PollContentV1::new(
+                title.clone(),
+                content.clone(),
+                draft.options.clone(),
+                draft.closes_at,
+                draft.multiselect,
+            );
+            if let Err(error) = poll_content.validate() {
+                poll_error.set(Some(error));
+                return;
+            }
+            poll_error.set(None);
+            Some(draft)
+        } else {
+            None
+        };
+
+        if !content.is_empty() || poll.is_some() {
             title_text.set(String::new());
             message_text.set(String::new());
             replying_to.set(None);
             show_modal.set(false);
+            poll_enabled.set(false);
+            poll_options.set(vec![String::new(), String::new()]);
+            poll_days.set(String::new());
+            poll_multiselect.set(false);
+            poll_error.set(None);
             crate::util::drafts::clear();
             crate::util::drafts::persist();
-            handle_send_message.call((title, content, reply_ctx));
+            handle_send_message.call((title, content, reply_ctx, poll));
         }
     };
 
@@ -358,6 +410,21 @@ pub fn PostInput(
                                 span { class: "text-xs text-text-muted ml-1", "Markdown supported" }
                                 button {
                                     r#type: "button",
+                                    class: if *poll_enabled.read() {
+                                        "px-2 py-1 text-xs rounded bg-accent text-white ml-2"
+                                    } else {
+                                        "px-2 py-1 text-xs bg-surface hover:bg-surface-hover rounded ml-2"
+                                    },
+                                    title: "Add a poll to this new post",
+                                    onclick: move |_| {
+                                        let next = !*poll_enabled.read();
+                                        poll_enabled.set(next);
+                                        poll_error.set(None);
+                                    },
+                                    "Poll"
+                                }
+                                button {
+                                    r#type: "button",
                                     class: "text-xs text-accent hover:text-accent/80 ml-2",
                                     onclick: move |_| {
                                         let next = !*show_preview.read();
@@ -426,6 +493,83 @@ pub fn PostInput(
                         }
                     }
 
+                    if poll_enabled() {
+                        div { class: "px-6 pb-4 pt-1 space-y-2",
+                            div { class: "flex items-center justify-between",
+                                span { class: "text-sm font-medium text-text", "Poll options" }
+                                span { class: "text-xs text-text-muted", "The title is the question" }
+                            }
+                            for (index, option) in poll_options.read().iter().enumerate() {
+                                div { class: "flex items-center gap-2",
+                                    input {
+                                        r#type: "text",
+                                        class: "flex-1 px-3 py-2 bg-surface border border-border rounded-lg text-text text-sm placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/50",
+                                        placeholder: "Option {index + 1}",
+                                        value: "{option}",
+                                        oninput: move |evt| {
+                                            poll_options.with_mut(|options| {
+                                                if let Some(slot) = options.get_mut(index) {
+                                                    *slot = evt.value();
+                                                }
+                                            });
+                                        },
+                                    }
+                                    if poll_options.read().len() > 2 {
+                                        button {
+                                            r#type: "button",
+                                            class: "px-2 py-1 text-text-muted hover:text-text text-sm",
+                                            title: "Remove option",
+                                            onclick: move |_| {
+                                                poll_options.with_mut(|options| {
+                                                    if index < options.len() {
+                                                        options.remove(index);
+                                                    }
+                                                });
+                                            },
+                                            "×"
+                                        }
+                                    }
+                                }
+                            }
+                            div { class: "flex flex-wrap items-center gap-3 text-xs",
+                                if poll_options.read().len() < plaza_core::board_state::content::MAX_POLL_OPTIONS {
+                                    button {
+                                        r#type: "button",
+                                        class: "px-2 py-1 bg-surface hover:bg-surface-hover text-text rounded",
+                                        onclick: move |_| {
+                                            poll_options.with_mut(|options| options.push(String::new()));
+                                        },
+                                        "+ Option"
+                                    }
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "px-2 py-1 bg-surface hover:bg-surface-hover text-text rounded",
+                                    onclick: move |_| {
+                                        let next = !*poll_multiselect.read();
+                                        poll_multiselect.set(next);
+                                    },
+                                    if *poll_multiselect.read() { "Multiple answers" } else { "Single answer" }
+                                }
+                                label { class: "flex items-center gap-1 text-text-muted",
+                                    "Closes in"
+                                    input {
+                                        r#type: "number",
+                                        min: "0",
+                                        max: "365",
+                                        class: "w-16 px-2 py-1 bg-surface border border-border rounded text-text",
+                                        value: "{poll_days}",
+                                        oninput: move |evt| poll_days.set(evt.value()),
+                                    }
+                                    "days (0 = never)"
+                                }
+                            }
+                            if let Some(error) = poll_error.read().as_ref() {
+                                p { class: "text-xs text-red-400", "{error}" }
+                            }
+                        }
+                    }
+
                     if *show_preview.read() {
                         div { class: "px-6 pb-4",
                             div {
@@ -459,7 +603,10 @@ pub fn PostInput(
                             button {
                                 r#type: "submit",
                                 class: "px-5 py-2 bg-accent hover:bg-accent-hover text-white font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
-                                disabled: message_text.read().is_empty() || message_text.read().len() > max_message_size || title_text.read().len() > max_title_size,
+                                disabled: (message_text.read().is_empty() && !poll_enabled())
+                                    || message_text.read().len() > max_message_size
+                                    || title_text.read().len() > max_title_size
+                                    || (poll_enabled() && title_text.read().trim().is_empty()),
                                 "Send Post"
                             }
                         }

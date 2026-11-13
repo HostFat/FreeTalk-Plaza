@@ -9,7 +9,7 @@ use crate::components::category_create_modal::CREATE_CATEGORY_MODAL;
 use crate::components::conversation::message_input::PostInput;
 use crate::util::avatar::get_avatar;
 use crate::util::ecies::unseal_bytes_with_secrets;
-use crate::util::messaging::{send_message, ReplyContext};
+use crate::util::messaging::{send_message, PollDraft, ReplyContext};
 use dioxus::prelude::*;
 use dioxus_free_icons::{icons::fa_solid_icons::FaBars, Icon};
 use plaza_core::board_state::member::MemberId;
@@ -71,83 +71,88 @@ pub fn TopBar() -> Element {
     });
 
     // Message sending handler
-    let handle_send_message =
-        move |(title_text, message_text, reply_ctx): (String, String, Option<ReplyContext>)| {
-            if message_text.is_empty() {
-                return;
-            }
+    let handle_send_message = move |(title_text, message_text, reply_ctx, poll): (
+        String,
+        String,
+        Option<ReplyContext>,
+        Option<PollDraft>,
+    )| {
+        if message_text.is_empty() {
+            return;
+        }
 
-            // Get board data for sending
-            let board_info = {
-                let current_board = CURRENT_BOARD.read();
-                if let Some(key) = current_board.owner_key {
-                    let boards = BOARDS.read();
-                    if let Some(board_data) = boards.map.get(&key) {
-                        let is_private = board_data
-                            .board_state
-                            .configuration
-                            .configuration
-                            .privacy_mode
-                            == PrivacyMode::Private;
-                        let secret_opt = if is_private {
-                            board_data
-                                .secrets
-                                .iter()
-                                .max_by_key(|(v, _)| *v)
-                                .map(|(v, s)| (*s, *v))
-                        } else {
-                            None
-                        };
-                        Some((
-                            key,
-                            board_data.board_key(),
-                            board_data.self_sk.clone(),
-                            board_data.board_state.clone(),
-                            is_private,
-                            secret_opt,
-                            board_data.clone(),
-                        ))
+        // Get board data for sending
+        let board_info = {
+            let current_board = CURRENT_BOARD.read();
+            if let Some(key) = current_board.owner_key {
+                let boards = BOARDS.read();
+                if let Some(board_data) = boards.map.get(&key) {
+                    let is_private = board_data
+                        .board_state
+                        .configuration
+                        .configuration
+                        .privacy_mode
+                        == PrivacyMode::Private;
+                    let secret_opt = if is_private {
+                        board_data
+                            .secrets
+                            .iter()
+                            .max_by_key(|(v, _)| *v)
+                            .map(|(v, s)| (*s, *v))
                     } else {
                         None
-                    }
+                    };
+                    Some((
+                        key,
+                        board_data.board_key(),
+                        board_data.self_sk.clone(),
+                        board_data.board_state.clone(),
+                        is_private,
+                        secret_opt,
+                        board_data.clone(),
+                    ))
                 } else {
                     None
                 }
-            };
-
-            if let Some((
-                current_board,
-                board_key,
-                self_sk,
-                board_state_clone,
-                is_private,
-                secret_opt,
-                snapshot,
-            )) = board_info
-            {
-                // A composer opened inside a restricted category carries its id.
-                let category_secret = reply_ctx
-                    .as_ref()
-                    .and_then(|reply| snapshot.posting_secret_for(&reply.message_id));
-                let category_id = CURRENT_CATEGORY.read().category_id.clone();
-                spawn(async move {
-                    send_message(
-                        current_board,
-                        board_key,
-                        self_sk,
-                        board_state_clone,
-                        is_private,
-                        secret_opt,
-                        category_secret,
-                        category_id,
-                        title_text,
-                        message_text,
-                        reply_ctx,
-                    )
-                    .await;
-                });
+            } else {
+                None
             }
         };
+
+        if let Some((
+            current_board,
+            board_key,
+            self_sk,
+            board_state_clone,
+            is_private,
+            secret_opt,
+            snapshot,
+        )) = board_info
+        {
+            // A composer opened inside a restricted category carries its id.
+            let category_secret = reply_ctx
+                .as_ref()
+                .and_then(|reply| snapshot.posting_secret_for(&reply.message_id));
+            let category_id = CURRENT_CATEGORY.read().category_id.clone();
+            spawn(async move {
+                send_message(
+                    current_board,
+                    board_key,
+                    self_sk,
+                    board_state_clone,
+                    is_private,
+                    secret_opt,
+                    category_secret,
+                    category_id,
+                    title_text,
+                    message_text,
+                    reply_ctx,
+                    poll,
+                )
+                .await;
+            });
+        }
+    };
 
     // Don't render if no board is selected
     let Some(board_data) = current_board_data.read().clone() else {
@@ -460,9 +465,12 @@ pub fn TopBar() -> Element {
                         let default_reply = category_reply_context.read().clone();
                         rsx! {
                             PostInput {
-                                handle_send_message: move |msg: (String, String, Option<ReplyContext>)| {
-                                    handle_send_message(msg)
-                                },
+                                handle_send_message: move |msg: (
+                                    String,
+                                    String,
+                                    Option<ReplyContext>,
+                                    Option<PollDraft>,
+                                )| { handle_send_message(msg) },
                                 replying_to: replying_to,
                                 on_request_edit_last: move |_| {},
                                 default_reply_to: default_reply,
@@ -508,6 +516,8 @@ pub fn TopBar() -> Element {
                     }
                 }
             }
+
+            crate::components::report_modal::ReportModal {}
         }
     }
 }
