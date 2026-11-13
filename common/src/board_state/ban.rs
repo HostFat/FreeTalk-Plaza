@@ -159,15 +159,15 @@ impl BansV1 {
             return Err("Number of bans exceeds the maximum allowed".to_string());
         }
 
-        let members_by_id = parent_state.members.members_by_member_id();
         for ban in &self.0 {
-            if ban.banned_by == parameters.owner_id() {
-                ban.verify_signature(&parameters.owner)
-                    .map_err(|e| format!("Invalid ban signature: {}", e))?;
-            } else if let Some(member) = members_by_id.get(&ban.banned_by) {
-                ban.verify_signature(&member.member.member_vk)
-                    .map_err(|e| format!("Invalid ban signature: {}", e))?;
-            }
+            let key = crate::board_state::roles::resolve_signer_key(
+                parent_state,
+                parameters,
+                &ban.banned_by,
+                ban.signer_key.as_ref(),
+            )?;
+            ban.verify_signature(&key)
+                .map_err(|e| format!("Invalid ban signature: {}", e))?;
         }
         Ok(())
     }
@@ -235,7 +235,16 @@ impl BansV1 {
         }
 
         let is_owner = ban.banned_by == parameters.owner_id();
-        let is_admin = admin_ids.contains(&ban.banned_by);
+        let proof_admin = ban
+            .authority
+            .as_ref()
+            .and_then(|proof| proof.admin.as_ref())
+            .map(|admin| {
+                admin.admin.id() == ban.banned_by
+                    && admin.verify_signature(&parameters.owner).is_ok()
+            })
+            .unwrap_or(false);
+        let is_admin = admin_ids.contains(&ban.banned_by) || proof_admin;
         if !is_owner && !is_admin {
             // The banner must still be present so its key can verify the ban.
             // A ban signed by a pruned member is removed by cleanup instead of
@@ -389,29 +398,17 @@ impl ComposableState for BansV1 {
             ));
         }
 
-        let members_by_id = parent_state.members.members_by_member_id();
-
-        let owner_vk = parameters.owner;
-        let owner_id = parameters.owner_id();
-
-        // Verify signatures for all bans
+        // Verify signatures for all bans. The banner's key may be embedded so a
+        // ban stays verifiable after the banner is pruned.
         for ban in &self.0 {
-            if ban.banned_by == owner_id {
-                ban.verify_signature(&owner_vk)
-                    .map_err(|e| format!("Invalid ban signature: {}", e))?;
-            } else if let Some(banning_member) = members_by_id.get(&ban.banned_by) {
-                ban.verify_signature(&banning_member.member.member_vk)
-                    .map_err(|e| format!("Invalid ban signature: {}", e))?;
-            } else {
-                // Without the banner's key the signature cannot be checked.
-                // Cleanup drops these bans, so a state that still contains one
-                // is not accepted.
-                return Err(format!(
-                    "Cannot verify ban {}: banner {} is not a member",
-                    ban.id().0 .0,
-                    ban.banned_by
-                ));
-            }
+            let key = crate::board_state::roles::resolve_signer_key(
+                parent_state,
+                parameters,
+                &ban.banned_by,
+                ban.signer_key.as_ref(),
+            )?;
+            ban.verify_signature(&key)
+                .map_err(|e| format!("Invalid ban signature: {}", e))?;
         }
 
         Ok(())
@@ -564,6 +561,11 @@ pub struct AuthorizedUserBan {
     pub ban: UserBan,
     pub banned_by: MemberId,
     pub signature: Signature,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    /// Admin authority at signing time, so an admin's bans survive a demotion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<crate::board_state::roles::AuthorityProof>>,
 }
 
 impl Eq for AuthorizedUserBan {}
@@ -591,6 +593,8 @@ impl AuthorizedUserBan {
             ban,
             banned_by,
             signature,
+            signer_key: Some(banner_signing_key.verifying_key()),
+            authority: None,
         }
     }
 
@@ -601,7 +605,22 @@ impl AuthorizedUserBan {
             ban,
             banned_by,
             signature,
+            signer_key: None,
+            authority: None,
         }
+    }
+
+    pub fn with_signer_key(mut self, key: VerifyingKey) -> Self {
+        self.signer_key = Some(key);
+        self
+    }
+
+    pub fn with_optional_authority(
+        mut self,
+        proof: Option<crate::board_state::roles::AuthorityProof>,
+    ) -> Self {
+        self.authority = proof.map(Box::new);
+        self
     }
 
     /// Verifies that the ban's signature is valid
@@ -661,6 +680,8 @@ pub struct AuthorizedBanRevocation {
     pub revocation: BanRevocationV1,
     pub signer: Option<MemberId>,
     pub signature: Signature,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
 }
 
 impl AuthorizedBanRevocation {
@@ -669,6 +690,7 @@ impl AuthorizedBanRevocation {
             signature: sign_struct(&revocation, signing_key),
             revocation,
             signer: Some(MemberId::from(&signing_key.verifying_key())),
+            signer_key: Some(signing_key.verifying_key()),
         }
     }
 
@@ -693,7 +715,12 @@ fn verify_revocation(
     entry: &AuthorizedBanRevocation,
 ) -> Result<(), String> {
     let signer = entry.signer_id(parameters);
-    let key = crate::board_state::roles::signer_key(state, parameters, &signer)?;
+    let key = crate::board_state::roles::resolve_signer_key(
+        state,
+        parameters,
+        &signer,
+        entry.signer_key.as_ref(),
+    )?;
     entry.verify_signature_with(&key)?;
     // Owner-only keeps the tombstone verifiable forever: the owner key is in
     // the contract parameters even if every member record is pruned.

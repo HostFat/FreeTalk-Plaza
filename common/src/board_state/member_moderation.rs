@@ -7,9 +7,8 @@
 
 use crate::board_state::member::MemberId;
 use crate::board_state::message::MessageId;
-use crate::board_state::moderation::is_owner_or_admin;
 use crate::board_state::reports::ReportReason;
-use crate::board_state::roles::signer_key;
+use crate::board_state::roles::{resolve_signer_key, AuthorityProof};
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::{sign_struct, verify_struct};
 use crate::ChatBoardStateV1;
@@ -35,6 +34,10 @@ pub struct AuthorizedWarning {
     pub signature: Signature,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
 }
 
 impl AuthorizedWarning {
@@ -43,7 +46,14 @@ impl AuthorizedWarning {
             signature: sign_struct(&warning, signing_key),
             warning,
             signer: Some(MemberId::from(&signing_key.verifying_key())),
+            signer_key: Some(signing_key.verifying_key()),
+            authority: None,
         }
+    }
+
+    pub fn with_optional_authority(mut self, proof: Option<AuthorityProof>) -> Self {
+        self.authority = proof.map(Box::new);
+        self
     }
 
     pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
@@ -98,11 +108,16 @@ fn verify_warning(
     entry: &AuthorizedWarning,
 ) -> Result<(), String> {
     let signer = entry.signer_id(parameters);
-    let key = signer_key(state, parameters, &signer)?;
+    let key = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
     entry.verify_signature_with(&key)?;
-    if !is_owner_or_admin(state, parameters, &signer) {
-        return Err("Only the owner or an admin can warn a member".to_string());
-    }
+    crate::board_state::roles::verify_admin_authority(
+        state,
+        parameters,
+        &signer,
+        entry.authority.as_deref(),
+        8,
+    )
+    .map_err(|_| "Only the owner or an admin can warn a member".to_string())?;
     if entry.warning.target == parameters.owner_id() {
         return Err("The owner cannot be warned".to_string());
     }
@@ -143,8 +158,7 @@ impl WarningsV1 {
                     .members
                     .iter()
                     .any(|member| member.member.id() == entry.warning.target)
-                && signer_key(state, parameters, &entry.signer_id(parameters)).is_ok()
-                && is_owner_or_admin(state, parameters, &entry.signer_id(parameters))
+                && verify_warning(state, parameters, entry).is_ok()
         });
         self.warnings.sort_by_key(|entry| entry.id().0 .0);
         self.warnings.dedup_by_key(|entry| entry.id());
@@ -268,6 +282,10 @@ pub struct AuthorizedSuspension {
     pub signature: Signature,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
 }
 
 impl AuthorizedSuspension {
@@ -276,7 +294,14 @@ impl AuthorizedSuspension {
             signature: sign_struct(&suspension, signing_key),
             suspension,
             signer: Some(MemberId::from(&signing_key.verifying_key())),
+            signer_key: Some(signing_key.verifying_key()),
+            authority: None,
         }
+    }
+
+    pub fn with_optional_authority(mut self, proof: Option<AuthorityProof>) -> Self {
+        self.authority = proof.map(Box::new);
+        self
     }
 
     pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
@@ -341,11 +366,16 @@ fn verify_suspension(
     entry: &AuthorizedSuspension,
 ) -> Result<(), String> {
     let signer = entry.signer_id(parameters);
-    let key = signer_key(state, parameters, &signer)?;
+    let key = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
     entry.verify_signature_with(&key)?;
-    if !is_owner_or_admin(state, parameters, &signer) {
-        return Err("Only the owner or an admin can suspend a member".to_string());
-    }
+    crate::board_state::roles::verify_admin_authority(
+        state,
+        parameters,
+        &signer,
+        entry.authority.as_deref(),
+        8,
+    )
+    .map_err(|_| "Only the owner or an admin can suspend a member".to_string())?;
     if entry.suspension.target == parameters.owner_id() {
         return Err("The owner cannot be suspended".to_string());
     }
@@ -382,8 +412,7 @@ impl SuspensionsV1 {
                     .members
                     .iter()
                     .any(|member| member.member.id() == entry.suspension.target)
-                && signer_key(state, parameters, &entry.signer_id(parameters)).is_ok()
-                && is_owner_or_admin(state, parameters, &entry.signer_id(parameters))
+                && verify_suspension(state, parameters, entry).is_ok()
         });
         self.suspensions.sort_by_key(|entry| {
             (

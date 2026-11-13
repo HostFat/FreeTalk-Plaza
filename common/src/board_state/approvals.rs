@@ -6,8 +6,10 @@
 
 use crate::board_state::member::MemberId;
 use crate::board_state::message::MessageId;
-use crate::board_state::moderation::{category_chain, is_owner_or_admin};
-use crate::board_state::roles::{signer_key, ModerationPower};
+use crate::board_state::moderation::category_chain;
+use crate::board_state::roles::{
+    resolve_signer_key, verify_moderation_authority, AuthorityProof, ModerationPower,
+};
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::{sign_struct, verify_struct};
 use crate::ChatBoardStateV1;
@@ -34,6 +36,10 @@ pub struct AuthorizedApproval {
     pub signature: Signature,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
 }
 
 impl AuthorizedApproval {
@@ -42,7 +48,14 @@ impl AuthorizedApproval {
             signature: sign_struct(&approval, signing_key),
             approval,
             signer: Some(MemberId::from(&signing_key.verifying_key())),
+            signer_key: Some(signing_key.verifying_key()),
+            authority: None,
         }
+    }
+
+    pub fn with_optional_authority(mut self, proof: Option<AuthorityProof>) -> Self {
+        self.authority = proof.map(Box::new);
+        self
     }
 
     pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
@@ -101,22 +114,6 @@ fn approval_map(approvals: &[AuthorizedApproval]) -> BTreeMap<MessageId, Approva
         .collect()
 }
 
-fn can_approve(
-    state: &ChatBoardStateV1,
-    parameters: &ChatBoardParametersV1,
-    signer: &MemberId,
-    target: &MessageId,
-) -> bool {
-    if is_owner_or_admin(state, parameters, signer) {
-        return true;
-    }
-    let routes = state.moderation.routes_map();
-    let chain = category_chain(&routes, target);
-    state
-        .roles
-        .has_moderation_power(signer, ModerationPower::Delete, &chain)
-}
-
 /// Section a message belongs to: its nearest category, or `None` at the root.
 pub fn message_scope(state: &ChatBoardStateV1, target: &MessageId) -> Option<MessageId> {
     category_chain(&state.moderation.routes_map(), target)
@@ -130,7 +127,7 @@ fn verify_approval(
     approval: &AuthorizedApproval,
 ) -> Result<(), String> {
     let signer = approval.signer_id(parameters);
-    let key = signer_key(state, parameters, &signer)?;
+    let key = resolve_signer_key(state, parameters, &signer, approval.signer_key.as_ref())?;
     approval.verify_signature_with(&key)?;
     if !state
         .recent_messages
@@ -144,9 +141,17 @@ fn verify_approval(
     if approval.approval.scope.is_some() && approval.approval.scope != expected {
         return Err("Approval scope is not the target's section".to_string());
     }
-    if !can_approve(state, parameters, &signer, &approval.approval.target) {
-        return Err("Signer cannot approve this post".to_string());
-    }
+    let routes = state.moderation.routes_map();
+    let chain = category_chain(&routes, &approval.approval.target);
+    verify_moderation_authority(
+        state,
+        parameters,
+        &signer,
+        ModerationPower::Delete,
+        &chain,
+        approval.authority.as_deref(),
+    )
+    .map_err(|_| "Signer cannot approve this post".to_string())?;
     Ok(())
 }
 
@@ -202,10 +207,8 @@ impl ApprovalsV1 {
             .map(|message| message.id())
             .collect();
         self.approvals.retain(|entry| {
-            let signer = entry.signer_id(parameters);
             live.contains(&entry.approval.target)
-                && signer_key(state, parameters, &signer).is_ok()
-                && can_approve(state, parameters, &signer, &entry.approval.target)
+                && verify_approval(state, parameters, entry).is_ok()
         });
         self.approvals.sort_by_key(|entry| {
             (

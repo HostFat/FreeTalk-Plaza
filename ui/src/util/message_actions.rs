@@ -18,9 +18,13 @@ use plaza_core::board_state::message::{
     AuthorizedMessageV1, BoardMessageBody, MessageId, MessageV1, SecretScope,
 };
 use plaza_core::board_state::moderation::{
-    AuthorizedFeatureFlag, AuthorizedPostMove, FeatureFlag, FeatureKind, ModerationDelta, PostMove,
+    category_chain, AuthorizedFeatureFlag, AuthorizedPostMove, FeatureFlag, FeatureKind,
+    ModerationDelta, PostMove,
 };
 use plaza_core::board_state::privacy::SealedBytes;
+use plaza_core::board_state::roles::{
+    admin_authority_proof, moderation_authority_proof, AuthorityProof, ModerationPower,
+};
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
 use plaza_core::chat_delegate::BoardKey;
 
@@ -372,6 +376,30 @@ pub async fn edit_category(
     send_action_messages(ctx, vec![content]).await;
 }
 
+fn self_member_id(ctx: &ActionContext) -> MemberId {
+    MemberId::from(&ctx.self_sk.verifying_key())
+}
+
+/// Authority the current identity holds for a moderation power, used to keep
+/// the record verifiable after a later demotion.
+pub(crate) fn moderation_proof(
+    ctx: &ActionContext,
+    target: &MessageId,
+    power: ModerationPower,
+) -> Option<AuthorityProof> {
+    let self_id = self_member_id(ctx);
+    if let Some(proof) = admin_authority_proof(&ctx.board_state, &self_id) {
+        return Some(proof);
+    }
+    let routes = ctx.board_state.moderation.routes_map();
+    let chain = category_chain(&routes, target);
+    moderation_authority_proof(&ctx.board_state, &self_id, power, &chain)
+}
+
+fn admin_proof(ctx: &ActionContext) -> Option<AuthorityProof> {
+    admin_authority_proof(&ctx.board_state, &self_member_id(ctx))
+}
+
 /// Pin/unpin or close/reopen a post. The contract verifies the signer's power
 /// and scope against the public moderation state.
 pub fn set_post_flag(
@@ -391,43 +419,60 @@ pub fn set_post_flag(
     let now = chrono::Utc::now().timestamp_millis();
     let mut flags = Vec::new();
     if let Some(value) = pinned {
-        flags.push(AuthorizedFeatureFlag::new(
-            FeatureFlag {
-                target,
-                kind: FeatureKind::Pinned,
-                value,
-                destination: None,
-                generation: next_generation(FeatureKind::Pinned),
-                created_at: now,
-            },
-            &ctx.self_sk,
-        ));
+        flags.push(
+            AuthorizedFeatureFlag::new(
+                FeatureFlag {
+                    target,
+                    kind: FeatureKind::Pinned,
+                    value,
+                    destination: None,
+                    generation: next_generation(FeatureKind::Pinned),
+                    created_at: now,
+                },
+                &ctx.self_sk,
+            )
+            .with_optional_authority(moderation_proof(
+                &ctx,
+                &target,
+                ModerationPower::Pin,
+            )),
+        );
     }
     if let Some(value) = closed {
-        flags.push(AuthorizedFeatureFlag::new(
-            FeatureFlag {
-                target,
-                kind: FeatureKind::Closed,
-                value,
-                destination: None,
-                generation: next_generation(FeatureKind::Closed),
-                created_at: now,
-            },
-            &ctx.self_sk,
-        ));
+        flags.push(
+            AuthorizedFeatureFlag::new(
+                FeatureFlag {
+                    target,
+                    kind: FeatureKind::Closed,
+                    value,
+                    destination: None,
+                    generation: next_generation(FeatureKind::Closed),
+                    created_at: now,
+                },
+                &ctx.self_sk,
+            )
+            .with_optional_authority(moderation_proof(
+                &ctx,
+                &target,
+                ModerationPower::Close,
+            )),
+        );
     }
     if let Some(value) = announced {
-        flags.push(AuthorizedFeatureFlag::new(
-            FeatureFlag {
-                target,
-                kind: FeatureKind::Announced,
-                value,
-                destination: None,
-                generation: next_generation(FeatureKind::Announced),
-                created_at: now,
-            },
-            &ctx.self_sk,
-        ));
+        flags.push(
+            AuthorizedFeatureFlag::new(
+                FeatureFlag {
+                    target,
+                    kind: FeatureKind::Announced,
+                    value,
+                    destination: None,
+                    generation: next_generation(FeatureKind::Announced),
+                    created_at: now,
+                },
+                &ctx.self_sk,
+            )
+            .with_optional_authority(admin_proof(&ctx)),
+        );
     }
     if flags.is_empty() {
         return Ok(());
@@ -499,7 +544,8 @@ pub fn move_post(
         moderation: Some(ModerationDelta {
             routes: Vec::new(),
             feature_flags: Vec::new(),
-            moves: vec![AuthorizedPostMove::new(change, &ctx.self_sk)],
+            moves: vec![AuthorizedPostMove::new(change, &ctx.self_sk)
+                .with_optional_authority(moderation_proof(ctx, &target, ModerationPower::Move))],
         }),
         ..Default::default()
     };
@@ -535,7 +581,8 @@ pub fn merge_topic(
             created_at: now,
         },
         &ctx.self_sk,
-    );
+    )
+    .with_optional_authority(moderation_proof(ctx, &source, ModerationPower::Move));
     let closed = AuthorizedFeatureFlag::new(
         FeatureFlag {
             target: source,
@@ -546,20 +593,23 @@ pub fn merge_topic(
             created_at: now,
         },
         &ctx.self_sk,
-    );
-    let moves: Vec<AuthorizedPostMove> = direct_replies
-        .into_iter()
-        .filter(|reply| *reply != destination)
-        .map(|reply| {
-            let change = PostMove {
-                target: reply,
-                new_parent: Some(destination),
-                generation: next_move_generation(ctx, &reply),
-                created_at: chrono::Utc::now().timestamp_millis(),
-            };
-            AuthorizedPostMove::new(change, &ctx.self_sk)
-        })
-        .collect();
+    )
+    .with_optional_authority(moderation_proof(ctx, &source, ModerationPower::Close));
+    let moves: Vec<AuthorizedPostMove> =
+        direct_replies
+            .into_iter()
+            .filter(|reply| *reply != destination)
+            .map(|reply| {
+                let change = PostMove {
+                    target: reply,
+                    new_parent: Some(destination),
+                    generation: next_move_generation(ctx, &reply),
+                    created_at: chrono::Utc::now().timestamp_millis(),
+                };
+                AuthorizedPostMove::new(change, &ctx.self_sk)
+                    .with_optional_authority(moderation_proof(ctx, &reply, ModerationPower::Move))
+            })
+            .collect();
     let delta = ChatBoardStateV1Delta {
         moderation: Some(ModerationDelta {
             routes: Vec::new(),

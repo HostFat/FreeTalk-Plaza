@@ -1,6 +1,6 @@
 //! Signed records for reports, report resolutions and post approvals.
 
-use crate::util::message_actions::{apply_state_delta, ActionContext};
+use crate::util::message_actions::{apply_state_delta, moderation_proof, ActionContext};
 use plaza_core::board_state::approvals::{
     message_scope, ApprovalV1, ApprovalsDelta, AuthorizedApproval,
 };
@@ -11,6 +11,7 @@ use plaza_core::board_state::reports::{
     AuthorizedReport, AuthorizedReportResolution, ReportReason, ReportResolution, ReportStatus,
     ReportV1, ReportsDelta,
 };
+use plaza_core::board_state::roles::ModerationPower;
 use plaza_core::board_state::ChatBoardStateV1Delta;
 
 /// Report a post. The reporter is the signing member.
@@ -51,15 +52,26 @@ pub fn resolve_report(
         .max()
         .unwrap_or(0)
         + 1;
+    let target = ctx
+        .board_state
+        .reports
+        .reports
+        .iter()
+        .find(|entry| entry.id() == report_id)
+        .map(|entry| entry.report.target);
     let resolution = ReportResolution {
         report_id,
         status,
         generation,
     };
+    let authorized = AuthorizedReportResolution::new(resolution, &ctx.self_sk)
+        .with_optional_authority(
+            target.and_then(|target| moderation_proof(ctx, &target, ModerationPower::Delete)),
+        );
     let delta = ChatBoardStateV1Delta {
         reports: Some(ReportsDelta {
             reports: Vec::new(),
-            resolutions: vec![AuthorizedReportResolution::new(resolution, &ctx.self_sk)],
+            resolutions: vec![authorized],
         }),
         ..Default::default()
     };
@@ -83,9 +95,12 @@ pub fn approve_post(ctx: &ActionContext, target: MessageId, approved: bool) -> R
         generation,
         scope: message_scope(&ctx.board_state, &target),
     };
+    let proof = moderation_proof(ctx, &target, ModerationPower::Delete);
     let delta = ChatBoardStateV1Delta {
         approvals: Some(ApprovalsDelta {
-            approvals: vec![AuthorizedApproval::new(approval, &ctx.self_sk)],
+            approvals: vec![
+                AuthorizedApproval::new(approval, &ctx.self_sk).with_optional_authority(proof)
+            ],
         }),
         ..Default::default()
     };

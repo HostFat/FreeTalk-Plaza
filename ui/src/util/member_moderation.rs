@@ -7,6 +7,7 @@ use plaza_core::board_state::member_moderation::{
     WarningsDelta,
 };
 use plaza_core::board_state::reports::ReportReason;
+use plaza_core::board_state::roles::admin_authority_proof;
 use plaza_core::board_state::ChatBoardStateV1Delta;
 
 pub fn warn_member(
@@ -19,12 +20,17 @@ pub fn warn_member(
         reason,
         created_at: chrono::Utc::now().timestamp_millis(),
     };
-    let delta = ChatBoardStateV1Delta {
-        warnings: Some(WarningsDelta {
-            warnings: vec![AuthorizedWarning::new(warning, &ctx.self_sk)],
-        }),
-        ..Default::default()
-    };
+    let delta =
+        ChatBoardStateV1Delta {
+            warnings: Some(WarningsDelta {
+                warnings: vec![AuthorizedWarning::new(warning, &ctx.self_sk)
+                    .with_optional_authority(admin_authority_proof(
+                        &ctx.board_state,
+                        &MemberId::from(&ctx.self_sk.verifying_key()),
+                    ))],
+            }),
+            ..Default::default()
+        };
     apply_state_delta(ctx, delta)
 }
 
@@ -56,7 +62,11 @@ pub fn suspend_member(
     };
     let delta = ChatBoardStateV1Delta {
         suspensions: Some(SuspensionsDelta {
-            suspensions: vec![AuthorizedSuspension::new(suspension, &ctx.self_sk)],
+            suspensions: vec![AuthorizedSuspension::new(suspension, &ctx.self_sk)
+                .with_optional_authority(admin_authority_proof(
+                    &ctx.board_state,
+                    &MemberId::from(&ctx.self_sk.verifying_key()),
+                ))],
         }),
         ..Default::default()
     };
@@ -86,7 +96,11 @@ pub fn lift_suspension(ctx: &ActionContext, target: MemberId) -> Result<(), Stri
     };
     let delta = ChatBoardStateV1Delta {
         suspensions: Some(SuspensionsDelta {
-            suspensions: vec![AuthorizedSuspension::new(suspension, &ctx.self_sk)],
+            suspensions: vec![AuthorizedSuspension::new(suspension, &ctx.self_sk)
+                .with_optional_authority(admin_authority_proof(
+                    &ctx.board_state,
+                    &MemberId::from(&ctx.self_sk.verifying_key()),
+                ))],
         }),
         ..Default::default()
     };

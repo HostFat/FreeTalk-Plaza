@@ -385,6 +385,12 @@ impl BoardData {
                 AuthorizedEncryptedSecretForMember::new(record, &self.self_sk)
             } else {
                 AuthorizedEncryptedSecretForMember::signed_by(record, self_id, &self.self_sk)
+                    .with_optional_authority(
+                        plaza_core::board_state::roles::distributor_authority_proof(
+                            &self.board_state,
+                            &self_id,
+                        ),
+                    )
             });
         }
 
@@ -1018,15 +1024,24 @@ impl BoardData {
             if sealed.is_empty() {
                 continue;
             }
-            sets.push(AuthorizedPqSecretSet::new(
-                PqSecretSet {
-                    scope: PqScope::Category(category_id),
-                    version: next_set_version,
-                    secret_version,
-                    secrets: sealed,
-                },
-                &self.self_sk,
-            ));
+            let self_id = MemberId::from(&self.self_sk.verifying_key());
+            sets.push(
+                AuthorizedPqSecretSet::new(
+                    PqSecretSet {
+                        scope: PqScope::Category(category_id),
+                        version: next_set_version,
+                        secret_version,
+                        secrets: sealed,
+                    },
+                    &self.self_sk,
+                )
+                .with_optional_authority(
+                    plaza_core::board_state::roles::distributor_authority_proof(
+                        &self.board_state,
+                        &self_id,
+                    ),
+                ),
+            );
         }
 
         if sets.is_empty() {
@@ -1158,6 +1173,7 @@ impl BoardData {
         if sealed.is_empty() {
             return false;
         }
+        let self_id = MemberId::from(&self.self_sk.verifying_key());
         let set = AuthorizedPqSecretSet::new(
             PqSecretSet {
                 scope: PqScope::Board,
@@ -1166,7 +1182,11 @@ impl BoardData {
                 secrets: sealed,
             },
             &self.self_sk,
-        );
+        )
+        .with_optional_authority(plaza_core::board_state::roles::admin_authority_proof(
+            &self.board_state,
+            &self_id,
+        ));
         self.apply_pq_delta(PqSecretsDelta {
             keys: vec![],
             sets: vec![set],

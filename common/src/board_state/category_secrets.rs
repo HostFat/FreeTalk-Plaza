@@ -11,6 +11,7 @@
 use crate::board_state::member::MemberId;
 use crate::board_state::message::MessageId;
 use crate::board_state::privacy::SecretVersion;
+use crate::board_state::roles::{resolve_signer_key, verify_distributor_authority};
 use crate::board_state::secret::{
     AuthorizedEncryptedSecretForMember, AuthorizedSecretVersionRecord,
 };
@@ -31,28 +32,6 @@ pub struct CategorySecretSet {
     pub current_version: SecretVersion,
     pub versions: Vec<AuthorizedSecretVersionRecord>,
     pub encrypted_secrets: Vec<AuthorizedEncryptedSecretForMember>,
-}
-
-/// Key of the member who signed a blob: the owner, or a member of a role with
-/// the key-distribution permission.
-fn distributor_key(
-    state: &ChatBoardStateV1,
-    parameters: &ChatBoardParametersV1,
-    signer: &MemberId,
-) -> Result<ed25519_dalek::VerifyingKey, String> {
-    if *signer == parameters.owner_id() {
-        return Ok(parameters.owner);
-    }
-    if !state.roles.can_distribute_keys(signer) {
-        return Err("Category key signer cannot distribute keys".to_string());
-    }
-    state
-        .members
-        .members
-        .iter()
-        .find(|member| member.member.id() == *signer)
-        .map(|member| member.member.member_vk)
-        .ok_or_else(|| "Category key signer is not a board member".to_string())
 }
 
 fn is_board_member(
@@ -76,8 +55,10 @@ fn verify_blob(
     category_id: MessageId,
 ) -> Result<(), String> {
     let signer = blob.signer_id(parameters);
-    let signing_key = distributor_key(state, parameters, &signer)?;
+    let signing_key = resolve_signer_key(state, parameters, &signer, blob.signer_key.as_ref())?;
     blob.verify_signature_with(&signing_key)?;
+    verify_distributor_authority(state, parameters, &signer, blob.authority.as_deref())
+        .map_err(|_| "Category key signer cannot distribute keys".to_string())?;
     if !is_board_member(state, parameters, &blob.secret.member_id) {
         return Err("Category key recipient is not a board member".to_string());
     }

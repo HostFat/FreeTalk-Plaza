@@ -8,7 +8,9 @@
 use crate::board_state::content::CONTENT_TYPE_MODERATION_ACTION;
 use crate::board_state::member::MemberId;
 use crate::board_state::message::MessageId;
-use crate::board_state::roles::{signer_key, ModerationPower};
+use crate::board_state::roles::{
+    resolve_signer_key, verify_moderation_authority, AuthorityProof, ModerationPower,
+};
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::{sign_struct, verify_struct};
 use crate::ChatBoardStateV1;
@@ -34,6 +36,8 @@ pub struct AuthorizedMessageRoute {
     pub signature: Signature,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
 }
 
 impl AuthorizedMessageRoute {
@@ -42,6 +46,7 @@ impl AuthorizedMessageRoute {
             signature: sign_struct(&route, signing_key),
             route,
             signer: Some(MemberId::from(&signing_key.verifying_key())),
+            signer_key: Some(signing_key.verifying_key()),
         }
     }
 
@@ -84,6 +89,10 @@ pub struct AuthorizedFeatureFlag {
     pub signature: Signature,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
 }
 
 impl AuthorizedFeatureFlag {
@@ -92,7 +101,14 @@ impl AuthorizedFeatureFlag {
             signature: sign_struct(&flag, signing_key),
             flag,
             signer: Some(MemberId::from(&signing_key.verifying_key())),
+            signer_key: Some(signing_key.verifying_key()),
+            authority: None,
         }
+    }
+
+    pub fn with_optional_authority(mut self, proof: Option<AuthorityProof>) -> Self {
+        self.authority = proof.map(Box::new);
+        self
     }
 
     pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
@@ -128,6 +144,10 @@ pub struct AuthorizedPostMove {
     pub signature: Signature,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
 }
 
 impl AuthorizedPostMove {
@@ -136,7 +156,14 @@ impl AuthorizedPostMove {
             signature: sign_struct(&change, signing_key),
             change,
             signer: Some(MemberId::from(&signing_key.verifying_key())),
+            signer_key: Some(signing_key.verifying_key()),
+            authority: None,
         }
+    }
+
+    pub fn with_optional_authority(mut self, proof: Option<AuthorityProof>) -> Self {
+        self.authority = proof.map(Box::new);
+        self
     }
 
     pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
@@ -270,29 +297,6 @@ pub(crate) fn is_owner_or_admin(
             .any(|admin| admin.admin.id() == *actor)
 }
 
-/// A scoped moderator may move a post only when their Move power covers both
-/// the section it leaves and the one it enters.
-fn can_move(
-    state: &ChatBoardStateV1,
-    parameters: &ChatBoardParametersV1,
-    routes: &BTreeMap<MessageId, RouteState>,
-    signer: &MemberId,
-    target: &MessageId,
-    destination: &MessageId,
-) -> bool {
-    if is_owner_or_admin(state, parameters, signer) {
-        return true;
-    }
-    let from = category_chain(routes, target);
-    let to = category_chain(routes, destination);
-    state
-        .roles
-        .has_moderation_power(signer, ModerationPower::Move, &from)
-        && state
-            .roles
-            .has_moderation_power(signer, ModerationPower::Move, &to)
-}
-
 fn target_author(state: &ChatBoardStateV1, target: &MessageId) -> Option<MemberId> {
     state
         .recent_messages
@@ -308,7 +312,7 @@ fn verify_route(
     route: &AuthorizedMessageRoute,
 ) -> Result<(), String> {
     let signer = route.signer_id(parameters);
-    let key = signer_key(state, parameters, &signer)?;
+    let key = resolve_signer_key(state, parameters, &signer, route.signer_key.as_ref())?;
     route.verify_signature_with(&key)?;
 
     let message = state
@@ -361,7 +365,7 @@ fn verify_feature_flag(
     entry: &AuthorizedFeatureFlag,
 ) -> Result<(), String> {
     let signer = entry.signer_id(parameters);
-    let key = signer_key(state, parameters, &signer)?;
+    let key = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
     entry.verify_signature_with(&key)?;
     let flag = &entry.flag;
     if flag.generation == 0 {
@@ -379,38 +383,40 @@ fn verify_feature_flag(
         return Err("Feature flags apply to posts".to_string());
     }
 
-    let owner_or_admin = is_owner_or_admin(state, parameters, &signer);
     let chain = category_chain(routes, &flag.target);
+    let proof = entry.authority.as_deref();
     match flag.kind {
         FeatureKind::Pinned => {
-            if !owner_or_admin
-                && !state
-                    .roles
-                    .has_moderation_power(&signer, ModerationPower::Pin, &chain)
-            {
-                return Err("Signer cannot pin this post".to_string());
-            }
+            verify_moderation_authority(
+                state,
+                parameters,
+                &signer,
+                ModerationPower::Pin,
+                &chain,
+                proof,
+            )?;
             if flag.destination.is_some() {
                 return Err("A pin has no destination".to_string());
             }
         }
         FeatureKind::Closed => {
-            if !owner_or_admin
-                && target_author(state, &flag.target).as_ref() != Some(&signer)
-                && !state
-                    .roles
-                    .has_moderation_power(&signer, ModerationPower::Close, &chain)
-            {
-                return Err("Signer cannot close this post".to_string());
+            if target_author(state, &flag.target).as_ref() != Some(&signer) {
+                verify_moderation_authority(
+                    state,
+                    parameters,
+                    &signer,
+                    ModerationPower::Close,
+                    &chain,
+                    proof,
+                )?;
             }
             if flag.destination.is_some() {
                 return Err("A close flag has no destination".to_string());
             }
         }
         FeatureKind::Announced => {
-            if !owner_or_admin {
-                return Err("Only the owner or an admin can announce a post".to_string());
-            }
+            crate::board_state::roles::verify_admin_authority(state, parameters, &signer, proof, 8)
+                .map_err(|_| "Only the owner or an admin can announce a post".to_string())?;
             if flag.destination.is_some() {
                 return Err("An announcement has no destination".to_string());
             }
@@ -440,27 +446,38 @@ fn verify_feature_flag(
                     }
                     current = route_parent(routes, &id);
                 }
-                if !can_move(
+                let destination_chain = category_chain(routes, &destination);
+                verify_moderation_authority(
                     state,
                     parameters,
-                    routes,
                     &signer,
-                    &flag.target,
-                    &destination,
-                ) {
-                    return Err("Signer cannot merge this post".to_string());
-                }
+                    ModerationPower::Move,
+                    &chain,
+                    proof,
+                )
+                .map_err(|_| "Signer cannot merge this post".to_string())?;
+                verify_moderation_authority(
+                    state,
+                    parameters,
+                    &signer,
+                    ModerationPower::Move,
+                    &destination_chain,
+                    proof,
+                )
+                .map_err(|_| "Signer cannot merge this post".to_string())?;
             } else {
                 if flag.destination.is_some() {
                     return Err("An unmerge has no destination".to_string());
                 }
-                if !owner_or_admin
-                    && !state
-                        .roles
-                        .has_moderation_power(&signer, ModerationPower::Move, &chain)
-                {
-                    return Err("Signer cannot undo a merge".to_string());
-                }
+                verify_moderation_authority(
+                    state,
+                    parameters,
+                    &signer,
+                    ModerationPower::Move,
+                    &chain,
+                    proof,
+                )
+                .map_err(|_| "Signer cannot undo a merge".to_string())?;
             }
         }
     }
@@ -499,7 +516,7 @@ fn verify_move(
     entry: &AuthorizedPostMove,
 ) -> Result<(), String> {
     let signer = entry.signer_id(parameters);
-    let key = signer_key(state, parameters, &signer)?;
+    let key = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
     entry.verify_signature_with(&key)?;
     let target = state
         .recent_messages
@@ -534,25 +551,37 @@ fn verify_move(
                 }
                 current = route_parent(routes, &id);
             }
-            if !can_move(
+            let from = category_chain(routes, &entry.change.target);
+            let to = category_chain(routes, &parent_id);
+            verify_moderation_authority(
                 state,
                 parameters,
-                routes,
                 &signer,
-                &entry.change.target,
-                &parent_id,
-            ) {
-                return Err("Signer cannot move this post here".to_string());
-            }
+                ModerationPower::Move,
+                &from,
+                entry.authority.as_deref(),
+            )
+            .map_err(|_| "Signer cannot move this post here".to_string())?;
+            verify_moderation_authority(
+                state,
+                parameters,
+                &signer,
+                ModerationPower::Move,
+                &to,
+                entry.authority.as_deref(),
+            )
+            .map_err(|_| "Signer cannot move this post here".to_string())?;
         }
         None => {
-            if !is_owner_or_admin(state, parameters, &signer)
-                && !state
-                    .roles
-                    .has_moderation_power(&signer, ModerationPower::Move, &[])
-            {
-                return Err("Signer cannot move this post to the board root".to_string());
-            }
+            verify_moderation_authority(
+                state,
+                parameters,
+                &signer,
+                ModerationPower::Move,
+                &[],
+                entry.authority.as_deref(),
+            )
+            .map_err(|_| "Signer cannot move this post to the board root".to_string())?;
         }
     }
     Ok(())
@@ -1091,6 +1120,96 @@ mod tests {
             .expect("independent pin and close flags verify");
         assert!(board.state.moderation.is_pinned(&board.post));
         assert!(board.state.moderation.is_closed(&board.post));
+    }
+
+    #[test]
+    fn scoped_pin_verifies_after_the_role_is_revoked() {
+        use crate::board_state::roles::{
+            moderation_authority_proof, AuthorizedRole, AuthorizedRoleAssignment, Role,
+            RoleAssignment,
+        };
+
+        let mut board = board();
+        let owner_id = MemberId::from(&board.owner_sk.verifying_key());
+        let member_id = MemberId::from(&board.member_sk.verifying_key());
+        let role_id = [3u8; 16];
+
+        board.state.roles.roles.push(AuthorizedRole::new(
+            Role {
+                id: role_id,
+                name: "pinner".to_string(),
+                generation: 1,
+                can_manage_access: false,
+                can_distribute_keys: false,
+                can_edit_posts: false,
+                can_delete_posts: false,
+                can_close_posts: false,
+                can_pin_posts: true,
+                can_move_posts: false,
+                scope: Vec::new(),
+                deleted: false,
+            },
+            &board.owner_sk,
+        ));
+        board
+            .state
+            .roles
+            .assignments
+            .push(AuthorizedRoleAssignment::new(
+                RoleAssignment {
+                    role_id,
+                    member_id,
+                    generation: 1,
+                    revoked: false,
+                },
+                &board.owner_sk,
+            ));
+
+        let proof = moderation_authority_proof(&board.state, &member_id, ModerationPower::Pin, &[])
+            .expect("the role grants pinning");
+        board.state.moderation.feature_flags.push(
+            AuthorizedFeatureFlag::new(
+                FeatureFlag {
+                    target: board.post,
+                    kind: FeatureKind::Pinned,
+                    value: true,
+                    destination: None,
+                    generation: 1,
+                    created_at: 1,
+                },
+                &board.member_sk,
+            )
+            .with_optional_authority(Some(proof)),
+        );
+        board
+            .state
+            .verify(&board.state, &board.parameters)
+            .expect("a scoped moderator may pin");
+
+        // Revoke the role and prune the member; the proof keeps the pin valid.
+        board
+            .state
+            .roles
+            .assignments
+            .retain(|a| a.assignment.member_id != member_id);
+        board
+            .state
+            .roles
+            .assignments
+            .push(AuthorizedRoleAssignment::new(
+                RoleAssignment {
+                    role_id,
+                    member_id,
+                    generation: 2,
+                    revoked: true,
+                },
+                &board.owner_sk,
+            ));
+        let _ = owner_id;
+        board
+            .state
+            .verify(&board.state, &board.parameters)
+            .expect("historical moderation authority keeps the pin verifiable");
     }
 
     #[test]

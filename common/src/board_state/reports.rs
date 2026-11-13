@@ -7,8 +7,10 @@
 
 use crate::board_state::member::MemberId;
 use crate::board_state::message::MessageId;
-use crate::board_state::moderation::{category_chain, is_owner_or_admin};
-use crate::board_state::roles::{signer_key, ModerationPower};
+use crate::board_state::moderation::category_chain;
+use crate::board_state::roles::{
+    resolve_signer_key, verify_moderation_authority, AuthorityProof, ModerationPower,
+};
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::{sign_struct, verify_struct};
 use crate::ChatBoardStateV1;
@@ -75,6 +77,8 @@ pub struct AuthorizedReport {
     pub signature: Signature,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
 }
 
 impl AuthorizedReport {
@@ -83,6 +87,7 @@ impl AuthorizedReport {
             signature: sign_struct(&report, signing_key),
             report,
             signer: Some(MemberId::from(&signing_key.verifying_key())),
+            signer_key: Some(signing_key.verifying_key()),
         }
     }
 
@@ -114,6 +119,10 @@ pub struct AuthorizedReportResolution {
     pub signature: Signature,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
 }
 
 impl AuthorizedReportResolution {
@@ -122,7 +131,14 @@ impl AuthorizedReportResolution {
             signature: sign_struct(&resolution, signing_key),
             resolution,
             signer: Some(MemberId::from(&signing_key.verifying_key())),
+            signer_key: Some(signing_key.verifying_key()),
+            authority: None,
         }
+    }
+
+    pub fn with_optional_authority(mut self, proof: Option<AuthorityProof>) -> Self {
+        self.authority = proof.map(Box::new);
+        self
     }
 
     pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
@@ -201,7 +217,7 @@ fn verify_report(
     entry: &AuthorizedReport,
 ) -> Result<(), String> {
     let signer = entry.signer_id(parameters);
-    let key = signer_key(state, parameters, &signer)?;
+    let key = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
     entry.verify_signature_with(&key)?;
     if entry.report.reporter != signer {
         return Err("Report reporter must be its signer".to_string());
@@ -212,22 +228,6 @@ fn verify_report(
     Ok(())
 }
 
-fn can_resolve(
-    state: &ChatBoardStateV1,
-    parameters: &ChatBoardParametersV1,
-    signer: &MemberId,
-    target: &MessageId,
-) -> bool {
-    if is_owner_or_admin(state, parameters, signer) {
-        return true;
-    }
-    let routes = state.moderation.routes_map();
-    let chain = category_chain(&routes, target);
-    state
-        .roles
-        .has_moderation_power(signer, ModerationPower::Delete, &chain)
-}
-
 fn verify_resolution(
     state: &ChatBoardStateV1,
     parameters: &ChatBoardParametersV1,
@@ -235,15 +235,23 @@ fn verify_resolution(
     entry: &AuthorizedReportResolution,
 ) -> Result<(), String> {
     let signer = entry.signer_id(parameters);
-    let key = signer_key(state, parameters, &signer)?;
+    let key = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
     entry.verify_signature_with(&key)?;
     let report = reports
         .iter()
         .find(|report| report.id() == entry.resolution.report_id)
         .ok_or("Report resolution targets a missing report")?;
-    if !can_resolve(state, parameters, &signer, &report.report.target) {
-        return Err("Signer cannot resolve this report".to_string());
-    }
+    let routes = state.moderation.routes_map();
+    let chain = category_chain(&routes, &report.report.target);
+    verify_moderation_authority(
+        state,
+        parameters,
+        &signer,
+        ModerationPower::Delete,
+        &chain,
+        entry.authority.as_deref(),
+    )
+    .map_err(|_| "Signer cannot resolve this report".to_string())?;
     Ok(())
 }
 
@@ -276,8 +284,7 @@ impl ReportsV1 {
             .map(|message| message.id())
             .collect();
         self.reports.retain(|entry| {
-            live.contains(&entry.report.target)
-                && signer_key(state, parameters, &entry.signer_id(parameters)).is_ok()
+            live.contains(&entry.report.target) && verify_report(state, parameters, entry).is_ok()
         });
 
         // One report per reporter and target; keep the lowest id.
@@ -307,16 +314,10 @@ impl ReportsV1 {
 
         let report_ids: HashSet<MessageId> =
             self.reports.iter().map(|report| report.id()).collect();
+        let reports = self.reports.clone();
         self.resolutions.retain(|entry| {
-            let signer = entry.signer_id(parameters);
             report_ids.contains(&entry.resolution.report_id)
-                && signer_key(state, parameters, &signer).is_ok()
-                && self
-                    .reports
-                    .iter()
-                    .find(|report| report.id() == entry.resolution.report_id)
-                    .map(|report| can_resolve(state, parameters, &signer, &report.report.target))
-                    .unwrap_or(false)
+                && verify_resolution(state, parameters, &reports, entry).is_ok()
         });
 
         // One resolution per report, the highest generation wins.

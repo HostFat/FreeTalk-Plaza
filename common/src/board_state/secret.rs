@@ -313,6 +313,10 @@ pub struct AuthorizedEncryptedSecretForMember {
     /// so records written before delegated distribution existed still verify.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<crate::board_state::roles::AuthorityProof>>,
 }
 
 impl AuthorizedEncryptedSecretForMember {
@@ -322,6 +326,8 @@ impl AuthorizedEncryptedSecretForMember {
             secret,
             owner_signature: signature,
             signer: None,
+            signer_key: None,
+            authority: None,
         }
     }
 
@@ -336,7 +342,17 @@ impl AuthorizedEncryptedSecretForMember {
             secret,
             owner_signature: signature,
             signer: Some(signer),
+            signer_key: Some(signing_key.verifying_key()),
+            authority: None,
         }
+    }
+
+    pub fn with_optional_authority(
+        mut self,
+        proof: Option<crate::board_state::roles::AuthorityProof>,
+    ) -> Self {
+        self.authority = proof.map(Box::new);
+        self
     }
 
     /// Create an AuthorizedEncryptedSecretForMember with a pre-computed signature.
@@ -346,6 +362,8 @@ impl AuthorizedEncryptedSecretForMember {
             secret,
             owner_signature,
             signer: None,
+            signer_key: None,
+            authority: None,
         }
     }
 

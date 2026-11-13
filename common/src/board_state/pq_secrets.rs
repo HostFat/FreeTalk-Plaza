@@ -8,8 +8,9 @@
 
 use crate::board_state::member::MemberId;
 use crate::board_state::message::MessageId;
-use crate::board_state::moderation::is_owner_or_admin;
-use crate::board_state::roles::signer_key;
+use crate::board_state::roles::{
+    resolve_signer_key, verify_admin_authority, verify_distributor_authority, AuthorityProof,
+};
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::{sign_struct, verify_struct};
 use crate::ChatBoardStateV1;
@@ -55,6 +56,8 @@ pub struct AuthorizedPqMemberKey {
     pub signature: Signature,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
 }
 
 impl AuthorizedPqMemberKey {
@@ -63,6 +66,7 @@ impl AuthorizedPqMemberKey {
             signature: sign_struct(&key, signing_key),
             key,
             signer: Some(MemberId::from(&signing_key.verifying_key())),
+            signer_key: Some(signing_key.verifying_key()),
         }
     }
 
@@ -116,6 +120,10 @@ pub struct AuthorizedPqSecretSet {
     pub signature: Signature,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<MemberId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
 }
 
 impl AuthorizedPqSecretSet {
@@ -124,7 +132,14 @@ impl AuthorizedPqSecretSet {
             signature: sign_struct(&set, signing_key),
             set,
             signer: Some(MemberId::from(&signing_key.verifying_key())),
+            signer_key: Some(signing_key.verifying_key()),
+            authority: None,
         }
+    }
+
+    pub fn with_optional_authority(mut self, proof: Option<AuthorityProof>) -> Self {
+        self.authority = proof.map(Box::new);
+        self
     }
 
     pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
@@ -180,7 +195,7 @@ fn verify_key(
     if signer != entry.key.member_id {
         return Err("A PQ member key must be signed by its member".to_string());
     }
-    let verifying = signer_key(state, parameters, &signer)?;
+    let verifying = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
     entry.verify_signature_with(&verifying)?;
     if entry.key.ek.len() != PQ_KEM_EK_LEN {
         return Err(format!("PQ member key must be {} bytes", PQ_KEM_EK_LEN));
@@ -198,12 +213,17 @@ fn verify_set(
     entry: &AuthorizedPqSecretSet,
 ) -> Result<(), String> {
     let signer = entry.signer_id(parameters);
-    let verifying = signer_key(state, parameters, &signer)?;
+    let verifying = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
     entry.verify_signature_with(&verifying)?;
     let is_category = matches!(entry.set.scope, PqScope::Category(_));
-    let can_sign = is_owner_or_admin(state, parameters, &signer)
-        || (is_category && state.roles.can_distribute_keys(&signer));
-    if !can_sign {
+    let authorized = if is_category {
+        verify_distributor_authority(state, parameters, &signer, entry.authority.as_deref()).is_ok()
+            || verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8)
+                .is_ok()
+    } else {
+        verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8).is_ok()
+    };
+    if !authorized {
         return Err("Signer cannot publish PQ secrets for this scope".to_string());
     }
     if entry.set.version == 0 {

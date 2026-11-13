@@ -194,26 +194,42 @@ pub(crate) fn verify_admin_authority(
     Err("Signer was not an admin when the record was signed".to_string())
 }
 
-pub(crate) fn verify_manager_authority(
+fn role_grants_power(role: &Role, power: ModerationPower, scope_chain: &[MessageId]) -> bool {
+    let enabled = match power {
+        ModerationPower::Edit => role.can_edit_posts,
+        ModerationPower::Delete => role.can_delete_posts,
+        ModerationPower::Close => role.can_close_posts,
+        ModerationPower::Pin => role.can_pin_posts,
+        ModerationPower::Move => role.can_move_posts,
+    };
+    enabled
+        && (role.scope.is_empty()
+            || role
+                .scope
+                .iter()
+                .any(|scope_id| scope_chain.contains(scope_id)))
+}
+
+/// Verify a role grant proof: the role definition, its signer's authority, the
+/// assignment and its signer's authority, then the caller's predicate.
+fn verify_role_grant(
     state: &ChatBoardStateV1,
     parameters: &ChatBoardParametersV1,
     signer: &MemberId,
     proof: Option<&AuthorityProof>,
     depth: u8,
+    qualifies: &dyn Fn(&Role) -> bool,
 ) -> Result<(), String> {
-    if *signer == parameters.owner_id() || state.roles.can_manage_access(signer) {
-        return Ok(());
-    }
     if depth == 0 {
         return Err("Authority proof is nested too deeply".to_string());
     }
-    let proof = proof.ok_or("Signer cannot manage access and carries no proof")?;
+    let proof = proof.ok_or("Signer carries no role authority proof")?;
     let grant = proof
         .grant
         .as_ref()
         .ok_or("Authority proof has no role grant")?;
-    if grant.role.role.deleted || !grant.role.role.can_manage_access {
-        return Err("The proof role does not grant access management".to_string());
+    if grant.role.role.deleted || !qualifies(&grant.role.role) {
+        return Err("The proof role does not grant this action".to_string());
     }
     if grant.assignment.assignment.role_id != grant.role.role.id
         || grant.assignment.assignment.member_id != *signer
@@ -261,6 +277,128 @@ pub(crate) fn verify_manager_authority(
         grant.assignment.authority.as_deref(),
         depth - 1,
     )
+}
+
+pub(crate) fn verify_manager_authority(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    signer: &MemberId,
+    proof: Option<&AuthorityProof>,
+    depth: u8,
+) -> Result<(), String> {
+    if *signer == parameters.owner_id() || state.roles.can_manage_access(signer) {
+        return Ok(());
+    }
+    verify_role_grant(state, parameters, signer, proof, depth, &|role| {
+        role.can_manage_access
+    })
+}
+
+/// Verify that the signer held a moderation power over `scope_chain` when the
+/// record was signed: currently, or through a proof from before a demotion.
+pub fn verify_moderation_authority(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    signer: &MemberId,
+    power: ModerationPower,
+    scope_chain: &[MessageId],
+    proof: Option<&AuthorityProof>,
+) -> Result<(), String> {
+    if *signer == parameters.owner_id() {
+        return Ok(());
+    }
+    if verify_admin_authority(state, parameters, signer, proof, MAX_AUTHORITY_DEPTH).is_ok() {
+        return Ok(());
+    }
+    if state.roles.has_moderation_power(signer, power, scope_chain) {
+        return Ok(());
+    }
+    verify_role_grant(
+        state,
+        parameters,
+        signer,
+        proof,
+        MAX_AUTHORITY_DEPTH,
+        &|role| role_grants_power(role, power, scope_chain),
+    )
+}
+
+/// Verify that the signer held the category key-distribution permission.
+pub fn verify_distributor_authority(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    signer: &MemberId,
+    proof: Option<&AuthorityProof>,
+) -> Result<(), String> {
+    if *signer == parameters.owner_id() || state.roles.can_distribute_keys(signer) {
+        return Ok(());
+    }
+    verify_role_grant(
+        state,
+        parameters,
+        signer,
+        proof,
+        MAX_AUTHORITY_DEPTH,
+        &|role| role.can_distribute_keys,
+    )
+}
+
+/// Proof for a signer who currently holds a moderation power over the chain.
+pub fn moderation_authority_proof(
+    state: &ChatBoardStateV1,
+    signer: &MemberId,
+    power: ModerationPower,
+    scope_chain: &[MessageId],
+) -> Option<AuthorityProof> {
+    let assignment = state.roles.assignments.iter().find(|entry| {
+        entry.assignment.member_id == *signer
+            && !entry.assignment.revoked
+            && state.roles.roles.iter().any(|role| {
+                role.role.id == entry.assignment.role_id
+                    && !role.role.deleted
+                    && role_grants_power(&role.role, power, scope_chain)
+            })
+    })?;
+    let role = state
+        .roles
+        .roles
+        .iter()
+        .find(|role| role.role.id == assignment.assignment.role_id)?;
+    Some(AuthorityProof {
+        admin: None,
+        grant: Some(Box::new(RoleGrantProof {
+            role: role.clone(),
+            assignment: assignment.clone(),
+        })),
+    })
+}
+
+/// Proof for a signer who may distribute category keys.
+pub fn distributor_authority_proof(
+    state: &ChatBoardStateV1,
+    signer: &MemberId,
+) -> Option<AuthorityProof> {
+    let assignment = state.roles.assignments.iter().find(|entry| {
+        entry.assignment.member_id == *signer
+            && !entry.assignment.revoked
+            && state.roles.roles.iter().any(|role| {
+                role.role.id == entry.assignment.role_id
+                    && role.role.can_distribute_keys
+                    && !role.role.deleted
+            })
+    })?;
+    let role = state
+        .roles
+        .roles
+        .iter()
+        .find(|role| role.role.id == assignment.assignment.role_id)?;
+    Some(AuthorityProof {
+        admin: None,
+        grant: Some(Box::new(RoleGrantProof {
+            role: role.clone(),
+            assignment: assignment.clone(),
+        })),
+    })
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]

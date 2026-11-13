@@ -70,7 +70,12 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
         .map_err(|e| format!("Failed to serialize ban for signing: {:?}", e))?;
 
     let signature = crate::signing::sign_ban_with_fallback(board_key, ban_bytes, &self_sk).await;
-    let authorized_ban = AuthorizedUserBan::with_signature(ban, banned_by, signature);
+    let authorized_ban = AuthorizedUserBan::with_signature(ban, banned_by, signature)
+        .with_signer_key(self_sk.verifying_key())
+        .with_optional_authority(plaza_core::board_state::roles::admin_authority_proof(
+            &board_state_clone,
+            &banned_by,
+        ));
     let delta = ChatBoardStateV1Delta {
         bans: Some(vec![authorized_ban]),
         ..Default::default()
