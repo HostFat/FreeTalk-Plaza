@@ -62,6 +62,43 @@ Wasm size for the probe crate:
 | Ed25519 only | 122,737 B |
 | Ed25519 + ML-DSA-65 + ML-KEM-768 | 227,652 B |
 
+
+## Wasm runtime
+
+The contract runs in wasm, so the native numbers are a lower bound. Build the
+benchmark for WASI and run it in wasmtime:
+
+```sh
+rustup target add wasm32-wasip1 --toolchain 1.94.1
+
+cargo build --release --target wasm32-wasip1 \
+  --manifest-path tools/pq-spike/Cargo.toml --bin pq-spike
+
+wasmtime run tools/pq-spike/target/wasm32-wasip1/release/pq-spike.wasm
+```
+
+`wasmtime` can be downloaded from
+[bytecodealliance/wasmtime releases](https://github.com/bytecodealliance/wasmtime/releases)
+(the x86_64 Windows zip contains `wasmtime.exe`).
+
+Wasmtime results (same input as the native table):
+
+| Records | Ed25519 verify | ML-DSA-65 verify | Ed25519 sign | ML-DSA-65 sign |
+|---:|---:|---:|---:|---:|
+| 100 | 34 ms | 279 ms | 12.6 ms | 998 ms |
+| 1,000 | 264 ms | 2.84 s | 119 ms | 8.65 s |
+| 10,000 | 2.69 s | 28.6 s | 1.13 s | 87.9 s |
+
+ML-KEM-768 in wasmtime: 0.59 ms encapsulation, 0.79 ms decapsulation.
+
+The wasm binary is 328.6 KB (it includes the benchmark and std). The probe
+library alone is 122.7 KB with Ed25519 and 227.7 KB with both PQ primitives
+(+105 KB) in the fast profile.
+
+In wasm ML-DSA verification is about 3× slower than native, and Ed25519 is
+about 8× slower. A full 10,000-message state takes ~29 s to verify in wasm,
+before the rest of the contract's work. That rules out ML-DSA on every
+message for large boards.
 ## Reading the numbers
 
 - A board with 10,000 messages grows from about 11.6 MB to 73.3 MB, and every
