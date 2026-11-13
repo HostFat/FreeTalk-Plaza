@@ -95,7 +95,7 @@ pub fn BoardList() -> Element {
             .iter()
             .find(|(_, _, is_current, _)| *is_current)
             .map(|(_, name, _, _)| name.clone())
-            .unwrap_or_else(|| "Select Board".to_string())
+            .unwrap_or_else(|| "Select or Create Board".to_string())
     });
 
     rsx! {
@@ -127,14 +127,14 @@ pub fn BoardList() -> Element {
             if is_open() {
                 // Backdrop to close dropdown when clicking outside
                 div {
-                    class: "fixed inset-0 z-10",
+                    class: "fixed inset-0 z-50 bg-black/0",
                     onclick: move |_| {
                         is_open.set(false);
                     }
                 }
 
-                // Dropdown menu - centered like the button
-                div { class: "absolute left-0 right-0 flex justify-center z-20",
+                // Dropdown menu - centered like the button, above the backdrop.
+                div { class: "absolute left-0 right-0 flex justify-center z-50",
                     div { class: "w-full md:w-auto bg-panel shadow-lg md:rounded-b-xl overflow-hidden",
                         style: "min-width: min(100vw, 60vw);",
 
