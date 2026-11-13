@@ -11,6 +11,7 @@ pub mod member_info;
 pub mod member_moderation;
 pub mod message;
 pub mod moderation;
+pub mod pq_secrets;
 pub mod privacy;
 pub mod reports;
 pub mod roles;
@@ -97,6 +98,10 @@ pub struct ChatBoardStateV1 {
     /// Approvals for posts by new members.
     #[serde(default)]
     pub approvals: crate::board_state::approvals::ApprovalsV1,
+
+    /// PQ KEM keys and sealed board/category secrets (contract v2 prototype).
+    #[serde(default)]
+    pub pq_secrets: crate::board_state::pq_secrets::PqSecretsV1,
 
     /// Warnings addressed to members.
     #[serde(default)]
@@ -253,6 +258,10 @@ impl ChatBoardStateV1 {
         let mut approvals = std::mem::take(&mut self.approvals);
         approvals.cleanup(self, parameters);
         self.approvals = approvals;
+
+        let mut pq = std::mem::take(&mut self.pq_secrets);
+        pq.cleanup(self, parameters);
+        self.pq_secrets = pq;
 
         let mut moderation = std::mem::take(&mut self.moderation);
         moderation.cleanup(self, parameters);

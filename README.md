@@ -85,6 +85,23 @@ prints the build time, warns if sources changed after that build, and runs
 `fdev publish`. Use it for a retry after a stuck publish or for a deliberate
 re-publish. For code changes, run `deploy-tool deploy`.
 
+# Contract v2 prototype (post-quantum KEM)
+
+`ChatBoardStateV1` now carries a `pq_secrets` field (serde default): member
+ML-KEM-768 keys and sealed board/category secrets. The contract verifies the
+member-signed key records, the owner/admin-signed sets, recipient membership
+and the fixed lengths (1184-byte encapsulation key, 1088-byte ciphertext,
+24-byte nonce, 48-4096-byte sealed payload). The contract does not need an
+ML-KEM implementation: the client encapsulates and decapsulates, and the
+contract stores opaque bytes.
+
+The field is empty for now; the UI still uses X25519 ECIES. The next step is to
+generate a KEM seed in the delegate, publish the member key, and seal the board
+and category secrets with ML-KEM (hybrid with X25519 during the transition).
+
+This is a state schema change, so it re-keys the contract; the local state
+migrates through the delegate as usual.
+
 # License
 
 FreeTalk Plaza is a fork of [River](https://github.com/freenet/river) and is
