@@ -107,6 +107,9 @@ pub static CURRENT_CATEGORY: GlobalSignal<CurrentCategoryContext> =
 /// composer in the top bar (which already knows the current category).
 pub static COMPOSE_REQUEST: GlobalSignal<u64> = Global::new(|| 0);
 
+/// Group id (as a string) to scroll to after returning to the home page.
+pub static SCROLL_TO_GROUP: GlobalSignal<Option<String>> = Global::new(|| None);
+
 /// Context for the currently viewed category
 #[derive(Clone, Default)]
 pub struct CurrentCategoryContext {

@@ -15,6 +15,7 @@ use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
 use std::collections::{HashMap, HashSet};
+use wasm_bindgen::JsCast;
 
 use wasm_bindgen_futures::spawn_local;
 
@@ -24,6 +25,7 @@ struct BreadcrumbItem {
     id: Option<String>, // None = root
     name: String,
     icon: Option<String>,
+    is_group: bool,
 }
 
 /// Build breadcrumb trail from root to current category
@@ -35,6 +37,7 @@ fn build_breadcrumbs(
         id: None,
         name: "Home".to_string(),
         icon: Some("🏠".to_string()),
+        is_group: false,
     }];
 
     if let Some(cat_id) = category_id {
@@ -54,6 +57,7 @@ fn build_breadcrumbs(
                         .clone()
                         .unwrap_or_else(|| "Unnamed".to_string()),
                     icon: None,
+                    is_group: cat.is_group,
                 });
                 current_id = cat
                     .parent_category_id
@@ -329,6 +333,35 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
             .unwrap_or_default();
         collapsed_groups.set(groups);
     });
+
+    // Returning to the home page from a group breadcrumb scrolls that group
+    // into view, after the home DOM has been painted.
+    use_effect(move || {
+        if CURRENT_CATEGORY.read().category_id.is_some() {
+            return;
+        }
+        let target = crate::components::app::SCROLL_TO_GROUP.read().clone();
+        let Some(group_id) = target else {
+            return;
+        };
+        crate::components::app::SCROLL_TO_GROUP.with_mut(|target| *target = None);
+        if let Some(window) = web_sys::window() {
+            let callback = wasm_bindgen::closure::Closure::once_into_js(move || {
+                if let Some(window) = web_sys::window() {
+                    if let Some(document) = window.document() {
+                        if let Some(element) =
+                            document.get_element_by_id(&format!("group-{group_id}"))
+                        {
+                            element.scroll_into_view();
+                        }
+                    }
+                }
+            });
+            if let Some(function) = callback.dyn_ref::<js_sys::Function>() {
+                let _ = window.request_animation_frame(function);
+            }
+        }
+    });
     // Posts rendered at a time; "Show more" grows it.
     let mut posts_limit = use_signal(|| 12usize);
     let category_for_reset = category_id.clone();
@@ -536,6 +569,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                     let crumb_id = crumb.id.clone();
                                     let crumb_name = crumb.name.clone();
                                     let crumb_icon = crumb.icon.clone();
+                                    let crumb_is_group = crumb.is_group;
 
                                     rsx! {
                                         if i > 0 {
@@ -553,14 +587,21 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                             // iframe and reload the app; set the hash instead.
                                             {
                                                 let target = match crumb_id.clone() {
-                                                    Some(id) => format!("/board/{board_id}/category/{id}"),
-                                                    None => format!("/board/{board_id}"),
+                                                    Some(id) if !crumb_is_group => {
+                                                        format!("/board/{board_id}/category/{id}")
+                                                    }
+                                                    _ => format!("/board/{board_id}"),
                                                 };
+                                                let scroll_target = crumb_id.clone().filter(|_| crumb_is_group);
                                                 rsx! {
                                                     button {
                                                         r#type: "button",
                                                         class: "flex items-center gap-1 text-accent hover:text-accent/80 transition-colors",
                                                         onclick: move |_| {
+                                                            if let Some(group_id) = scroll_target.clone() {
+                                                                crate::components::app::SCROLL_TO_GROUP
+                                                                    .with_mut(|target| *target = Some(group_id));
+                                                            }
                                                             if let Some(win) = web_sys::window() {
                                                                 let _ = win.location().set_hash(&target);
                                                             }
@@ -575,107 +616,28 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                         }
                                     }
                                 })}
-                            }
-                        }
-
-                        // Category header (when viewing a category)
-                        if let Some(cat) = current_category.as_ref() {
-                            {
-                                let name = cat.category_name.as_deref().unwrap_or("Unnamed");
-                                let description = cat.category_description.as_deref();
-                                let color = cat.category_color.as_deref().unwrap_or("#6366f1");
-
-                                rsx! {
-                                    div { class: "sticky top-0 z-20 bg-panel rounded-xl border border-border shadow-sm overflow-hidden mb-6",
-                                        // Color accent bar
-                                        div {
-                                            class: "h-2",
-                                            style: "background-color: {color};",
+                                if !category_is_locked {
+                                    div { class: "ml-auto flex items-center gap-2 flex-shrink-0",
+                                        button {
+                                            r#type: "button",
+                                            class: "flex items-center gap-1.5 px-3 py-1.5 bg-accent hover:bg-accent/80 text-white text-xs font-medium rounded-lg transition-colors",
+                                            title: "Write a new post in this section",
+                                            onclick: move |_| {
+                                                *crate::components::app::COMPOSE_REQUEST.write() += 1;
+                                            },
+                                            span { "✏️" }
+                                            span { "New post" }
                                         }
-                                        div { class: "p-6",
-                                            div { class: "flex items-center gap-4",
-                                                div { class: "flex-1 min-w-0 flex flex-wrap items-baseline gap-x-3",
-                                                    h1 { class: "text-xl font-bold text-text truncate", "{name}" }
-                                                    if let Some(desc) = description {
-                                                        span { class: "text-sm text-text-muted truncate min-w-0",
-                                                            "{desc}"
-                                                        }
-                                                    }
-                                                }
-                                                if !category_is_locked {
-                                                    div { class: "flex items-center gap-2 flex-shrink-0",
-                                                        button {
-                                                            r#type: "button",
-                                                            class: "flex items-center gap-2 px-4 py-2 bg-accent hover:bg-accent/80 text-white text-sm font-medium rounded-lg transition-colors",
-                                                            title: "Write a new post in this category",
-                                                            onclick: move |_| {
-                                                                *crate::components::app::COMPOSE_REQUEST.write() += 1;
-                                                            },
-                                                            span { "✏️" }
-                                                            span { "New post" }
-                                                        }
-                                                        if can_manage_structure {
-                                                            button {
-                                                                r#type: "button",
-                                                                class: "px-3 py-2 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg transition-colors",
-                                                                title: "Create a subsection inside this section",
-                                                                onclick: {
-                                                                    let handler = open_subsection.clone();
-                                                                    move |_| handler(())
-                                                                },
-                                                                "+ Subsection"
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            // Child boards inside the section card,
-                                            // under the name and description.
-                                            if !categories.is_empty() {
-                                                div { class: "mt-3 pt-3 border-t border-border",
-                                                    h3 { class: "text-sm font-semibold text-text-muted mb-2", "Child Boards" }
-                                                    div { class: "divide-y divide-border",
-                                                        for child in categories.iter() {
-                                                            {
-                                                                let (count, last) = category_stats(
-                                                                    &child.message_id,
-                                                                    &reply_children,
-                                                                );
-                                                                let child_name = child
-                                                                    .category_name
-                                                                    .clone()
-                                                                    .unwrap_or_else(|| "Unnamed".to_string());
-                                                                let child_id = child.message_id.clone();
-                                                                let board = current_board_id.read().clone();
-                                                                let nav = navigator();
-                                                                rsx! {
-                                                                    button {
-                                                                        key: "{child_id:?}",
-                                                                        r#type: "button",
-                                                                        class: "w-full flex items-center gap-3 px-2 py-2 text-left hover:bg-surface rounded transition-colors",
-                                                                        onclick: move |_| {
-                                                                            nav.push(Route::PostsInCategory {
-                                                                                board_id: board.clone(),
-                                                                                category_id: child_id.0 .0.to_string(),
-                                                                            });
-                                                                        },
-                                                                        span { class: "text-sm font-medium text-text",
-                                                                            if !child.category_allowed_roles.is_empty() { "🔒 " }
-                                                                            "{child_name}"
-                                                                        }
-                                                                        span { class: "ml-auto text-xs text-text-muted text-right",
-                                                                            if count == 1 { "1 post" } else { "{count} posts" }
-                                                                            if let Some((author, time)) = last {
-                                                                                " · {time} by {author}"
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
+                                        if can_manage_structure {
+                                            button {
+                                                r#type: "button",
+                                                class: "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg transition-colors",
+                                                title: "Create a subsection inside this section",
+                                                onclick: {
+                                                    let handler = open_subsection.clone();
+                                                    move |_| handler(())
+                                                },
+                                                "+ Subsection"
                                             }
                                         }
                                     }
@@ -956,7 +918,10 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                             }
                                                         };
                                                         rsx! {
-                                                            div { key: "group-{group_key}", class: "mb-5",
+                                                            div {
+                                                                key: "group-{group_key}",
+                                                                id: "group-{group_key}",
+                                                                class: "mb-5",
                                                                 CategoryCard {
                                                                     category: group.clone(),
                                                                     self_member_id: self_member_id,
@@ -1057,6 +1022,44 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                             pending_delete_group.set(false);
                                                                         },
                                                                     }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Child boards as full cards under the
+                                        // breadcrumb, before the posts.
+                                        if viewing_category && !categories.is_empty() {
+                                            div { class: "mb-8",
+                                                h2 { class: "text-lg font-semibold text-text-muted mb-3", "Child Boards" }
+                                                div { class: "space-y-2",
+                                                    for category in categories.iter() {
+                                                        {
+                                                            let (count, last) = category_summaries
+                                                                .get(&category.message_id)
+                                                                .cloned()
+                                                                .unwrap_or_default();
+                                                            let edit_handler = handle_edit_category.clone();
+                                                            let board_id = current_board_id.read().clone();
+                                                            rsx! {
+                                                                SectionRow {
+                                                                    category: category.clone(),
+                                                                    self_member_id: self_member_id,
+                                                                    is_owner: is_owner,
+                                                                    is_admin: is_admin,
+                                                                    post_count: count,
+                                                                    last_activity: last,
+                                                                    allow_group_change: false,
+                                                                    child_boards: Vec::new(),
+                                                                    board_id: board_id,
+                                                                    on_edit: move |data| edit_handler(data),
+                                                                    on_delete: move |id| {
+                                                                        pending_delete.set(Some(id));
+                                                                        pending_delete_group.set(false);
+                                                                    },
                                                                 }
                                                             }
                                                         }
