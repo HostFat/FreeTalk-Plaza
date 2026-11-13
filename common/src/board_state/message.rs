@@ -28,6 +28,41 @@ pub struct MessageActionsState {
     pub reactions: HashMap<MessageId, HashMap<String, Vec<MemberId>>>,
 }
 
+/// Moderation grants used while rebuilding edits/deletes locally.
+#[derive(Clone, Debug, Default)]
+pub struct ModerationPermissions {
+    pub closed: std::collections::HashSet<MessageId>,
+    pub grants: Vec<ModerationGrant>,
+    /// Target message -> category chain used for scope checks
+    pub scope_chains: HashMap<MessageId, Vec<MessageId>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModerationGrant {
+    pub member_id: MemberId,
+    pub can_edit: bool,
+    pub can_delete: bool,
+    pub scope: Vec<MessageId>,
+}
+
+impl ModerationPermissions {
+    pub fn can(&self, member: MemberId, edit: bool, target: &MessageId) -> bool {
+        let chain = self.scope_chains.get(target);
+        self.grants.iter().any(|grant| {
+            grant.member_id == member
+                && if edit {
+                    grant.can_edit
+                } else {
+                    grant.can_delete
+                }
+                && (grant.scope.is_empty()
+                    || grant.scope.iter().any(|scope_id| {
+                        chain.map(|chain| chain.contains(scope_id)).unwrap_or(false)
+                    }))
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct MessagesV1 {
     pub messages: Vec<AuthorizedMessageV1>,
@@ -214,7 +249,7 @@ impl MessagesV1 {
     /// use `rebuild_actions_state_with_decrypted` and provide the decrypted
     /// content for each private action message.
     pub fn rebuild_actions_state(&mut self) {
-        self.rebuild_actions_state_with_permissions(&HashMap::new(), None, None);
+        self.rebuild_actions_state_with_permissions(&HashMap::new(), None, None, None);
     }
 
     /// Rebuild actions state with decrypted content (for private boards).
@@ -224,7 +259,7 @@ impl MessagesV1 {
         &mut self,
         decrypted_content: &HashMap<MessageId, Vec<u8>>,
     ) {
-        self.rebuild_actions_state_with_permissions(decrypted_content, None, None);
+        self.rebuild_actions_state_with_permissions(decrypted_content, None, None, None);
     }
 
     /// Rebuild actions state with owner/admin permissions for category edits.
@@ -233,6 +268,7 @@ impl MessagesV1 {
         decrypted_content: &HashMap<MessageId, Vec<u8>>,
         owner_id: Option<MemberId>,
         admin_ids: Option<&std::collections::HashSet<MemberId>>,
+        moderation: Option<&ModerationPermissions>,
     ) {
         use crate::board_state::content::{
             ActionContentV1, DecodedContent, ACTION_TYPE_DELETE, ACTION_TYPE_EDIT,
@@ -292,31 +328,44 @@ impl MessagesV1 {
             };
 
             let target = &action.target;
+            let is_privileged = owner_id == Some(actor)
+                || admin_ids.map(|ids| ids.contains(&actor)).unwrap_or(false);
+            let target_closed = moderation
+                .map(|moderation| moderation.closed.contains(target))
+                .unwrap_or(false);
 
             match action.action_type {
                 ACTION_TYPE_EDIT => {
-                    // Only the original author can edit their message
                     // Categories must use ACTION_TYPE_EDIT_CATEGORY instead
-                    if category_ids.contains(target) {
+                    if category_ids.contains(target) || target_closed {
                         continue;
                     }
                     if let Some(&original_author) = message_authors.get(target) {
-                        if actor == original_author {
-                            // Don't allow editing deleted messages
-                            if !self.actions_state.deleted.contains(target) {
-                                if let Some(payload) = action.edit_payload() {
-                                    self.actions_state
-                                        .edited_content
-                                        .insert(target.clone(), payload.new_text);
-                                }
+                        let allowed = actor == original_author
+                            || is_privileged
+                            || moderation
+                                .map(|moderation| moderation.can(actor, true, target))
+                                .unwrap_or(false);
+                        if allowed && !self.actions_state.deleted.contains(target) {
+                            if let Some(payload) = action.edit_payload() {
+                                self.actions_state
+                                    .edited_content
+                                    .insert(target.clone(), payload.new_text);
                             }
                         }
                     }
                 }
                 ACTION_TYPE_DELETE => {
-                    // Only the original author can delete their message
+                    if target_closed {
+                        continue;
+                    }
                     if let Some(&original_author) = message_authors.get(target) {
-                        if actor == original_author {
+                        let allowed = actor == original_author
+                            || is_privileged
+                            || moderation
+                                .map(|moderation| moderation.can(actor, false, target))
+                                .unwrap_or(false);
+                        if allowed {
                             self.actions_state.deleted.insert(target.clone());
                             // Also remove any edited content for deleted messages
                             self.actions_state.edited_content.remove(target);
@@ -325,8 +374,9 @@ impl MessagesV1 {
                     }
                 }
                 ACTION_TYPE_REACTION => {
-                    // Anyone can add reactions to non-deleted messages
-                    if message_authors.contains_key(target)
+                    // Anyone can add reactions to open, non-deleted messages
+                    if !target_closed
+                        && message_authors.contains_key(target)
                         && !self.actions_state.deleted.contains(target)
                     {
                         if let Some(payload) = action.reaction_payload() {
@@ -345,6 +395,9 @@ impl MessagesV1 {
                 }
                 ACTION_TYPE_REMOVE_REACTION => {
                     // Users can only remove their own reactions
+                    if target_closed {
+                        continue;
+                    }
                     if let Some(payload) = action.reaction_payload() {
                         if let Some(reactions) = self.actions_state.reactions.get_mut(target) {
                             if let Some(reactors) = reactions.get_mut(&payload.emoji) {

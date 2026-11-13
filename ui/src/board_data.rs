@@ -416,12 +416,52 @@ impl BoardData {
             .iter()
             .map(|admin| admin.admin.id())
             .collect();
+
+        let routes = self.board_state.moderation.routes_map();
+        let mut closed = HashSet::new();
+        let mut grants = Vec::new();
+        for flag in &self.board_state.moderation.flags {
+            if flag.flag.closed {
+                closed.insert(flag.flag.target);
+            }
+        }
+        for role in &self.board_state.roles.roles {
+            if role.role.deleted || (!role.role.can_edit_posts && !role.role.can_delete_posts) {
+                continue;
+            }
+            for member_id in self.board_state.roles.members_of_role(&role.role.id) {
+                grants.push(plaza_core::board_state::message::ModerationGrant {
+                    member_id,
+                    can_edit: role.role.can_edit_posts,
+                    can_delete: role.role.can_delete_posts,
+                    scope: role.role.scope.clone(),
+                });
+            }
+        }
+        let scope_chains = self
+            .board_state
+            .recent_messages
+            .messages
+            .iter()
+            .map(|message| {
+                (
+                    message.id(),
+                    plaza_core::board_state::moderation::category_chain(&routes, &message.id()),
+                )
+            })
+            .collect();
+        let moderation = plaza_core::board_state::message::ModerationPermissions {
+            closed,
+            grants,
+            scope_chains,
+        };
         self.board_state
             .recent_messages
             .rebuild_actions_state_with_permissions(
                 &decrypted_actions,
                 Some(owner_id),
                 Some(&admin_ids),
+                Some(&moderation),
             );
     }
 

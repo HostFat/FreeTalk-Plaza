@@ -1367,6 +1367,42 @@ pub fn SinglePostView(post_id: String) -> Element {
                 let category = post
                     .as_ref()
                     .and_then(|post| category_of(post, &all_messages));
+                let can_moderate = post
+                    .as_ref()
+                    .map(|post| {
+                        let is_privileged = board_data.self_sk.verifying_key()
+                            == board_data.owner_vk
+                            || board_data
+                                .board_state
+                                .admin
+                                .admins
+                                .iter()
+                                .any(|admin| admin.admin.id() == self_member_id);
+                        if is_privileged {
+                            return true;
+                        }
+                        let mut chain = category
+                            .as_ref()
+                            .map(|cat| {
+                                category_chain(&board_data.board_state.moderation.routes_map(), cat)
+                            })
+                            .unwrap_or_default();
+                        if chain.is_empty() {
+                            if let Some(cat) = category.as_ref() {
+                                chain.push(cat.clone());
+                            }
+                        }
+                        board_data.board_state.roles.has_moderation_power(
+                            &self_member_id,
+                            ModerationPower::Edit,
+                            &chain,
+                        ) || board_data.board_state.roles.has_moderation_power(
+                            &self_member_id,
+                            ModerationPower::Delete,
+                            &chain,
+                        )
+                    })
+                    .unwrap_or(false);
                 return post.map(|p| {
                     (
                         p,
@@ -1374,6 +1410,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                         max_title_size,
                         max_message_size,
                         category,
+                        can_moderate,
                     )
                 });
             }
@@ -1413,7 +1450,7 @@ pub fn SinglePostView(post_id: String) -> Element {
     let category_id = post_data
         .read()
         .as_ref()
-        .and_then(|(_, _, _, _, category)| category.clone());
+        .and_then(|(_, _, _, _, category, _)| category.clone());
     let has_category = category_id.is_some();
     let back_target = match category_id {
         Some(category) => format!(
@@ -1452,7 +1489,7 @@ pub fn SinglePostView(post_id: String) -> Element {
             div { class: "flex-1 overflow-y-auto",
                 {
                     match post_data.read().as_ref() {
-                        Some((post, self_member_id, max_title_size, max_message_size, _)) => {
+                        Some((post, self_member_id, max_title_size, max_message_size, _, can_moderate)) => {
                             rsx! {
                                 div { class: "max-w-5xl mx-auto px-4 py-6",
                                     MessageCard {
@@ -1472,6 +1509,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                                         on_edit: move |(msg_id, new_title, new_text)| {
                                             handle_edit_message(msg_id, new_title, new_text);
                                         },
+                                        can_moderate: *can_moderate,
                                     }
                                 }
                             }

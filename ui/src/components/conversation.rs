@@ -1342,6 +1342,7 @@ fn ActionButtons(
     on_reply: Option<EventHandler<ReplyContext>>,
     on_edit: Option<EventHandler<(MessageId, String, String)>>,
     on_request_delete: Option<EventHandler<MessageId>>,
+    #[props(default)] can_moderate: bool,
     size: MessageSize,
 ) -> Element {
     // Create emoji picker state locally to ensure it's element-specific
@@ -1349,7 +1350,7 @@ fn ActionButtons(
 
     let has_actions = on_react.is_some()
         || on_reply.is_some()
-        || (is_self && (on_edit.is_some() || on_request_delete.is_some()));
+        || ((is_self || can_moderate) && (on_edit.is_some() || on_request_delete.is_some()));
 
     if !has_actions || !*is_hovered.read() {
         return rsx! {};
@@ -1441,8 +1442,8 @@ fn ActionButtons(
                 }
             }
 
-            // Edit/Delete buttons (only for own messages)
-            if is_self {
+            // Edit/Delete buttons (own messages, or moderators)
+            if is_self || can_moderate {
                 if on_edit.is_some() {
                     button {
                         class: if matches!(size, MessageSize::Compact) { "text-xs text-text-muted hover:text-text px-1" } else { "text-sm text-text-muted hover:text-text px-2" },
@@ -1531,6 +1532,9 @@ pub fn MessageCard(
     /// Hide the body and show only the header/title (post list)
     #[props(default = false)]
     hide_content: bool,
+    /// The viewer has moderation powers over this post
+    #[props(default)]
+    can_moderate: bool,
 ) -> Element {
     let msg = message.clone();
     let is_self = msg.is_self;
@@ -1679,6 +1683,7 @@ pub fn MessageCard(
                             on_reply: on_reply.clone(),
                             on_edit: on_edit.clone(),
                             on_request_delete: on_request_delete.clone(),
+                            can_moderate: can_moderate,
                             size: size,
                         }
                     }
@@ -1828,6 +1833,7 @@ pub fn MessageCard(
                                 on_reply: on_reply.clone(),
                                 on_edit: on_edit.clone(),
                                 on_request_delete: on_request_delete.clone(),
+                                can_moderate: can_moderate,
                                 size: size,
                             }
                         }
