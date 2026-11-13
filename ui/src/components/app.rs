@@ -21,6 +21,7 @@ use crate::components::board_list::receive_invitation_modal::ReceiveInvitationMo
 use crate::components::category_create_modal::CategoryCreateModal;
 use crate::components::members::member_info_modal::MemberInfoModal;
 use crate::components::members::Invitation;
+use crate::components::notifications_view::NotificationsView;
 use crate::components::posts_view::{PostsView, SinglePostView};
 use crate::components::profile_view::ProfileView;
 use crate::components::search_view::SearchView;
@@ -65,6 +66,8 @@ pub enum Route {
     Members { board_id: String },
     #[route("/board/:board_id/search")]
     Search { board_id: String },
+    #[route("/board/:board_id/notifications")]
+    Notifications { board_id: String },
     #[route("/board/:board_id/member/:member_key")]
     Profile {
         board_id: String,
@@ -426,6 +429,12 @@ fn PostsInCategory(board_id: String, category_id: String) -> Element {
 #[component]
 fn Search(board_id: String) -> Element {
     rsx! { BoardGate { board_id: board_id.clone(), SearchView {} } }
+}
+
+/// Route component for local notifications
+#[component]
+fn Notifications(board_id: String) -> Element {
+    rsx! { BoardGate { board_id: board_id.clone(), NotificationsView {} } }
 }
 
 /// Route component for a member profile

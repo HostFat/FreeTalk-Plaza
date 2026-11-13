@@ -52,6 +52,14 @@ pub struct BoardData {
     #[serde(default)]
     pub collapsed_groups: Vec<MessageId>,
 
+    /// Last time the user marked notifications as read (milliseconds).
+    #[serde(default)]
+    pub last_visit: i64,
+
+    /// Last time each section was opened (milliseconds), for unread badges.
+    #[serde(default)]
+    pub read_categories: HashMap<MessageId, i64>,
+
     /// Decrypted per-category secrets: category id -> (version, key).
     ///
     /// Persisted in the delegate store because an invite link can deliver a
@@ -1203,6 +1211,8 @@ impl Boards {
             self_member_info: None,
             category_secrets: HashMap::new(),
             collapsed_groups: Vec::new(),
+            last_visit: 0,
+            read_categories: HashMap::new(),
         };
 
         info!("🟢 Inserting board into map...");
@@ -1754,6 +1764,8 @@ mod tests {
             secrets: HashMap::new(),
             category_secrets: HashMap::new(),
             collapsed_groups: Vec::new(),
+            last_visit: 0,
+            read_categories: HashMap::new(),
             current_secret_version: None,
             last_secret_rotation: None,
             key_migrated_to_delegate: false,
@@ -1827,6 +1839,8 @@ mod tests {
             secrets: HashMap::new(),
             category_secrets: HashMap::new(),
             collapsed_groups: Vec::new(),
+            last_visit: 0,
+            read_categories: HashMap::new(),
             current_secret_version: None,
             last_secret_rotation: None,
             key_migrated_to_delegate: false,
@@ -1890,6 +1904,8 @@ mod tests {
                 secrets: HashMap::new(),
                 category_secrets: HashMap::new(),
                 collapsed_groups: Vec::new(),
+                last_visit: 0,
+                read_categories: HashMap::new(),
                 current_secret_version: None,
                 last_secret_rotation: None,
                 key_migrated_to_delegate: false,

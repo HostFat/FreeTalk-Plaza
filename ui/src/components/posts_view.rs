@@ -101,6 +101,47 @@ fn get_content(
     (categories, posts)
 }
 
+/// Posts newer than `read_upto` in a category subtree.
+fn unread_in_category(
+    id: &MessageId,
+    children: &HashMap<MessageId, Vec<&MessageData>>,
+    read_upto: i64,
+) -> usize {
+    let mut count = 0usize;
+    let mut stack: Vec<&MessageId> = vec![id];
+    while let Some(parent) = stack.pop() {
+        let Some(replies) = children.get(parent) else {
+            continue;
+        };
+        for reply in replies {
+            stack.push(&reply.message_id);
+            if !reply.is_category && reply.time.timestamp_millis() > read_upto {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// Mark a section as read up to now and persist the local preference.
+fn mark_category_read(category_id: MessageId) {
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut changed = false;
+    BOARDS.with_mut(|boards| {
+        if let Some(owner) = CURRENT_BOARD.read().owner_key {
+            if let Some(board) = boards.map.get_mut(&owner) {
+                board.read_categories.insert(category_id, now);
+                changed = true;
+            }
+        }
+    });
+    if changed {
+        spawn_local(async {
+            let _ = save_boards_to_delegate().await;
+        });
+    }
+}
+
 /// Posts and newest post below a category, descending into subcategories.
 fn category_stats(
     id: &MessageId,
@@ -302,6 +343,7 @@ fn SectionRow(
     is_admin: bool,
     post_count: usize,
     last_activity: Option<(String, String)>,
+    #[props(default)] unread_count: usize,
     #[props(default)] groups: Vec<(MessageId, String)>,
     #[props(default)] allow_group_change: bool,
     /// Child boards shown as a compact line under the row (home page)
@@ -312,12 +354,14 @@ fn SectionRow(
     board_id: String,
 ) -> Element {
     let category_id = category.id_string();
+    let read_id = category.message_id;
     let nav = navigator();
     let nav_board = board_id.clone();
     let nav_category = category_id.clone();
     let child_nav = navigator();
     let child_board = board_id.clone();
     let on_child_click = EventHandler::new(move |child_id: MessageId| {
+        mark_category_read(child_id);
         child_nav.push(Route::PostsInCategory {
             board_id: child_board.clone(),
             category_id: child_id.0 .0.to_string(),
@@ -332,9 +376,11 @@ fn SectionRow(
             is_admin: is_admin,
             post_count: post_count,
             last_activity: last_activity,
+            unread_count: unread_count,
             groups: groups,
             allow_group_change: allow_group_change,
             on_click: move |_| {
+                mark_category_read(read_id);
                 nav.push(Route::PostsInCategory {
                     board_id: nav_board.clone(),
                     category_id: nav_category.clone(),
@@ -895,6 +941,26 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                     )
                                 })
                                 .collect();
+                            let read_categories = current_board_data
+                                .as_ref()
+                                .map(|board| board.read_categories.clone())
+                                .unwrap_or_default();
+                            let unread_counts: HashMap<MessageId, usize> = stats_targets
+                                .iter()
+                                .map(|category| {
+                                    (
+                                        category.message_id,
+                                        unread_in_category(
+                                            &category.message_id,
+                                            &children,
+                                            read_categories
+                                                .get(&category.message_id)
+                                                .copied()
+                                                .unwrap_or(i64::MAX),
+                                        ),
+                                    )
+                                })
+                                .collect();
 
                             if let Some((self_member_id, is_owner, is_admin)) = board_info {
                                 let viewer_roles = current_board_data
@@ -1039,6 +1105,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                                         is_owner: is_owner,
                                                                                         is_admin: is_admin,
                                                                                         post_count: count,
+                                                                                        unread_count: unread_counts.get(&section.message_id).copied().unwrap_or(0),
                                                                                         last_activity: last,
                                                                                         groups: group_options.clone(),
                                                                                         allow_group_change: true,
@@ -1082,6 +1149,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                         is_owner: is_owner,
                                                                         is_admin: is_admin,
                                                                         post_count: count,
+                                                                        unread_count: unread_counts.get(&section.message_id).copied().unwrap_or(0),
                                                                         last_activity: last,
                                                                         groups: group_options.clone(),
                                                                         allow_group_change: true,
@@ -1122,6 +1190,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                     is_owner: is_owner,
                                                                     is_admin: is_admin,
                                                                     post_count: count,
+                                                                    unread_count: unread_counts.get(&category.message_id).copied().unwrap_or(0),
                                                                     last_activity: last,
                                                                     allow_group_change: false,
                                                                     child_boards: Vec::new(),

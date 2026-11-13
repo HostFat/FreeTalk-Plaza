@@ -50,6 +50,9 @@ pub fn CategoryCard(
     /// Time and author of the newest post in this category
     #[props(default)]
     last_activity: Option<(String, String)>,
+    /// Unread posts in this section
+    #[props(default)]
+    unread_count: usize,
     /// Groups show a "+ Section" action
     #[props(default)]
     on_new_section: Option<EventHandler<()>>,
@@ -201,6 +204,12 @@ pub fn CategoryCard(
                                         class: "flex-shrink-0 text-xs px-2 py-0.5 rounded-full bg-surface border border-border text-text-muted",
                                         title: "Visible only to members of the selected roles",
                                         if category.category_locked { "🔒 Locked" } else { "🔒 Restricted" }
+                                    }
+                                }
+                                if unread_count > 0 {
+                                    span {
+                                        class: "flex-shrink-0 text-xs px-2 py-0.5 rounded-full bg-accent/20 text-accent",
+                                        "{unread_count} new"
                                     }
                                 }
                                 if let Some(desc) = description {

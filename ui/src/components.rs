@@ -8,6 +8,7 @@ pub mod category_view;
 pub mod conversation;
 pub mod join_screen;
 pub mod members;
+pub mod notifications_view;
 pub mod posts_view;
 pub mod profile_view;
 pub mod search_view;
