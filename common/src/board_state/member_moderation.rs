@@ -298,6 +298,14 @@ pub struct SuspensionsV1 {
 pub struct SuspensionState {
     pub until: i64,
     pub generation: u64,
+    #[serde(default)]
+    pub digest: i64,
+}
+
+fn record_digest<T: serde::Serialize>(value: &T) -> i64 {
+    let mut bytes = Vec::new();
+    let _ = ciborium::ser::into_writer(value, &mut bytes);
+    freenet_scaffold::util::fast_hash(&bytes).0
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -320,6 +328,7 @@ fn suspension_map(suspensions: &[AuthorizedSuspension]) -> BTreeMap<MemberId, Su
                 SuspensionState {
                     until: entry.suspension.until,
                     generation: entry.suspension.generation,
+                    digest: record_digest(&entry.suspension),
                 },
             )
         })
@@ -434,7 +443,11 @@ impl ComposableState for SuspensionsV1 {
                 old_state
                     .suspensions
                     .get(&entry.suspension.target)
-                    .map(|old| old.generation < entry.suspension.generation)
+                    .map(|old| {
+                        old.generation < entry.suspension.generation
+                            || (old.generation == entry.suspension.generation
+                                && old.digest != record_digest(&entry.suspension))
+                    })
                     .unwrap_or(true)
             })
             .cloned()
@@ -462,8 +475,11 @@ impl ComposableState for SuspensionsV1 {
                 .iter()
                 .find(|existing| existing.suspension.target == entry.suspension.target)
             {
-                Some(existing) if existing.suspension.generation >= entry.suspension.generation => {
-                }
+                Some(existing)
+                    if existing.suspension.generation > entry.suspension.generation
+                        || (existing.suspension.generation == entry.suspension.generation
+                            && record_digest(&existing.suspension)
+                                <= record_digest(&entry.suspension)) => {}
                 _ => {
                     self.suspensions
                         .retain(|existing| existing.suspension.target != entry.suspension.target);

@@ -394,6 +394,8 @@ mod tests {
                     banned_at: at(1),
                     banned_user: MemberId(FastHash(21)),
                     expires_at: None,
+                    target_member: None,
+                    invite_chain: Vec::new(),
                 },
                 member_id,
                 &member_key,
@@ -404,6 +406,8 @@ mod tests {
                     banned_at: at(2),
                     banned_user: MemberId(FastHash(23)),
                     expires_at: None,
+                    target_member: None,
+                    invite_chain: Vec::new(),
                 },
                 owner_id,
                 &owner_key,
@@ -553,6 +557,16 @@ mod tests {
             &owner_sk,
         );
 
+        let member_b = AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: a_id,
+                member_vk: b_vk,
+                join_proof: None,
+            },
+            &a_sk,
+        );
+
         // A bans B (authorized because A is in B's invite chain)
         let ban_b_by_a = AuthorizedUserBan::new(
             UserBan {
@@ -560,6 +574,8 @@ mod tests {
                 banned_at: std::time::SystemTime::now(),
                 banned_user: b_id,
                 expires_at: None,
+                target_member: Some(member_b),
+                invite_chain: vec![member_a.clone()],
             },
             a_id,
             &a_sk,
@@ -589,6 +605,8 @@ mod tests {
                 banned_at: std::time::SystemTime::now() + std::time::Duration::from_secs(1),
                 banned_user: a_id,
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             owner_id,
             &owner_sk,
@@ -825,6 +843,8 @@ mod tests {
                 banned_at: SystemTime::now(),
                 banned_user: c_id,
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             a_id,
             &a_sk,

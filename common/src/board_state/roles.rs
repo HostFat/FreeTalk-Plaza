@@ -255,6 +255,7 @@ impl ComposableState for RolesV1 {
                 RoleState {
                     generation: role.role.generation,
                     deleted: role.role.deleted,
+                    digest: record_digest(&role.role),
                 },
             );
         }
@@ -268,6 +269,7 @@ impl ComposableState for RolesV1 {
                 AssignmentState {
                     generation: assignment.assignment.generation,
                     revoked: assignment.assignment.revoked,
+                    digest: record_digest(&assignment.assignment),
                 },
             );
         }
@@ -287,7 +289,11 @@ impl ComposableState for RolesV1 {
                 old_state_summary
                     .roles
                     .get(&r.role.id)
-                    .map(|s| s.generation < r.role.generation)
+                    .map(|s| {
+                        s.generation < r.role.generation
+                            || (s.generation == r.role.generation
+                                && s.digest != record_digest(&r.role))
+                    })
                     .unwrap_or(true)
             })
             .cloned()
@@ -299,7 +305,11 @@ impl ComposableState for RolesV1 {
                 old_state_summary
                     .assignments
                     .get(&(a.assignment.role_id, a.assignment.member_id))
-                    .map(|s| s.generation < a.assignment.generation)
+                    .map(|s| {
+                        s.generation < a.assignment.generation
+                            || (s.generation == a.assignment.generation
+                                && s.digest != record_digest(&a.assignment))
+                    })
                     .unwrap_or(true)
             })
             .cloned()
@@ -353,7 +363,10 @@ impl ComposableState for RolesV1 {
             let mut combined = self.clone();
             for role in &delta.roles {
                 match combined.roles.iter().find(|r| r.role.id == role.role.id) {
-                    Some(existing) if existing.role.generation >= role.role.generation => {}
+                    Some(existing)
+                        if existing.role.generation > role.role.generation
+                            || (existing.role.generation == role.role.generation
+                                && record_digest(&existing.role) <= record_digest(&role.role)) => {}
                     _ => {
                         combined.roles.retain(|r| r.role.id != role.role.id);
                         combined.roles.push(role.clone());
@@ -374,7 +387,9 @@ impl ComposableState for RolesV1 {
                         if existing.assignment.generation > assignment.assignment.generation
                             || (existing.assignment.generation
                                 == assignment.assignment.generation
-                                && existing.assignment.revoked) => {}
+                                && (existing.assignment.revoked
+                                    || record_digest(&existing.assignment)
+                                        <= record_digest(&assignment.assignment))) => {}
                     _ => {
                         combined
                             .assignments
@@ -517,18 +532,28 @@ pub struct RolesSummary {
 pub struct RoleState {
     pub generation: u64,
     pub deleted: bool,
+    #[serde(default)]
+    pub digest: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct AssignmentState {
     pub generation: u64,
     pub revoked: bool,
+    #[serde(default)]
+    pub digest: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
 pub struct RolesDelta {
     pub roles: Vec<AuthorizedRole>,
     pub assignments: Vec<AuthorizedRoleAssignment>,
+}
+
+fn record_digest<T: serde::Serialize>(value: &T) -> i64 {
+    let mut bytes = Vec::new();
+    let _ = ciborium::ser::into_writer(value, &mut bytes);
+    freenet_scaffold::util::fast_hash(&bytes).0
 }
 
 #[cfg(test)]

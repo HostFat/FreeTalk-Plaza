@@ -531,6 +531,8 @@ fn test_ban_member_excludes_from_new_secrets() {
         banned_at: SystemTime::now(),
         banned_user: member1_id,
         expires_at: None,
+        target_member: None,
+        invite_chain: Vec::new(),
     };
 
     board_state

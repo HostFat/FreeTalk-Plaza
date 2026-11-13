@@ -59,6 +59,14 @@ pub struct ApprovalsV1 {
 pub struct ApprovalState {
     pub approved: bool,
     pub generation: u64,
+    #[serde(default)]
+    pub digest: i64,
+}
+
+fn record_digest<T: serde::Serialize>(value: &T) -> i64 {
+    let mut bytes = Vec::new();
+    let _ = ciborium::ser::into_writer(value, &mut bytes);
+    freenet_scaffold::util::fast_hash(&bytes).0
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -81,6 +89,7 @@ fn approval_map(approvals: &[AuthorizedApproval]) -> BTreeMap<MessageId, Approva
                 ApprovalState {
                     approved: entry.approval.approved,
                     generation: entry.approval.generation,
+                    digest: record_digest(&entry.approval),
                 },
             )
         })
@@ -223,7 +232,11 @@ impl ComposableState for ApprovalsV1 {
                 old_state
                     .approvals
                     .get(&entry.approval.target)
-                    .map(|old| old.generation < entry.approval.generation)
+                    .map(|old| {
+                        old.generation < entry.approval.generation
+                            || (old.generation == entry.approval.generation
+                                && old.digest != record_digest(&entry.approval))
+                    })
                     .unwrap_or(true)
             })
             .cloned()
@@ -251,7 +264,12 @@ impl ComposableState for ApprovalsV1 {
                 .iter()
                 .find(|existing| existing.approval.target == entry.approval.target)
             {
-                Some(existing) if existing.approval.generation >= entry.approval.generation => {}
+                Some(existing)
+                    if existing.approval.generation > entry.approval.generation
+                        || (existing.approval.generation == entry.approval.generation
+                            && (existing.approval.approved == false
+                                || record_digest(&existing.approval)
+                                    <= record_digest(&entry.approval))) => {}
                 _ => {
                     self.approvals
                         .retain(|existing| existing.approval.target != entry.approval.target);

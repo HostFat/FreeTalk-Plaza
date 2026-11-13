@@ -1943,6 +1943,8 @@ impl ApiClient {
             banned_at: std::time::SystemTime::now(),
             banned_user: banned_member_id,
             expires_at: None,
+            target_member: None,
+            invite_chain: Vec::new(),
         };
 
         let authorized_ban = AuthorizedUserBan::new(user_ban, my_member_id, &signing_key);

@@ -19,6 +19,58 @@ use std::time::SystemTime;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct BansV1(pub Vec<AuthorizedUserBan>);
 
+/// Verify a signed membership proof for a target that is no longer present.
+/// The proof is part of the signed ban, so a member cannot invent an absent id.
+fn verify_member_proof(
+    parameters: &ChatBoardParametersV1,
+    ban: &AuthorizedUserBan,
+) -> Result<(), String> {
+    let target = ban
+        .ban
+        .target_member
+        .as_ref()
+        .ok_or("Missing membership proof")?;
+    if target.member.id() != ban.ban.banned_user {
+        return Err("Proof is for another member".to_string());
+    }
+    let mut by_id: HashMap<MemberId, &AuthorizedMember> = ban
+        .ban
+        .invite_chain
+        .iter()
+        .map(|member| (member.member.id(), member))
+        .collect();
+    by_id.insert(target.member.id(), target);
+
+    for member in by_id.values() {
+        if member.member.join_proof.is_some() {
+            return Err("Token-joined target needs the owner or an admin".to_string());
+        }
+        let inviter = member.member.invited_by;
+        if inviter == parameters.owner_id() {
+            member.verify_signature(&parameters.owner)?;
+        } else if let Some(parent) = by_id.get(&inviter) {
+            member.verify_signature(&parent.member.member_vk)?;
+        } else {
+            return Err("Membership proof is incomplete".to_string());
+        }
+    }
+
+    let mut current = target.member.id();
+    for _ in 0..64 {
+        if current == parameters.owner_id() {
+            return Err("The banner is not in the target's invite chain".to_string());
+        }
+        if current == ban.banned_by {
+            return Ok(());
+        }
+        let member = by_id
+            .get(&current)
+            .ok_or("Membership proof is missing an ancestor")?;
+        current = member.member.invited_by;
+    }
+    Err("Invite chain is cyclic".to_string())
+}
+
 /// Represents different types of validation errors that can occur with bans
 #[derive(Debug, Clone, PartialEq)]
 pub enum BanValidationError {
@@ -36,6 +88,9 @@ pub enum BanValidationError {
 
     /// The ban names a different board owner
     OwnerMismatch,
+
+    /// The signed membership proof is missing or invalid
+    InvalidMembershipProof,
 
     /// A circular invite chain was detected
     SelfInvitationDetected(MemberId),
@@ -61,6 +116,9 @@ impl fmt::Display for BanValidationError {
             }
             BanValidationError::OwnerMismatch => {
                 write!(f, "The ban names a different board owner")
+            }
+            BanValidationError::InvalidMembershipProof => {
+                write!(f, "The ban's membership proof is invalid")
             }
             BanValidationError::NotInInviteChain(banner_id, banned_id) => write!(
                 f,
@@ -197,10 +255,13 @@ impl BansV1 {
             // invite chain can no longer be walked. The signature and banner
             // checks above still apply.
             let Some(banned_member) = member_map.get(&ban.ban.banned_user) else {
-                // The target is already removed by this ban; the invite chain
-                // cannot be walked. The banner and signature checks still
-                // apply. New bans against arbitrary absent ids are rejected by
-                // apply_delta before they enter the state.
+                // The target is gone. A member-issued ban must carry the
+                // signed membership proof so an arbitrary absent id cannot be
+                // banned. Owner/admin bans stay trusted.
+                if let Err(error) = verify_member_proof(parameters, ban) {
+                    let _ = error;
+                    invalid_bans.insert(ban.id(), BanValidationError::InvalidMembershipProof);
+                }
                 return;
             };
 
@@ -569,6 +630,14 @@ pub struct UserBan {
     /// moderator publishes a revocation after this moment; the UI offers it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<SystemTime>,
+    /// Signed membership proof of the target, used when the target is no
+    /// longer in the members list. Without it a member cannot prove that an
+    /// absent id was ever part of their invite chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_member: Option<AuthorizedMember>,
+    /// Ancestors of the target up to (excluding) the owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invite_chain: Vec<AuthorizedMember>,
 }
 
 /// A unique identifier for a ban
@@ -811,6 +880,8 @@ mod tests {
                 banned_at: SystemTime::now(),
                 banned_user: member1_id,
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             owner_id,
             &owner_key,
@@ -832,6 +903,8 @@ mod tests {
                     banned_at: SystemTime::now(),
                     banned_user: member1_id,
                     expires_at: None,
+                    target_member: None,
+                    invite_chain: Vec::new(),
                 },
                 owner_id,
                 &owner_key,
@@ -854,6 +927,8 @@ mod tests {
                 banned_at: SystemTime::now(),
                 banned_user: member2_id,
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             pruned_id,
             &pruned_key,
@@ -874,6 +949,8 @@ mod tests {
                 banned_at: SystemTime::now(),
                 banned_user: member2_id,
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             orphaned_id,
             &orphaned_key,
@@ -885,6 +962,8 @@ mod tests {
                 banned_at: SystemTime::now(),
                 banned_user: orphaned_id,
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             owner_id,
             &owner_key,
@@ -902,6 +981,8 @@ mod tests {
                 banned_at: SystemTime::now(),
                 banned_user: member2_id,
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             member1_id,
             &member1_key,
@@ -928,6 +1009,8 @@ mod tests {
                 banned_at: SystemTime::now(),
                 banned_user: id,
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             id,
             &key,
@@ -939,6 +1022,8 @@ mod tests {
                 banned_at: SystemTime::now() + Duration::from_secs(1),
                 banned_user: id,
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             id,
             &key,
@@ -966,6 +1051,8 @@ mod tests {
                 banned_at: SystemTime::now(),
                 banned_user: id,
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             id,
             &key,
@@ -977,6 +1064,8 @@ mod tests {
                 banned_at: SystemTime::now() + Duration::from_secs(1),
                 banned_user: id,
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             id,
             &key,
@@ -1014,6 +1103,8 @@ mod tests {
                     banned_at: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
                     banned_user: id,
                     expires_at: None,
+                    target_member: None,
+                    invite_chain: Vec::new(),
                 },
                 id,
                 &key,
@@ -1055,6 +1146,8 @@ mod tests {
                 banned_at: at(1),
                 banned_user: MemberId(FastHash(11)),
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             member_id,
             &member_key,
@@ -1065,6 +1158,8 @@ mod tests {
                 banned_at: at(2),
                 banned_user: MemberId(FastHash(12)),
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             owner_id,
             &owner_key,
@@ -1127,6 +1222,8 @@ mod tests {
                 banned_at: SystemTime::now(),
                 banned_user: member_id,
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             owner_id,
             &owner_key,
@@ -1157,6 +1254,8 @@ mod tests {
                     banned_at: SystemTime::now() + Duration::from_secs(i as u64 + 10),
                     banned_user: member_id,
                     expires_at: None,
+                    target_member: None,
+                    invite_chain: Vec::new(),
                 },
                 owner_id,
                 &owner_key,
@@ -1204,6 +1303,8 @@ mod tests {
                     banned_at: SystemTime::now() + Duration::from_secs(i as u64 + 100),
                     banned_user: member_id,
                     expires_at: None,
+                    target_member: None,
+                    invite_chain: Vec::new(),
                 },
                 owner_id,
                 &owner_key,
@@ -1234,6 +1335,8 @@ mod tests {
             banned_at: SystemTime::now(),
             banned_user: member_id,
             expires_at: None,
+            target_member: None,
+            invite_chain: Vec::new(),
         };
 
         let authorized_ban = AuthorizedUserBan::new(ban.clone(), owner_id, &owner_key);
@@ -1261,6 +1364,8 @@ mod tests {
                 banned_at: SystemTime::now() + Duration::from_secs(1),
                 banned_user: member_id,
                 expires_at: None,
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             owner_id,
             &owner_key,
@@ -1303,6 +1408,8 @@ mod revocation_tests {
                 banned_at: SystemTime::now(),
                 banned_user: member_id,
                 expires_at: Some(SystemTime::now() + Duration::from_secs(3600)),
+                target_member: None,
+                invite_chain: Vec::new(),
             },
             owner_id,
             &owner_sk,

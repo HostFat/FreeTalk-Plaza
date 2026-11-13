@@ -29,6 +29,29 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
         owner: current_board,
     };
 
+    // A signed membership proof lets the ban be verified after the target has
+    // been removed from the members list.
+    let members = &board_state_clone.members.members;
+    let target_member = members
+        .iter()
+        .find(|member| member.member.id() == member_to_ban)
+        .cloned();
+    let mut invite_chain = Vec::new();
+    if let Some(target) = &target_member {
+        let owner_id = MemberId::from(&current_board);
+        let mut current = target.member.invited_by;
+        for _ in 0..64 {
+            if current == owner_id {
+                break;
+            }
+            let Some(parent) = members.iter().find(|member| member.member.id() == current) else {
+                break;
+            };
+            invite_chain.push(parent.clone());
+            current = parent.member.invited_by;
+        }
+    }
+
     let banned_at = get_current_system_time();
     let expires_at = duration_days
         .map(|days| banned_at + std::time::Duration::from_secs(days.max(1) as u64 * 24 * 60 * 60));
@@ -37,6 +60,8 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
         banned_at,
         banned_user: member_to_ban,
         expires_at,
+        target_member,
+        invite_chain,
     };
 
     let mut ban_bytes = Vec::new();

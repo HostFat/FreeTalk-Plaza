@@ -616,6 +616,16 @@ fn build_add_reaction_content(
 /// Wrap each action in the public moderation envelope. The contract reads the
 /// type and target; the payload stays sealed on private boards.
 async fn send_actions(ctx: ActionContext, actions: Vec<ActionContentV1>) {
+    let self_id = plaza_core::board_state::member::MemberId::from(&ctx.self_sk.verifying_key());
+    if ctx
+        .board_state
+        .suspensions
+        .active_until(self_id, chrono::Utc::now().timestamp_millis())
+        .is_some()
+    {
+        dioxus::logger::tracing::warn!("Suspended members cannot edit or react");
+        return;
+    }
     let mut contents = Vec::new();
     for action in actions {
         let encoded = action.encode();
