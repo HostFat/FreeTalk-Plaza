@@ -24,6 +24,7 @@ pub fn PostInput(
     let mut title_text = use_signal(String::new);
     let mut message_text = use_signal(String::new);
     let mut show_emoji_picker = use_signal(|| false);
+    let mut show_preview = use_signal(|| false);
 
     // Open modal when replying_to changes to Some (from clicking reply button)
     use_effect(move || {
@@ -34,6 +35,25 @@ pub fn PostInput(
 
     // Other pages can ask the shared composer to open, for example the
     // "New post" button inside a category.
+    // A quote from a post opens the composer, appends the quote and replies
+    // to that post.
+    use_effect(move || {
+        let request = crate::components::app::QUOTE_REQUEST.read().clone();
+        let Some(request) = request else {
+            return;
+        };
+        let quote = format!("> {}: {}\n\n", request.author, request.text);
+        let current = message_text.read().clone();
+        message_text.set(format!("{quote}{current}"));
+        replying_to.set(Some(crate::util::messaging::ReplyContext {
+            message_id: request.target,
+            author_name: request.author,
+            content_preview: request.preview,
+        }));
+        show_modal.set(true);
+        crate::components::app::QUOTE_REQUEST.with_mut(|request| *request = None);
+    });
+
     let default_reply_for_request = default_reply_to.clone();
     let mut last_compose_request = use_signal(|| *crate::components::app::COMPOSE_REQUEST.read());
     use_effect(move || {
@@ -264,6 +284,15 @@ pub fn PostInput(
                                     "H"
                                 }
                                 span { class: "text-xs text-text-muted ml-1", "Markdown supported" }
+                                button {
+                                    r#type: "button",
+                                    class: "text-xs text-accent hover:text-accent/80 ml-2",
+                                    onclick: move |_| {
+                                        let next = !*show_preview.read();
+                                        show_preview.set(next);
+                                    },
+                                    if *show_preview.read() { "Write" } else { "Preview" }
+                                }
                             }
                             div { class: "relative",
                                 // Emoji picker backdrop
@@ -317,6 +346,15 @@ pub fn PostInput(
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    if *show_preview.read() {
+                        div { class: "px-6 pb-4",
+                            div {
+                                class: "prose prose-base dark:prose-invert max-w-none p-4 bg-surface border border-border rounded-lg",
+                                dangerous_inner_html: "{crate::util::markdown::text_to_html(&message_text.read())}",
                             }
                         }
                     }

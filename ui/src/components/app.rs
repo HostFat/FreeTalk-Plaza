@@ -122,6 +122,17 @@ pub static COMPOSE_REQUEST: GlobalSignal<u64> = Global::new(|| 0);
 /// Group id (as a string) to scroll to after returning to the home page.
 pub static SCROLL_TO_GROUP: GlobalSignal<Option<String>> = Global::new(|| None);
 
+/// Quote requested from a post. The shared composer inserts it and replies
+/// to the quoted post.
+#[derive(Clone)]
+pub struct QuoteRequest {
+    pub target: MessageId,
+    pub author: String,
+    pub preview: String,
+    pub text: String,
+}
+pub static QUOTE_REQUEST: GlobalSignal<Option<QuoteRequest>> = Global::new(|| None);
+
 /// Context for the currently viewed category
 #[derive(Clone, Default)]
 pub struct CurrentCategoryContext {

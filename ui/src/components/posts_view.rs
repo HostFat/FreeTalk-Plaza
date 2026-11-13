@@ -238,6 +238,7 @@ fn thread_stats(
 #[component]
 fn PostRow(
     post: MessageData,
+    board_id: String,
     reply_count: usize,
     last_reply: Option<(String, String)>,
     #[props(default)] can_pin: bool,
@@ -252,6 +253,7 @@ fn PostRow(
         post.title_text.clone()
     };
     let created = format_utc_as_local_time(post.time.timestamp_millis());
+    let post_id = post.id_string();
     let avatar = get_avatar(&post.author_id);
     let preview = {
         let mut text: String = post.content_text.chars().take(400).collect();
@@ -292,6 +294,54 @@ fn PostRow(
                     }
                     if let Some((author, time)) = last_reply {
                         span { class: "text-xs text-text-muted", "· last {time} by {author}" }
+                    }
+                }
+                div { class: "flex items-center gap-1 flex-shrink-0",
+                    button {
+                        r#type: "button",
+                        class: "px-1.5 py-1 text-xs rounded hover:bg-surface",
+                        title: "Quote",
+                        onclick: {
+                            let target = post.message_id;
+                            let author = post.author_name.clone();
+                            let text = post.content_text.clone();
+                            let preview = post.content_text.chars().take(200).collect::<String>();
+                            move |evt| {
+                                evt.stop_propagation();
+                                crate::components::app::QUOTE_REQUEST.with_mut(|request| {
+                                    *request = Some(crate::components::app::QuoteRequest {
+                                        target,
+                                        author: author.clone(),
+                                        preview: preview.clone(),
+                                        text: text.clone(),
+                                    });
+                                });
+                                *crate::components::app::COMPOSE_REQUEST.write() += 1;
+                            }
+                        },
+                        "❝"
+                    }
+                    button {
+                        r#type: "button",
+                        class: "px-1.5 py-1 text-xs rounded hover:bg-surface",
+                        title: "Copy link",
+                        onclick: {
+                            let board = board_id.clone();
+                            let post_id = post_id.clone();
+                            move |evt| {
+                                evt.stop_propagation();
+                                if let Some(window) = web_sys::window() {
+                                    if let Ok(href) = window.location().href() {
+                                        let base = href.split('#').next().unwrap_or("");
+                                        let link = format!(
+                                            "{base}#/board/{board}/post/{post_id}"
+                                        );
+                                        let _ = crate::util::copy_to_clipboard(&link);
+                                    }
+                                }
+                            }
+                        },
+                        "🔗"
                     }
                 }
                 if can_pin || can_close {
@@ -1271,6 +1321,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                             PostRow {
                                                                 key: "{post_id}",
                                                                 post: post.clone(),
+                                                                board_id: board_id.clone(),
                                                                 reply_count: reply_count,
                                                                 last_reply: last_reply,
                                                                 can_pin: can_pin,
