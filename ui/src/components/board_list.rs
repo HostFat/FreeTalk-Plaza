@@ -134,8 +134,8 @@ pub fn BoardList() -> Element {
                 }
 
                 // Dropdown menu - centered like the button, above the backdrop.
-                div { class: "absolute left-0 right-0 flex justify-center z-50",
-                    div { class: "w-full md:w-auto bg-panel shadow-lg md:rounded-b-xl overflow-hidden",
+                div { class: "absolute left-0 right-0 flex justify-center z-50 pointer-events-none",
+                    div { class: "w-full md:w-auto bg-panel shadow-lg md:rounded-b-xl overflow-hidden pointer-events-auto",
                         style: "min-width: min(100vw, 60vw);",
 
                         // Board list
