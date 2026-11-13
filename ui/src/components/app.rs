@@ -372,7 +372,7 @@ fn Home() -> Element {
             }
             p { class: "text-sm mt-1 mb-4", "Forums on Freenet" }
             p { class: "text-xl", "Select a board above or create one" }
-            p { class: "text-sm mt-2", "Posts will appear here" }
+            p { class: "text-sm mt-2", "Topics will appear here" }
         }
     }
 }

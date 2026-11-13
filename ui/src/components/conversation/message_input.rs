@@ -237,9 +237,9 @@ pub fn PostInput(
             button {
                 class: "flex items-center gap-2 px-4 py-2.5 bg-accent hover:bg-accent-hover text-white font-medium rounded-xl transition-colors",
                 onclick: open_modal,
-                title: if has_draft() { "Compose Post (draft saved)" } else { "Compose Post" },
+                title: if has_draft() { "Compose Topic (draft saved)" } else { "Compose Topic" },
                 Icon { icon: FaPen, width: 14, height: 14 }
-                "Compose Post"
+                "Compose Topic"
             }
         } else if default_reply_to.is_some() && !in_post {
             button {
@@ -255,9 +255,9 @@ pub fn PostInput(
                 title: if in_post {
                     if has_draft() { "Compose Reply (draft saved)" } else { "Compose Reply" }
                 } else if has_draft() {
-                    "Compose Post (draft saved)"
+                    "Compose Topic (draft saved)"
                 } else {
-                    "Compose Post"
+                    "Compose Topic"
                 },
                 Icon { icon: FaPen, width: 18, height: 18 }
                 if has_draft() {
@@ -283,7 +283,7 @@ pub fn PostInput(
                     // Modal header
                     div { class: "flex items-center justify-between px-6 py-4 border-b border-border",
                         h2 { class: "text-lg font-semibold text-text",
-                            if replying_to.read().is_some() { "Reply to Post" } else { "New Post" }
+                            if replying_to.read().is_some() { "Reply to Topic" } else { "New Topic" }
                         }
                         button {
                             class: "p-2 rounded-lg text-text-muted hover:text-text hover:bg-surface transition-colors",
@@ -354,7 +354,7 @@ pub fn PostInput(
                         div { class: "space-y-1.5",
                             div { class: "flex items-center justify-between",
                                 label { class: "block text-sm font-medium text-text",
-                                    "Post"
+                                    if replying_to.read().is_some() { "Reply" } else { "Topic" }
                                 }
                                 span {
                                     class: if message_text.read().len() > max_message_size { "text-xs text-red-400" } else { "text-xs text-text-muted" },
@@ -441,7 +441,7 @@ pub fn PostInput(
                                     } else {
                                         "px-2 py-1 text-xs bg-surface hover:bg-surface-hover rounded ml-2"
                                     },
-                                    title: "Add a poll to this new post",
+                                    title: "Add a poll to this new topic",
                                     onclick: move |_| {
                                         let next = !*poll_enabled.read();
                                         poll_enabled.set(next);
@@ -633,7 +633,7 @@ pub fn PostInput(
                                     || message_text.read().len() > max_message_size
                                     || title_text.read().len() > max_title_size
                                     || (poll_enabled() && title_text.read().trim().is_empty()),
-                                "Send Post"
+                                if replying_to.read().is_some() { "Send Reply" } else { "Send Topic" }
                             }
                         }
                     }

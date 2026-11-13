@@ -222,9 +222,9 @@ pub fn CategoryCard(
                                     div {
                                         p {
                                             if post_count == 1 {
-                                                "1 post"
+                                                "1 topic"
                                             } else {
-                                                "{post_count} posts"
+                                                "{post_count} topics"
                                             }
                                         }
                                         if let Some((author, time)) = last_activity.clone() {

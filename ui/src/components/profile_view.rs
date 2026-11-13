@@ -138,7 +138,7 @@ pub fn ProfileView(member_key: String) -> Element {
                             let _ = window.location().set_hash(&target);
                         }
                     },
-                    "← Back to posts"
+                    "← Back to topics"
                 }
                 h1 { class: "text-lg font-semibold text-text ml-2", "{nickname}" }
             }

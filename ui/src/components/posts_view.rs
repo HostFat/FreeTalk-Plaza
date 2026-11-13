@@ -788,7 +788,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
             if !has_board_selected {
                 div { class: "flex flex-col items-center justify-center h-64 text-text-muted",
                     p { class: "text-xl", "Select a board from the sidebar above or create one" }
-                    p { class: "text-sm mt-2", "Posts will appear here" }
+                    p { class: "text-sm mt-2", "Topics will appear here" }
                 }
             } else {
                 // Categories and Posts list
@@ -892,12 +892,12 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                         button {
                                             r#type: "button",
                                             class: "flex items-center gap-1.5 px-3 py-1.5 bg-accent hover:bg-accent/80 text-white text-xs font-medium rounded-lg transition-colors",
-                                            title: "Write a new post in this section",
+                                            title: "Write a new topic in this section",
                                             onclick: move |_| {
                                                 *crate::components::app::COMPOSE_REQUEST.write() += 1;
                                             },
                                             span { "✏️" }
-                                            span { "New post" }
+                                            span { "New Topic" }
                                         }
                                         if let Some(section_id) = current_section_id {
                                             button {
@@ -1419,7 +1419,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                         if has_posts {
                                             if has_categories {
                                                 div { class: "flex items-center justify-between mb-4",
-                                                    h2 { class: "text-lg font-semibold text-text-muted", "Posts" }
+                                                    h2 { class: "text-lg font-semibold text-text-muted", "Topics" }
                                                     if can_write {
                                                         button {
                                                             r#type: "button",
@@ -1427,7 +1427,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                             onclick: move |_| {
                                                                 *crate::components::app::COMPOSE_REQUEST.write() += 1;
                                                             },
-                                                            "+ New Post"
+                                                            "+ New Topic"
                                                         }
                                                     }
                                                 }
@@ -1461,7 +1461,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                         onclick: move |_| {
                                                             *crate::components::app::COMPOSE_REQUEST.write() += 1;
                                                         },
-                                                        "+ New Post"
+                                                        "+ New Topic"
                                                     }
                                                 }
                                             }
@@ -1616,7 +1616,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                 if *pending_delete_group.read() {
                                     "Delete Group?"
                                 } else {
-                                    "Delete Post?"
+                                    "Delete Topic?"
                                 }
                             }
                             p { class: "text-text-muted text-sm mb-4",
@@ -1819,7 +1819,7 @@ pub fn SinglePostView(post_id: String) -> Element {
     let back_label = if has_category {
         "← Back to category"
     } else {
-        "← Back to posts"
+        "← Back to topics"
     };
 
     rsx! {
@@ -1873,7 +1873,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                         None => {
                             rsx! {
                                 div { class: "flex-1 flex flex-col items-center justify-center h-64 text-text-muted",
-                                    p { class: "text-xl", "Post not found." }
+                                    p { class: "text-xl", "Topic not found." }
                                     button {
                                         r#type: "button",
                                         class: "mt-4 text-accent hover:text-accent/80 transition-colors",
@@ -1883,7 +1883,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                                                 let _ = win.location().set_hash(&target);
                                             }
                                         },
-                                        "← Back to posts"
+                                        "← Back to topics"
                                     }
                                 }
                             }
@@ -1901,7 +1901,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                         class: "bg-panel rounded-lg shadow-xl p-6 max-w-sm mx-4",
                         onclick: move |e| e.stop_propagation(),
                         h3 { class: "text-lg font-semibold text-text mb-2",
-                            "Delete Post?"
+                            "Delete Topic?"
                         }
                         p { class: "text-text-muted text-sm mb-4",
                             "This action cannot be undone."
