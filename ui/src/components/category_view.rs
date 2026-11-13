@@ -1,5 +1,6 @@
 use crate::components::conversation::MessageData;
 use dioxus::prelude::*;
+use freenet_scaffold::util::FastHash;
 use plaza_core::board_state::content::validate_icon;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
@@ -26,6 +27,8 @@ pub struct CategoryEditData {
     pub new_description: Option<String>,
     pub new_icon: Option<String>,
     pub new_color: String,
+    /// `Some(parent)` moves the section; `None` keeps the current parent.
+    pub new_parent: Option<Option<MessageId>>,
 }
 
 /// A card component for displaying a category in a grid
@@ -47,6 +50,15 @@ pub fn CategoryCard(
     /// Time and author of the newest post in this category
     #[props(default)]
     last_activity: Option<(String, String)>,
+    /// Groups show a "+ Section" action
+    #[props(default)]
+    on_new_section: Option<EventHandler<()>>,
+    /// Groups available for moving this section
+    #[props(default)]
+    groups: Vec<(MessageId, String)>,
+    /// Top-level sections and sections inside a group can be moved
+    #[props(default)]
+    allow_group_change: bool,
     /// Click handler for navigation
     on_click: EventHandler<()>,
     /// Edit handler with full category data
@@ -62,12 +74,14 @@ pub fn CategoryCard(
     let mut edit_description = use_signal(String::new);
     let mut edit_icon = use_signal(String::new);
     let mut edit_color = use_signal(String::new);
+    let mut edit_group = use_signal(|| None::<MessageId>);
     let mut error_msg = use_signal(|| None::<String>);
 
     let icon = category.category_icon.as_deref().unwrap_or("📁");
     let name = category.category_name.as_deref().unwrap_or("Unnamed");
     let description = category.category_description.as_deref();
     let color = category.category_color.as_deref().unwrap_or("#6366f1");
+    let current_parent_for_save = category.parent_category_id.clone();
 
     // Can edit if user is author, owner, or admin
     let is_author = category.author_id == self_member_id;
@@ -79,7 +93,7 @@ pub fn CategoryCard(
         div {
             class: "bg-panel rounded-lg border border-border overflow-hidden hover:border-accent/50 transition-colors cursor-pointer group relative",
             onclick: move |_| {
-                if !*is_editing.read() {
+                if !*is_editing.read() && !category.is_group {
                     on_click.call(())
                 }
             },
@@ -147,16 +161,43 @@ pub fn CategoryCard(
                                     }
                                 }
                             }
-                            div { class: "flex-shrink-0 text-right text-xs text-text-muted",
-                                p {
-                                    if post_count == 1 {
-                                        "1 post"
-                                    } else {
-                                        "{post_count} posts"
+                            div { class: "flex items-center gap-2 flex-shrink-0 text-right text-xs text-text-muted",
+                                div {
+                                    p {
+                                        if category.is_group {
+                                            if post_count == 1 {
+                                                "1 section"
+                                            } else {
+                                                "{post_count} sections"
+                                            }
+                                        } else if post_count == 1 {
+                                            "1 post"
+                                        } else {
+                                            "{post_count} posts"
+                                        }
+                                    }
+                                    if !category.is_group {
+                                        if let Some((author, time)) = last_activity.clone() {
+                                            p { class: "mt-0.5", "{time} by {author}" }
+                                        }
                                     }
                                 }
-                                if let Some((author, time)) = last_activity.clone() {
-                                    p { class: "mt-0.5", "{time} by {author}" }
+                                if category.is_group {
+                                    if let Some(handler) = on_new_section.as_ref() {
+                                        button {
+                                            r#type: "button",
+                                            class: "px-2 py-1 rounded bg-accent/10 text-accent hover:bg-accent/20",
+                                            title: "Create a section in this group",
+                                            onclick: {
+                                                let handler = handler.clone();
+                                                move |evt| {
+                                                    evt.stop_propagation();
+                                                    handler.call(());
+                                                }
+                                            },
+                                            "+ Section"
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -206,6 +247,34 @@ pub fn CategoryCard(
                         }
                     }
 
+                    // Move the section to another group
+                    if allow_group_change {
+                        div { class: "mb-2",
+                            label { class: "block text-xs font-medium text-text-muted mb-1", "Group" }
+                            select {
+                                class: "w-full px-2 py-1 bg-surface border border-border rounded text-sm text-text",
+                                value: (*edit_group.read())
+                                    .as_ref()
+                                    .map(|id| id.0 .0.to_string())
+                                    .unwrap_or_default(),
+                                onclick: move |e| e.stop_propagation(),
+                                onchange: move |e| {
+                                    e.stop_propagation();
+                                    let value = e.value();
+                                    edit_group.set(if value.is_empty() {
+                                        None
+                                    } else {
+                                        value.parse::<i64>().ok().map(|id| MessageId(FastHash(id)))
+                                    });
+                                },
+                                option { value: "", "Ungrouped" }
+                                for (group_id, group_name) in groups.iter() {
+                                    option { value: "{group_id.0 .0}", "{group_name}" }
+                                }
+                            }
+                        }
+                    }
+
                     // Save/Cancel buttons
                     div { class: "flex gap-2",
                         button {
@@ -236,12 +305,22 @@ pub fn CategoryCard(
 
                                     if let Some(ref handler) = on_edit {
                                         let desc = edit_description.read().trim().to_string();
+                                        let current_parent = current_parent_for_save.clone();
+                                        let selected_group = (*edit_group.read()).clone();
+                                        let new_parent = if allow_group_change
+                                            && selected_group != current_parent
+                                        {
+                                            Some(selected_group)
+                                        } else {
+                                            None
+                                        };
                                         handler.call(CategoryEditData {
                                             message_id: msg_id.clone(),
                                             new_name: name_val,
                                             new_description: if desc.is_empty() { None } else { Some(desc) },
                                             new_icon: if icon_val.is_empty() { None } else { Some(icon_val) },
                                             new_color: edit_color.read().clone(),
+                                            new_parent,
                                         });
                                     }
                                     is_editing.set(false);
@@ -283,6 +362,7 @@ pub fn CategoryCard(
                                     edit_description.set(desc.clone());
                                     edit_icon.set(ic.clone());
                                     edit_color.set(col.clone());
+                                    edit_group.set(category.parent_category_id.clone());
                                     error_msg.set(None);
                                     is_editing.set(true);
                                 }

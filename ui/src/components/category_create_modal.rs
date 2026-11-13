@@ -1,6 +1,7 @@
 use crate::components::app::{BOARDS, CURRENT_BOARD, CURRENT_CATEGORY};
-use crate::util::messaging::send_category;
+use crate::util::messaging::{send_category, send_group};
 use dioxus::prelude::*;
+use freenet_scaffold::util::FastHash;
 use plaza_core::board_state::content::validate_icon;
 use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::roles::RoleId;
@@ -11,11 +12,17 @@ pub static CREATE_CATEGORY_MODAL: GlobalSignal<CreateCategoryModalSignal> =
     Global::new(|| CreateCategoryModalSignal {
         show: false,
         parent_category_id: None,
+        is_group: false,
+        parent_is_group: false,
     });
 
 pub struct CreateCategoryModalSignal {
     pub show: bool,
     pub parent_category_id: Option<MessageId>,
+    /// Create a homepage group instead of a section
+    pub is_group: bool,
+    /// The parent is a group, so this is a section and not a subsection
+    pub parent_is_group: bool,
 }
 
 /// Color presets for category selection
@@ -42,9 +49,12 @@ pub fn CategoryCreateModal() -> Element {
     let mut is_creating = use_signal(|| false);
     let mut selected_roles = use_signal(Vec::<RoleId>::new);
     let mut hidden = use_signal(|| false);
+    let mut selected_group = use_signal(|| None::<MessageId>);
 
     let modal_state = CREATE_CATEGORY_MODAL.read();
     let is_open = modal_state.show;
+    let is_group = modal_state.is_group;
+    let parent_is_group = modal_state.parent_is_group;
     let parent_id = modal_state.parent_category_id.clone();
     let parent_id_for_closure = parent_id.clone();
     let has_parent = parent_id.is_some();
@@ -54,7 +64,7 @@ pub fn CategoryCreateModal() -> Element {
     }
 
     // Check if user can create categories and list the roles they can restrict to
-    let (can_create, is_owner, roles) = {
+    let (can_create, is_owner, roles, groups) = {
         let current_board = CURRENT_BOARD.read();
         if let Some(key) = current_board.owner_key {
             let boards = BOARDS.read();
@@ -67,16 +77,29 @@ pub fn CategoryCreateModal() -> Element {
                     .filter(|role| !role.role.deleted)
                     .map(|role| (role.role.id, role.role.name.clone()))
                     .collect::<Vec<_>>();
+                let groups = board_data
+                    .board_state
+                    .recent_messages
+                    .messages
+                    .iter()
+                    .filter_map(|message| {
+                        let category = board_data
+                            .readable_category(&message.id(), &message.message.content)?;
+                        (category.is_group && category.parent_category_id.is_none())
+                            .then(|| (message.id(), category.name))
+                    })
+                    .collect::<Vec<_>>();
                 (
                     board_data.can_create_categories(),
                     board_data.self_sk.verifying_key() == board_data.owner_vk,
                     roles,
+                    groups,
                 )
             } else {
-                (false, false, Vec::new())
+                (false, false, Vec::new(), Vec::new())
             }
         } else {
-            (false, false, Vec::new())
+            (false, false, Vec::new(), Vec::new())
         }
     };
 
@@ -88,6 +111,8 @@ pub fn CategoryCreateModal() -> Element {
                 onclick: move |_| {
                     CREATE_CATEGORY_MODAL.with_mut(|modal| {
                         modal.show = false;
+                        modal.is_group = false;
+                        modal.parent_is_group = false;
                     });
                 }
             }
@@ -98,13 +123,15 @@ pub fn CategoryCreateModal() -> Element {
                     onclick: move |e| e.stop_propagation(),
                     h2 { class: "text-lg font-semibold text-text mb-4", "Permission Denied" }
                     p { class: "text-text-muted mb-4",
-                        "Only board owners and admins can create categories."
+                        "Only board owners and admins can create sections and groups."
                     }
                     button {
                         class: "px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-lg transition-colors",
                         onclick: move |_| {
                             CREATE_CATEGORY_MODAL.with_mut(|modal| {
                                 modal.show = false;
+                                modal.is_group = false;
+                        modal.parent_is_group = false;
                             });
                         },
                         "Close"
@@ -154,22 +181,33 @@ pub fn CategoryCreateModal() -> Element {
         };
 
         let color_val = color.read().clone();
-        let parent_id_val = parent_id_for_closure.clone();
+        let parent_id_val = if is_group {
+            None
+        } else if has_parent {
+            parent_id_for_closure.clone()
+        } else {
+            (*selected_group.read()).clone()
+        };
         let roles_val = selected_roles.read().clone();
         let hidden_val = *hidden.read();
+        let creating_group = is_group;
 
         spawn_local(async move {
-            match send_category(
-                name_val,
-                description_val,
-                icon_val,
-                color_val,
-                parent_id_val,
-                roles_val,
-                hidden_val,
-            )
-            .await
-            {
+            let result = if creating_group {
+                send_group(name_val, description_val, icon_val, color_val).await
+            } else {
+                send_category(
+                    name_val,
+                    description_val,
+                    icon_val,
+                    color_val,
+                    parent_id_val,
+                    roles_val,
+                    hidden_val,
+                )
+                .await
+            };
+            match result {
                 Ok(()) => {
                     // Reset and close modal
                     name.set(String::new());
@@ -178,23 +216,29 @@ pub fn CategoryCreateModal() -> Element {
                     color.set(COLOR_PRESETS[0].0.to_string());
                     selected_roles.set(Vec::new());
                     hidden.set(false);
+                    selected_group.set(None);
                     CREATE_CATEGORY_MODAL.with_mut(|modal| {
                         modal.show = false;
                         modal.parent_category_id = None;
+                        modal.is_group = false;
+                        modal.parent_is_group = false;
                     });
                 }
                 Err(e) => {
-                    error_msg.set(Some(format!("Failed to create category: {}", e)));
+                    let kind = if creating_group { "group" } else { "section" };
+                    error_msg.set(Some(format!("Failed to create {}: {}", kind, e)));
                 }
             }
             is_creating.set(false);
         });
     };
 
-    let title = if has_parent {
-        "Create Subcategory"
+    let title = if is_group {
+        "Create Group"
+    } else if has_parent && !parent_is_group {
+        "Create Subsection"
     } else {
-        "Create Category"
+        "Create Section"
     };
 
     // Get parent category name for display
@@ -212,6 +256,8 @@ pub fn CategoryCreateModal() -> Element {
                 CREATE_CATEGORY_MODAL.with_mut(|modal| {
                     modal.show = false;
                     modal.parent_category_id = None;
+                    modal.is_group = false;
+                        modal.parent_is_group = false;
                 });
             }
         }
@@ -290,6 +336,35 @@ pub fn CategoryCreateModal() -> Element {
                         }
                     }
 
+                    // Group picker for a new top-level section
+                    if !is_group && !has_parent && !groups.is_empty() {
+                        div {
+                            label { class: "block text-sm font-medium text-text mb-1", "Group" }
+                            select {
+                                class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text text-sm",
+                                value: (*selected_group.read())
+                                    .as_ref()
+                                    .map(|id| id.0 .0.to_string())
+                                    .unwrap_or_default(),
+                                onchange: move |evt| {
+                                    let value = evt.value();
+                                    selected_group.set(if value.is_empty() {
+                                        None
+                                    } else {
+                                        value.parse::<i64>().ok().map(|id| MessageId(FastHash(id)))
+                                    });
+                                },
+                                option { value: "", "Ungrouped" }
+                                for (group_id, group_name) in groups.iter() {
+                                    option {
+                                        value: "{group_id.0 .0}",
+                                        "{group_name}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Color picker
                     div {
                         label { class: "block text-sm font-medium text-text mb-2", "Color *" }
@@ -318,7 +393,7 @@ pub fn CategoryCreateModal() -> Element {
                     }
 
                     // Restricted visibility: owner only, and only when roles exist
-                    if is_owner && !roles.is_empty() {
+                    if is_owner && !is_group && !roles.is_empty() {
                         div {
                             label { class: "block text-sm font-medium text-text mb-2", "Visible to" }
                             p { class: "text-xs text-text-muted mb-2",
@@ -381,6 +456,8 @@ pub fn CategoryCreateModal() -> Element {
                             CREATE_CATEGORY_MODAL.with_mut(|modal| {
                                 modal.show = false;
                                 modal.parent_category_id = None;
+                                modal.is_group = false;
+                        modal.parent_is_group = false;
                             });
                         },
                         "Cancel"

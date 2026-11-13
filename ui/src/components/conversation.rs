@@ -60,6 +60,8 @@ pub struct MessageData {
     pub category_hidden: bool,
     /// Category is restricted and we do not hold its secret
     pub category_locked: bool,
+    /// Category is a homepage group containing sections
+    pub is_group: bool,
 }
 
 /// A message with its nested replies
@@ -146,6 +148,7 @@ pub fn get_all_messages(
             category_allowed_roles,
             category_hidden,
             category_locked,
+            category_is_group,
         ) = match category_info {
             Some(mut info) => {
                 if let Some(edit) = messages_state.edited_category(&message_id) {
@@ -165,6 +168,9 @@ pub fn get_all_messages(
                     info.description = edit.new_description.clone();
                     info.icon = edit.new_icon.clone();
                     info.color = Some(edit.new_color.clone());
+                    if edit.set_parent {
+                        info.parent = edit.new_parent.clone();
+                    }
                 }
                 (
                     true,
@@ -176,6 +182,7 @@ pub fn get_all_messages(
                     info.allowed_roles,
                     info.hidden,
                     info.locked,
+                    info.is_group,
                 )
             }
             None => (
@@ -186,6 +193,7 @@ pub fn get_all_messages(
                 None,
                 None,
                 Vec::new(),
+                false,
                 false,
                 false,
             ),
@@ -220,6 +228,7 @@ pub fn get_all_messages(
             category_allowed_roles,
             category_hidden,
             category_locked,
+            is_group: category_is_group,
         });
     }
 
@@ -453,6 +462,8 @@ pub struct CategoryInfo {
     pub parent: Option<MessageId>,
     pub allowed_roles: Vec<RoleId>,
     pub hidden: bool,
+    /// Homepage group that contains sections and has no posts
+    pub is_group: bool,
     /// Restricted category whose key this client does not hold.
     pub locked: bool,
 }
@@ -513,6 +524,7 @@ fn extract_category_info(
         parent: category.parent_category_id,
         allowed_roles: category.allowed_roles,
         hidden: category.hidden,
+        is_group: category.is_group,
         locked,
     })
 }
@@ -1851,6 +1863,7 @@ pub fn get_subcategories(
         .iter()
         .filter(|m| {
             m.is_category
+                && !m.is_group
                 && m.parent_category_id.as_ref() == Some(category_id)
                 && !(m.category_hidden && m.category_locked)
         })

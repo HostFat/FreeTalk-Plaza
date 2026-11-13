@@ -520,6 +520,112 @@ pub async fn send_category(
     Ok(())
 }
 
+/// Create a homepage group. Groups contain sections and have no posts.
+pub async fn send_group(
+    name: String,
+    description: Option<String>,
+    icon: Option<String>,
+    color: String,
+) -> Result<(), String> {
+    use crate::components::app::CURRENT_BOARD;
+
+    let (current_board, board_key, self_sk, can_create, secret_opt) = {
+        let current_board_read = CURRENT_BOARD.read();
+        let boards_read = BOARDS.read();
+        let current_board = current_board_read.owner_key.ok_or("No board selected")?;
+        let board_data = boards_read
+            .map
+            .get(&current_board)
+            .ok_or("Board not found")?;
+        let can_create = board_data.can_create_categories();
+        let secret_opt = if board_data.is_private() {
+            board_data
+                .secrets
+                .iter()
+                .max_by_key(|(version, _)| *version)
+                .map(|(version, secret)| (*secret, *version))
+        } else {
+            None
+        };
+        (
+            current_board,
+            board_data.board_key(),
+            board_data.self_sk.clone(),
+            can_create,
+            secret_opt,
+        )
+    };
+
+    if !can_create {
+        return Err("Only board owners and admins can create groups".to_string());
+    }
+
+    let mut group = CategoryContentV1::new(name, description, color);
+    if let Some(icon) = icon {
+        group = group.with_icon(icon);
+    }
+    group = group.with_group();
+
+    let content = match secret_opt {
+        Some((secret, version)) => {
+            let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &group.encode());
+            BoardMessageBody::Private {
+                content_type: CONTENT_TYPE_CATEGORY,
+                content_version: CATEGORY_CONTENT_VERSION,
+                ciphertext,
+                nonce,
+                secret_version: version,
+                secret_scope: plaza_core::board_state::message::SecretScope::Board,
+            }
+        }
+        None => BoardMessageBody::public_raw(
+            CONTENT_TYPE_CATEGORY,
+            CATEGORY_CONTENT_VERSION,
+            group.encode(),
+        ),
+    };
+
+    let message = MessageV1 {
+        board_owner: MemberId::from(current_board),
+        author: MemberId::from(&self_sk.verifying_key()),
+        content,
+        time: get_current_system_time(),
+    };
+    let mut message_bytes = Vec::new();
+    ciborium::ser::into_writer(&message, &mut message_bytes)
+        .map_err(|e| format!("Failed to serialize message: {:?}", e))?;
+    let signature =
+        crate::signing::sign_message_with_fallback(board_key, message_bytes, &self_sk).await;
+    let auth_message = AuthorizedMessageV1::with_signature(message, signature);
+
+    let delta = ChatBoardStateV1Delta {
+        recent_messages: Some(vec![auth_message]),
+        ..Default::default()
+    };
+
+    let mut apply_error: Option<String> = None;
+    BOARDS.with_mut(|boards| {
+        if let Some(board_data) = boards.map.get_mut(&current_board) {
+            let state_before = board_data.board_state.clone();
+            if let Err(e) = board_data.board_state.apply_delta(
+                &state_before,
+                &ChatBoardParametersV1 {
+                    owner: current_board,
+                },
+                &Some(delta),
+            ) {
+                apply_error = Some(e);
+            } else {
+                mark_needs_sync(current_board);
+            }
+        }
+    });
+    match apply_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 /// Hand per-category secrets to members who are now in an allowed role.
 ///
 /// Only the owner signs these records, so this is a no-op on other clients.

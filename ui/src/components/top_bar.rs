@@ -260,19 +260,21 @@ pub fn TopBar() -> Element {
                             span { "⚙" }
                             span { "Admin" }
                         }
-                        // New Category button (uses current category as parent if viewing one)
+                        // New Section button (uses current section as parent if viewing one)
                         button {
                             class: "flex items-center gap-2 px-4 py-2.5 bg-accent hover:bg-accent/80 text-white font-medium rounded-xl transition-colors",
-                            title: "Create Category",
+                            title: "Create Section",
                             onclick: move |_| {
                                 let parent_id = CURRENT_CATEGORY.read().category_id.clone();
                                 CREATE_CATEGORY_MODAL.with_mut(|modal| {
                                     modal.show = true;
+                                    modal.is_group = false;
+                                    modal.parent_is_group = false;
                                     modal.parent_category_id = parent_id;
                                 });
                             },
                             span { "📁" }
-                            span { "Category" }
+                            span { "Section" }
                         }
                     }
                 }
@@ -338,11 +340,12 @@ pub fn TopBar() -> Element {
                                         let parent_id = CURRENT_CATEGORY.read().category_id.clone();
                                         CREATE_CATEGORY_MODAL.with_mut(|modal| {
                                             modal.show = true;
+                                            modal.is_group = false;
                                             modal.parent_category_id = parent_id;
                                         });
                                     },
                                     span { "📁" }
-                                    span { "New Category" }
+                                    span { "New Section" }
                                 }
                             }
                         }

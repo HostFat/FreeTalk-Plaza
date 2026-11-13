@@ -247,6 +247,7 @@ pub async fn edit_category(
     new_description: Option<String>,
     new_icon: Option<String>,
     new_color: String,
+    new_parent: Option<Option<MessageId>>,
 ) {
     if new_name.is_empty() {
         return;
@@ -261,26 +262,49 @@ pub async fn edit_category(
             // Keep the real name sealed and re-state the ACL so an edit cannot
             // turn a restricted category into a public one.
             let sealed_name = crate::util::ecies::seal_bytes(new_name.as_bytes(), &key, version);
-            let action = ActionContentV1::edit_category_sealed(
-                target_message_id.clone(),
-                CategoryEditPayload::placeholder_name(category.hidden),
-                new_description,
-                new_icon,
-                new_color,
-                sealed_name,
-                category.allowed_roles.clone(),
-                category.hidden,
-            );
+            let action = match new_parent.clone() {
+                Some(parent) => ActionContentV1::edit_category_sealed_with_parent(
+                    target_message_id.clone(),
+                    CategoryEditPayload::placeholder_name(category.hidden),
+                    new_description,
+                    new_icon,
+                    new_color,
+                    sealed_name,
+                    category.allowed_roles.clone(),
+                    category.hidden,
+                    parent,
+                ),
+                None => ActionContentV1::edit_category_sealed(
+                    target_message_id.clone(),
+                    CategoryEditPayload::placeholder_name(category.hidden),
+                    new_description,
+                    new_icon,
+                    new_color,
+                    sealed_name,
+                    category.allowed_roles.clone(),
+                    category.hidden,
+                ),
+            };
             seal_action_with(action, SecretScope::Category(category_id), &key, version)
         }
         _ => {
-            let action = ActionContentV1::edit_category(
-                target_message_id.clone(),
-                new_name,
-                new_description,
-                new_icon,
-                new_color,
-            );
+            let action = match new_parent.clone() {
+                Some(parent) => ActionContentV1::edit_category_with_parent(
+                    target_message_id.clone(),
+                    new_name,
+                    new_description,
+                    new_icon,
+                    new_color,
+                    parent,
+                ),
+                None => ActionContentV1::edit_category(
+                    target_message_id.clone(),
+                    new_name,
+                    new_description,
+                    new_icon,
+                    new_color,
+                ),
+            };
             match seal_action(&ctx, action, &target_message_id) {
                 Some(content) => content,
                 None => return,
@@ -289,6 +313,67 @@ pub async fn edit_category(
     };
 
     send_action_messages(ctx, vec![content]).await;
+}
+
+/// Build the action that moves a section to a new parent. Restricted sections
+/// keep their sealed name and ACL; the parent change does not need the key.
+fn move_category_action(
+    ctx: &ActionContext,
+    category_id: &MessageId,
+    new_parent: Option<MessageId>,
+) -> Option<BoardMessageBody> {
+    let category = ctx.category_content(category_id)?;
+    let action = if category.is_restricted() {
+        ActionContentV1::edit_category_sealed_with_parent(
+            category_id.clone(),
+            category.name.clone(),
+            category.description.clone(),
+            category.icon.clone(),
+            category.color.clone(),
+            category.sealed_name.clone()?,
+            category.allowed_roles.clone(),
+            category.hidden,
+            new_parent,
+        )
+    } else {
+        ActionContentV1::edit_category_with_parent(
+            category_id.clone(),
+            category.name.clone(),
+            category.description.clone(),
+            category.icon.clone(),
+            category.color.clone(),
+            new_parent,
+        )
+    };
+    seal_action(ctx, action, category_id)
+}
+
+/// Delete a group and move its sections to Ungrouped in the same delta.
+pub async fn delete_group(ctx: ActionContext, group_id: MessageId) -> Result<(), String> {
+    let children: Vec<MessageId> = ctx
+        .board_state
+        .recent_messages
+        .messages
+        .iter()
+        .filter_map(|message| {
+            let category = ctx.category_content(&message.id())?;
+            (!category.is_group && category.parent_category_id.as_ref() == Some(&group_id))
+                .then(|| message.id())
+        })
+        .collect();
+
+    let mut contents = Vec::new();
+    for child in children {
+        let body = move_category_action(&ctx, &child, None)
+            .ok_or("Could not move a section out of the group")?;
+        contents.push(body);
+    }
+    let delete = ActionContentV1::delete(group_id.clone());
+    let body = seal_action(&ctx, delete, &group_id).ok_or("Could not seal the group deletion")?;
+    contents.push(body);
+
+    send_action_messages(ctx, contents).await;
+    Ok(())
 }
 
 // Helper to build remove reaction content

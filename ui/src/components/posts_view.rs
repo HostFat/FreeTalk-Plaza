@@ -1,6 +1,7 @@
 use crate::components::app::{
     CurrentCategoryContext, Route, BOARDS, CURRENT_BOARD, CURRENT_CATEGORY,
 };
+use crate::components::category_create_modal::CREATE_CATEGORY_MODAL;
 use crate::components::category_view::{CategoryCard, CategoryEditData};
 use crate::components::conversation::{
     get_all_messages, get_category_posts, get_subcategories, get_top_level_categories,
@@ -239,9 +240,52 @@ fn PostRow(
     }
 }
 
+/// A section row, used under a group, in Ungrouped, and in a section page.
+#[component]
+fn SectionRow(
+    category: MessageData,
+    self_member_id: MemberId,
+    is_owner: bool,
+    is_admin: bool,
+    post_count: usize,
+    last_activity: Option<(String, String)>,
+    #[props(default)] groups: Vec<(MessageId, String)>,
+    #[props(default)] allow_group_change: bool,
+    on_edit: EventHandler<CategoryEditData>,
+    on_delete: EventHandler<MessageId>,
+    board_id: String,
+) -> Element {
+    let category_id = category.id_string();
+    let nav = navigator();
+    let nav_board = board_id.clone();
+    let nav_category = category_id.clone();
+    rsx! {
+        CategoryCard {
+            key: "{category_id}",
+            category: category,
+            self_member_id: self_member_id,
+            is_owner: is_owner,
+            is_admin: is_admin,
+            post_count: post_count,
+            last_activity: last_activity,
+            groups: groups,
+            allow_group_change: allow_group_change,
+            on_click: move |_| {
+                nav.push(Route::PostsInCategory {
+                    board_id: nav_board.clone(),
+                    category_id: nav_category.clone(),
+                });
+            },
+            on_edit: move |data| on_edit.call(data),
+            on_request_delete: move |id| on_delete.call(id),
+        }
+    }
+}
+
 #[component]
 pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
+    let mut pending_delete_group = use_signal(|| false);
     let mut recent_first = use_signal(|| false);
     // Posts rendered at a time; "Show more" grows it.
     let mut posts_limit = use_signal(|| 12usize);
@@ -302,6 +346,20 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
         .as_ref()
         .map(|cat| cat.category_locked)
         .unwrap_or(false);
+    // Used by the category header button, before board_info is destructured.
+    let can_manage_structure = current_board_data
+        .as_ref()
+        .map(|board| {
+            let self_id = MemberId::from(&board.self_sk.verifying_key());
+            self_id == MemberId::from(&board.owner_vk)
+                || board
+                    .board_state
+                    .admin
+                    .admins
+                    .iter()
+                    .any(|admin| admin.admin.id() == self_id)
+        })
+        .unwrap_or(false);
 
     // Update CURRENT_CATEGORY for auto-parenting posts/categories
     // Compare before writing to avoid unnecessary updates
@@ -337,6 +395,43 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
             });
         }
     };
+    // Deleting a group first moves its sections to Ungrouped.
+    let handle_delete_group = move |group_id: MessageId| {
+        if let Some(ctx) = ActionContext::from_current_board() {
+            spawn_local(async move {
+                if let Err(e) = message_actions::delete_group(ctx, group_id).await {
+                    dioxus::logger::tracing::error!("Failed to delete group: {}", e);
+                }
+            });
+        }
+    };
+
+    // Open the shared create modal in the three modes.
+    let open_group_modal = move |_| {
+        CREATE_CATEGORY_MODAL.with_mut(|modal| {
+            modal.show = true;
+            modal.is_group = true;
+            modal.parent_is_group = false;
+            modal.parent_category_id = None;
+        });
+    };
+    let open_section_in_group = move |group_id: MessageId| {
+        CREATE_CATEGORY_MODAL.with_mut(|modal| {
+            modal.show = true;
+            modal.is_group = false;
+            modal.parent_is_group = true;
+            modal.parent_category_id = Some(group_id);
+        });
+    };
+    let open_subsection = move |_| {
+        let parent = CURRENT_CATEGORY.read().category_id.clone();
+        CREATE_CATEGORY_MODAL.with_mut(|modal| {
+            modal.show = true;
+            modal.is_group = false;
+            modal.parent_is_group = false;
+            modal.parent_category_id = parent;
+        });
+    };
 
     // Handler for editing categories
     let handle_edit_category = move |edit_data: CategoryEditData| {
@@ -349,6 +444,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                     edit_data.new_description,
                     edit_data.new_icon,
                     edit_data.new_color,
+                    edit_data.new_parent,
                 )
                 .await;
             });
@@ -456,15 +552,29 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                     }
                                                 }
                                                 if !category_is_locked {
-                                                    button {
-                                                        r#type: "button",
-                                                        class: "flex-shrink-0 flex items-center gap-2 px-4 py-2 bg-accent hover:bg-accent/80 text-white text-sm font-medium rounded-lg transition-colors",
-                                                        title: "Write a new post in this category",
-                                                        onclick: move |_| {
-                                                            *crate::components::app::COMPOSE_REQUEST.write() += 1;
-                                                        },
-                                                        span { "✏️" }
-                                                        span { "New post" }
+                                                    div { class: "flex items-center gap-2 flex-shrink-0",
+                                                        button {
+                                                            r#type: "button",
+                                                            class: "flex items-center gap-2 px-4 py-2 bg-accent hover:bg-accent/80 text-white text-sm font-medium rounded-lg transition-colors",
+                                                            title: "Write a new post in this category",
+                                                            onclick: move |_| {
+                                                                *crate::components::app::COMPOSE_REQUEST.write() += 1;
+                                                            },
+                                                            span { "✏️" }
+                                                            span { "New post" }
+                                                        }
+                                                        if can_manage_structure {
+                                                            button {
+                                                                r#type: "button",
+                                                                class: "px-3 py-2 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg transition-colors",
+                                                                title: "Create a subsection inside this section",
+                                                                onclick: {
+                                                                    let handler = open_subsection.clone();
+                                                                    move |_| handler(())
+                                                                },
+                                                                "+ Subsection"
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -499,8 +609,96 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                     (self_member_id, is_owner, is_admin)
                                 });
 
-                            let has_categories = !categories.is_empty();
                             let has_posts = !posts.is_empty();
+                            let (viewer_is_owner, viewer_is_admin) = current_board_data
+                                .as_ref()
+                                .map(|board| {
+                                    let self_id = MemberId::from(&board.self_sk.verifying_key());
+                                    (
+                                        self_id == MemberId::from(&board.owner_vk),
+                                        board
+                                            .board_state
+                                            .admin
+                                            .admins
+                                            .iter()
+                                            .any(|admin| admin.admin.id() == self_id),
+                                    )
+                                })
+                                .unwrap_or((false, false));
+
+                            // Groups are homepage-only headings. Sections in a
+                            // group are their children; top-level sections with
+                            // no group go under Ungrouped.
+                            let root_groups: Vec<MessageData> = if viewing_category {
+                                Vec::new()
+                            } else {
+                                all_messages
+                                    .iter()
+                                    .filter(|message| {
+                                        message.is_category
+                                            && message.is_group
+                                            && message.parent_category_id.is_none()
+                                    })
+                                    .cloned()
+                                    .collect()
+                            };
+                            let mut sections_by_group: HashMap<MessageId, Vec<MessageData>> =
+                                HashMap::new();
+                            let ungrouped_sections: Vec<MessageData> = if viewing_category {
+                                Vec::new()
+                            } else {
+                                all_messages
+                                    .iter()
+                                    .filter(|message| {
+                                        message.is_category
+                                            && !message.is_group
+                                            && !(message.category_hidden
+                                                && message.category_locked)
+                                    })
+                                    .filter(|message| {
+                                        if let Some(parent) = message.parent_category_id.as_ref() {
+                                            sections_by_group
+                                                .entry(parent.clone())
+                                                .or_default()
+                                                .push((*message).clone());
+                                            false
+                                        } else {
+                                            true
+                                        }
+                                    })
+                                    .cloned()
+                                    .collect()
+                            };
+                            let groups: Vec<MessageData> = root_groups
+                                .into_iter()
+                                .filter(|group| {
+                                    viewer_is_owner
+                                        || viewer_is_admin
+                                        || sections_by_group
+                                            .get(&group.message_id)
+                                            .map(|sections| !sections.is_empty())
+                                            .unwrap_or(false)
+                                })
+                                .collect();
+                            // The root always shows the Groups block, so the
+                            // owner can create the first group on a new board.
+                            let has_categories = if viewing_category {
+                                !categories.is_empty()
+                            } else {
+                                true
+                            };
+                            let group_options: Vec<(MessageId, String)> = groups
+                                .iter()
+                                .map(|group| {
+                                    (
+                                        group.message_id.clone(),
+                                        group
+                                            .category_name
+                                            .clone()
+                                            .unwrap_or_else(|| "Unnamed".to_string()),
+                                    )
+                                })
+                                .collect();
 
                             // Parent -> direct replies, shared by the post and
                             // category summaries below.
@@ -546,10 +744,18 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
 
                             // Posts and latest activity inside each category,
                             // including its subcategories.
+                            let stats_targets: Vec<&MessageData> = if viewing_category {
+                                categories.iter().collect()
+                            } else {
+                                ungrouped_sections
+                                    .iter()
+                                    .chain(sections_by_group.values().flatten())
+                                    .collect()
+                            };
                             let category_summaries: HashMap<
                                 MessageId,
                                 (usize, Option<(String, String)>),
-                            > = categories
+                            > = stats_targets
                                 .iter()
                                 .map(|category| {
                                     (
@@ -569,52 +775,179 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                     }
                                 } else {
                                     rsx! {
-                                        // Categories grid
-                                        if has_categories {
+                                        // Homepage: groups with their sections,
+                                        // then sections without a group.
+                                        if !viewing_category {
                                             div { class: "mb-8",
-                                                if has_posts || !viewing_category {
-                                                    h2 { class: "text-lg font-semibold text-text-muted mb-4 flex items-center gap-2",
-                                                        if viewing_category { "Subcategories" } else { "Categories" }
+                                                div { class: "flex items-center justify-between mb-3",
+                                                    h2 { class: "text-lg font-semibold text-text-muted", "Groups" }
+                                                    if is_owner || is_admin {
+                                                        button {
+                                                            r#type: "button",
+                                                            class: "px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
+                                                            onclick: open_group_modal,
+                                                            "+ Group"
+                                                        }
                                                     }
                                                 }
-                                                div { class: "space-y-2",
-                                                    {categories.iter().map({
-                                                        let handle_edit_category = handle_edit_category.clone();
-                                                        move |cat| {
-                                                            let cat_id = cat.id_string();
-                                                            let board_id = current_board_id.read().clone();
-                                                            let nav = navigator();
-                                                            let handle_edit_category = handle_edit_category.clone();
-                                                            let (category_posts, category_last) =
-                                                                category_summaries
-                                                                    .get(&cat.message_id)
-                                                                    .cloned()
-                                                                    .unwrap_or_default();
-                                                            rsx! {
+
+                                                for group in groups.iter() {
+                                                    {
+                                                        let group_id = group.message_id.clone();
+                                                        let group_key = group.id_string();
+                                                        let sections = sections_by_group
+                                                            .get(&group_id)
+                                                            .cloned()
+                                                            .unwrap_or_default();
+                                                        let section_count = sections.len();
+                                                        let board_id = current_board_id.read().clone();
+                                                        let open_group_section =
+                                                            open_section_in_group.clone();
+                                                        let edit_handler = handle_edit_category.clone();
+                                                        rsx! {
+                                                            div { key: "group-{group_key}", class: "mb-5",
                                                                 CategoryCard {
-                                                                    key: "{cat_id}",
-                                                                    category: cat.clone(),
+                                                                    category: group.clone(),
                                                                     self_member_id: self_member_id,
                                                                     is_owner: is_owner,
                                                                     is_admin: is_admin,
-                                                                    post_count: category_posts,
-                                                                    last_activity: category_last,
-                                                                    on_click: move |_| {
-                                                                        nav.push(Route::PostsInCategory {
-                                                                            board_id: board_id.clone(),
-                                                                            category_id: cat_id.clone(),
-                                                                        });
+                                                                    post_count: section_count,
+                                                                    last_activity: None,
+                                                                    on_click: move |_| {},
+                                                                    on_new_section: move |_| {
+                                                                        open_group_section(group_id.clone())
                                                                     },
-                                                                    on_edit: move |edit_data| {
-                                                                        handle_edit_category(edit_data);
+                                                                    on_edit: move |data| edit_handler(data),
+                                                                    on_request_delete: move |id| {
+                                                                        pending_delete.set(Some(id));
+                                                                        pending_delete_group.set(true);
                                                                     },
-                                                                    on_request_delete: move |msg_id| {
-                                                                        pending_delete.set(Some(msg_id));
-                                                                    },
+                                                                }
+                                                                if !sections.is_empty() {
+                                                                    div { class: "mt-2 ml-4 pl-4 border-l border-border space-y-2",
+                                                                        for section in sections.iter() {
+                                                                            {
+                                                                                let (count, last) = category_summaries
+                                                                                    .get(&section.message_id)
+                                                                                    .cloned()
+                                                                                    .unwrap_or_default();
+                                                                                let edit_handler = handle_edit_category.clone();
+                                                                                rsx! {
+                                                                                    SectionRow {
+                                                                                        category: section.clone(),
+                                                                                        self_member_id: self_member_id,
+                                                                                        is_owner: is_owner,
+                                                                                        is_admin: is_admin,
+                                                                                        post_count: count,
+                                                                                        last_activity: last,
+                                                                                        groups: group_options.clone(),
+                                                                                        allow_group_change: true,
+                                                                                        board_id: board_id.clone(),
+                                                                                        on_edit: move |data| edit_handler(data),
+                                                                                        on_delete: move |id| {
+                                                                            pending_delete.set(Some(id));
+                                                                            pending_delete_group.set(false);
+                                                                        },
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
                                                                 }
                                                             }
                                                         }
-                                                    })}
+                                                    }
+                                                }
+
+                                                if !ungrouped_sections.is_empty() {
+                                                    h2 { class: "text-lg font-semibold text-text-muted mb-3 mt-6", "Ungrouped" }
+                                                    div { class: "space-y-2",
+                                                        for section in ungrouped_sections.iter() {
+                                                            {
+                                                                let (count, last) = category_summaries
+                                                                    .get(&section.message_id)
+                                                                    .cloned()
+                                                                    .unwrap_or_default();
+                                                                let edit_handler = handle_edit_category.clone();
+                                                                let board_id = current_board_id.read().clone();
+                                                                rsx! {
+                                                                    SectionRow {
+                                                                        category: section.clone(),
+                                                                        self_member_id: self_member_id,
+                                                                        is_owner: is_owner,
+                                                                        is_admin: is_admin,
+                                                                        post_count: count,
+                                                                        last_activity: last,
+                                                                        groups: group_options.clone(),
+                                                                        allow_group_change: true,
+                                                                        board_id: board_id,
+                                                                        on_edit: move |data| edit_handler(data),
+                                                                        on_delete: move |id| {
+                                                                            pending_delete.set(Some(id));
+                                                                            pending_delete_group.set(false);
+                                                                        },
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Section page: its subsections.
+                                        if viewing_category {
+                                            div { class: "mb-8",
+                                                div { class: "flex items-center justify-between mb-3",
+                                                    h2 { class: "text-lg font-semibold text-text-muted", "Subsections" }
+                                                    if is_owner || is_admin {
+                                                        button {
+                                                            r#type: "button",
+                                                            class: "px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
+                                                            onclick: move |_| {
+                                                                let parent = CURRENT_CATEGORY
+                                                                    .read()
+                                                                    .category_id
+                                                                    .clone();
+                                                                CREATE_CATEGORY_MODAL.with_mut(|modal| {
+                                                                    modal.show = true;
+                                                                    modal.is_group = false;
+                                                                    modal.parent_category_id = parent;
+                                                                });
+                                                            },
+                                                            "+ Subsection"
+                                                        }
+                                                    }
+                                                }
+                                                if !categories.is_empty() {
+                                                    div { class: "space-y-2",
+                                                        for category in categories.iter() {
+                                                            {
+                                                                let (count, last) = category_summaries
+                                                                    .get(&category.message_id)
+                                                                    .cloned()
+                                                                    .unwrap_or_default();
+                                                                let edit_handler = handle_edit_category.clone();
+                                                                let board_id = current_board_id.read().clone();
+                                                                rsx! {
+                                                                    SectionRow {
+                                                                        category: category.clone(),
+                                                                        self_member_id: self_member_id,
+                                                                        is_owner: is_owner,
+                                                                        is_admin: is_admin,
+                                                                        post_count: count,
+                                                                        last_activity: last,
+                                                                        board_id: board_id,
+                                                                        on_edit: move |data| edit_handler(data),
+                                                                        on_delete: move |id| {
+                                                                            pending_delete.set(Some(id));
+                                                                            pending_delete_group.set(false);
+                                                                        },
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -713,25 +1046,42 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                             class: "bg-panel rounded-lg shadow-xl p-6 max-w-sm mx-4",
                             onclick: move |e| e.stop_propagation(),
                             h3 { class: "text-lg font-semibold text-text mb-2",
-                                "Delete Post?"
+                                if *pending_delete_group.read() {
+                                    "Delete Group?"
+                                } else {
+                                    "Delete Post?"
+                                }
                             }
                             p { class: "text-text-muted text-sm mb-4",
-                                "This action cannot be undone."
+                                if *pending_delete_group.read() {
+                                    "The group is removed and its sections are moved to Ungrouped."
+                                } else {
+                                    "This action cannot be undone."
+                                }
                             }
                             div { class: "flex gap-3 justify-end",
                                 button {
                                     class: "px-4 py-2 rounded-lg bg-surface hover:bg-surface/80 text-text transition-colors",
-                                    onclick: move |_| pending_delete.set(None),
+                                    onclick: move |_| {
+                                        pending_delete.set(None);
+                                        pending_delete_group.set(false);
+                                    },
                                     "Cancel"
                                 }
                                 button {
                                     class: "px-4 py-2 rounded-lg bg-red-500 hover:bg-red-600 text-white transition-colors",
                                     onclick: move |_| {
                                         let msg_id_opt = pending_delete.read().clone();
+                                        let is_group = *pending_delete_group.read();
                                         if let Some(msg_id) = msg_id_opt {
-                                            handle_delete_message(msg_id);
+                                            if is_group {
+                                                handle_delete_group(msg_id);
+                                            } else {
+                                                handle_delete_message(msg_id);
+                                            }
                                         }
                                         pending_delete.set(None);
+                                        pending_delete_group.set(false);
                                     },
                                     "Delete"
                                 }

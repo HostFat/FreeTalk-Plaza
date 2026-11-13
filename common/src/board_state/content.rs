@@ -146,6 +146,35 @@ impl ActionContentV1 {
                 sealed_name: None,
                 allowed_roles: Vec::new(),
                 hidden: false,
+                set_parent: false,
+                new_parent: None,
+            }),
+        }
+    }
+
+    /// Edit a section and move it to another parent (a group or another
+    /// section). `new_parent = None` means ungrouped.
+    pub fn edit_category_with_parent(
+        target: MessageId,
+        new_name: String,
+        new_description: Option<String>,
+        new_icon: Option<String>,
+        new_color: String,
+        new_parent: Option<MessageId>,
+    ) -> Self {
+        Self {
+            action_type: ACTION_TYPE_EDIT_CATEGORY,
+            target,
+            payload: encode_cbor(&CategoryEditPayload {
+                new_name,
+                new_description,
+                new_icon,
+                new_color,
+                sealed_name: None,
+                allowed_roles: Vec::new(),
+                hidden: false,
+                set_parent: true,
+                new_parent,
             }),
         }
     }
@@ -174,6 +203,38 @@ impl ActionContentV1 {
                 sealed_name: Some(sealed_name),
                 allowed_roles,
                 hidden,
+                set_parent: false,
+                new_parent: None,
+            }),
+        }
+    }
+
+    /// Edit a restricted section and move it to another parent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_category_sealed_with_parent(
+        target: MessageId,
+        placeholder_name: String,
+        new_description: Option<String>,
+        new_icon: Option<String>,
+        new_color: String,
+        sealed_name: crate::board_state::privacy::SealedBytes,
+        allowed_roles: Vec<crate::board_state::roles::RoleId>,
+        hidden: bool,
+        new_parent: Option<MessageId>,
+    ) -> Self {
+        Self {
+            action_type: ACTION_TYPE_EDIT_CATEGORY,
+            target,
+            payload: encode_cbor(&CategoryEditPayload {
+                new_name: placeholder_name,
+                new_description,
+                new_icon,
+                new_color,
+                sealed_name: Some(sealed_name),
+                allowed_roles,
+                hidden,
+                set_parent: true,
+                new_parent,
             }),
         }
     }
@@ -248,6 +309,14 @@ pub struct CategoryEditPayload {
     pub allowed_roles: Vec<crate::board_state::roles::RoleId>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
+    /// Set to true when `new_parent` should replace the parent. Omitted for
+    /// ordinary edits so old payloads keep their bytes.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub set_parent: bool,
+    /// New parent: a group or a section. `None` means ungrouped. Only read
+    /// when `set_parent` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_parent: Option<MessageId>,
 }
 
 /// Keeps new default fields out of the bytes that signatures cover.
@@ -337,6 +406,10 @@ pub struct CategoryContentV1 {
     /// Keep the category out of listings for members without the secret.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
+    /// A group is a homepage-only heading that contains sections. Groups have
+    /// no posts. Omitted at false so old categories keep their bytes.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_group: bool,
 }
 
 impl CategoryContentV1 {
@@ -351,7 +424,18 @@ impl CategoryContentV1 {
             allowed_roles: Vec::new(),
             sealed_name: None,
             hidden: false,
+            is_group: false,
         }
+    }
+
+    /// Turn this category into a homepage group. Groups are never restricted
+    /// and never contain posts.
+    pub fn with_group(mut self) -> Self {
+        self.is_group = true;
+        self.allowed_roles.clear();
+        self.sealed_name = None;
+        self.hidden = false;
+        self
     }
 
     /// Restrict the category to the given roles. The real name must be supplied
@@ -635,6 +719,74 @@ mod tests {
         let encoded = category.encode();
         let decoded = CategoryContentV1::decode(&encoded).unwrap();
         assert_eq!(decoded.parent_category_id, Some(parent_id));
+    }
+
+    /// Adding `is_group` must not change the bytes of existing categories.
+    #[test]
+    fn a_category_without_group_roundtrips_unchanged() {
+        let category = CategoryContentV1::new(
+            "General".to_string(),
+            Some("General discussion".to_string()),
+            "#6366f1".to_string(),
+        );
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&category, &mut bytes).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("is_group"));
+
+        let decoded: CategoryContentV1 = ciborium::from_reader(&bytes[..]).unwrap();
+        let mut again = Vec::new();
+        ciborium::into_writer(&decoded, &mut again).unwrap();
+        assert_eq!(bytes, again);
+    }
+
+    #[test]
+    fn a_group_roundtrips() {
+        let group = CategoryContentV1::new(
+            "Local".to_string(),
+            Some("Language sections".to_string()),
+            "#6366f1".to_string(),
+        )
+        .with_group();
+        assert!(group.is_group);
+        let decoded = CategoryContentV1::decode(&group.encode()).unwrap();
+        assert!(decoded.is_group);
+    }
+
+    /// Ordinary edits must not grow their signed payload with parent fields.
+    #[test]
+    fn an_ordinary_category_edit_roundtrips_unchanged() {
+        let action = ActionContentV1::edit_category(
+            test_message_id(),
+            "Name".to_string(),
+            None,
+            None,
+            "#6366f1".to_string(),
+        );
+        let payload = action.category_edit_payload().unwrap();
+        assert!(!payload.set_parent);
+        assert!(payload.new_parent.is_none());
+
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&payload, &mut bytes).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("set_parent"));
+        assert!(!text.contains("new_parent"));
+    }
+
+    #[test]
+    fn a_category_edit_can_move_the_section() {
+        let parent = test_message_id();
+        let action = ActionContentV1::edit_category_with_parent(
+            test_message_id(),
+            "Name".to_string(),
+            None,
+            None,
+            "#6366f1".to_string(),
+            Some(parent.clone()),
+        );
+        let payload = action.category_edit_payload().unwrap();
+        assert!(payload.set_parent);
+        assert_eq!(payload.new_parent, Some(parent));
     }
 
     #[test]
