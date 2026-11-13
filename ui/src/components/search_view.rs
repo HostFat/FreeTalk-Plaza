@@ -21,6 +21,7 @@ pub fn SearchView() -> Element {
             self_id,
             &board.secrets,
             &board.category_secrets,
+            &board.old_category_secrets,
         );
         Some((board.owner_vk, messages))
     });

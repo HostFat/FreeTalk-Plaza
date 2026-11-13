@@ -64,6 +64,9 @@ pub struct Role {
     pub can_close_posts: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub can_pin_posts: bool,
+    /// Move, merge and split posts between sections.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub can_move_posts: bool,
     /// Sections where the moderation powers apply, including their
     /// subsections. Empty means the whole board.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -124,6 +127,7 @@ pub enum ModerationPower {
     Delete,
     Close,
     Pin,
+    Move,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -451,6 +455,7 @@ impl RolesV1 {
                 ModerationPower::Delete => role.can_delete_posts,
                 ModerationPower::Close => role.can_close_posts,
                 ModerationPower::Pin => role.can_pin_posts,
+                ModerationPower::Move => role.can_move_posts,
             };
             enabled
                 && (role.scope.is_empty()
@@ -551,6 +556,7 @@ mod delegation_tests {
                 can_delete_posts: false,
                 can_close_posts: false,
                 can_pin_posts: false,
+                can_move_posts: false,
                 scope: Vec::new(),
                 deleted: false,
             },
@@ -656,6 +662,7 @@ mod delegation_tests {
             can_delete_posts: false,
             can_close_posts: false,
             can_pin_posts: false,
+            can_move_posts: false,
             scope: Vec::new(),
             deleted: false,
         };
@@ -684,6 +691,7 @@ mod delegation_tests {
             can_delete_posts: false,
             can_close_posts: false,
             can_pin_posts: false,
+            can_move_posts: false,
             scope: Vec::new(),
             deleted: false,
         };

@@ -23,6 +23,7 @@ pub fn NotificationsView() -> Element {
             self_id,
             &board.secrets,
             &board.category_secrets,
+            &board.old_category_secrets,
         );
         let nickname = notifications::self_nickname(&board, self_id);
         Some((

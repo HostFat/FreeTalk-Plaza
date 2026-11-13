@@ -81,6 +81,7 @@ pub fn RolesSection() -> Element {
     let mut role_delete = use_signal(|| false);
     let mut role_close = use_signal(|| false);
     let mut role_pin = use_signal(|| false);
+    let mut role_move = use_signal(|| false);
     let mut role_scope = use_signal(|| Vec::<plaza_core::board_state::message::MessageId>::new());
     let mut assign_index = use_signal(|| 0usize);
     let mut error = use_signal(|| None::<String>);
@@ -198,6 +199,10 @@ pub fn RolesSection() -> Element {
                         input { r#type: "checkbox", checked: *role_pin.read(), onchange: move |e| role_pin.set(e.checked()) }
                         "pin posts"
                     }
+                    label { class: "flex items-center gap-1",
+                        input { r#type: "checkbox", checked: *role_move.read(), onchange: move |e| role_move.set(e.checked()) }
+                        "move posts"
+                    }
                 }
                 div { class: "w-full",
                     p { class: "text-xs text-text-muted mb-1",
@@ -244,9 +249,11 @@ pub fn RolesSection() -> Element {
                         let delete = *role_delete.read();
                         let close = *role_close.read();
                         let pin = *role_pin.read();
+                        let move_posts = *role_move.read();
                         let scope = role_scope.read().clone();
                         match access::create_role(
-                            name, manages, distributes, edit, delete, close, pin, scope,
+                            name, manages, distributes, edit, delete, close, pin, move_posts,
+                            scope,
                         ) {
                             Ok(()) => {
                                 role_name.set(String::new());
@@ -256,6 +263,7 @@ pub fn RolesSection() -> Element {
                                 role_delete.set(false);
                                 role_close.set(false);
                                 role_pin.set(false);
+                                role_move.set(false);
                                 role_scope.set(Vec::new());
                                 error.set(None);
                             }
@@ -281,6 +289,7 @@ pub fn RolesSection() -> Element {
                         let can_delete_posts = role.role.can_delete_posts;
                         let can_close_posts = role.role.can_close_posts;
                         let can_pin_posts = role.role.can_pin_posts;
+                        let can_move_posts = role.role.can_move_posts;
                         let role_scope_ids = role.role.scope.clone();
                         let scope_label = if role_scope_ids.is_empty() {
                             "whole board".to_string()
@@ -312,6 +321,7 @@ pub fn RolesSection() -> Element {
                                         (can_delete_posts, "delete"),
                                         (can_close_posts, "close"),
                                         (can_pin_posts, "pin"),
+                                        (can_move_posts, "move"),
                                     ] {
                                         if enabled {
                                             span { class: "text-xs text-accent", "{label}" }
@@ -327,6 +337,7 @@ pub fn RolesSection() -> Element {
                                                 ("delete", can_delete_posts, 1u8),
                                                 ("close", can_close_posts, 2u8),
                                                 ("pin", can_pin_posts, 3u8),
+                                                ("move", can_move_posts, 4u8),
                                             ] {
                                                 {
                                                     let scope = role_scope_ids.clone();
@@ -340,8 +351,10 @@ pub fn RolesSection() -> Element {
                                                                     let delete = if idx == 1 { evt.checked() } else { can_delete_posts };
                                                                     let close = if idx == 2 { evt.checked() } else { can_close_posts };
                                                                     let pin = if idx == 3 { evt.checked() } else { can_pin_posts };
+                                                                    let move_posts = if idx == 4 { evt.checked() } else { can_move_posts };
                                                                     let _ = access::update_role_moderation(
-                                                                        role_id, edit, delete, close, pin, scope.clone(),
+                                                                        role_id, edit, delete, close, pin,
+                                                                        move_posts, scope.clone(),
                                                                     );
                                                                 },
                                                             }
@@ -430,6 +443,7 @@ pub fn RolesSection() -> Element {
                                                                             can_delete_posts,
                                                                             can_close_posts,
                                                                             can_pin_posts,
+                                                                            can_move_posts,
                                                                             selected,
                                                                         );
                                                                     },

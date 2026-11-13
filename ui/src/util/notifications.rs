@@ -112,6 +112,7 @@ pub fn unread_count(board: &BoardData) -> usize {
         self_id,
         &board.secrets,
         &board.category_secrets,
+        &board.old_category_secrets,
     );
     collect(
         &messages,
@@ -201,6 +202,7 @@ mod tests {
             is_pending: false,
             is_announced: false,
             poll: None,
+            merged_into: None,
         }
     }
 

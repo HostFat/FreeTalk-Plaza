@@ -94,6 +94,11 @@ pub struct BoardData {
     /// disappear on reload.
     #[serde(default)]
     pub category_secrets: HashMap<MessageId, (u32, [u8; 32])>,
+
+    /// Keys from earlier versions of a rotated category, so messages sealed
+    /// before the rotation stay readable. Local to this member.
+    #[serde(default)]
+    pub old_category_secrets: HashMap<MessageId, HashMap<u32, [u8; 32]>>,
     /// The current (latest) secret version
     #[serde(skip)]
     pub current_secret_version: Option<u32>,
@@ -130,28 +135,46 @@ impl BoardData {
         let member_id = MemberId::from(&self.self_sk.verifying_key());
         let sets = self.board_state.category_secrets.categories.clone();
         for set in &sets {
-            let blob = set
+            let mut latest: Option<(u32, [u8; 32])> = None;
+            for blob in set
                 .encrypted_secrets
                 .iter()
                 .filter(|s| s.secret.member_id == member_id)
-                .max_by_key(|s| s.secret.secret_version);
-            let Some(blob) = blob else { continue };
-            let ephemeral = X25519PublicKey::from(blob.secret.sender_ephemeral_public_key);
-            match decrypt_secret_from_member_blob(
-                &blob.secret.ciphertext,
-                &blob.secret.nonce,
-                &ephemeral,
-                &self.self_sk,
-            ) {
-                Ok(secret) => {
-                    self.category_secrets.insert(
-                        set.category_id.clone(),
-                        (blob.secret.secret_version, secret),
+            {
+                let ephemeral = X25519PublicKey::from(blob.secret.sender_ephemeral_public_key);
+                let Ok(secret) = decrypt_secret_from_member_blob(
+                    &blob.secret.ciphertext,
+                    &blob.secret.nonce,
+                    &ephemeral,
+                    &self.self_sk,
+                ) else {
+                    dioxus::logger::tracing::warn!(
+                        "Failed to decrypt category secret v{}",
+                        blob.secret.secret_version
                     );
+                    continue;
+                };
+                let version = blob.secret.secret_version;
+                match latest {
+                    Some((best_version, best_key)) if best_version >= version => {
+                        self.old_category_secrets
+                            .entry(set.category_id.clone())
+                            .or_default()
+                            .insert(version, secret);
+                    }
+                    Some((best_version, best_key)) => {
+                        self.old_category_secrets
+                            .entry(set.category_id.clone())
+                            .or_default()
+                            .insert(best_version, best_key);
+                        latest = Some((version, secret));
+                    }
+                    None => latest = Some((version, secret)),
                 }
-                Err(e) => {
-                    dioxus::logger::tracing::warn!("Failed to decrypt category secret: {}", e);
-                }
+            }
+            if let Some((version, secret)) = latest {
+                self.category_secrets
+                    .insert(set.category_id.clone(), (version, secret));
             }
         }
 
@@ -191,7 +214,14 @@ impl BoardData {
                     .map(|secret| (*secret, *secret_version)),
                 SecretScope::Category(id) => self
                     .category_secret(id)
-                    .map(|(version, secret)| (secret, version)),
+                    .filter(|(version, _)| version == secret_version)
+                    .map(|(version, secret)| (secret, version))
+                    .or_else(|| {
+                        self.old_category_secrets
+                            .get(id)
+                            .and_then(|versions| versions.get(secret_version))
+                            .map(|secret| (*secret, *secret_version))
+                    }),
             },
             BoardMessageBody::Public { .. } => None,
         }
@@ -376,6 +406,58 @@ impl BoardData {
         readers: &[MemberId],
     ) -> CategorySecretSetDelta {
         self.category_secret_records(category_id, secret, version, readers, true)
+    }
+
+    /// Owner-only: open a new secret version for a restricted category and
+    /// hand it to the current readers. Posts sealed before the rotation stay
+    /// readable with the old key kept locally; the past is not re-encrypted.
+    pub fn rotate_category_secret(
+        &mut self,
+        category_id: &MessageId,
+    ) -> Result<CategorySecretsDelta, String> {
+        if self.self_sk.verifying_key() != self.owner_vk {
+            return Err("Only the board owner can rotate a category key".to_string());
+        }
+        let category = self
+            .restricted_categories()
+            .into_iter()
+            .find(|(id, _)| id == category_id)
+            .map(|(_, category)| category)
+            .ok_or("Not a restricted category")?;
+        let (old_version, old_key) = self
+            .category_secret(category_id)
+            .ok_or("No current key for this category")?;
+        let version = self
+            .board_state
+            .category_secrets
+            .current_version(category_id)
+            .unwrap_or(old_version)
+            + 1;
+        let secret = crate::util::ecies::generate_board_secret();
+        let readers = self.category_readers(&category);
+        let set = self.new_category_secret_set(category_id, &secret, version, &readers);
+        let delta = CategorySecretsDelta { sets: vec![set] };
+        let params = ChatBoardParametersV1 {
+            owner: self.owner_vk,
+        };
+        let before = self.board_state.clone();
+        self.board_state
+            .apply_delta(
+                &before,
+                &params,
+                &Some(plaza_core::board_state::ChatBoardStateV1Delta {
+                    category_secrets: Some(delta.clone()),
+                    ..Default::default()
+                }),
+            )
+            .map_err(|error| format!("Could not rotate the category key: {error}"))?;
+        self.old_category_secrets
+            .entry(category_id.clone())
+            .or_default()
+            .insert(old_version, old_key);
+        self.category_secrets
+            .insert(category_id.clone(), (version, secret));
+        Ok(delta)
     }
 
     /// Recompute edits, deletions and reactions, opening actions sealed with
@@ -1237,6 +1319,7 @@ impl Boards {
             invite_chain: vec![],
             self_member_info: None,
             category_secrets: HashMap::new(),
+            old_category_secrets: HashMap::new(),
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
@@ -1508,6 +1591,7 @@ mod tests {
                                 can_delete_posts: false,
                                 can_close_posts: false,
                                 can_pin_posts: false,
+                                can_move_posts: false,
                                 scope: Vec::new(),
                                 deleted: false,
                             },
@@ -1792,6 +1876,7 @@ mod tests {
             last_read_message_id: None,
             secrets: HashMap::new(),
             category_secrets: HashMap::new(),
+            old_category_secrets: HashMap::new(),
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
@@ -1869,6 +1954,7 @@ mod tests {
             last_read_message_id: None,
             secrets: HashMap::new(),
             category_secrets: HashMap::new(),
+            old_category_secrets: HashMap::new(),
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
@@ -1936,6 +2022,7 @@ mod tests {
                 last_read_message_id: None,
                 secrets: HashMap::new(),
                 category_secrets: HashMap::new(),
+                old_category_secrets: HashMap::new(),
                 collapsed_groups: Vec::new(),
                 last_visit: 0,
                 read_categories: HashMap::new(),

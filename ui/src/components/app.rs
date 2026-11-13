@@ -60,6 +60,10 @@ pub enum Route {
     AdminBanned { board_id: String },
     #[route("/board/:board_id/admin/moderation")]
     AdminModeration { board_id: String },
+    #[route("/board/:board_id/admin/structure")]
+    AdminStructure { board_id: String },
+    #[route("/board/:board_id/admin/audit")]
+    AdminAudit { board_id: String },
     #[route("/board/:board_id/admin/roles")]
     AdminRoles { board_id: String },
     #[route("/board/:board_id/admin/links")]
@@ -491,6 +495,22 @@ fn AdminBanned(board_id: String) -> Element {
 fn AdminModeration(board_id: String) -> Element {
     rsx! {
         BoardGate { board_id: board_id.clone(), AdminView { tab: "moderation".to_string() } }
+    }
+}
+
+/// Admin view, structure tab
+#[component]
+fn AdminStructure(board_id: String) -> Element {
+    rsx! {
+        BoardGate { board_id: board_id.clone(), AdminView { tab: "structure".to_string() } }
+    }
+}
+
+/// Admin view, audit tab
+#[component]
+fn AdminAudit(board_id: String) -> Element {
+    rsx! {
+        BoardGate { board_id: board_id.clone(), AdminView { tab: "audit".to_string() } }
     }
 }
 

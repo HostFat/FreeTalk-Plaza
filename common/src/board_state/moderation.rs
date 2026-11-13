@@ -63,6 +63,9 @@ pub struct PostFlag {
     /// Board-wide announcement, shown above every section.
     #[serde(default, skip_serializing_if = "is_false")]
     pub announced: bool,
+    /// Destination topic when this topic was merged. The source is hidden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_into: Option<MessageId>,
     pub generation: u64,
 }
 
@@ -97,10 +100,56 @@ impl AuthorizedPostFlag {
     }
 }
 
+/// A moderator-signed change of a post's parent, used to move a topic to
+/// another section, split a reply into a new topic, or move replies on merge.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct PostMove {
+    pub target: MessageId,
+    /// New parent: a category for a topic, a post for a reply. `None` moves a
+    /// topic to the board root.
+    pub new_parent: Option<MessageId>,
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub created_at: i64,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct AuthorizedPostMove {
+    pub change: PostMove,
+    pub signature: Signature,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<MemberId>,
+}
+
+impl AuthorizedPostMove {
+    pub fn new(change: PostMove, signing_key: &SigningKey) -> Self {
+        Self {
+            signature: sign_struct(&change, signing_key),
+            change,
+            signer: Some(MemberId::from(&signing_key.verifying_key())),
+        }
+    }
+
+    pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
+        self.signer.unwrap_or_else(|| parameters.owner_id())
+    }
+
+    pub fn verify_signature_with(&self, key: &VerifyingKey) -> Result<(), String> {
+        verify_struct(&self.change, &self.signature, key)
+            .map_err(|e| format!("Invalid post move signature: {}", e))
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
 pub struct ModerationV1 {
     pub routes: Vec<AuthorizedMessageRoute>,
     pub flags: Vec<AuthorizedPostFlag>,
+    #[serde(default)]
+    pub moves: Vec<AuthorizedPostMove>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -118,6 +167,13 @@ pub struct FlagState {
     pub pinned: bool,
     pub closed: bool,
     pub announced: bool,
+    pub merged_into: Option<MessageId>,
+    pub generation: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct MoveState {
+    pub new_parent: Option<MessageId>,
     pub generation: u64,
 }
 
@@ -125,6 +181,7 @@ pub struct FlagState {
 pub struct ModerationSummary {
     pub routes: BTreeMap<MessageId, RouteState>,
     pub flags: BTreeMap<MessageId, FlagState>,
+    pub moves: BTreeMap<MessageId, MoveState>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -133,6 +190,8 @@ pub struct ModerationDelta {
     pub routes: Vec<AuthorizedMessageRoute>,
     #[serde(default)]
     pub flags: Vec<AuthorizedPostFlag>,
+    #[serde(default)]
+    pub moves: Vec<AuthorizedPostMove>,
 }
 
 fn route_map(routes: &[AuthorizedMessageRoute]) -> BTreeMap<MessageId, RouteState> {
@@ -162,6 +221,7 @@ fn flag_map(flags: &[AuthorizedPostFlag]) -> BTreeMap<MessageId, FlagState> {
                 pinned: flag.flag.pinned,
                 closed: flag.flag.closed,
                 announced: flag.flag.announced,
+                merged_into: flag.flag.merged_into,
                 generation: flag.flag.generation,
             },
         );
@@ -203,6 +263,29 @@ pub(crate) fn is_owner_or_admin(
             .admins
             .iter()
             .any(|admin| admin.admin.id() == *actor)
+}
+
+/// A scoped moderator may move a post only when their Move power covers both
+/// the section it leaves and the one it enters.
+fn can_move(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    routes: &BTreeMap<MessageId, RouteState>,
+    signer: &MemberId,
+    target: &MessageId,
+    destination: &MessageId,
+) -> bool {
+    if is_owner_or_admin(state, parameters, signer) {
+        return true;
+    }
+    let from = category_chain(routes, target);
+    let to = category_chain(routes, destination);
+    state
+        .roles
+        .has_moderation_power(signer, ModerationPower::Move, &from)
+        && state
+            .roles
+            .has_moderation_power(signer, ModerationPower::Move, &to)
 }
 
 fn target_author(state: &ChatBoardStateV1, target: &MessageId) -> Option<MemberId> {
@@ -281,12 +364,28 @@ fn check_flag_permission(
     let pinned_changed = current.pinned != flag.pinned;
     let closed_changed = current.closed != flag.closed;
     let announced_changed = current.announced != flag.announced;
-    if !pinned_changed && !closed_changed && !announced_changed {
+    let merged_changed = current.merged_into != flag.merged_into;
+    if !pinned_changed && !closed_changed && !announced_changed && !merged_changed {
         return Err("Post flag does not change anything".to_string());
     }
     if announced_changed {
         // Announcements are board-wide, so only the owner and admins set them.
         return Err("Signer cannot announce this post".to_string());
+    }
+    if merged_changed {
+        let Some(destination) = flag.merged_into else {
+            return Err("Only the owner or an admin can undo a merge".to_string());
+        };
+        if !can_move(
+            state,
+            parameters,
+            routes,
+            signer,
+            &flag.target,
+            &destination,
+        ) {
+            return Err("Signer cannot merge this post".to_string());
+        }
     }
     let author = target_author(state, &flag.target);
     if closed_changed && author.as_ref() == Some(signer) {
@@ -336,6 +435,7 @@ fn verify_flag(
             pinned: entry.flag.pinned,
             closed: entry.flag.closed,
             announced: entry.flag.announced,
+            merged_into: entry.flag.merged_into,
             generation: entry.flag.generation,
         });
     check_flag_permission(
@@ -348,7 +448,110 @@ fn verify_flag(
     )
 }
 
+fn move_map(moves: &[AuthorizedPostMove]) -> BTreeMap<MessageId, MoveState> {
+    moves
+        .iter()
+        .map(|entry| {
+            (
+                entry.change.target,
+                MoveState {
+                    new_parent: entry.change.new_parent,
+                    generation: entry.change.generation,
+                },
+            )
+        })
+        .collect()
+}
+
+fn route_parent(routes: &BTreeMap<MessageId, RouteState>, id: &MessageId) -> Option<MessageId> {
+    routes.get(id).and_then(|route| {
+        if route.is_category {
+            route.parent_category_id
+        } else {
+            route.reply_to
+        }
+    })
+}
+
+fn verify_move(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    routes: &BTreeMap<MessageId, RouteState>,
+    entry: &AuthorizedPostMove,
+) -> Result<(), String> {
+    let signer = entry.signer_id(parameters);
+    let key = signer_key(state, parameters, &signer)?;
+    entry.verify_signature_with(&key)?;
+    let target = state
+        .recent_messages
+        .messages
+        .iter()
+        .find(|message| message.id() == entry.change.target)
+        .ok_or("Post move targets a missing message")?;
+    if target.message.content.is_category() {
+        return Err("Categories are moved with their edit action".to_string());
+    }
+    match entry.change.new_parent {
+        Some(parent_id) => {
+            if parent_id == entry.change.target {
+                return Err("A post cannot be moved under itself".to_string());
+            }
+            let parent = state
+                .recent_messages
+                .messages
+                .iter()
+                .find(|message| message.id() == parent_id)
+                .ok_or("Post move parent is missing")?;
+            if parent.message.content.is_action() {
+                return Err("Post move parent is not a post or section".to_string());
+            }
+            let mut current = Some(parent_id);
+            for _ in 0..64 {
+                let Some(id) = current else {
+                    break;
+                };
+                if id == entry.change.target {
+                    return Err("Post move would create a cycle".to_string());
+                }
+                current = route_parent(routes, &id);
+            }
+            if !can_move(
+                state,
+                parameters,
+                routes,
+                &signer,
+                &entry.change.target,
+                &parent_id,
+            ) {
+                return Err("Signer cannot move this post here".to_string());
+            }
+        }
+        None => {
+            if !is_owner_or_admin(state, parameters, &signer)
+                && !state
+                    .roles
+                    .has_moderation_power(&signer, ModerationPower::Move, &[])
+            {
+                return Err("Signer cannot move this post to the board root".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
 impl ModerationV1 {
+    pub fn moved_to(&self, target: &MessageId) -> Option<&Option<MessageId>> {
+        self.moves
+            .iter()
+            .filter(|entry| entry.change.target == *target)
+            .max_by_key(|entry| entry.change.generation)
+            .map(|entry| &entry.change.new_parent)
+    }
+
+    pub fn is_merged_into(&self, target: &MessageId) -> Option<MessageId> {
+        self.flag_for(target).and_then(|flag| flag.merged_into)
+    }
+
     pub fn route(&self, message_id: &MessageId) -> Option<&MessageRoute> {
         self.routes
             .iter()
@@ -452,6 +655,59 @@ impl ModerationV1 {
         }
         Ok(())
     }
+
+    /// Drop records whose message or signer is gone and keep one record per
+    /// target. Deterministic, like the other state cleanups.
+    pub fn cleanup(&mut self, state: &ChatBoardStateV1, parameters: &ChatBoardParametersV1) {
+        use std::collections::HashSet;
+        let live: HashSet<MessageId> = state
+            .recent_messages
+            .messages
+            .iter()
+            .map(|message| message.id())
+            .collect();
+        self.routes.retain(|entry| {
+            live.contains(&entry.route.message_id) && verify_route(state, parameters, entry).is_ok()
+        });
+        self.routes.sort_by_key(|entry| {
+            (
+                entry.route.message_id.0 .0,
+                entry.route.generation,
+                entry.signer_id(parameters).0 .0,
+            )
+        });
+        self.routes.dedup_by_key(|entry| entry.route.message_id);
+        self.routes.sort_by_key(|entry| entry.route.message_id.0 .0);
+
+        let routes = route_map(&self.routes);
+        self.flags.retain(|entry| {
+            live.contains(&entry.flag.target)
+                && verify_flag(state, parameters, &routes, entry).is_ok()
+        });
+        self.flags.sort_by_key(|entry| {
+            (
+                entry.flag.target.0 .0,
+                entry.flag.generation,
+                entry.signer_id(parameters).0 .0,
+            )
+        });
+        self.flags.dedup_by_key(|entry| entry.flag.target);
+        self.flags.sort_by_key(|entry| entry.flag.target.0 .0);
+
+        self.moves.retain(|entry| {
+            live.contains(&entry.change.target)
+                && verify_move(state, parameters, &routes, entry).is_ok()
+        });
+        self.moves.sort_by_key(|entry| {
+            (
+                entry.change.target.0 .0,
+                entry.change.generation,
+                entry.signer_id(parameters).0 .0,
+            )
+        });
+        self.moves.dedup_by_key(|entry| entry.change.target);
+        self.moves.sort_by_key(|entry| entry.change.target.0 .0);
+    }
 }
 
 impl ComposableState for ModerationV1 {
@@ -480,6 +736,13 @@ impl ComposableState for ModerationV1 {
             }
             verify_flag(parent_state, parameters, &routes, flag)?;
         }
+        let mut move_ids = std::collections::HashSet::new();
+        for entry in &self.moves {
+            if !move_ids.insert(entry.change.target) {
+                return Err("Duplicate post move".to_string());
+            }
+            verify_move(parent_state, parameters, &routes, entry)?;
+        }
         self.validate_actions(parent_state, parameters)
     }
 
@@ -491,6 +754,7 @@ impl ComposableState for ModerationV1 {
         ModerationSummary {
             routes: route_map(&self.routes),
             flags: flag_map(&self.flags),
+            moves: move_map(&self.moves),
         }
     }
 
@@ -524,10 +788,26 @@ impl ComposableState for ModerationV1 {
             })
             .cloned()
             .collect();
-        if routes.is_empty() && flags.is_empty() {
+        let moves: Vec<AuthorizedPostMove> = self
+            .moves
+            .iter()
+            .filter(|entry| {
+                old_state
+                    .moves
+                    .get(&entry.change.target)
+                    .map(|old| old.generation < entry.change.generation)
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        if routes.is_empty() && flags.is_empty() && moves.is_empty() {
             None
         } else {
-            Some(ModerationDelta { routes, flags })
+            Some(ModerationDelta {
+                routes,
+                flags,
+                moves,
+            })
         }
     }
 
@@ -571,6 +851,21 @@ impl ComposableState for ModerationV1 {
                 }
             }
         }
+        for entry in &delta.moves {
+            verify_move(parent_state, parameters, &routes, entry)?;
+            match self
+                .moves
+                .iter()
+                .find(|existing| existing.change.target == entry.change.target)
+            {
+                Some(existing) if existing.change.generation >= entry.change.generation => {}
+                _ => {
+                    self.moves
+                        .retain(|existing| existing.change.target != entry.change.target);
+                    self.moves.push(entry.clone());
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -591,6 +886,7 @@ mod tests {
     struct Board {
         state: ChatBoardStateV1,
         parameters: ChatBoardParametersV1,
+        owner_sk: SigningKey,
         member_sk: SigningKey,
         post: MessageId,
     }
@@ -640,6 +936,7 @@ mod tests {
         Board {
             state,
             parameters,
+            owner_sk,
             member_sk,
             post: post_id,
         }
@@ -673,6 +970,7 @@ mod tests {
                 pinned: false,
                 closed: true,
                 announced: false,
+                merged_into: None,
                 generation: 1,
             },
             &board.member_sk,
@@ -686,6 +984,43 @@ mod tests {
     }
 
     #[test]
+    fn only_moderators_move_posts() {
+        let mut board = board();
+        let by_member = AuthorizedPostMove::new(
+            PostMove {
+                target: board.post,
+                new_parent: None,
+                generation: 1,
+                created_at: 1,
+            },
+            &board.member_sk,
+        );
+        board.state.moderation.moves.push(by_member);
+        assert!(board
+            .state
+            .moderation
+            .verify(&board.state, &board.parameters)
+            .is_err());
+
+        board.state.moderation.moves.clear();
+        let owner_move = AuthorizedPostMove::new(
+            PostMove {
+                target: board.post,
+                new_parent: None,
+                generation: 1,
+                created_at: 1,
+            },
+            &board.owner_sk,
+        );
+        board.state.moderation.moves.push(owner_move);
+        assert!(board
+            .state
+            .moderation
+            .verify(&board.state, &board.parameters)
+            .is_ok());
+    }
+
+    #[test]
     fn members_cannot_announce_posts() {
         let mut board = board();
         let flag = AuthorizedPostFlag::new(
@@ -694,6 +1029,7 @@ mod tests {
                 pinned: false,
                 closed: false,
                 announced: true,
+                merged_into: None,
                 generation: 1,
             },
             &board.member_sk,

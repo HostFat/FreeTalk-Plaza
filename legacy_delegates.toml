@@ -54,3 +54,10 @@ description = "Delegated category key distribution and invite links that carry c
 date = "2026-11-12"
 delegate_key = "c8bf8dcd9c13b3ee48ef8cb8e0e6988c06d1468d4d36026ff5780811d9c6f476"
 code_hash = "125665757a756a381595609cbae10daafa6c84609238a72b1e118d9a02634941"
+
+[[entry]]
+version = "V6"
+description = "Phase 2: reports, approval queue, announcements and polls"
+date = "2026-11-13"
+delegate_key = "4bcd537a1287c2699e2b90c594a34c081851886b5c1a869ac06f2ef44445e467"
+code_hash = "89a0cc4d05284649e9524befa24aa566f72a755a0cd6f7a1d2dc6487fc1e10cb"

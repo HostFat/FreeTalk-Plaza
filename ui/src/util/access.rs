@@ -177,6 +177,7 @@ pub fn create_role(
     can_delete_posts: bool,
     can_close_posts: bool,
     can_pin_posts: bool,
+    can_move_posts: bool,
     mut scope: Vec<MessageId>,
 ) -> Result<(), String> {
     let name = name.trim().to_string();
@@ -200,6 +201,7 @@ pub fn create_role(
             can_delete_posts,
             can_close_posts,
             can_pin_posts,
+            can_move_posts,
             scope,
             deleted: false,
         };
@@ -226,6 +228,7 @@ pub fn update_role_moderation(
     can_delete_posts: bool,
     can_close_posts: bool,
     can_pin_posts: bool,
+    can_move_posts: bool,
     mut scope: Vec<MessageId>,
 ) -> Result<(), String> {
     scope.sort();
@@ -245,6 +248,7 @@ pub fn update_role_moderation(
             can_delete_posts,
             can_close_posts,
             can_pin_posts,
+            can_move_posts,
             scope,
             ..current
         };

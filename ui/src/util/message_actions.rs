@@ -8,14 +8,17 @@ use dioxus::prelude::*;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use plaza_core::board_state::content::{
-    ActionContentV1, CategoryContentV1, CategoryEditPayload, ModerationActionV1,
+    ActionContentV1, CategoryContentV1, CategoryEditPayload, ModerationActionV1, ReplyContentV1,
     ACTION_CONTENT_VERSION, CONTENT_TYPE_ACTION, CONTENT_TYPE_MODERATION_ACTION,
+    CONTENT_TYPE_REPLY, REPLY_CONTENT_VERSION,
 };
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::{
     AuthorizedMessageV1, BoardMessageBody, MessageId, MessageV1, SecretScope,
 };
-use plaza_core::board_state::moderation::{AuthorizedPostFlag, ModerationDelta, PostFlag};
+use plaza_core::board_state::moderation::{
+    AuthorizedPostFlag, AuthorizedPostMove, ModerationDelta, PostFlag, PostMove,
+};
 use plaza_core::board_state::privacy::SealedBytes;
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
 use plaza_core::chat_delegate::BoardKey;
@@ -323,6 +326,7 @@ pub fn set_post_flag(
             pinned: false,
             closed: false,
             announced: false,
+            merged_into: None,
             generation: 0,
         });
     let flag = PostFlag {
@@ -330,6 +334,7 @@ pub fn set_post_flag(
         pinned: pinned.unwrap_or(current.pinned),
         closed: closed.unwrap_or(current.closed),
         announced: announced.unwrap_or(current.announced),
+        merged_into: current.merged_into,
         generation: current.generation + 1,
     };
     let authorized = AuthorizedPostFlag::new(flag, &ctx.self_sk);
@@ -337,6 +342,7 @@ pub fn set_post_flag(
         moderation: Some(ModerationDelta {
             routes: Vec::new(),
             flags: vec![authorized],
+            moves: Vec::new(),
         }),
         ..Default::default()
     };
@@ -359,6 +365,179 @@ pub fn set_post_flag(
     }
     crate::components::app::mark_needs_sync(owner);
     Ok(())
+}
+
+fn next_move_generation(ctx: &ActionContext, target: &MessageId) -> u64 {
+    ctx.board_state
+        .moderation
+        .moves
+        .iter()
+        .filter(|entry| entry.change.target == *target)
+        .map(|entry| entry.change.generation)
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+pub(crate) fn apply_state_delta(
+    ctx: &ActionContext,
+    delta: ChatBoardStateV1Delta,
+) -> Result<(), String> {
+    let parent = ctx.board_state.clone();
+    let owner = ctx.current_board;
+    let mut error: Option<String> = None;
+    BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.map.get_mut(&owner) {
+            if let Err(e) = board.board_state.apply_delta(
+                &parent,
+                &ChatBoardParametersV1 { owner },
+                &Some(delta),
+            ) {
+                error = Some(e);
+            }
+        }
+    });
+    if let Some(error) = error {
+        return Err(error);
+    }
+    mark_needs_sync(owner);
+    Ok(())
+}
+
+/// Move a topic to another section, or a reply under another topic.
+pub fn move_post(
+    ctx: &ActionContext,
+    target: MessageId,
+    new_parent: Option<MessageId>,
+) -> Result<(), String> {
+    let change = PostMove {
+        target,
+        new_parent,
+        generation: next_move_generation(ctx, &target),
+        created_at: chrono::Utc::now().timestamp_millis(),
+    };
+    let delta = ChatBoardStateV1Delta {
+        moderation: Some(ModerationDelta {
+            routes: Vec::new(),
+            flags: Vec::new(),
+            moves: vec![AuthorizedPostMove::new(change, &ctx.self_sk)],
+        }),
+        ..Default::default()
+    };
+    apply_state_delta(ctx, delta)
+}
+
+/// Merge a topic into another one: hide the source, close it, and move its
+/// direct replies under the destination. Descendants follow their parent.
+pub fn merge_topic(
+    ctx: &ActionContext,
+    source: MessageId,
+    destination: MessageId,
+    direct_replies: Vec<MessageId>,
+) -> Result<(), String> {
+    if source == destination {
+        return Err("A topic cannot be merged into itself".to_string());
+    }
+    let current = ctx
+        .board_state
+        .moderation
+        .flag_for(&source)
+        .cloned()
+        .unwrap_or(PostFlag {
+            target: source,
+            pinned: false,
+            closed: false,
+            announced: false,
+            merged_into: None,
+            generation: 0,
+        });
+    let flag = PostFlag {
+        target: source,
+        pinned: current.pinned,
+        closed: true,
+        announced: current.announced,
+        merged_into: Some(destination),
+        generation: current.generation + 1,
+    };
+    let moves: Vec<AuthorizedPostMove> = direct_replies
+        .into_iter()
+        .filter(|reply| *reply != destination)
+        .map(|reply| {
+            let change = PostMove {
+                target: reply,
+                new_parent: Some(destination),
+                generation: next_move_generation(ctx, &reply),
+                created_at: chrono::Utc::now().timestamp_millis(),
+            };
+            AuthorizedPostMove::new(change, &ctx.self_sk)
+        })
+        .collect();
+    let delta = ChatBoardStateV1Delta {
+        moderation: Some(ModerationDelta {
+            routes: Vec::new(),
+            flags: vec![AuthorizedPostFlag::new(flag, &ctx.self_sk)],
+            moves,
+        }),
+        ..Default::default()
+    };
+    apply_state_delta(ctx, delta)
+}
+
+/// Split one reply into a new topic in its section: create the topic, then
+/// move the reply under it.
+pub async fn split_reply(
+    ctx: &ActionContext,
+    reply: MessageId,
+    category: MessageId,
+    category_author: String,
+    category_preview: String,
+    title: String,
+) -> Result<(), String> {
+    let reply_content = ReplyContentV1::new(
+        title,
+        String::new(),
+        category,
+        category_author,
+        category_preview,
+    );
+    let content_bytes = reply_content.encode();
+    let (content_type, content_version) = (CONTENT_TYPE_REPLY, REPLY_CONTENT_VERSION);
+    let category_secret = ctx.category_secret_for(&category);
+    let content = if let Some((category_id, secret, version)) = category_secret {
+        let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes);
+        BoardMessageBody::Private {
+            content_type,
+            content_version,
+            ciphertext,
+            nonce,
+            secret_version: version,
+            secret_scope: SecretScope::Category(category_id),
+        }
+    } else if ctx.is_private {
+        match ctx.secret_opt {
+            Some((secret, version)) => {
+                let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes);
+                BoardMessageBody::private(content_type, content_version, ciphertext, nonce, version)
+            }
+            None => BoardMessageBody::public_raw(content_type, content_version, content_bytes),
+        }
+    } else {
+        BoardMessageBody::public_raw(content_type, content_version, content_bytes)
+    };
+
+    let new_topic = crate::util::messaging::publish_message(
+        ctx.current_board,
+        ctx.board_key,
+        ctx.self_sk.clone(),
+        ctx.board_state.clone(),
+        content,
+        Some(category),
+        Some(category),
+    )
+    .await
+    .ok_or("Could not create the split topic")?;
+
+    move_post(ctx, reply, Some(new_topic))
 }
 
 /// Build the action that moves a section to a new parent. Restricted sections

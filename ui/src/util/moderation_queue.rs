@@ -1,8 +1,6 @@
 //! Signed records for reports, report resolutions and post approvals.
 
-use crate::components::app::{mark_needs_sync, BOARDS};
-use crate::util::message_actions::ActionContext;
-use freenet_scaffold::ComposableState;
+use crate::util::message_actions::{apply_state_delta, ActionContext};
 use plaza_core::board_state::approvals::{ApprovalV1, ApprovalsDelta, AuthorizedApproval};
 use plaza_core::board_state::configuration::AuthorizedConfigurationV1;
 use plaza_core::board_state::member::MemberId;
@@ -11,29 +9,7 @@ use plaza_core::board_state::reports::{
     AuthorizedReport, AuthorizedReportResolution, ReportReason, ReportResolution, ReportStatus,
     ReportV1, ReportsDelta,
 };
-use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
-
-fn apply(ctx: &ActionContext, delta: ChatBoardStateV1Delta) -> Result<(), String> {
-    let parent = ctx.board_state.clone();
-    let owner = ctx.current_board;
-    let mut error: Option<String> = None;
-    BOARDS.with_mut(|boards| {
-        if let Some(board) = boards.map.get_mut(&owner) {
-            if let Err(e) = board.board_state.apply_delta(
-                &parent,
-                &ChatBoardParametersV1 { owner },
-                &Some(delta),
-            ) {
-                error = Some(e);
-            }
-        }
-    });
-    if let Some(error) = error {
-        return Err(error);
-    }
-    mark_needs_sync(owner);
-    Ok(())
-}
+use plaza_core::board_state::ChatBoardStateV1Delta;
 
 /// Report a post. The reporter is the signing member.
 pub fn report_post(
@@ -55,7 +31,7 @@ pub fn report_post(
         }),
         ..Default::default()
     };
-    apply(ctx, delta)
+    apply_state_delta(ctx, delta)
 }
 
 pub fn resolve_report(
@@ -85,7 +61,7 @@ pub fn resolve_report(
         }),
         ..Default::default()
     };
-    apply(ctx, delta)
+    apply_state_delta(ctx, delta)
 }
 
 pub fn approve_post(ctx: &ActionContext, target: MessageId, approved: bool) -> Result<(), String> {
@@ -110,7 +86,7 @@ pub fn approve_post(ctx: &ActionContext, target: MessageId, approved: bool) -> R
         }),
         ..Default::default()
     };
-    apply(ctx, delta)
+    apply_state_delta(ctx, delta)
 }
 
 /// Owner-only: require approval for posts by members without an approved post.
@@ -135,5 +111,5 @@ pub fn set_approval_required(ctx: &ActionContext, required: bool) -> Result<(), 
         configuration: Some(authorized),
         ..Default::default()
     };
-    apply(ctx, delta)
+    apply_state_delta(ctx, delta)
 }

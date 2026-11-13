@@ -8,6 +8,7 @@ pub mod identity;
 pub mod invites;
 pub mod member;
 pub mod member_info;
+pub mod member_moderation;
 pub mod message;
 pub mod moderation;
 pub mod privacy;
@@ -91,6 +92,14 @@ pub struct ChatBoardStateV1 {
     /// Approvals for posts by new members.
     #[serde(default)]
     pub approvals: crate::board_state::approvals::ApprovalsV1,
+
+    /// Warnings addressed to members.
+    #[serde(default)]
+    pub warnings: crate::board_state::member_moderation::WarningsV1,
+
+    /// Temporary suspensions addressed to members.
+    #[serde(default)]
+    pub suspensions: crate::board_state::member_moderation::SuspensionsV1,
 
     /// If this contract has been replaced by a new contract this will contain the new contract address.
     /// This can only be set by the owner.
@@ -226,6 +235,18 @@ impl ChatBoardStateV1 {
         let mut approvals = std::mem::take(&mut self.approvals);
         approvals.cleanup(self, parameters);
         self.approvals = approvals;
+
+        let mut moderation = std::mem::take(&mut self.moderation);
+        moderation.cleanup(self, parameters);
+        self.moderation = moderation;
+
+        let mut warnings = std::mem::take(&mut self.warnings);
+        warnings.cleanup(self, parameters);
+        self.warnings = warnings;
+
+        let mut suspensions = std::mem::take(&mut self.suspensions);
+        suspensions.cleanup(self, parameters);
+        self.suspensions = suspensions;
 
         // 6. Re-sort for deterministic ordering
         self.members.members.sort_by_key(|m| m.member.id());

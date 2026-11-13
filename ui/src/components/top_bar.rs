@@ -188,6 +188,10 @@ pub fn TopBar() -> Element {
         .unwrap_or_else(|| "You".to_string());
 
     let self_avatar = get_avatar(&self_member_id);
+    let suspended_until = board_data
+        .board_state
+        .suspensions
+        .active_until(self_member_id, chrono::Utc::now().timestamp_millis());
     let board_id = bs58::encode(board_data.owner_vk.as_bytes()).into_string();
 
     // Target hashes for the tab links. The links prevent the browser's default
@@ -456,26 +460,34 @@ pub fn TopBar() -> Element {
                 // Post input
                 match can_participate {
                     Ok(()) => {
-                        let max_title = current_board_data.read().as_ref()
-                            .map(|bd| bd.board_state.configuration.configuration.max_title_size)
-                            .unwrap_or(100);
-                        let max_message = current_board_data.read().as_ref()
-                            .map(|bd| bd.board_state.configuration.configuration.max_message_size)
-                            .unwrap_or(10000);
-                        let default_reply = category_reply_context.read().clone();
-                        rsx! {
-                            PostInput {
-                                handle_send_message: move |msg: (
-                                    String,
-                                    String,
-                                    Option<ReplyContext>,
-                                    Option<PollDraft>,
-                                )| { handle_send_message(msg) },
-                                replying_to: replying_to,
-                                on_request_edit_last: move |_| {},
-                                default_reply_to: default_reply,
-                                max_title_size: max_title,
-                                max_message_size: max_message,
+                        if let Some(until) = suspended_until {
+                            rsx! {
+                                div { class: "px-4 py-2 bg-error-bg text-red-700 dark:text-red-400 rounded-lg text-sm",
+                                    "You are suspended until {crate::util::format_utc_as_local_time(until)} and cannot post."
+                                }
+                            }
+                        } else {
+                            let max_title = current_board_data.read().as_ref()
+                                .map(|bd| bd.board_state.configuration.configuration.max_title_size)
+                                .unwrap_or(100);
+                            let max_message = current_board_data.read().as_ref()
+                                .map(|bd| bd.board_state.configuration.configuration.max_message_size)
+                                .unwrap_or(10000);
+                            let default_reply = category_reply_context.read().clone();
+                            rsx! {
+                                PostInput {
+                                    handle_send_message: move |msg: (
+                                        String,
+                                        String,
+                                        Option<ReplyContext>,
+                                        Option<PollDraft>,
+                                    )| { handle_send_message(msg) },
+                                    replying_to: replying_to,
+                                    on_request_edit_last: move |_| {},
+                                    default_reply_to: default_reply,
+                                    max_title_size: max_title,
+                                    max_message_size: max_message,
+                                }
                             }
                         }
                     },

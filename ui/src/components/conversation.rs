@@ -124,6 +124,8 @@ pub struct MessageData {
     pub is_announced: bool,
     /// Poll question and current votes
     pub poll: Option<PollData>,
+    /// Destination topic when this topic was merged
+    pub merged_into: Option<MessageId>,
 }
 
 /// A message with its nested replies
@@ -151,6 +153,7 @@ pub fn get_all_messages(
     self_member_id: MemberId,
     secrets: &HashMap<u32, [u8; 32]>,
     category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+    old_category_secrets: &HashMap<MessageId, HashMap<u32, [u8; 32]>>,
 ) -> Vec<MessageData> {
     let mut messages = Vec::new();
     let owner_id = state.configuration.configuration.owner_member_id;
@@ -165,8 +168,12 @@ pub fn get_all_messages(
     // the lower message id, so peers that see votes in any order agree.
     let mut ballots: HashMap<MessageId, HashMap<MemberId, PollBallot>> = HashMap::new();
     for message in &state.recent_messages.messages {
-        let Some(vote) = decrypt_poll_vote(&message.message.content, secrets, category_secrets)
-        else {
+        let Some(vote) = decrypt_poll_vote(
+            &message.message.content,
+            secrets,
+            category_secrets,
+            old_category_secrets,
+        ) else {
             continue;
         };
         let ballot = PollBallot {
@@ -228,10 +235,20 @@ pub fn get_all_messages(
             .recent_messages
             .effective_text(message)
             .unwrap_or_else(|| {
-                decrypt_message_content(&message.message.content, secrets, category_secrets)
+                decrypt_message_content(
+                    &message.message.content,
+                    secrets,
+                    category_secrets,
+                    old_category_secrets,
+                )
             });
         let content_html = text_to_html(&content_text);
-        let title_text = decrypt_message_title(&message.message.content, secrets, category_secrets);
+        let title_text = decrypt_message_title(
+            &message.message.content,
+            secrets,
+            category_secrets,
+            old_category_secrets,
+        );
 
         let reactions = state
             .recent_messages
@@ -239,8 +256,15 @@ pub fn get_all_messages(
             .cloned()
             .unwrap_or_default();
 
-        let (reply_to_author, reply_to_preview, reply_to_message_id) =
-            extract_reply_context(&message.message.content, secrets, category_secrets);
+        let (reply_to_author, reply_to_preview, reply_to_message_id) = extract_reply_context(
+            &message.message.content,
+            secrets,
+            category_secrets,
+            old_category_secrets,
+        );
+        let moved_parent = state.moderation.moved_to(&message_id).copied().flatten();
+        let reply_to_message_id = moved_parent.or(reply_to_message_id);
+        let merged_into = state.moderation.is_merged_into(&message_id);
 
         let send_time_ms = raw_time.timestamp_millis();
         let receive_delay_secs = get_delay_secs(&message_id, send_time_ms);
@@ -250,6 +274,7 @@ pub fn get_all_messages(
             &message.message.content,
             secrets,
             category_secrets,
+            old_category_secrets,
             &message_id,
         );
         let (
@@ -317,20 +342,25 @@ pub fn get_all_messages(
         let edited = state.recent_messages.is_edited(&message_id)
             || state.recent_messages.is_category_edited(&message_id);
 
-        let poll =
-            decrypt_poll(&message.message.content, secrets, category_secrets).map(|content| {
-                let mut votes: Vec<PollBallot> = ballots
-                    .get(&message_id)
-                    .map(|votes| votes.values().cloned().collect())
-                    .unwrap_or_default();
-                votes.sort_by_key(|ballot| ballot.voter.0 .0);
-                PollData {
-                    options: content.options,
-                    closes_at: content.closes_at,
-                    multiselect: content.multiselect,
-                    votes,
-                }
-            });
+        let poll = decrypt_poll(
+            &message.message.content,
+            secrets,
+            category_secrets,
+            old_category_secrets,
+        )
+        .map(|content| {
+            let mut votes: Vec<PollBallot> = ballots
+                .get(&message_id)
+                .map(|votes| votes.values().cloned().collect())
+                .unwrap_or_default();
+            votes.sort_by_key(|ballot| ballot.voter.0 .0);
+            PollData {
+                options: content.options,
+                closes_at: content.closes_at,
+                multiselect: content.multiselect,
+                votes,
+            }
+        });
 
         messages.push(MessageData {
             message_id,
@@ -363,6 +393,7 @@ pub fn get_all_messages(
             is_pending,
             is_announced: state.moderation.is_announced(&message_id),
             poll,
+            merged_into,
         });
     }
 
@@ -422,6 +453,7 @@ fn body_secret(
     content: &BoardMessageBody,
     board_secrets: &HashMap<u32, [u8; 32]>,
     category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+    old_category_secrets: &HashMap<MessageId, HashMap<u32, [u8; 32]>>,
 ) -> Option<[u8; 32]> {
     match content {
         BoardMessageBody::Private {
@@ -430,7 +462,16 @@ fn body_secret(
             ..
         } => match secret_scope {
             SecretScope::Board => board_secrets.get(secret_version).copied(),
-            SecretScope::Category(id) => category_secrets.get(id).map(|(_, key)| *key),
+            SecretScope::Category(id) => category_secrets
+                .get(id)
+                .filter(|(version, _)| version == secret_version)
+                .map(|(_, key)| *key)
+                .or_else(|| {
+                    old_category_secrets
+                        .get(id)
+                        .and_then(|versions| versions.get(secret_version))
+                        .copied()
+                }),
         },
         BoardMessageBody::Public { .. } => None,
     }
@@ -440,6 +481,7 @@ fn decrypt_poll(
     content: &BoardMessageBody,
     secrets: &HashMap<u32, [u8; 32]>,
     category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+    old_category_secrets: &HashMap<MessageId, HashMap<u32, [u8; 32]>>,
 ) -> Option<plaza_core::board_state::content::PollContentV1> {
     use plaza_core::board_state::content::{PollContentV1, CONTENT_TYPE_POLL};
     match content {
@@ -452,7 +494,7 @@ fn decrypt_poll(
             nonce,
             ..
         } if *content_type == CONTENT_TYPE_POLL => {
-            let secret = body_secret(content, secrets, category_secrets)?;
+            let secret = body_secret(content, secrets, category_secrets, old_category_secrets)?;
             let bytes =
                 crate::util::ecies::decrypt_with_symmetric_key(&secret, ciphertext, nonce).ok()?;
             PollContentV1::decode(&bytes).ok()
@@ -465,6 +507,7 @@ fn decrypt_poll_vote(
     content: &BoardMessageBody,
     secrets: &HashMap<u32, [u8; 32]>,
     category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+    old_category_secrets: &HashMap<MessageId, HashMap<u32, [u8; 32]>>,
 ) -> Option<plaza_core::board_state::content::PollVoteV1> {
     use plaza_core::board_state::content::{PollVoteV1, CONTENT_TYPE_POLL_VOTE};
     match content {
@@ -477,7 +520,7 @@ fn decrypt_poll_vote(
             nonce,
             ..
         } if *content_type == CONTENT_TYPE_POLL_VOTE => {
-            let secret = body_secret(content, secrets, category_secrets)?;
+            let secret = body_secret(content, secrets, category_secrets, old_category_secrets)?;
             let bytes =
                 crate::util::ecies::decrypt_with_symmetric_key(&secret, ciphertext, nonce).ok()?;
             PollVoteV1::decode(&bytes).ok()
@@ -490,6 +533,7 @@ fn decrypt_message_title(
     content: &BoardMessageBody,
     secrets: &HashMap<u32, [u8; 32]>,
     category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+    old_category_secrets: &HashMap<MessageId, HashMap<u32, [u8; 32]>>,
 ) -> String {
     use plaza_core::board_state::content::{
         PollContentV1, ReplyContentV1, TextContentV1, CONTENT_TYPE_POLL, CONTENT_TYPE_REPLY,
@@ -523,7 +567,9 @@ fn decrypt_message_title(
             nonce,
             ..
         } => {
-            if let Some(secret) = body_secret(content, secrets, category_secrets) {
+            if let Some(secret) =
+                body_secret(content, secrets, category_secrets, old_category_secrets)
+            {
                 use crate::util::ecies::decrypt_with_symmetric_key;
                 if let Ok(decrypted_bytes) =
                     decrypt_with_symmetric_key(&secret, ciphertext.as_slice(), nonce)
@@ -554,6 +600,7 @@ fn decrypt_message_content(
     content: &BoardMessageBody,
     secrets: &HashMap<u32, [u8; 32]>,
     category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+    old_category_secrets: &HashMap<MessageId, HashMap<u32, [u8; 32]>>,
 ) -> String {
     use plaza_core::board_state::content::{
         PollContentV1, ReplyContentV1, TextContentV1, CONTENT_TYPE_ACTION, CONTENT_TYPE_POLL,
@@ -592,7 +639,9 @@ fn decrypt_message_content(
             secret_scope,
             ..
         } => {
-            if let Some(secret) = body_secret(content, secrets, category_secrets) {
+            if let Some(secret) =
+                body_secret(content, secrets, category_secrets, old_category_secrets)
+            {
                 use crate::util::ecies::decrypt_with_symmetric_key;
                 if let Ok(decrypted_bytes) =
                     decrypt_with_symmetric_key(&secret, ciphertext.as_slice(), nonce)
@@ -635,6 +684,7 @@ fn extract_reply_context(
     content: &BoardMessageBody,
     secrets: &HashMap<u32, [u8; 32]>,
     category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+    old_category_secrets: &HashMap<MessageId, HashMap<u32, [u8; 32]>>,
 ) -> (Option<String>, Option<String>, Option<MessageId>) {
     use plaza_core::board_state::content::{ReplyContentV1, CONTENT_TYPE_REPLY};
 
@@ -656,7 +706,9 @@ fn extract_reply_context(
             nonce,
             ..
         } if *content_type == CONTENT_TYPE_REPLY => {
-            if let Some(secret) = body_secret(content, secrets, category_secrets) {
+            if let Some(secret) =
+                body_secret(content, secrets, category_secrets, old_category_secrets)
+            {
                 use crate::util::ecies::decrypt_with_symmetric_key;
                 if let Ok(decrypted_bytes) =
                     decrypt_with_symmetric_key(&secret, ciphertext.as_slice(), nonce)
@@ -697,12 +749,21 @@ fn open_category_name(
     mut category: CategoryContentV1,
     category_id: &MessageId,
     category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+    old_category_secrets: &HashMap<MessageId, HashMap<u32, [u8; 32]>>,
 ) -> CategoryContentV1 {
     if let Some(sealed) = category.sealed_name.as_ref() {
+        let mut keys: Vec<[u8; 32]> = Vec::new();
         if let Some((_, key)) = category_secrets.get(category_id) {
-            if let Ok(bytes) = crate::util::ecies::unseal_bytes(sealed, Some(key)) {
+            keys.push(*key);
+        }
+        if let Some(versions) = old_category_secrets.get(category_id) {
+            keys.extend(versions.values().copied());
+        }
+        for key in keys {
+            if let Ok(bytes) = crate::util::ecies::unseal_bytes(sealed, Some(&key)) {
                 if let Ok(name) = String::from_utf8(bytes) {
                     category.name = name;
+                    break;
                 }
             }
         }
@@ -715,6 +776,7 @@ fn extract_category_info(
     content: &BoardMessageBody,
     secrets: &HashMap<u32, [u8; 32]>,
     category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+    old_category_secrets: &HashMap<MessageId, HashMap<u32, [u8; 32]>>,
     message_id: &MessageId,
 ) -> Option<CategoryInfo> {
     use plaza_core::board_state::content::{CategoryContentV1, CONTENT_TYPE_CATEGORY};
@@ -730,7 +792,7 @@ fn extract_category_info(
             nonce,
             ..
         } if *content_type == CONTENT_TYPE_CATEGORY => {
-            let secret = body_secret(content, secrets, category_secrets)?;
+            let secret = body_secret(content, secrets, category_secrets, old_category_secrets)?;
             let bytes =
                 crate::util::ecies::decrypt_with_symmetric_key(&secret, ciphertext, nonce).ok()?;
             CategoryContentV1::decode(&bytes).ok()?
@@ -739,7 +801,7 @@ fn extract_category_info(
     };
 
     let locked = category.is_restricted() && !category_secrets.contains_key(message_id);
-    let category = open_category_name(category, message_id, category_secrets);
+    let category = open_category_name(category, message_id, category_secrets, old_category_secrets);
     Some(CategoryInfo {
         name: Some(category.name),
         description: category.description,
@@ -793,6 +855,7 @@ pub fn Conversation(
                         self_member_id,
                         &board_data.secrets,
                         &board_data.category_secrets,
+                        &board_data.old_category_secrets,
                     );
 
                     // Build member name lookup
@@ -2094,7 +2157,7 @@ pub fn MessageCard(
 pub fn get_top_level_posts(all_messages: &[MessageData]) -> Vec<MessageData> {
     let mut posts: Vec<_> = all_messages
         .iter()
-        .filter(|m| m.is_top_level_post() && !m.is_category)
+        .filter(|m| m.is_top_level_post() && !m.is_category && m.merged_into.is_none())
         .cloned()
         .collect();
     posts.sort_by_key(|m| std::cmp::Reverse(m.time));
@@ -2142,7 +2205,11 @@ pub fn get_category_posts(
 ) -> Vec<MessageData> {
     let mut posts: Vec<_> = all_messages
         .iter()
-        .filter(|m| !m.is_category && m.reply_to_message_id.as_ref() == Some(category_id))
+        .filter(|m| {
+            !m.is_category
+                && m.merged_into.is_none()
+                && m.reply_to_message_id.as_ref() == Some(category_id)
+        })
         .cloned()
         .collect();
     posts.sort_by_key(|m| std::cmp::Reverse(m.time));
@@ -2192,18 +2259,28 @@ mod category_tests {
 
         let mut secrets = HashMap::new();
         secrets.insert(0u32, secret);
-        let info = extract_category_info(&content, &secrets, &HashMap::new(), &message_id())
-            .expect("category decodes");
+        let info = extract_category_info(
+            &content,
+            &secrets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &message_id(),
+        )
+        .expect("category decodes");
         assert_eq!(info.name.as_deref(), Some("Segreta"));
         assert_eq!(info.color.as_deref(), Some("#6366f1"));
         assert!(!info.locked);
 
         // Without the secret the content is unreadable, so it is not listed as
         // a category at all.
-        assert!(
-            extract_category_info(&content, &HashMap::new(), &HashMap::new(), &message_id())
-                .is_none()
-        );
+        assert!(extract_category_info(
+            &content,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &message_id(),
+        )
+        .is_none());
     }
 
     #[test]
@@ -2225,14 +2302,26 @@ mod category_tests {
 
         let mut category_secrets = HashMap::new();
         category_secrets.insert(id.clone(), (0u32, category_secret));
-        let readable = extract_category_info(&content, &HashMap::new(), &category_secrets, &id)
-            .expect("category decodes");
+        let readable = extract_category_info(
+            &content,
+            &HashMap::new(),
+            &category_secrets,
+            &HashMap::new(),
+            &id,
+        )
+        .expect("category decodes");
         assert_eq!(readable.name.as_deref(), Some("Members only"));
         assert!(!readable.locked);
         assert!(readable.hidden);
 
-        let outsider = extract_category_info(&content, &HashMap::new(), &HashMap::new(), &id)
-            .expect("placeholder is still visible");
+        let outsider = extract_category_info(
+            &content,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &id,
+        )
+        .expect("placeholder is still visible");
         assert_eq!(outsider.name.as_deref(), Some("Restricted category"));
         assert!(outsider.locked);
     }

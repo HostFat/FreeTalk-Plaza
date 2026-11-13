@@ -129,6 +129,7 @@ pub async fn handle_get_response(
                         last_read_message_id: None,
                         secrets: std::collections::HashMap::new(),
                         category_secrets: std::collections::HashMap::new(),
+                        old_category_secrets: std::collections::HashMap::new(),
                         collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: std::collections::HashMap::new(),

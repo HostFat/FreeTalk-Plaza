@@ -115,7 +115,10 @@ fn unread_in_category(
         };
         for reply in replies {
             stack.push(&reply.message_id);
-            if !reply.is_category && reply.time.timestamp_millis() > read_upto {
+            if !reply.is_category
+                && reply.merged_into.is_none()
+                && reply.time.timestamp_millis() > read_upto
+            {
                 count += 1;
             }
         }
@@ -156,7 +159,7 @@ fn category_stats(
         };
         for reply in replies {
             stack.push(&reply.message_id);
-            if reply.is_category {
+            if reply.is_category || reply.merged_into.is_some() {
                 continue;
             }
             count += 1;
@@ -207,6 +210,9 @@ fn thread_stats(
             continue;
         };
         for reply in replies {
+            if reply.merged_into.is_some() {
+                continue;
+            }
             count += 1;
             let timestamp = reply.time.timestamp_millis();
             if latest
@@ -585,6 +591,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
             self_member_id,
             &board_data.secrets,
             &board_data.category_secrets,
+            &board_data.old_category_secrets,
         )
     } else {
         Vec::new()
@@ -1644,6 +1651,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                     self_member_id,
                     &board_data.secrets,
                     &board_data.category_secrets,
+                    &board_data.old_category_secrets,
                 );
                 let post = all_messages
                     .iter()

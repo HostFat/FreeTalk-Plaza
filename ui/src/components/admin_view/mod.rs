@@ -7,8 +7,10 @@ use add_admin_modal::AddAdminModal;
 use crate::board_data::BoardData;
 use crate::components::access_section::{InviteLinksSection, RolesSection};
 use crate::components::app::{BOARDS, CURRENT_BOARD, EDIT_BOARD_MODAL};
+use crate::components::audit_view::AuditView;
 use crate::components::members::member_info_modal::ban_button::BanButton;
 use crate::components::moderation_view::ModerationView;
+use crate::components::structure_view::StructureView;
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
 use wasm_bindgen_futures::spawn_local;
@@ -22,6 +24,8 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
             "roles" => format!("/board/{board_id}/admin/roles"),
             "links" => format!("/board/{board_id}/admin/links"),
             "moderation" => format!("/board/{board_id}/admin/moderation"),
+            "structure" => format!("/board/{board_id}/admin/structure"),
+            "audit" => format!("/board/{board_id}/admin/audit"),
             _ => format!("/board/{board_id}/admin"),
         };
         if let Some(win) = web_sys::window() {
@@ -147,6 +151,7 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
     let tab_board_admins = board_id_for_tabs.clone();
     let tab_board_bans = board_id_for_tabs.clone();
     let tab_board_moderation = board_id_for_tabs.clone();
+    let tab_board_structure = board_id_for_tabs.clone();
     let tab_board_roles = board_id_for_tabs.clone();
     let tab_board_links = board_id_for_tabs.clone();
     rsx! {
@@ -186,6 +191,29 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                         },
                         onclick: move |_| navigate_admin_tab(&tab_board_moderation, "moderation"),
                         "Moderation"
+                    }
+                    button {
+                        r#type: "button",
+                        class: if active == "structure" {
+                            "px-4 py-2 rounded-md text-sm bg-accent text-white"
+                        } else {
+                            "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
+                        },
+                        onclick: move |_| navigate_admin_tab(&tab_board_structure, "structure"),
+                        "Structure"
+                    }
+                    button {
+                        r#type: "button",
+                        class: if active == "audit" {
+                            "px-4 py-2 rounded-md text-sm bg-accent text-white"
+                        } else {
+                            "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
+                        },
+                        onclick: {
+                            let board = board_id_for_tabs.clone();
+                            move |_| navigate_admin_tab(&board, "audit")
+                        },
+                        "Audit"
                     }
                     button {
                         r#type: "button",
@@ -391,6 +419,10 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                 }
             } else if active == "moderation" {
                 ModerationView {}
+            } else if active == "structure" {
+                StructureView {}
+            } else if active == "audit" {
+                AuditView {}
             } else if active == "roles" {
                 RolesSection {}
             } else {

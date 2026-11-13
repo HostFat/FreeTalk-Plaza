@@ -11,6 +11,7 @@ use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::reports::ReportStatus;
 use std::collections::HashMap;
+use wasm_bindgen_futures::spawn_local;
 
 fn nickname(board: &BoardData, member_id: MemberId) -> String {
     board
@@ -57,6 +58,7 @@ pub fn ModerationView() -> Element {
         self_id,
         &board.secrets,
         &board.category_secrets,
+        &board.old_category_secrets,
     );
     let by_id: HashMap<_, _> = messages
         .iter()
@@ -83,6 +85,8 @@ pub fn ModerationView() -> Element {
         .configuration
         .configuration
         .approval_required;
+    let restricted = board.restricted_categories();
+    let board_key = board.owner_vk;
 
     rsx! {
         div { class: "flex flex-col gap-6",
@@ -186,6 +190,68 @@ pub fn ModerationView() -> Element {
                                             },
                                             "Reject"
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Category key rotation
+            if is_owner && !restricted.is_empty() {
+                div { class: "bg-surface rounded-lg p-4 space-y-2",
+                    h2 { class: "text-lg font-semibold text-text", "Restricted category keys" }
+                    p { class: "text-text-muted text-xs",
+                        "A new version protects future posts. Old posts stay readable with the key kept on your device; edit a section name after rotating so new members see it."
+                    }
+                    for (category_id, category) in restricted.iter() {
+                        {
+                            let category_id = *category_id;
+                            let version = board
+                                .board_state
+                                .category_secrets
+                                .current_version(&category_id);
+                            rsx! {
+                                div { class: "flex flex-wrap items-center gap-3 text-sm",
+                                    span { class: "text-text flex-1 min-w-32",
+                                        {
+                                            by_id
+                                                .get(&category_id)
+                                                .and_then(|message| message.category_name.clone())
+                                                .unwrap_or_else(|| category.name.clone())
+                                        }
+                                    }
+                                    span { class: "text-xs text-text-muted",
+                                        "v{version.unwrap_or(0)}"
+                                    }
+                                    button {
+                                        r#type: "button",
+                                        class: "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg",
+                                        onclick: move |_| {
+                                            let mut changed = false;
+                                            let mut failure = None;
+                                            BOARDS.with_mut(|boards| {
+                                                if let Some(board) = boards.map.get_mut(&board_key) {
+                                                    match board.rotate_category_secret(&category_id) {
+                                                        Ok(_) => changed = true,
+                                                        Err(e) => failure = Some(e),
+                                                    }
+                                                }
+                                            });
+                                            if let Some(e) = failure {
+                                                error.set(Some(e));
+                                                return;
+                                            }
+                                            if changed {
+                                                error.set(None);
+                                                crate::components::app::mark_needs_sync(board_key);
+                                                spawn_local(async {
+                                                    let _ = crate::components::app::chat_delegate::save_boards_to_delegate().await;
+                                                });
+                                            }
+                                        },
+                                        "Rotate key"
                                     }
                                 }
                             }

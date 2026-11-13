@@ -163,7 +163,7 @@ pub async fn send_message(
     .await;
 }
 
-async fn publish_message(
+pub(crate) async fn publish_message(
     current_board: VerifyingKey,
     board_key: BoardKey,
     self_sk: SigningKey,
@@ -171,7 +171,7 @@ async fn publish_message(
     content: BoardMessageBody,
     reply_target: Option<MessageId>,
     category_id: Option<MessageId>,
-) {
+) -> Option<MessageId> {
     let message = MessageV1 {
         board_owner: MemberId::from(current_board),
         author: MemberId::from(&self_sk.verifying_key()),
@@ -183,7 +183,7 @@ async fn publish_message(
     let mut message_bytes = Vec::new();
     if let Err(e) = ciborium::ser::into_writer(&message, &mut message_bytes) {
         error!("Failed to serialize message for signing: {:?}", e);
-        return;
+        return None;
     }
 
     // Sign using delegate with fallback to local signing
@@ -285,12 +285,14 @@ async fn publish_message(
         moderation: Some(ModerationDelta {
             routes: vec![route],
             flags: Vec::new(),
+            moves: Vec::new(),
         }),
         ..Default::default()
     };
 
     info!("Sending message: {:?}", auth_message);
 
+    let mut applied = false;
     BOARDS.with_mut(|boards| {
         if let Some(board_data) = boards.map.get_mut(&current_board) {
             if let Err(e) = board_data.board_state.apply_delta(
@@ -307,9 +309,11 @@ async fn publish_message(
 
                 // Request notification permission on first message
                 request_permission_on_first_message();
+                applied = true;
             }
         }
     });
+    applied.then(|| auth_message.id())
 }
 
 /// Send one vote for a poll. Votes are hidden from post lists and counted by
@@ -586,6 +590,7 @@ pub async fn send_category(
         moderation: Some(ModerationDelta {
             routes: vec![route],
             flags: Vec::new(),
+            moves: Vec::new(),
         }),
         ..Default::default()
     };
@@ -718,6 +723,7 @@ pub async fn send_group(
         moderation: Some(ModerationDelta {
             routes: vec![route],
             flags: Vec::new(),
+            moves: Vec::new(),
         }),
         ..Default::default()
     };

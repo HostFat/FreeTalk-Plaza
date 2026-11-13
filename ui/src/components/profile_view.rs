@@ -25,6 +25,7 @@ pub fn ProfileView(member_key: String) -> Element {
             self_id,
             &board.secrets,
             &board.category_secrets,
+            &board.old_category_secrets,
         );
         Some((board.owner_vk, messages))
     });
@@ -93,6 +94,41 @@ pub fn ProfileView(member_key: String) -> Element {
     let post_count = posts.len();
     posts.truncate(30);
 
+    let (warnings, suspension, can_view_warnings) = {
+        let boards = BOARDS.read();
+        match boards.map.get(&owner_vk) {
+            Some(board) => {
+                let self_id = MemberId::from(&board.self_sk.verifying_key());
+                let owner_id = MemberId::from(&board.owner_vk);
+                let is_moderator = self_id == owner_id
+                    || board
+                        .board_state
+                        .admin
+                        .admins
+                        .iter()
+                        .any(|admin| admin.admin.id() == self_id);
+                let notices: Vec<(String, i64)> = board
+                    .board_state
+                    .warnings
+                    .for_member(target)
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry.warning.reason.label().to_string(),
+                            entry.warning.created_at,
+                        )
+                    })
+                    .collect();
+                let suspension = board
+                    .board_state
+                    .suspensions
+                    .active_until(target, chrono::Utc::now().timestamp_millis());
+                (notices, suspension, self_id == target || is_moderator)
+            }
+            None => (Vec::new(), None, false),
+        }
+    };
+
     rsx! {
         div { class: "flex-1 flex flex-col min-w-0 min-h-0 bg-bg",
             div { class: "flex items-center gap-2 px-6 py-3 border-b border-border",
@@ -122,6 +158,23 @@ pub fn ProfileView(member_key: String) -> Element {
                         }
                         p { class: "text-xs text-text-muted mt-2",
                             "{post_count} post(s)"
+                        }
+                    }
+                    if can_view_warnings && (!warnings.is_empty() || suspension.is_some()) {
+                        div { class: "bg-panel border border-border rounded-lg p-4 mb-6 space-y-2",
+                            if let Some(until) = suspension {
+                                p { class: "text-sm text-amber-400",
+                                    "Suspended until {format_utc_as_local_time(until)}"
+                                }
+                            }
+                            if !warnings.is_empty() {
+                                h2 { class: "text-sm font-semibold text-text", "Warnings" }
+                                for (reason, created_at) in warnings.iter() {
+                                    p { class: "text-xs text-text-muted",
+                                        "{reason} · {format_utc_as_local_time(*created_at)}"
+                                    }
+                                }
+                            }
                         }
                     }
                     h2 { class: "text-lg font-semibold text-text-muted mb-3", "Recent posts" }
