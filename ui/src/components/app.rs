@@ -304,7 +304,7 @@ pub fn App() -> Element {
             TopBar {}
             // Development warning, visible on every page including boards.
             div { class: "flex-shrink-0 bg-amber-500/10 border-y border-amber-500/30 px-4 py-1 text-center text-xs text-amber-200",
-                "Work in progress: features and data can break without notice, there is no support. Avoid boards you plan to keep long term."
+                "Work in progress: features and data can break without notice, there is no support. Avoid creating boards you plan to keep long term."
             }
             // Main content area (router)
             // The routed views use `flex-1` roots with their own scroll area.
