@@ -2812,3 +2812,153 @@ fn test_member_can_be_added_as_admin() {
     assert_eq!(admins.admins.len(), 1);
     assert_eq!(admins.admins[0].admin.member_id, member_id);
 }
+
+// =============================================================================
+// HISTORICAL AUTHORITY CONVERGENCE
+// =============================================================================
+//
+// A record signed by a scoped moderator carries a role-grant proof. Peers may
+// receive the record and the role revocation in either order; both must keep
+// the record and end in the same state.
+
+#[test]
+fn moderation_record_with_historical_authority_converges() {
+    use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+    use plaza_core::board_state::moderation::{
+        AuthorizedFeatureFlag, FeatureFlag, FeatureKind, ModerationDelta,
+    };
+    use plaza_core::board_state::roles::{
+        moderation_authority_proof, AuthorizedRole, AuthorizedRoleAssignment, ModerationPower,
+        Role, RoleAssignment, RolesDelta,
+    };
+    use plaza_core::board_state::ChatBoardStateV1Delta;
+
+    let owner_sk = SigningKey::generate(&mut OsRng);
+    let owner_vk = owner_sk.verifying_key();
+    let owner_id: MemberId = owner_vk.into();
+    let parameters = ChatBoardParametersV1 { owner: owner_vk };
+
+    let (author, author_sk) = create_test_member(owner_id, owner_id);
+    let author_id = MemberId::from(&author.member_vk);
+    let (moderator, moderator_sk) = create_test_member(owner_id, owner_id);
+    let moderator_id = MemberId::from(&moderator.member_vk);
+    let author_record = create_authorized_member(author, &owner_sk);
+    let moderator_record = create_authorized_member(moderator, &owner_sk);
+
+    let post = create_test_msg(owner_id, author_id, &author_sk, 0);
+    let post_id: MessageId = post.id();
+
+    let role_id = [7u8; 16];
+    let role = AuthorizedRole::new(
+        Role {
+            id: role_id,
+            name: "pinner".to_string(),
+            generation: 1,
+            can_manage_access: false,
+            can_distribute_keys: false,
+            can_edit_posts: false,
+            can_delete_posts: false,
+            can_close_posts: false,
+            can_pin_posts: true,
+            can_move_posts: false,
+            scope: Vec::new(),
+            deleted: false,
+        },
+        &owner_sk,
+    );
+    let assignment = |generation, revoked| {
+        AuthorizedRoleAssignment::new(
+            RoleAssignment {
+                role_id,
+                member_id: moderator_id,
+                generation,
+                revoked,
+            },
+            &owner_sk,
+        )
+    };
+
+    let base = ChatBoardStateV1 {
+        configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner_sk),
+        members: MembersV1 {
+            members: vec![author_record, moderator_record],
+        },
+        recent_messages: MessagesV1 {
+            messages: vec![post],
+            ..Default::default()
+        },
+        roles: plaza_core::board_state::roles::RolesV1 {
+            roles: vec![role],
+            assignments: vec![assignment(1, false)],
+        },
+        ..Default::default()
+    };
+
+    let proof = moderation_authority_proof(&base, &moderator_id, ModerationPower::Pin, &[])
+        .expect("the role grants pinning");
+    let flag = AuthorizedFeatureFlag::new(
+        FeatureFlag {
+            target: post_id,
+            kind: FeatureKind::Pinned,
+            value: true,
+            destination: None,
+            generation: 1,
+            created_at: 1,
+        },
+        &moderator_sk,
+    )
+    .with_optional_authority(Some(proof));
+
+    let pin_delta = ChatBoardStateV1Delta {
+        moderation: Some(ModerationDelta {
+            routes: Vec::new(),
+            feature_flags: vec![flag],
+            moves: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let revoke_delta = ChatBoardStateV1Delta {
+        roles: Some(RolesDelta {
+            roles: Vec::new(),
+            assignments: vec![assignment(2, true)],
+        }),
+        ..Default::default()
+    };
+
+    let initial = base;
+    let mut peer_a = initial.clone();
+    let mut peer_b = initial.clone();
+
+    // Peer A: pin first, then revocation.
+    peer_a
+        .apply_delta(&peer_a.clone(), &parameters, &Some(pin_delta.clone()))
+        .expect("pin applies");
+    let after_pin = peer_a.clone();
+    peer_a
+        .apply_delta(&after_pin, &parameters, &Some(revoke_delta.clone()))
+        .expect("revocation applies");
+    peer_a
+        .verify(&peer_a, &parameters)
+        .expect("peer A state verifies");
+
+    // Peer B: revocation first, then the pin signed before it.
+    peer_b
+        .apply_delta(&peer_b.clone(), &parameters, &Some(revoke_delta))
+        .expect("revocation applies first");
+    let after_revoke = peer_b.clone();
+    peer_b
+        .apply_delta(&after_revoke, &parameters, &Some(pin_delta))
+        .expect("historical pin still applies after the revocation");
+    peer_b
+        .verify(&peer_b, &parameters)
+        .expect("peer B state verifies");
+
+    assert_eq!(
+        peer_a.moderation.feature_flags, peer_b.moderation.feature_flags,
+        "both peers keep the same pin"
+    );
+    assert_eq!(
+        peer_a.roles.assignments, peer_b.roles.assignments,
+        "both peers keep the same revocation"
+    );
+}
