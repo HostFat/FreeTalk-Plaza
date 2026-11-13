@@ -125,6 +125,9 @@ pub static CURRENT_CATEGORY: GlobalSignal<CurrentCategoryContext> =
 pub static CURRENT_POST: GlobalSignal<CurrentPostContext> =
     Global::new(|| CurrentPostContext::default());
 
+/// Current hash route, used to highlight the active top-bar tab.
+pub static CURRENT_HASH: GlobalSignal<String> = Global::new(String::new);
+
 /// Bumped by "New post" buttons elsewhere in the app to open the shared
 /// composer in the top bar (which already knows the current category).
 pub static COMPOSE_REQUEST: GlobalSignal<u64> = Global::new(|| 0);

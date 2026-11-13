@@ -2,10 +2,9 @@
 
 use crate::board_data::SendMessageError;
 use crate::components::app::{
-    ABOUT_MODAL, BOARDS, COMPOSE_REQUEST, CURRENT_BOARD, CURRENT_CATEGORY, CURRENT_POST,
-    MEMBER_INFO_MODAL, QUOTE_COLLECTION,
+    ABOUT_MODAL, BOARDS, COMPOSE_REQUEST, CURRENT_BOARD, CURRENT_CATEGORY, CURRENT_HASH,
+    CURRENT_POST, MEMBER_INFO_MODAL, QUOTE_COLLECTION,
 };
-use crate::components::category_create_modal::CREATE_CATEGORY_MODAL;
 use crate::components::conversation::message_input::PostInput;
 use crate::util::avatar::get_avatar;
 use crate::util::ecies::unseal_bytes_with_secrets;
@@ -229,6 +228,26 @@ pub fn TopBar() -> Element {
     let nav_members_mobile = nav_members.clone();
     let nav_search_mobile = nav_search.clone();
     let nav_notifications_mobile = nav_notifications.clone();
+
+    // Highlight the tab matching the current hash route.
+    let active_hash = CURRENT_HASH.read().clone();
+    let board_active = active_hash == nav_posts
+        || (active_hash.starts_with(&format!("/board/{board_id}"))
+            && !active_hash.contains("/admin")
+            && !active_hash.contains("/members")
+            && !active_hash.contains("/search")
+            && !active_hash.contains("/notifications"));
+    let notifications_active = active_hash.contains("/notifications");
+    let search_active = active_hash.contains("/search");
+    let members_active = active_hash.contains("/members");
+    let admin_active = active_hash.contains("/admin");
+    let tab_class = move |active: bool| {
+        if active {
+            "flex items-center gap-2 px-4 py-2.5 bg-accent hover:bg-accent/80 text-white font-medium rounded-xl transition-colors"
+        } else {
+            "flex items-center gap-2 px-4 py-2.5 bg-surface hover:bg-surface-hover text-text font-medium rounded-xl transition-colors"
+        }
+    };
     let nav_admin_mobile = nav_admin.clone();
 
     rsx! {
@@ -279,11 +298,11 @@ pub fn TopBar() -> Element {
             div { class: "flex items-center gap-3 pr-4",
                 // Desktop navigation buttons (hidden on mobile)
                 div { class: "hidden md:flex items-center gap-3",
-                    // Posts button
+                    // Board button
                     button {
                         r#type: "button",
-                        class: "flex items-center gap-2 px-4 py-2.5 bg-surface hover:bg-surface-hover text-text font-medium rounded-xl transition-colors",
-                        title: "View Posts",
+                        class: tab_class(board_active),
+                        title: "View Board",
                         onclick: move |ev: MouseEvent| {
                             ev.prevent_default();
                             if let Some(win) = web_sys::window() {
@@ -291,13 +310,13 @@ pub fn TopBar() -> Element {
                             }
                         },
                         span { "📝" }
-                        span { "Posts" }
+                        span { "Board" }
                     }
                     // Notifications button
                     button {
                         r#type: "button",
-                        class: "flex items-center gap-2 px-4 py-2.5 bg-surface hover:bg-surface-hover text-text font-medium rounded-xl transition-colors",
                         title: "Notifications",
+                        class: tab_class(notifications_active),
                         onclick: move |ev: MouseEvent| {
                             ev.prevent_default();
                             if let Some(win) = web_sys::window() {
@@ -318,8 +337,8 @@ pub fn TopBar() -> Element {
                     // Search button
                     button {
                         r#type: "button",
-                        class: "flex items-center gap-2 px-4 py-2.5 bg-surface hover:bg-surface-hover text-text font-medium rounded-xl transition-colors",
                         title: "Search this board",
+                        class: tab_class(search_active),
                         onclick: move |ev: MouseEvent| {
                             ev.prevent_default();
                             if let Some(win) = web_sys::window() {
@@ -332,8 +351,8 @@ pub fn TopBar() -> Element {
                     // Members button
                     button {
                         r#type: "button",
-                        class: "flex items-center gap-2 px-4 py-2.5 bg-surface hover:bg-surface-hover text-text font-medium rounded-xl transition-colors",
                         title: "View Members",
+                        class: tab_class(members_active),
                         onclick: move |ev: MouseEvent| {
                             ev.prevent_default();
                             if let Some(win) = web_sys::window() {
@@ -347,8 +366,8 @@ pub fn TopBar() -> Element {
                     if is_owner || is_admin {
                         button {
                             r#type: "button",
-                            class: "flex items-center gap-2 px-4 py-2.5 bg-surface hover:bg-surface-hover text-text font-medium rounded-xl transition-colors",
-                            title: "Manage Admins",
+                                title: "Manage Admins",
+                            class: tab_class(admin_active),
                             onclick: move |ev: MouseEvent| {
                                 ev.prevent_default();
                                 if let Some(win) = web_sys::window() {
@@ -357,22 +376,6 @@ pub fn TopBar() -> Element {
                             },
                             span { "⚙" }
                             span { "Admin" }
-                        }
-                        // New Section button (uses current section as parent if viewing one)
-                        button {
-                            class: "flex items-center gap-2 px-4 py-2.5 bg-accent hover:bg-accent/80 text-white font-medium rounded-xl transition-colors",
-                            title: "Create Section",
-                            onclick: move |_| {
-                                let parent_id = CURRENT_CATEGORY.read().category_id.clone();
-                                CREATE_CATEGORY_MODAL.with_mut(|modal| {
-                                    modal.show = true;
-                                    modal.is_group = false;
-                                    modal.parent_is_group = false;
-                                    modal.parent_category_id = parent_id;
-                                });
-                            },
-                            span { "📁" }
-                            span { "Section" }
                         }
                     }
                 }
@@ -404,7 +407,7 @@ pub fn TopBar() -> Element {
                                     }
                                 },
                                 span { "📝" }
-                                span { "Posts" }
+                                span { "Board" }
                             }
                             button {
                                 r#type: "button",
@@ -460,20 +463,6 @@ pub fn TopBar() -> Element {
                                     },
                                     span { "⚙" }
                                     span { "Admin" }
-                                }
-                                button {
-                                    class: "flex items-center gap-3 px-4 py-3 text-accent hover:bg-surface transition-colors w-full text-left",
-                                    onclick: move |_| {
-                                        menu_open.set(false);
-                                        let parent_id = CURRENT_CATEGORY.read().category_id.clone();
-                                        CREATE_CATEGORY_MODAL.with_mut(|modal| {
-                                            modal.show = true;
-                                            modal.is_group = false;
-                                            modal.parent_category_id = parent_id;
-                                        });
-                                    },
-                                    span { "📁" }
-                                    span { "New Section" }
                                 }
                             }
                         }

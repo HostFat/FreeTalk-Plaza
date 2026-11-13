@@ -707,6 +707,15 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
             modal.parent_category_id = None;
         });
     };
+    let open_section_modal = move |_| {
+        let parent = CURRENT_CATEGORY.read().category_id.clone();
+        CREATE_CATEGORY_MODAL.with_mut(|modal| {
+            modal.show = true;
+            modal.is_group = false;
+            modal.parent_is_group = false;
+            modal.parent_category_id = parent;
+        });
+    };
     let open_section_in_group = move |group_id: MessageId| {
         CREATE_CATEGORY_MODAL.with_mut(|modal| {
             modal.show = true;
@@ -1179,11 +1188,19 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                 div { class: "flex items-center justify-between mb-3",
                                                     h2 { class: "text-lg font-semibold text-text-muted", "Groups" }
                                                     if is_owner || is_admin {
-                                                        button {
-                                                            r#type: "button",
-                                                            class: "px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
-                                                            onclick: open_group_modal,
-                                                            "+ Group"
+                                                        div { class: "flex items-center gap-2",
+                                                            button {
+                                                                r#type: "button",
+                                                                class: "px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
+                                                                onclick: open_group_modal,
+                                                                "+ Group"
+                                                            }
+                                                            button {
+                                                                r#type: "button",
+                                                                class: "px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
+                                                                onclick: open_section_modal,
+                                                                "+ Section"
+                                                            }
                                                         }
                                                     }
                                                 }

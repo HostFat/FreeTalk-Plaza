@@ -8,7 +8,7 @@
 //! - Marking messages as read when tab becomes visible
 
 use crate::components::app::chat_delegate::save_boards_to_delegate;
-use crate::components::app::{BOARDS, CURRENT_BOARD};
+use crate::components::app::{BOARDS, CURRENT_BOARD, CURRENT_HASH};
 use crate::util::ecies::unseal_bytes_with_secrets;
 use dioxus::logger::tracing::{debug, info, warn};
 use dioxus::prelude::*;
@@ -320,6 +320,23 @@ pub fn init_document_title_manager() {
         callback.forget();
 
         info!("Document title manager initialized");
+    }
+
+    // Track the active hash so the top-bar tabs can highlight themselves.
+    if let Some(window) = web_sys::window() {
+        if let Ok(hash) = window.location().hash() {
+            *CURRENT_HASH.write() = hash;
+        }
+        let callback = Closure::wrap(Box::new(move || {
+            if let Some(window) = web_sys::window() {
+                if let Ok(hash) = window.location().hash() {
+                    *CURRENT_HASH.write() = hash;
+                }
+            }
+        }) as Box<dyn Fn()>);
+        let _ = window
+            .add_event_listener_with_callback("hashchange", callback.as_ref().unchecked_ref());
+        callback.forget();
     }
 }
 
