@@ -282,6 +282,20 @@ pub fn RolesSection() -> Element {
                         let can_close_posts = role.role.can_close_posts;
                         let can_pin_posts = role.role.can_pin_posts;
                         let role_scope_ids = role.role.scope.clone();
+                        let scope_label = if role_scope_ids.is_empty() {
+                            "whole board".to_string()
+                        } else {
+                            role_scope_ids
+                                .iter()
+                                .filter_map(|id| {
+                                    scope_options
+                                        .iter()
+                                        .find(|(scope_id, _)| scope_id == id)
+                                        .map(|(_, name)| name.clone())
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
                         let assigned = data.board_state.roles.members_of_role(&role_id);
                         rsx! {
                             div { class: "bg-surface rounded-lg p-3",
@@ -381,6 +395,48 @@ pub fn RolesSection() -> Element {
                                                         class: "text-red-400",
                                                         onclick: move |_| { let _ = access::set_role_member(role_id, mid, false); },
                                                         "×"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if can_define_roles {
+                                    div { class: "mt-2 text-xs text-text-muted",
+                                        details {
+                                            summary { class: "cursor-pointer select-none", "Scope: {scope_label}" }
+                                            div { class: "mt-2 max-h-40 overflow-y-auto border border-border rounded p-2 space-y-1",
+                                                p { class: "text-xs text-text-muted", "No selection = whole board." }
+                                                for (scope_id, scope_name) in scope_options.iter() {
+                                                    {
+                                                        let id = *scope_id;
+                                                        let checked = role_scope_ids.contains(&id);
+                                                        let current_scope = role_scope_ids.clone();
+                                                        rsx! {
+                                                            label { key: "{id:?}", class: "flex items-center gap-2 text-xs text-text-muted",
+                                                                input {
+                                                                    r#type: "checkbox",
+                                                                    checked: checked,
+                                                                    onchange: move |evt| {
+                                                                        let mut selected = current_scope.clone();
+                                                                        if evt.checked() {
+                                                                            if !selected.contains(&id) { selected.push(id); }
+                                                                        } else {
+                                                                            selected.retain(|entry| *entry != id);
+                                                                        }
+                                                                        let _ = access::update_role_moderation(
+                                                                            role_id,
+                                                                            can_edit_posts,
+                                                                            can_delete_posts,
+                                                                            can_close_posts,
+                                                                            can_pin_posts,
+                                                                            selected,
+                                                                        );
+                                                                    },
+                                                                }
+                                                                "{scope_name}"
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
