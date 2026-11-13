@@ -47,6 +47,11 @@ pub struct BoardData {
     /// Maps secret_version -> decrypted 32-byte secret
     #[serde(skip)]
     pub secrets: HashMap<u32, [u8; 32]>,
+    /// Homepage groups this user collapsed. Local UI preference, persisted in
+    /// the delegate; never part of the shared board state.
+    #[serde(default)]
+    pub collapsed_groups: Vec<MessageId>,
+
     /// Decrypted per-category secrets: category id -> (version, key).
     ///
     /// Persisted in the delegate store because an invite link can deliver a
@@ -1124,6 +1129,7 @@ impl Boards {
             invite_chain: vec![],
             self_member_info: None,
             category_secrets: HashMap::new(),
+            collapsed_groups: Vec::new(),
         };
 
         info!("🟢 Inserting board into map...");
@@ -1669,6 +1675,7 @@ mod tests {
             last_read_message_id: None,
             secrets: HashMap::new(),
             category_secrets: HashMap::new(),
+            collapsed_groups: Vec::new(),
             current_secret_version: None,
             last_secret_rotation: None,
             key_migrated_to_delegate: false,
@@ -1741,6 +1748,7 @@ mod tests {
             last_read_message_id: None,
             secrets: HashMap::new(),
             category_secrets: HashMap::new(),
+            collapsed_groups: Vec::new(),
             current_secret_version: None,
             last_secret_rotation: None,
             key_migrated_to_delegate: false,
@@ -1803,6 +1811,7 @@ mod tests {
                 last_read_message_id: None,
                 secrets: HashMap::new(),
                 category_secrets: HashMap::new(),
+                collapsed_groups: Vec::new(),
                 current_secret_version: None,
                 last_secret_rotation: None,
                 key_migrated_to_delegate: false,

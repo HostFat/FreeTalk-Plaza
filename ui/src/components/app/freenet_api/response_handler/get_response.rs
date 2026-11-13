@@ -129,6 +129,7 @@ pub async fn handle_get_response(
                         last_read_message_id: None,
                         secrets: std::collections::HashMap::new(),
                         category_secrets: std::collections::HashMap::new(),
+                        collapsed_groups: Vec::new(),
                         current_secret_version: None,
                         last_secret_rotation: None,
                         key_migrated_to_delegate: false, // Will be checked/migrated on startup

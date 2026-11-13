@@ -1,3 +1,4 @@
+use crate::components::app::chat_delegate::save_boards_to_delegate;
 use crate::components::app::{
     CurrentCategoryContext, Route, BOARDS, CURRENT_BOARD, CURRENT_CATEGORY,
 };
@@ -11,9 +12,11 @@ use crate::util::avatar::get_avatar;
 use crate::util::format_utc_as_local_time;
 use crate::util::message_actions::{self, ActionContext};
 use dioxus::prelude::*;
+use freenet_scaffold::util::FastHash;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
 use wasm_bindgen_futures::spawn_local;
 
 /// Breadcrumb item for category navigation
@@ -251,6 +254,9 @@ fn SectionRow(
     last_activity: Option<(String, String)>,
     #[props(default)] groups: Vec<(MessageId, String)>,
     #[props(default)] allow_group_change: bool,
+    /// Child boards shown as a compact line under the row (home page)
+    #[props(default)]
+    child_boards: Vec<(MessageId, String)>,
     on_edit: EventHandler<CategoryEditData>,
     on_delete: EventHandler<MessageId>,
     board_id: String,
@@ -259,6 +265,8 @@ fn SectionRow(
     let nav = navigator();
     let nav_board = board_id.clone();
     let nav_category = category_id.clone();
+    let child_nav = navigator();
+    let child_board = board_id.clone();
     rsx! {
         CategoryCard {
             key: "{category_id}",
@@ -279,6 +287,33 @@ fn SectionRow(
             on_edit: move |data| on_edit.call(data),
             on_request_delete: move |id| on_delete.call(id),
         }
+        if !child_boards.is_empty() {
+            div { class: "mt-1 ml-12 flex flex-wrap items-center gap-2 text-xs text-text-muted",
+                span { "Child Boards:" }
+                for (child_id, child_name) in child_boards.iter() {
+                    {
+                        let child_id = child_id.clone();
+                        let child_name = child_name.clone();
+                        let board = child_board.clone();
+                        let nav = child_nav;
+                        rsx! {
+                            button {
+                                key: "{child_id:?}",
+                                r#type: "button",
+                                class: "hover:text-accent transition-colors",
+                                onclick: move |_| {
+                                    nav.push(Route::PostsInCategory {
+                                        board_id: board.clone(),
+                                        category_id: child_id.0 .0.to_string(),
+                                    });
+                                },
+                                "{child_name}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -288,6 +323,32 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
     let mut pending_delete_group = use_signal(|| false);
     let mut pending_group_children: Signal<Vec<MessageId>> = use_signal(Vec::new);
     let mut recent_first = use_signal(|| false);
+    let initial_collapsed: HashSet<MessageId> = CURRENT_BOARD
+        .read()
+        .owner_key
+        .and_then(|key| {
+            BOARDS
+                .read()
+                .map
+                .get(&key)
+                .map(|board| board.collapsed_groups.iter().cloned().collect())
+        })
+        .unwrap_or_default();
+    let mut collapsed_groups = use_signal(|| initial_collapsed);
+    use_effect(move || {
+        let groups: HashSet<MessageId> = CURRENT_BOARD
+            .read()
+            .owner_key
+            .and_then(|key| {
+                BOARDS
+                    .read()
+                    .map
+                    .get(&key)
+                    .map(|board| board.collapsed_groups.iter().cloned().collect())
+            })
+            .unwrap_or_default();
+        collapsed_groups.set(groups);
+    });
     // Posts rendered at a time; "Show more" grows it.
     let mut posts_limit = use_signal(|| 12usize);
     let category_for_reset = category_id.clone();
@@ -580,41 +641,6 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                 }
                                             }
 
-                                            // Child boards, like the board page on
-                                            // Bitcointalk: under the name/description.
-                                            if !categories.is_empty() {
-                                                div { class: "mt-3 pt-3 border-t border-border flex flex-wrap items-center gap-2",
-                                                    span { class: "text-xs font-medium text-text-muted", "Child Boards:" }
-                                                    for child in categories.iter() {
-                                                        {
-                                                            let child_id = child.id_string();
-                                                            let child_name = child
-                                                                .category_name
-                                                                .clone()
-                                                                .unwrap_or_else(|| "Unnamed".to_string());
-                                                            let board_id = current_board_id.read().clone();
-                                                            let nav = navigator();
-                                                            rsx! {
-                                                                button {
-                                                                    key: "{child_id}",
-                                                                    r#type: "button",
-                                                                    class: "px-2.5 py-1 text-xs rounded-md bg-surface hover:bg-surface-hover text-text transition-colors",
-                                                                    onclick: move |_| {
-                                                                        nav.push(Route::PostsInCategory {
-                                                                            board_id: board_id.clone(),
-                                                                            category_id: child_id.clone(),
-                                                                        });
-                                                                    },
-                                                                    if !child.category_allowed_roles.is_empty() {
-                                                                        "🔒 "
-                                                                    }
-                                                                    "{child_name}"
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
                                         }
                                     }
                                 }
@@ -737,6 +763,30 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                 })
                                 .collect();
 
+                            // Child boards by parent, for the names shown under
+                            // a section on the home page.
+                            let mut child_boards_by_parent: HashMap<
+                                MessageId,
+                                Vec<(MessageId, String)>,
+                            > = HashMap::new();
+                            for message in &all_messages {
+                                if !message.is_category || message.is_group {
+                                    continue;
+                                }
+                                if let Some(parent) = message.parent_category_id.as_ref() {
+                                    child_boards_by_parent
+                                        .entry(parent.clone())
+                                        .or_default()
+                                        .push((
+                                            message.message_id.clone(),
+                                            message
+                                                .category_name
+                                                .clone()
+                                                .unwrap_or_else(|| "Unnamed".to_string()),
+                                        ));
+                                }
+                            }
+
                             // Parent -> direct replies, shared by the post and
                             // category summaries below.
                             let children: HashMap<MessageId, Vec<&MessageData>> = {
@@ -841,37 +891,90 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                         let open_group_section =
                                                             open_section_in_group.clone();
                                                         let edit_handler = handle_edit_category.clone();
+                                                        let is_collapsed = collapsed_groups
+                                                            .read()
+                                                            .contains(&group_id);
+                                                        let toggle_group = {
+                                                            let group_id = group_id.clone();
+                                                            let owner = CURRENT_BOARD.read().owner_key;
+                                                            move |_| {
+                                                                let mut set = collapsed_groups.read().clone();
+                                                                if set.contains(&group_id) {
+                                                                    set.remove(&group_id);
+                                                                } else {
+                                                                    set.insert(group_id.clone());
+                                                                }
+                                                                collapsed_groups.set(set.clone());
+                                                                if let Some(owner) = owner {
+                                                                    BOARDS.with_mut(|boards| {
+                                                                        if let Some(board) =
+                                                                            boards.map.get_mut(&owner)
+                                                                        {
+                                                                            board.collapsed_groups = set
+                                                                                .iter()
+                                                                                .cloned()
+                                                                                .collect();
+                                                                        }
+                                                                    });
+                                                                    spawn_local(async {
+                                                                        if let Err(e) =
+                                                                            save_boards_to_delegate().await
+                                                                        {
+                                                                            dioxus::logger::tracing::error!(
+                                                                                "Failed to save collapsed groups: {}",
+                                                                                e
+                                                                            );
+                                                                        }
+                                                                    });
+                                                                }
+                                                            }
+                                                        };
                                                         rsx! {
                                                             div { key: "group-{group_key}", class: "mb-5",
-                                                                CategoryCard {
-                                                                    category: group.clone(),
-                                                                    self_member_id: self_member_id,
-                                                                    is_owner: is_owner,
-                                                                    is_admin: is_admin,
-                                                                    post_count: section_count,
-                                                                    last_activity: None,
-                                                                    on_click: move |_| {},
-                                                                    on_new_section: move |_| {
-                                                                        open_group_section(group_id.clone())
-                                                                    },
-                                                                    on_edit: move |data| edit_handler(data),
-                                                                    on_request_delete: {
-                                                                        let children: Vec<MessageId> = sections
-                                                                            .iter()
-                                                                            .map(|section| section.message_id.clone())
-                                                                            .collect();
-                                                                        move |id| {
-                                                                            pending_delete.set(Some(id));
-                                                                            pending_delete_group.set(true);
-                                                                            pending_group_children.set(children.clone());
+                                                                div { class: "flex items-center gap-2",
+                                                                    button {
+                                                                        r#type: "button",
+                                                                        class: "w-6 h-6 flex items-center justify-center rounded text-text-muted hover:text-text hover:bg-surface transition-colors flex-shrink-0",
+                                                                        title: if is_collapsed { "Expand group" } else { "Collapse group" },
+                                                                        onclick: toggle_group,
+                                                                        if is_collapsed { "▸" } else { "▾" }
+                                                                    }
+                                                                    div { class: "flex-1 min-w-0",
+                                                                        CategoryCard {
+                                                                            category: group.clone(),
+                                                                            self_member_id: self_member_id,
+                                                                            is_owner: is_owner,
+                                                                            is_admin: is_admin,
+                                                                            post_count: section_count,
+                                                                            last_activity: None,
+                                                                            on_click: move |_| {},
+                                                                            on_new_section: move |_| {
+                                                                                open_group_section(group_id.clone())
+                                                                            },
+                                                                            on_edit: move |data| edit_handler(data),
+                                                                            on_request_delete: {
+                                                                                let children: Vec<MessageId> = sections
+                                                                                    .iter()
+                                                                                    .map(|section| section.message_id.clone())
+                                                                                    .collect();
+                                                                                move |id| {
+                                                                                    pending_delete.set(Some(id));
+                                                                                    pending_delete_group.set(true);
+                                                                                    pending_group_children.set(children.clone());
+                                                                                }
+                                                                            },
                                                                         }
-                                                                    },
+                                                                    }
                                                                 }
-                                                                if !sections.is_empty() {
+                                                                if !is_collapsed && !sections.is_empty() {
                                                                     div { class: "mt-2 ml-4 pl-4 border-l border-border space-y-2",
                                                                         for section in sections.iter() {
                                                                             {
                                                                                 let (count, last) = category_summaries
+                                                                                    .get(&section.message_id)
+                                                                                    .cloned()
+                                                                                    .unwrap_or_default();
+                                                                                let child_boards = child_boards_by_parent
                                                                                     .get(&section.message_id)
                                                                                     .cloned()
                                                                                     .unwrap_or_default();
@@ -886,6 +989,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                                         last_activity: last,
                                                                                         groups: group_options.clone(),
                                                                                         allow_group_change: true,
+                                                                                        child_boards: child_boards,
                                                                                         board_id: board_id.clone(),
                                                                                         on_edit: move |data| edit_handler(data),
                                                                                         on_delete: move |id| {
@@ -912,6 +1016,10 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                     .get(&section.message_id)
                                                                     .cloned()
                                                                     .unwrap_or_default();
+                                                                let child_boards = child_boards_by_parent
+                                                                    .get(&section.message_id)
+                                                                    .cloned()
+                                                                    .unwrap_or_default();
                                                                 let edit_handler = handle_edit_category.clone();
                                                                 let board_id = current_board_id.read().clone();
                                                                 rsx! {
@@ -924,6 +1032,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                         last_activity: last,
                                                                         groups: group_options.clone(),
                                                                         allow_group_change: true,
+                                                                        child_boards: child_boards,
                                                                         board_id: board_id,
                                                                         on_edit: move |data| edit_handler(data),
                                                                         on_delete: move |id| {
@@ -931,6 +1040,44 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                             pending_delete_group.set(false);
                                                                         },
                                                                     }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Child boards as a full list under the
+                                        // section header, before the posts.
+                                        if viewing_category && !categories.is_empty() {
+                                            div { class: "mb-8",
+                                                h2 { class: "text-lg font-semibold text-text-muted mb-3", "Child Boards" }
+                                                div { class: "space-y-2",
+                                                    for category in categories.iter() {
+                                                        {
+                                                            let (count, last) = category_summaries
+                                                                .get(&category.message_id)
+                                                                .cloned()
+                                                                .unwrap_or_default();
+                                                            let edit_handler = handle_edit_category.clone();
+                                                            let board_id = current_board_id.read().clone();
+                                                            rsx! {
+                                                                SectionRow {
+                                                                    category: category.clone(),
+                                                                    self_member_id: self_member_id,
+                                                                    is_owner: is_owner,
+                                                                    is_admin: is_admin,
+                                                                    post_count: count,
+                                                                    last_activity: last,
+                                                                    allow_group_change: false,
+                                                                    child_boards: Vec::new(),
+                                                                    board_id: board_id,
+                                                                    on_edit: move |data| edit_handler(data),
+                                                                    on_delete: move |id| {
+                                                                        pending_delete.set(Some(id));
+                                                                        pending_delete_group.set(false);
+                                                                    },
                                                                 }
                                                             }
                                                         }

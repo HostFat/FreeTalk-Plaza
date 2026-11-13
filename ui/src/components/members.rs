@@ -483,6 +483,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     last_read_message_id: None,
                     secrets: HashMap::new(),
                     category_secrets,
+                    collapsed_groups: Vec::new(),
                     current_secret_version: None,
                     last_secret_rotation: None,
                     key_migrated_to_delegate: false,
