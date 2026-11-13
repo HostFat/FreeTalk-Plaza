@@ -262,6 +262,10 @@ fn PostRow(
         }
         text
     };
+    let quoted = crate::components::app::QUOTE_COLLECTION
+        .read()
+        .iter()
+        .any(|quote| quote.target == post.message_id);
 
     rsx! {
         div {
@@ -299,24 +303,31 @@ fn PostRow(
                 div { class: "flex items-center gap-1 flex-shrink-0",
                     button {
                         r#type: "button",
-                        class: "px-1.5 py-1 text-xs rounded hover:bg-surface",
-                        title: "Quote",
+                        class: if quoted {
+                            "px-1.5 py-1 text-xs rounded bg-accent/20 text-accent"
+                        } else {
+                            "px-1.5 py-1 text-xs rounded hover:bg-surface"
+                        },
+                        title: if quoted { "Remove from quote" } else { "Add to quote" },
                         onclick: {
                             let target = post.message_id;
                             let author = post.author_name.clone();
-                            let text = post.content_text.clone();
+                            let text: String = post.content_text.chars().take(1000).collect();
                             let preview = post.content_text.chars().take(200).collect::<String>();
                             move |evt| {
                                 evt.stop_propagation();
-                                crate::components::app::QUOTE_REQUEST.with_mut(|request| {
-                                    *request = Some(crate::components::app::QuoteRequest {
-                                        target,
-                                        author: author.clone(),
-                                        preview: preview.clone(),
-                                        text: text.clone(),
-                                    });
+                                crate::components::app::QUOTE_COLLECTION.with_mut(|quotes| {
+                                    if let Some(index) = quotes.iter().position(|q| q.target == target) {
+                                        quotes.remove(index);
+                                    } else {
+                                        quotes.push(crate::components::app::QuoteRequest {
+                                            target,
+                                            author: author.clone(),
+                                            preview: preview.clone(),
+                                            text: text.clone(),
+                                        });
+                                    }
                                 });
-                                *crate::components::app::COMPOSE_REQUEST.write() += 1;
                             }
                         },
                         "❝"
@@ -692,6 +703,20 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
 
     let viewing_category = category_id.is_some();
 
+    // Follow/Unfollow applies to sections, never to homepage groups.
+    let current_section_id = current_category
+        .as_ref()
+        .filter(|section| !section.is_group)
+        .map(|section| section.message_id);
+    let section_followed = current_section_id
+        .map(|id| {
+            current_board_data
+                .as_ref()
+                .map(|board| board.subscribed_categories.contains(&id))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+
     rsx! {
         div { class: "flex-1 flex flex-col min-w-0 min-h-0 bg-bg",
             // Show no-board-selected message or header with user info
@@ -771,6 +796,28 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                             },
                                             span { "✏️" }
                                             span { "New post" }
+                                        }
+                                        if let Some(section_id) = current_section_id {
+                                            button {
+                                                r#type: "button",
+                                                class: if section_followed {
+                                                    "px-3 py-1.5 bg-surface text-accent text-xs rounded-lg transition-colors"
+                                                } else {
+                                                    "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg transition-colors"
+                                                },
+                                                title: if section_followed {
+                                                    "Stop following this section"
+                                                } else {
+                                                    "Show new topics in this section under Notifications"
+                                                },
+                                                onclick: move |_| {
+                                                    crate::util::subscriptions::set_followed(
+                                                        section_id,
+                                                        !section_followed,
+                                                    );
+                                                },
+                                                if section_followed { "✓ Following" } else { "+ Follow" }
+                                            }
                                         }
                                         if can_manage_structure {
                                             button {

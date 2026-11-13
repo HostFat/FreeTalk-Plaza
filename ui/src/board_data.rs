@@ -32,6 +32,24 @@ pub enum SendMessageError {
     UserBanned,
 }
 
+/// Unsent composer content. Local to this user and persisted in the delegate
+/// store, so a reload or a navigation does not lose a half-written post.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug, Default)]
+pub struct ComposerDraft {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub reply_to: Option<MessageId>,
+    #[serde(default)]
+    pub reply_author: String,
+    #[serde(default)]
+    pub reply_preview: String,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardData {
     pub owner_vk: VerifyingKey,
@@ -59,6 +77,15 @@ pub struct BoardData {
     /// Last time each section was opened (milliseconds), for unread badges.
     #[serde(default)]
     pub read_categories: HashMap<MessageId, i64>,
+
+    /// The composer's unsent post. Local UI state, never shared with the board.
+    #[serde(default)]
+    pub draft: Option<ComposerDraft>,
+
+    /// Sections the user follows. New topics in these sections show up in the
+    /// notifications list. Local preference, persisted in the delegate.
+    #[serde(default)]
+    pub subscribed_categories: Vec<MessageId>,
 
     /// Decrypted per-category secrets: category id -> (version, key).
     ///
@@ -1213,6 +1240,8 @@ impl Boards {
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
+            draft: None,
+            subscribed_categories: Vec::new(),
         };
 
         info!("🟢 Inserting board into map...");
@@ -1766,6 +1795,8 @@ mod tests {
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
+            draft: None,
+            subscribed_categories: Vec::new(),
             current_secret_version: None,
             last_secret_rotation: None,
             key_migrated_to_delegate: false,
@@ -1841,6 +1872,8 @@ mod tests {
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
+            draft: None,
+            subscribed_categories: Vec::new(),
             current_secret_version: None,
             last_secret_rotation: None,
             key_migrated_to_delegate: false,
@@ -1906,6 +1939,8 @@ mod tests {
                 collapsed_groups: Vec::new(),
                 last_visit: 0,
                 read_categories: HashMap::new(),
+                draft: None,
+                subscribed_categories: Vec::new(),
                 current_secret_version: None,
                 last_secret_rotation: None,
                 key_migrated_to_delegate: false,

@@ -73,7 +73,7 @@ freenet-scaffold.workspace = true
 freenet-stdlib = { workspace = true, features = ["net"] }
 
 futures = "0.3.30"
-futures-timer = "3.0.3"
+futures-timer = { version = "3.0.3", features = ["wasm-bindgen"] }
 
 # Add this section for the build script
 [build-dependencies]

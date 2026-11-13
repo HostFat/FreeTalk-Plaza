@@ -2,10 +2,13 @@
 
 pub mod access;
 pub mod avatar;
+pub mod drafts;
 pub mod ecies;
 pub mod markdown;
 pub mod message_actions;
 pub mod messaging;
+pub mod notifications;
+pub mod subscriptions;
 
 use ed25519_dalek::VerifyingKey;
 use freenet_stdlib::prelude::{ContractCode, ContractKey, Parameters};

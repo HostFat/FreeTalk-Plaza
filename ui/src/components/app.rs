@@ -122,16 +122,16 @@ pub static COMPOSE_REQUEST: GlobalSignal<u64> = Global::new(|| 0);
 /// Group id (as a string) to scroll to after returning to the home page.
 pub static SCROLL_TO_GROUP: GlobalSignal<Option<String>> = Global::new(|| None);
 
-/// Quote requested from a post. The shared composer inserts it and replies
-/// to the quoted post.
-#[derive(Clone)]
+/// A post selected for quoting. The composer drains the collection and turns
+/// every entry into a quoted block, so several posts can be quoted at once.
+#[derive(Clone, PartialEq)]
 pub struct QuoteRequest {
     pub target: MessageId,
     pub author: String,
     pub preview: String,
     pub text: String,
 }
-pub static QUOTE_REQUEST: GlobalSignal<Option<QuoteRequest>> = Global::new(|| None);
+pub static QUOTE_COLLECTION: GlobalSignal<Vec<QuoteRequest>> = Global::new(Vec::new);
 
 /// Context for the currently viewed category
 #[derive(Clone, Default)]

@@ -2,7 +2,8 @@
 
 use crate::board_data::SendMessageError;
 use crate::components::app::{
-    ABOUT_MODAL, BOARDS, CURRENT_BOARD, CURRENT_CATEGORY, MEMBER_INFO_MODAL,
+    ABOUT_MODAL, BOARDS, COMPOSE_REQUEST, CURRENT_BOARD, CURRENT_CATEGORY, MEMBER_INFO_MODAL,
+    QUOTE_COLLECTION,
 };
 use crate::components::category_create_modal::CREATE_CATEGORY_MODAL;
 use crate::components::conversation::message_input::PostInput;
@@ -26,6 +27,29 @@ pub fn TopBar() -> Element {
             .read()
             .owner_key
             .and_then(|key| BOARDS.read().map.get(&key).cloned())
+    });
+
+    // Quotes belong to the board they were picked on.
+    let mut quote_board = use_signal(|| CURRENT_BOARD.read().owner_key);
+    use_effect(move || {
+        let current = CURRENT_BOARD.read().owner_key;
+        if current != *quote_board.peek() {
+            quote_board.set(current);
+            QUOTE_COLLECTION.write().clear();
+        }
+    });
+
+    // Unread notifications for the bell badge.
+    let unread_notifications = use_memo(move || {
+        let Some(key) = CURRENT_BOARD.read().owner_key else {
+            return 0;
+        };
+        BOARDS
+            .read()
+            .map
+            .get(&key)
+            .map(crate::util::notifications::unread_count)
+            .unwrap_or(0)
     });
 
     // Get category context for default reply (when viewing a category)
@@ -248,7 +272,15 @@ pub fn TopBar() -> Element {
                                 let _ = win.location().set_hash(&nav_notifications);
                             }
                         },
-                        span { "🔔" }
+                        span { class: "relative",
+                            span { "🔔" }
+                            if unread_notifications() > 0 {
+                                span {
+                                    class: "absolute -top-2 -right-2 min-w-4 h-4 px-1 rounded-full bg-accent text-white text-[10px] leading-4 text-center",
+                                    "{unread_notifications()}"
+                                }
+                            }
+                        }
                         span { "Notifications" }
                     }
                     // Search button
@@ -353,6 +385,12 @@ pub fn TopBar() -> Element {
                                 },
                                 span { "🔔" }
                                 span { "Notifications" }
+                                if unread_notifications() > 0 {
+                                    span {
+                                        class: "ml-auto min-w-5 h-5 px-1.5 rounded-full bg-accent text-white text-[11px] leading-5 text-center",
+                                        "{unread_notifications()}"
+                                    }
+                                }
                             }
                             button {
                                 r#type: "button",
@@ -439,6 +477,35 @@ pub fn TopBar() -> Element {
                             "You have been banned from this board."
                         }
                     },
+                }
+            }
+
+            // Quotes picked from the post list wait here until the user opens
+            // the composer. Several posts can be collected before replying.
+            if !QUOTE_COLLECTION.read().is_empty() {
+                {
+                    let count = QUOTE_COLLECTION.read().len();
+                    rsx! {
+                        div { class: "fixed bottom-5 right-5 z-40 flex items-center gap-3 bg-panel border border-border shadow-xl rounded-xl px-4 py-3",
+                            span { class: "text-sm text-text", "❝ {count} quoted" }
+                            button {
+                                r#type: "button",
+                                class: "px-3 py-1.5 bg-accent hover:bg-accent-hover text-white text-xs font-medium rounded-lg transition-colors",
+                                onclick: move |_| {
+                                    *COMPOSE_REQUEST.write() += 1;
+                                },
+                                "Quote in reply"
+                            }
+                            button {
+                                r#type: "button",
+                                class: "px-2 py-1.5 text-text-muted hover:text-text text-xs transition-colors",
+                                onclick: move |_| {
+                                    QUOTE_COLLECTION.write().clear();
+                                },
+                                "Clear"
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -25,6 +25,37 @@ pub fn PostInput(
     let mut message_text = use_signal(String::new);
     let mut show_emoji_picker = use_signal(|| false);
     let mut show_preview = use_signal(|| false);
+    let mut draft_restored = use_signal(|| false);
+    let mut save_generation = use_signal(|| 0u64);
+
+    // Keep the draft in BoardData and write the delegate store. The compose
+    // path uses this directly; typing waits for a pause so every keystroke
+    // does not rewrite the board state.
+    let mut save_draft_now = move || {
+        if crate::util::drafts::store(
+            &title_text.peek(),
+            &message_text.peek(),
+            replying_to.peek().as_ref(),
+        ) {
+            crate::util::drafts::persist();
+        }
+    };
+    let mut schedule_save = move || {
+        let generation = *save_generation.peek() + 1;
+        save_generation.set(generation);
+        spawn(async move {
+            futures_timer::Delay::new(std::time::Duration::from_millis(800)).await;
+            if *save_generation.peek() == generation {
+                if crate::util::drafts::store(
+                    &title_text.peek(),
+                    &message_text.peek(),
+                    replying_to.peek().as_ref(),
+                ) {
+                    crate::util::drafts::persist();
+                }
+            }
+        });
+    };
 
     // Open modal when replying_to changes to Some (from clicking reply button)
     use_effect(move || {
@@ -33,41 +64,72 @@ pub fn PostInput(
         }
     });
 
-    // Other pages can ask the shared composer to open, for example the
-    // "New post" button inside a category.
-    // A quote from a post opens the composer, appends the quote and replies
-    // to that post.
-    use_effect(move || {
-        let request = crate::components::app::QUOTE_REQUEST.read().clone();
-        let Some(request) = request else {
+    // Restore the saved draft when the user opens the composer for a new post.
+    // A draft never overrides text the composer already has, such as a quote,
+    // and never overrides a reply the user started from the post list.
+    let mut restore_draft = move || {
+        if *draft_restored.peek() {
+            return;
+        }
+        draft_restored.set(true);
+        if !title_text.peek().is_empty() || !message_text.peek().is_empty() {
+            return;
+        }
+        let Some(draft) = crate::util::drafts::load() else {
             return;
         };
-        let quote = format!("> {}: {}\n\n", request.author, request.text);
-        let current = message_text.read().clone();
-        message_text.set(format!("{quote}{current}"));
-        replying_to.set(Some(crate::util::messaging::ReplyContext {
-            message_id: request.target,
-            author_name: request.author,
-            content_preview: request.preview,
-        }));
-        show_modal.set(true);
-        crate::components::app::QUOTE_REQUEST.with_mut(|request| *request = None);
-    });
+        title_text.set(draft.title);
+        message_text.set(draft.text);
+        if let Some(target) = draft.reply_to {
+            replying_to.set(Some(crate::util::messaging::ReplyContext {
+                message_id: target,
+                author_name: draft.reply_author,
+                content_preview: draft.reply_preview,
+            }));
+        }
+    };
 
+    // Other pages can ask the shared composer to open, for example the
+    // "New post" button inside a category. Quotes collected from the post
+    // list are inserted in one block and reply to the last quoted post.
     let default_reply_for_request = default_reply_to.clone();
     let mut last_compose_request = use_signal(|| *crate::components::app::COMPOSE_REQUEST.read());
     use_effect(move || {
         let request = *crate::components::app::COMPOSE_REQUEST.read();
-        if request != *last_compose_request.read() {
-            last_compose_request.set(request);
-            if replying_to.peek().is_none() {
-                if let Some(default) = default_reply_for_request.clone() {
-                    replying_to.set(Some(default));
-                }
-            }
-            show_modal.set(true);
+        if request == *last_compose_request.read() {
+            return;
         }
+        last_compose_request.set(request);
+
+        let quotes = crate::components::app::QUOTE_COLLECTION.read().clone();
+        if !quotes.is_empty() {
+            let mut text = String::new();
+            for quote in quotes.iter() {
+                text.push_str(&format!("> {}: {}\n\n", quote.author, quote.text));
+            }
+            let existing = message_text.peek().clone();
+            message_text.set(format!("{text}{existing}"));
+            if let Some(last) = quotes.last() {
+                replying_to.set(Some(crate::util::messaging::ReplyContext {
+                    message_id: last.target,
+                    author_name: last.author.clone(),
+                    content_preview: last.preview.clone(),
+                }));
+            }
+            crate::components::app::QUOTE_COLLECTION.with_mut(|quotes| quotes.clear());
+        }
+
+        if replying_to.peek().is_none() {
+            if let Some(default) = default_reply_for_request.clone() {
+                replying_to.set(Some(default));
+            }
+        }
+        restore_draft();
+        show_modal.set(true);
+        save_draft_now();
     });
+
+    let has_draft = use_memo(move || crate::util::drafts::load().is_some());
 
     // Handler for opening the modal via Compose button
     let open_modal = {
@@ -79,6 +141,7 @@ pub fn PostInput(
                     replying_to.set(Some(default.clone()));
                 }
             }
+            restore_draft();
             show_modal.set(true);
         }
     };
@@ -92,6 +155,8 @@ pub fn PostInput(
             message_text.set(String::new());
             replying_to.set(None);
             show_modal.set(false);
+            crate::util::drafts::clear();
+            crate::util::drafts::persist();
             handle_send_message.call((title, content, reply_ctx));
         }
     };
@@ -100,6 +165,7 @@ pub fn PostInput(
     let handle_emoji_select = move |emoji: String| {
         let current = message_text.peek().to_string();
         message_text.set(format!("{}{}", current, emoji));
+        schedule_save();
     };
 
     rsx! {
@@ -113,10 +179,13 @@ pub fn PostInput(
             }
         } else {
             button {
-                class: "p-3 bg-accent hover:bg-accent-hover text-white rounded-xl transition-colors",
+                class: "relative p-3 bg-accent hover:bg-accent-hover text-white rounded-xl transition-colors",
                 onclick: open_modal,
-                title: "Compose Post",
+                title: if has_draft() { "Compose Post (draft saved)" } else { "Compose Post" },
                 Icon { icon: FaPen, width: 18, height: 18 }
+                if has_draft() {
+                    span { class: "absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-white border border-accent" }
+                }
             }
         }
 
@@ -125,6 +194,7 @@ pub fn PostInput(
             div {
                 class: "fixed inset-0 bg-black/50 flex items-center justify-center z-50",
                 onclick: move |_| {
+                    save_draft_now();
                     show_modal.set(false);
                     replying_to.set(None);
                 },
@@ -140,6 +210,7 @@ pub fn PostInput(
                         button {
                             class: "p-2 rounded-lg text-text-muted hover:text-text hover:bg-surface transition-colors",
                             onclick: move |_| {
+                                save_draft_now();
                                 show_modal.set(false);
                                 replying_to.set(None);
                             },
@@ -196,6 +267,7 @@ pub fn PostInput(
                                     // Strip newlines from title
                                     let value = evt.value().replace(['\n', '\r'], "");
                                     title_text.set(value);
+                                    schedule_save();
                                 },
                             }
                         }
@@ -331,7 +403,10 @@ pub fn PostInput(
                                         placeholder: "Type your message...",
                                         value: "{message_text}",
                                         rows: "5",
-                                        oninput: move |evt| message_text.set(evt.value().to_string()),
+                                        oninput: move |evt| {
+                                            message_text.set(evt.value().to_string());
+                                            schedule_save();
+                                        },
                                         onkeydown: move |evt| {
                                             // Ctrl/Cmd+Enter sends the message
                                             if evt.key() == Key::Enter && (evt.modifiers().ctrl() || evt.modifiers().meta()) {
@@ -340,6 +415,7 @@ pub fn PostInput(
                                             }
                                             // Escape closes modal
                                             if evt.key() == Key::Escape {
+                                                save_draft_now();
                                                 show_modal.set(false);
                                                 replying_to.set(None);
                                             }
@@ -374,6 +450,7 @@ pub fn PostInput(
                                 r#type: "button",
                                 class: "px-4 py-2 rounded-lg bg-surface hover:bg-surface-hover text-text transition-colors",
                                 onclick: move |_| {
+                                    save_draft_now();
                                     show_modal.set(false);
                                     replying_to.set(None);
                                 },
