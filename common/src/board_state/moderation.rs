@@ -388,7 +388,7 @@ fn check_flag_permission(
         }
     }
     let author = target_author(state, &flag.target);
-    if closed_changed && author.as_ref() == Some(signer) {
+    if closed_changed && !pinned_changed && author.as_ref() == Some(signer) {
         return Ok(());
     }
     let chain = category_chain(routes, &flag.target);
@@ -415,6 +415,16 @@ fn verify_flag(
     routes: &BTreeMap<MessageId, RouteState>,
     flag: &AuthorizedPostFlag,
 ) -> Result<(), String> {
+    verify_flag_against(state, parameters, routes, &state.moderation.flags, flag)
+}
+
+fn verify_flag_against(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    routes: &BTreeMap<MessageId, RouteState>,
+    previous_flags: &[AuthorizedPostFlag],
+    flag: &AuthorizedPostFlag,
+) -> Result<(), String> {
     let signer = flag.signer_id(parameters);
     let key = signer_key(state, parameters, &signer)?;
     flag.verify_signature_with(&key)?;
@@ -423,9 +433,7 @@ fn verify_flag(
     }
     // Compare with the previous generation only: when the contract verifies a
     // whole state, the flag being checked is already in that state.
-    let existing = state
-        .moderation
-        .flags
+    let existing = previous_flags
         .iter()
         .filter(|entry| {
             entry.flag.target == flag.flag.target && entry.flag.generation < flag.flag.generation
@@ -680,9 +688,10 @@ impl ModerationV1 {
         self.routes.sort_by_key(|entry| entry.route.message_id.0 .0);
 
         let routes = route_map(&self.routes);
+        let previous_flags = self.flags.clone();
         self.flags.retain(|entry| {
             live.contains(&entry.flag.target)
-                && verify_flag(state, parameters, &routes, entry).is_ok()
+                && verify_flag_against(state, parameters, &routes, &previous_flags, entry).is_ok()
         });
         self.flags.sort_by_key(|entry| {
             (

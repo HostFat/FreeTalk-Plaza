@@ -30,6 +30,7 @@ use std::collections::HashMap;
 pub enum SendMessageError {
     UserNotMember,
     UserBanned,
+    UserSuspended,
 }
 
 /// Unsent composer content. Local to this user and persisted in the delegate
@@ -156,7 +157,7 @@ impl BoardData {
                 };
                 let version = blob.secret.secret_version;
                 match latest {
-                    Some((best_version, best_key)) if best_version >= version => {
+                    Some((best_version, _best_key)) if best_version >= version => {
                         self.old_category_secrets
                             .entry(set.category_id.clone())
                             .or_default()
@@ -260,10 +261,18 @@ impl BoardData {
     ) -> Option<CategoryContentV1> {
         let mut category = self.decode_category(content)?;
         if let Some(sealed) = category.sealed_name.as_ref() {
+            let mut keys = Vec::new();
             if let Some((_, key)) = self.category_secret(category_id) {
+                keys.push(key);
+            }
+            if let Some(versions) = self.old_category_secrets.get(category_id) {
+                keys.extend(versions.values().copied());
+            }
+            for key in keys {
                 if let Ok(bytes) = crate::util::ecies::unseal_bytes(sealed, Some(&key)) {
                     if let Ok(name) = String::from_utf8(bytes) {
                         category.name = name;
+                        break;
                     }
                 }
             }
@@ -762,6 +771,49 @@ impl BoardData {
         .is_ok()
     }
 
+    /// Decrypt the board-secret blobs (X25519 and hybrid PQ) for this member.
+    /// Used on initial load and on every update that may carry a new version.
+    pub fn decrypt_board_secrets(&mut self) {
+        if !self.is_private() {
+            return;
+        }
+        use crate::util::ecies::decrypt_secret_from_member_blob;
+        use x25519_dalek::PublicKey as X25519PublicKey;
+
+        let member_id = MemberId::from(&self.self_sk.verifying_key());
+        let current_version = self.board_state.secrets.current_version;
+        let member_secrets: Vec<(u32, Vec<u8>, [u8; 12], [u8; 32])> = self
+            .board_state
+            .secrets
+            .encrypted_secrets
+            .iter()
+            .filter(|secret| secret.secret.member_id == member_id)
+            .map(|secret| {
+                (
+                    secret.secret.secret_version,
+                    secret.secret.ciphertext.clone(),
+                    secret.secret.nonce,
+                    secret.secret.sender_ephemeral_public_key,
+                )
+            })
+            .collect();
+        for (version, ciphertext, nonce, ephemeral_key_bytes) in member_secrets {
+            let ephemeral = X25519PublicKey::from(ephemeral_key_bytes);
+            match decrypt_secret_from_member_blob(&ciphertext, &nonce, &ephemeral, &self.self_sk) {
+                Ok(secret) => self.set_secret(secret, version),
+                Err(error) => {
+                    dioxus::logger::tracing::warn!(
+                        "Failed to decrypt board secret v{}: {}",
+                        version,
+                        error
+                    );
+                }
+            }
+        }
+        self.current_secret_version = Some(current_version);
+        self.decrypt_pq_board_secrets();
+    }
+
     /// Try the PQ sets for the board secret. Old versions stay in `secrets`.
     pub fn decrypt_pq_board_secrets(&mut self) {
         if !self.is_private() {
@@ -821,9 +873,25 @@ impl BoardData {
         }
         for (category_id, version, sealed) in items {
             match crate::util::pq::open_secret(&self.self_sk, &sealed) {
-                Ok(secret) => {
-                    self.category_secrets.insert(category_id, (version, secret));
-                }
+                Ok(secret) => match self.category_secrets.get(&category_id).copied() {
+                    Some((current_version, _current_key)) if current_version > version => {
+                        self.old_category_secrets
+                            .entry(category_id)
+                            .or_default()
+                            .insert(version, secret);
+                    }
+                    Some((current_version, _current_key)) if current_version == version => {}
+                    Some((current_version, current_key)) => {
+                        self.old_category_secrets
+                            .entry(category_id)
+                            .or_default()
+                            .insert(current_version, current_key);
+                        self.category_secrets.insert(category_id, (version, secret));
+                    }
+                    None => {
+                        self.category_secrets.insert(category_id, (version, secret));
+                    }
+                },
                 Err(error) => {
                     dioxus::logger::tracing::warn!(
                         "Could not open PQ category secret v{}: {}",
@@ -839,7 +907,7 @@ impl BoardData {
     /// Owner or members of a key-distribution role can sign these sets.
     pub fn generate_missing_pq_category_secrets(&mut self) -> bool {
         use plaza_core::board_state::pq_secrets::{
-            AuthorizedPqSecretSet, PqScope, PqSecretSet, PqSecretsDelta,
+            AuthorizedPqSecretSet, PqScope, PqSecretSet, PqSecretsDelta, PqSuite,
         };
         use std::collections::HashSet;
 
@@ -902,9 +970,19 @@ impl BoardData {
                         .collect()
                 })
                 .unwrap_or_default();
-            if recipients
-                .iter()
-                .all(|(member_id, _, _)| covered.contains(member_id))
+            let all_hybrid = existing
+                .map(|entry| {
+                    entry
+                        .set
+                        .secrets
+                        .iter()
+                        .all(|secret| matches!(secret.suite, PqSuite::Hybrid))
+                })
+                .unwrap_or(false);
+            if all_hybrid
+                && recipients
+                    .iter()
+                    .all(|(member_id, _, _)| covered.contains(member_id))
             {
                 continue;
             }
@@ -958,7 +1036,7 @@ impl BoardData {
     /// PQ key. Members without a key keep using the X25519 blob.
     pub fn generate_missing_pq_secrets(&mut self) -> bool {
         use plaza_core::board_state::pq_secrets::{
-            AuthorizedPqSecretSet, PqScope, PqSealedSecret, PqSecretSet, PqSecretsDelta,
+            AuthorizedPqSecretSet, PqScope, PqSecretSet, PqSecretsDelta, PqSuite,
         };
         use std::collections::HashSet;
 
@@ -1032,9 +1110,19 @@ impl BoardData {
                     .collect()
             })
             .unwrap_or_default();
-        if recipients
-            .iter()
-            .all(|(member_id, _, _)| covered.contains(member_id))
+        let all_hybrid = existing_for_version
+            .map(|entry| {
+                entry
+                    .set
+                    .secrets
+                    .iter()
+                    .all(|secret| matches!(secret.suite, PqSuite::Hybrid))
+            })
+            .unwrap_or(false);
+        if all_hybrid
+            && recipients
+                .iter()
+                .all(|(member_id, _, _)| covered.contains(member_id))
         {
             return false;
         }
@@ -1147,6 +1235,14 @@ impl BoardData {
         {
             return Err(SendMessageError::UserBanned);
         }
+        if self
+            .board_state
+            .suspensions
+            .active_until(member_id, chrono::Utc::now().timestamp_millis())
+            .is_some()
+        {
+            return Err(SendMessageError::UserSuspended);
+        }
 
         // Owner can always send
         if verifying_key == self.owner_vk {
@@ -1187,6 +1283,14 @@ impl BoardData {
             .any(|b| b.ban.banned_user == member_id)
         {
             return Err(SendMessageError::UserBanned);
+        }
+        if self
+            .board_state
+            .suspensions
+            .active_until(member_id, chrono::Utc::now().timestamp_millis())
+            .is_some()
+        {
+            return Err(SendMessageError::UserSuspended);
         }
 
         // Owner can always participate
@@ -1350,7 +1454,7 @@ impl BoardData {
             .map(|b| b.ban.banned_user)
             .collect();
 
-        let current_members: Vec<MemberId> = self
+        let mut current_members: Vec<MemberId> = self
             .board_state
             .members
             .members
@@ -1358,6 +1462,10 @@ impl BoardData {
             .map(|m| MemberId::from(&m.member.member_vk))
             .filter(|id| !banned_members.contains(id))
             .collect();
+        // The owner is not a Member record, but needs the new board secret too.
+        current_members.push(MemberId::from(&self.owner_vk));
+        current_members.sort_by_key(|member| member.0 .0);
+        current_members.dedup();
 
         if current_members.is_empty() {
             return Err("No members to encrypt secret for".to_string());
@@ -1409,8 +1517,8 @@ impl BoardData {
         self.secrets.insert(new_version, new_secret);
         self.current_secret_version = Some(new_version);
         self.last_secret_rotation = Some(get_current_system_time());
-        // Add the PQ set for the new version alongside the X25519 blobs.
-        self.generate_missing_pq_secrets();
+        // The PQ set is generated after the caller applies the SecretsDelta:
+        // the contract rejects a set that references a not-yet-current version.
 
         Ok(SecretsDelta {
             current_version: Some(new_version),
@@ -1731,8 +1839,8 @@ impl Boards {
             board_data.regenerate_contract_key();
             // Stored state carries category keys; open them on load so the UI can
             // show restricted categories without waiting for a network round trip.
+            board_data.decrypt_board_secrets();
             board_data.decrypt_category_secrets();
-            board_data.decrypt_pq_board_secrets();
 
             // If the contract key changed (WASM was updated), track for upgrade pointer
             if old_contract_key != board_data.contract_key {

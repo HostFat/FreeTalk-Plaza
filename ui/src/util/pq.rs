@@ -63,8 +63,7 @@ pub fn seal_secret(
     let recipient_x25519 = crate::util::ecies::ed25519_to_x25519_public_key(recipient_vk);
     let x25519_shared = ephemeral_secret.diffie_hellman(&recipient_x25519);
 
-    let seed = crate::util::ecies::generate_board_secret();
-    let mut rng = SeedRng::from_seed(seed);
+    let mut rng = OsRngAdapter(rand::rngs::OsRng);
     let (ciphertext, kem_shared) = ek.encapsulate_with_rng(&mut rng);
 
     let mut combined = Vec::with_capacity(64);
@@ -128,38 +127,25 @@ pub fn open_secret(self_sk: &SigningKey, sealed: &PqSealedSecret) -> Result<[u8;
     Ok(secret)
 }
 
-/// Deterministic RNG for ML-KEM encapsulation, seeded from OS randomness.
-struct SeedRng(u64);
+/// Adapts `rand`'s OS-backed RNG to the `rand_core` 0.10 traits used by
+/// ml-kem, so encapsulation uses the same cryptographic randomness as ECIES.
+struct OsRngAdapter(rand::rngs::OsRng);
 
-impl SeedRng {
-    fn from_seed(seed: [u8; 32]) -> Self {
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&seed[..8]);
-        Self(u64::from_le_bytes(bytes) | 1)
-    }
-}
-
-impl rand_core::TryRng for SeedRng {
+impl rand_core::TryRng for OsRngAdapter {
     type Error = core::convert::Infallible;
     fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        Ok(self.try_next_u64()? as u32)
+        Ok(rand::RngCore::next_u32(&mut self.0))
     }
     fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        Ok(self.0)
+        Ok(rand::RngCore::next_u64(&mut self.0))
     }
     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
-        for chunk in dst.chunks_mut(8) {
-            let value = self.try_next_u64()?.to_le_bytes();
-            chunk.copy_from_slice(&value[..chunk.len()]);
-        }
+        rand::RngCore::fill_bytes(&mut self.0, dst);
         Ok(())
     }
 }
 
-impl rand_core::TryCryptoRng for SeedRng {}
+impl rand_core::TryCryptoRng for OsRngAdapter {}
 
 /// Periodic client work on private boards: publish our KEM key, open the
 /// board secret from a PQ set, and (as owner) seal it for members with keys.

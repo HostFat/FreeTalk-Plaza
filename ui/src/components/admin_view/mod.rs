@@ -67,6 +67,22 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
             })
     });
 
+    let is_admin = use_memo(move || {
+        current_board_data
+            .read()
+            .as_ref()
+            .map(|board_data| {
+                let self_id = MemberId::from(&board_data.self_sk.verifying_key());
+                board_data
+                    .board_state
+                    .admin
+                    .admins
+                    .iter()
+                    .any(|admin| admin.admin.id() == self_id)
+            })
+            .unwrap_or(false)
+    });
+
     // Get list of current admins
     let admins = use_memo(move || {
         current_board_data
@@ -145,6 +161,14 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
         return rsx! {
             div { class: "flex-1 flex items-center justify-center p-4",
                 p { class: "text-text-muted", "Select a board to manage admins" }
+            }
+        };
+    }
+
+    if !*is_owner.read() && !*is_admin.read() {
+        return rsx! {
+            div { class: "flex-1 flex items-center justify-center p-4",
+                p { class: "text-text-muted", "Only the board owner and admins can open this page." }
             }
         };
     }

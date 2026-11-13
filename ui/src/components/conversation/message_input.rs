@@ -41,7 +41,7 @@ pub fn PostInput(
     // Keep the draft in BoardData and write the delegate store. The compose
     // path uses this directly; typing waits for a pause so every keystroke
     // does not rewrite the board state.
-    let mut save_draft_now = move || {
+    let save_draft_now = move || {
         if crate::util::drafts::store(
             &title_text.peek(),
             &message_text.peek(),

@@ -80,7 +80,7 @@ pub fn decrypt(
     sender_public_key: &X25519PublicKey,
     ciphertext: &[u8],
     nonce: &[u8; 12],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, String> {
     // Convert Ed25519 signing key to X25519 private key
     let recipient_x25519_private_key = ed25519_to_x25519_private_key(recipient_private_key);
 
@@ -91,12 +91,11 @@ pub fn decrypt(
     let symmetric_key = Sha256::digest(shared_secret.as_bytes());
 
     // Decrypt the ciphertext using AES-GCM
-    let cipher = Aes256Gcm::new_from_slice(&symmetric_key).expect("Failed to create cipher");
-    let decrypted_message = cipher
+    let cipher = Aes256Gcm::new_from_slice(&symmetric_key)
+        .map_err(|_| "Failed to create cipher".to_string())?;
+    cipher
         .decrypt(&Nonce::from(*nonce), ciphertext.as_ref())
-        .expect("decryption failure!");
-
-    decrypted_message
+        .map_err(|_| "decryption failure".to_string())
 }
 
 #[allow(dead_code)]
@@ -211,7 +210,7 @@ pub fn decrypt_secret_from_member_blob(
     ephemeral_sender_key: &X25519PublicKey,
     member_private_key: &SigningKey,
 ) -> Result<[u8; 32], String> {
-    let decrypted = decrypt(member_private_key, ephemeral_sender_key, ciphertext, nonce);
+    let decrypted = decrypt(member_private_key, ephemeral_sender_key, ciphertext, nonce)?;
 
     if decrypted.len() != 32 {
         return Err(format!(
@@ -343,7 +342,8 @@ mod tests {
             &sender_public_key,
             &ciphertext,
             &nonce,
-        );
+        )
+        .expect("decrypt");
 
         // Ensure the decrypted message matches the original
         assert_eq!(decrypted_message, plaintext);

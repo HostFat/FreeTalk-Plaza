@@ -161,13 +161,10 @@ impl ApprovalsV1 {
             .map(|message| message.id())
             .collect();
         self.approvals.retain(|entry| {
+            let signer = entry.signer_id(parameters);
             live.contains(&entry.approval.target)
-                && can_approve(
-                    state,
-                    parameters,
-                    &entry.signer_id(parameters),
-                    &entry.approval.target,
-                )
+                && signer_key(state, parameters, &signer).is_ok()
+                && can_approve(state, parameters, &signer, &entry.approval.target)
         });
         self.approvals.sort_by_key(|entry| {
             (

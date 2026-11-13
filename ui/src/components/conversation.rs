@@ -19,8 +19,7 @@ use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use plaza_core::board_state::content::CategoryContentV1;
 use plaza_core::board_state::member::MemberId;
-use plaza_core::board_state::member_info::MemberInfoV1;
-use plaza_core::board_state::message::{BoardMessageBody, MessageId, MessagesV1, SecretScope};
+use plaza_core::board_state::message::{BoardMessageBody, MessageId, SecretScope};
 use plaza_core::board_state::roles::RoleId;
 use std::collections::HashMap;
 use wasm_bindgen_futures::spawn_local;
@@ -1080,6 +1079,11 @@ pub fn Conversation(
                                             max_message_size: max_message,
                                         }
                                     }
+                                }
+                            },
+                            Err(SendMessageError::UserSuspended) => rsx! {
+                                div { class: "px-4 py-2 bg-error-bg text-red-700 dark:text-red-400 rounded-lg text-sm",
+                                    "You are suspended and cannot post."
                                 }
                             },
                             Err(SendMessageError::UserNotMember) => {

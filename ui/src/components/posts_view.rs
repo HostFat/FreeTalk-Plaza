@@ -1662,7 +1662,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                     .and_then(|post| category_of(post, &all_messages));
                 let can_moderate = post
                     .as_ref()
-                    .map(|post| {
+                    .map(|_post| {
                         let is_privileged = board_data.self_sk.verifying_key()
                             == board_data.owner_vk
                             || board_data

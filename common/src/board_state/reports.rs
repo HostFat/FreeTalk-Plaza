@@ -299,19 +299,14 @@ impl ReportsV1 {
         let report_ids: HashSet<MessageId> =
             self.reports.iter().map(|report| report.id()).collect();
         self.resolutions.retain(|entry| {
+            let signer = entry.signer_id(parameters);
             report_ids.contains(&entry.resolution.report_id)
+                && signer_key(state, parameters, &signer).is_ok()
                 && self
                     .reports
                     .iter()
                     .find(|report| report.id() == entry.resolution.report_id)
-                    .map(|report| {
-                        can_resolve(
-                            state,
-                            parameters,
-                            &entry.signer_id(parameters),
-                            &report.report.target,
-                        )
-                    })
+                    .map(|report| can_resolve(state, parameters, &signer, &report.report.target))
                     .unwrap_or(false)
         });
 

@@ -151,6 +151,7 @@ pub fn EditBoardModal() -> Element {
                                                                                         ) {
                                                                                             error!("Failed to apply rotation delta: {}", e);
                                                                                         } else {
+                                                                                            board_data.generate_missing_pq_secrets();
                                                                                             mark_needs_sync(current_board);
                                                                                         }
                                                                                     }

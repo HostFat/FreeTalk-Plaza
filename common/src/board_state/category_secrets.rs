@@ -72,12 +72,19 @@ fn verify_blob(
     state: &ChatBoardStateV1,
     parameters: &ChatBoardParametersV1,
     blob: &AuthorizedEncryptedSecretForMember,
+    current_version: u32,
 ) -> Result<(), String> {
     let signer = blob.signer_id(parameters);
     let signing_key = distributor_key(state, parameters, &signer)?;
     blob.verify_signature_with(&signing_key)?;
     if !is_board_member(state, parameters, &blob.secret.member_id) {
         return Err("Category key recipient is not a board member".to_string());
+    }
+    if blob.secret.secret_version > current_version {
+        return Err("Category key blob references a future version".to_string());
+    }
+    if blob.secret.ciphertext.is_empty() || blob.secret.ciphertext.len() > 4096 {
+        return Err("Category key blob has an invalid ciphertext length".to_string());
     }
     Ok(())
 }
@@ -120,7 +127,7 @@ impl ComposableState for CategorySecretsV1 {
                 record.verify_signature(&parameters.owner)?;
             }
             for secret in &set.encrypted_secrets {
-                verify_blob(parent_state, parameters, secret)?;
+                verify_blob(parent_state, parameters, secret, set.current_version)?;
             }
             if let Some(max) = set.versions.iter().map(|v| v.record.version).max() {
                 if set.current_version != max {
@@ -216,7 +223,7 @@ impl ComposableState for CategorySecretsV1 {
                     record.verify_signature(&parameters.owner)?;
                 }
                 for secret in &incoming.encrypted_secrets {
-                    verify_blob(parent_state, parameters, secret)?;
+                    verify_blob(parent_state, parameters, secret, incoming.current_version)?;
                 }
 
                 let set = match self

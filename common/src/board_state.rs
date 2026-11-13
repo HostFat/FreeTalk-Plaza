@@ -188,17 +188,15 @@ impl ChatBoardStateV1 {
         // - The banner is not the owner AND
         // - The banner is not in the current members list AND
         // - The banner IS in the banned users set (i.e., they were banned, not pruned)
-        let banned_user_ids: HashSet<MemberId> =
-            self.bans.0.iter().map(|b| b.ban.banned_user).collect();
         let current_member_ids: HashSet<MemberId> =
             self.members.members.iter().map(|m| m.member.id()).collect();
 
+        // Keep only bans whose banner is still available to sign/verify them.
+        // A ban whose banner was pruned can no longer be authenticated, so it
+        // is dropped instead of being accepted without a signature check.
         self.bans.0.retain(|ban| {
-            // Keep if: banner is owner, OR banner is still a member, OR banner is NOT banned
-            // (not banned = pruned for inactivity, their bans should persist)
-            ban.banned_by == owner_id
-                || current_member_ids.contains(&ban.banned_by)
-                || !banned_user_ids.contains(&ban.banned_by)
+            ban.ban.banned_user != owner_id
+                && (ban.banned_by == owner_id || current_member_ids.contains(&ban.banned_by))
         });
 
         // 5a-bis. A revocation lifts its ban. Doing this before the cap keeps
@@ -240,13 +238,22 @@ impl ChatBoardStateV1 {
             )
             .collect();
         for set in &mut self.category_secrets.categories {
+            let current_version = set.current_version;
             set.encrypted_secrets.retain(|blob| {
                 let signer = blob.signer.unwrap_or(owner_id);
                 authorized_signers.contains(&signer)
                     && (blob.secret.member_id == owner_id
                         || current_member_ids.contains(&blob.secret.member_id))
+                    && blob.secret.secret_version <= current_version
+                    && !blob.secret.ciphertext.is_empty()
+                    && blob.secret.ciphertext.len() <= 4096
             });
         }
+        // Drop empty sets: they are unauthenticated and would otherwise be an
+        // unbounded, replicated growth vector.
+        self.category_secrets
+            .categories
+            .retain(|set| !set.versions.is_empty() || !set.encrypted_secrets.is_empty());
 
         // 5e. Reports and approvals lose their target or their signer when a
         // message is pruned or a moderator loses the power. Dropping them here
@@ -785,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ban_persists_after_banner_pruned() {
+    fn test_ban_dropped_after_banner_pruned() {
         let rng = &mut rand::thread_rng();
         let owner_sk = SigningKey::generate(rng);
         let owner_vk = owner_sk.verifying_key();
@@ -844,10 +851,10 @@ mod tests {
         // A should be pruned (no messages)
         assert!(state.members.members.is_empty(), "A should be pruned");
 
-        // A's ban of C should persist (A was pruned, not banned)
-        assert_eq!(state.bans.0.len(), 1, "Ban should persist");
-        assert_eq!(state.bans.0[0].ban.banned_user, c_id);
-        assert_eq!(state.bans.0[0].banned_by, a_id);
+        // Without A's key the ban signature cannot be verified, so the ban is
+        // dropped rather than accepted unauthenticated.
+        assert!(state.bans.0.is_empty(), "Ban should be dropped");
+        let _ = (c_id, a_id);
     }
 
     #[test]

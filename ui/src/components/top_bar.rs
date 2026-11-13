@@ -505,6 +505,11 @@ pub fn TopBar() -> Element {
                         }
                     },
                     Err(SendMessageError::UserNotMember) => rsx! {},
+                    Err(SendMessageError::UserSuspended) => rsx! {
+                        div { class: "px-4 py-2 bg-error-bg text-red-700 dark:text-red-400 rounded-lg text-sm",
+                            "You are suspended and cannot post."
+                        }
+                    },
                     Err(SendMessageError::UserBanned) => rsx! {
                         div { class: "px-4 py-2 bg-error-bg text-red-700 dark:text-red-400 rounded-lg text-sm",
                             "You have been banned from this board."

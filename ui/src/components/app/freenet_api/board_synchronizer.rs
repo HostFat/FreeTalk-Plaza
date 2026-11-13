@@ -107,6 +107,7 @@ impl BoardSynchronizer {
                         // New category blobs may have arrived; open them before
                         // rebuilding edits and reactions, which can also be
                         // sealed per category.
+                        board_data.decrypt_board_secrets();
                         board_data.decrypt_category_secrets();
                         board_data.rebuild_actions_with_local_secrets(&params);
 
@@ -752,6 +753,7 @@ impl BoardSynchronizer {
                         let params = ChatBoardParametersV1 {
                             owner: board_owner_vk,
                         };
+                        board_data.decrypt_board_secrets();
                         board_data.decrypt_category_secrets();
                         board_data.rebuild_actions_with_local_secrets(&params);
 

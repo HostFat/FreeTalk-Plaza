@@ -82,6 +82,8 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
                             .apply_delta(&current_state, &params, &Some(rotation_delta))
                     {
                         apply_error = Some(format!("Failed to apply secret rotation: {:?}", e));
+                    } else {
+                        data.generate_missing_pq_secrets();
                     }
                 }
                 Err(e) => error!("Failed to rotate secret after ban: {}", e),

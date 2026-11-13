@@ -218,6 +218,15 @@ impl ComposableState for RolesV1 {
             if signer != parameters.owner_id() && !self.can_manage_access(&signer) {
                 return Err("Role assignment signer cannot manage access".to_string());
             }
+            // Evaluating authority against the list that contains this record
+            // would let a manager grant a role to themselves. Delegation to
+            // another member is allowed; self-promotion is not.
+            if signer != parameters.owner_id()
+                && assignment.assignment.member_id == signer
+                && !is_board_admin(parent_state, &signer)
+            {
+                return Err("A manager cannot assign a role to themselves".to_string());
+            }
             let signing_key = signer_key(parent_state, parameters, &signer)?;
             verify_struct(&assignment.assignment, &assignment.signature, &signing_key)
                 .map_err(|e| format!("Invalid role assignment signature: {}", e))?;
@@ -322,7 +331,25 @@ impl ComposableState for RolesV1 {
 
             // Merge first, then validate assignments against the resulting
             // manager set: a grant and the manager's own assignment may arrive
-            // in the same delta.
+            // in the same delta. Authorization is checked against the state
+            // before the delta, so a manager cannot grant a role to themselves
+            // and use that same grant to pass the check.
+            for assignment in &delta.assignments {
+                let signer = assignment.signer_id(parameters);
+                if signer != parameters.owner_id() && !self.can_manage_access(&signer) {
+                    return Err("Role assignment signer cannot manage access".to_string());
+                }
+                if signer != parameters.owner_id()
+                    && assignment.assignment.member_id == signer
+                    && !is_board_admin(parent_state, &signer)
+                {
+                    return Err("A manager cannot assign a role to themselves".to_string());
+                }
+                let signing_key = signer_key(parent_state, parameters, &signer)?;
+                verify_struct(&assignment.assignment, &assignment.signature, &signing_key)
+                    .map_err(|e| format!("Invalid role assignment signature: {}", e))?;
+            }
+
             let mut combined = self.clone();
             for role in &delta.roles {
                 match combined.roles.iter().find(|r| r.role.id == role.role.id) {
@@ -355,16 +382,6 @@ impl ComposableState for RolesV1 {
                         combined.assignments.push(assignment.clone());
                     }
                 }
-            }
-
-            for assignment in &delta.assignments {
-                let signer = assignment.signer_id(parameters);
-                if signer != parameters.owner_id() && !combined.can_manage_access(&signer) {
-                    return Err("Role assignment signer cannot manage access".to_string());
-                }
-                let signing_key = signer_key(parent_state, parameters, &signer)?;
-                verify_struct(&assignment.assignment, &assignment.signature, &signing_key)
-                    .map_err(|e| format!("Invalid role assignment signature: {}", e))?;
             }
 
             combined.roles.sort_by_key(|r| r.role.id);
@@ -643,6 +660,61 @@ mod delegation_tests {
             .roles
             .apply_delta(&state.clone(), &params, &Some(delta))
             .is_err());
+    }
+
+    #[test]
+    fn a_manager_cannot_assign_a_role_to_themselves() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let manager = SigningKey::from_bytes(&[7u8; 32]);
+        let params = params(&owner);
+        let mut state = state_with_manager(&owner, &manager);
+
+        let role = Role {
+            id: [6u8; 16],
+            name: "moderator".to_string(),
+            generation: 1,
+            can_manage_access: false,
+            can_distribute_keys: false,
+            can_edit_posts: false,
+            can_delete_posts: true,
+            can_close_posts: false,
+            can_pin_posts: false,
+            can_move_posts: false,
+            scope: Vec::new(),
+            deleted: false,
+        };
+        state
+            .roles
+            .apply_delta(
+                &state.clone(),
+                &params,
+                &Some(RolesDelta {
+                    roles: vec![AuthorizedRole::new(role, &owner)],
+                    assignments: vec![],
+                }),
+            )
+            .expect("the owner defines the moderator role");
+
+        let manager_id = MemberId::from(&manager.verifying_key());
+        let assignment = RoleAssignment {
+            role_id: [6u8; 16],
+            member_id: manager_id,
+            generation: 1,
+            revoked: false,
+        };
+        let delta = RolesDelta {
+            roles: vec![],
+            assignments: vec![AuthorizedRoleAssignment::signed_by(
+                assignment, manager_id, &manager,
+            )],
+        };
+        assert!(
+            state
+                .roles
+                .apply_delta(&state.clone(), &params, &Some(delta))
+                .is_err(),
+            "a manager must not promote themselves"
+        );
     }
 
     #[test]
