@@ -19,6 +19,7 @@ use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::{
     AuthorizedMessageV1, BoardMessageBody, MessageId, MessageV1,
 };
+use plaza_core::board_state::moderation::{AuthorizedMessageRoute, MessageRoute, ModerationDelta};
 use plaza_core::board_state::roles::RoleId;
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
 use plaza_core::chat_delegate::BoardKey;
@@ -44,6 +45,7 @@ pub async fn send_message(
     secret_opt: Option<([u8; 32], u32)>,
     // Set when posting inside a restricted category: (category, key, version)
     category_secret: Option<(MessageId, [u8; 32], u32)>,
+    category_id: Option<MessageId>,
     title_text: String,
     message_text: String,
     reply_ctx: Option<ReplyContext>,
@@ -57,6 +59,8 @@ pub async fn send_message(
         .configuration
         .configuration
         .max_message_size;
+
+    let reply_target = reply_ctx.as_ref().map(|reply| reply.message_id.clone());
 
     // Build content based on whether this is a reply or regular message
     let content = if let Some((category_id, secret, version)) = category_secret {
@@ -258,10 +262,26 @@ pub async fn send_message(
         }
     };
 
+    let route = AuthorizedMessageRoute::new(
+        MessageRoute {
+            message_id: auth_message.id(),
+            reply_to: reply_target,
+            category_id,
+            is_category: false,
+            parent_category_id: None,
+            is_group: false,
+            generation: 1,
+        },
+        &self_sk,
+    );
     let delta = ChatBoardStateV1Delta {
         recent_messages: Some(vec![auth_message.clone()]),
         members: members_delta,
         member_info: member_info_delta,
+        moderation: Some(ModerationDelta {
+            routes: vec![route],
+            flags: Vec::new(),
+        }),
         ..Default::default()
     };
 
@@ -405,6 +425,7 @@ pub async fn send_category(
         return Err("Only the board owner can create restricted categories".to_string());
     }
 
+    let parent_for_route = parent_category_id.clone();
     let mut category = CategoryContentV1::new(name.clone(), description, color);
     if let Some(i) = icon {
         category = category.with_icon(i);
@@ -481,9 +502,25 @@ pub async fn send_category(
         }
     });
 
+    let route = AuthorizedMessageRoute::new(
+        MessageRoute {
+            message_id: auth_message.id(),
+            reply_to: None,
+            category_id: Some(auth_message.id()),
+            is_category: true,
+            parent_category_id: parent_for_route,
+            is_group: false,
+            generation: 1,
+        },
+        &self_sk,
+    );
     let delta = ChatBoardStateV1Delta {
         recent_messages: Some(vec![auth_message.clone()]),
         category_secrets,
+        moderation: Some(ModerationDelta {
+            routes: vec![route],
+            flags: Vec::new(),
+        }),
         ..Default::default()
     };
 
@@ -598,8 +635,24 @@ pub async fn send_group(
         crate::signing::sign_message_with_fallback(board_key, message_bytes, &self_sk).await;
     let auth_message = AuthorizedMessageV1::with_signature(message, signature);
 
+    let route = AuthorizedMessageRoute::new(
+        MessageRoute {
+            message_id: auth_message.id(),
+            reply_to: None,
+            category_id: Some(auth_message.id()),
+            is_category: true,
+            parent_category_id: None,
+            is_group: true,
+            generation: 1,
+        },
+        &self_sk,
+    );
     let delta = ChatBoardStateV1Delta {
         recent_messages: Some(vec![auth_message]),
+        moderation: Some(ModerationDelta {
+            routes: vec![route],
+            flags: Vec::new(),
+        }),
         ..Default::default()
     };
 

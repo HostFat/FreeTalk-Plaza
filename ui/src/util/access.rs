@@ -87,6 +87,29 @@ fn signer_for(self_id: MemberId, board_key: VerifyingKey) -> Option<MemberId> {
     }
 }
 
+/// Role definitions may be signed by the owner or a board admin.
+fn with_admin_board<T>(
+    f: impl FnOnce(&BoardData, SigningKey, VerifyingKey, MemberId) -> Result<T, String>,
+) -> Result<T, String> {
+    let (board_key, self_sk, data) = {
+        let current_board = CURRENT_BOARD.read().owner_key.ok_or("No board selected")?;
+        let boards = BOARDS.read();
+        let data = boards
+            .map
+            .get(&current_board)
+            .ok_or("Board not found")?
+            .clone();
+        (current_board, data.self_sk.clone(), data)
+    };
+    let self_id = MemberId::from(&self_sk.verifying_key());
+    if self_id != MemberId::from(board_key)
+        && !plaza_core::board_state::roles::is_board_admin(&data.board_state, &self_id)
+    {
+        return Err("Only the board owner or an admin can define roles".to_string());
+    }
+    f(&data, self_sk, board_key, self_id)
+}
+
 /// Role definitions are owner-only: a manager must not be able to widen its own
 /// permissions.
 fn with_owner_board<T>(
@@ -145,16 +168,24 @@ fn apply_and_sync(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_role(
     name: String,
     can_manage_access: bool,
     can_distribute_keys: bool,
+    can_edit_posts: bool,
+    can_delete_posts: bool,
+    can_close_posts: bool,
+    can_pin_posts: bool,
+    mut scope: Vec<MessageId>,
 ) -> Result<(), String> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("Role name cannot be empty".to_string());
     }
-    with_owner_board(|data, owner_sk, board_key| {
+    scope.sort();
+    scope.dedup();
+    with_admin_board(|data, signing_key, board_key, self_id| {
         let mut id: RoleId = [0u8; 16];
         let random = SigningKey::generate(&mut rand::thread_rng());
         id.copy_from_slice(&random.to_bytes()[..16]);
@@ -165,11 +196,65 @@ pub fn create_role(
             generation: 1,
             can_manage_access,
             can_distribute_keys,
+            can_edit_posts,
+            can_delete_posts,
+            can_close_posts,
+            can_pin_posts,
+            scope,
             deleted: false,
+        };
+        let authorized = match signer_for(self_id, board_key) {
+            Some(signer) => AuthorizedRole::signed_by(role, signer, &signing_key),
+            None => AuthorizedRole::new(role, &signing_key),
         };
         let delta = ChatBoardStateV1Delta {
             roles: Some(RolesDelta {
-                roles: vec![AuthorizedRole::new(role, &owner_sk)],
+                roles: vec![authorized],
+                assignments: vec![],
+            }),
+            ..Default::default()
+        };
+        apply_and_sync(board_key, &data.board_state.clone(), delta)
+    })
+}
+
+/// Update a role's moderation powers and section scope.
+#[allow(clippy::too_many_arguments)]
+pub fn update_role_moderation(
+    role_id: RoleId,
+    can_edit_posts: bool,
+    can_delete_posts: bool,
+    can_close_posts: bool,
+    can_pin_posts: bool,
+    mut scope: Vec<MessageId>,
+) -> Result<(), String> {
+    scope.sort();
+    scope.dedup();
+    with_admin_board(|data, signing_key, board_key, self_id| {
+        let current = data
+            .board_state
+            .roles
+            .roles
+            .iter()
+            .find(|r| r.role.id == role_id)
+            .map(|r| r.role.clone())
+            .ok_or("Role not found")?;
+        let role = Role {
+            generation: current.generation + 1,
+            can_edit_posts,
+            can_delete_posts,
+            can_close_posts,
+            can_pin_posts,
+            scope,
+            ..current
+        };
+        let authorized = match signer_for(self_id, board_key) {
+            Some(signer) => AuthorizedRole::signed_by(role, signer, &signing_key),
+            None => AuthorizedRole::new(role, &signing_key),
+        };
+        let delta = ChatBoardStateV1Delta {
+            roles: Some(RolesDelta {
+                roles: vec![authorized],
                 assignments: vec![],
             }),
             ..Default::default()

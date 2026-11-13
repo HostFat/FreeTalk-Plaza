@@ -8,6 +8,7 @@ pub mod invites;
 pub mod member;
 pub mod member_info;
 pub mod message;
+pub mod moderation;
 pub mod privacy;
 pub mod roles;
 pub mod secret;
@@ -76,6 +77,10 @@ pub struct ChatBoardStateV1 {
 
     /// The most recent messages in the chat board, the number is limited by the board configuration.
     pub recent_messages: MessagesV1,
+
+    /// Public routing and post flags used by the contract to verify moderation.
+    #[serde(default)]
+    pub moderation: crate::board_state::moderation::ModerationV1,
 
     /// If this contract has been replaced by a new contract this will contain the new contract address.
     /// This can only be set by the owner.

@@ -2,18 +2,21 @@
 
 use crate::components::app::{mark_needs_sync, BOARDS};
 use crate::util::ecies::encrypt_with_symmetric_key;
+use crate::util::ecies::seal_bytes;
 use crate::util::get_current_system_time;
 use dioxus::prelude::*;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use plaza_core::board_state::content::{
-    ActionContentV1, CategoryContentV1, CategoryEditPayload, ACTION_CONTENT_VERSION,
-    CONTENT_TYPE_ACTION,
+    ActionContentV1, CategoryContentV1, CategoryEditPayload, ModerationActionV1,
+    ACTION_CONTENT_VERSION, CONTENT_TYPE_ACTION, CONTENT_TYPE_MODERATION_ACTION,
 };
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::{
     AuthorizedMessageV1, BoardMessageBody, MessageId, MessageV1, SecretScope,
 };
+use plaza_core::board_state::moderation::{AuthorizedPostFlag, ModerationDelta, PostFlag};
+use plaza_core::board_state::privacy::SealedBytes;
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta};
 use plaza_core::chat_delegate::BoardKey;
 
@@ -184,40 +187,30 @@ pub async fn toggle_reaction(ctx: ActionContext, target_message_id: MessageId, e
     };
 
     let clicked_same = existing_reaction.as_ref() == Some(&emoji);
-    let mut messages_to_send = Vec::new();
+    let mut actions = Vec::new();
 
     if clicked_same {
-        // Remove the reaction
-        let content = build_remove_reaction_content(&ctx, target_message_id.clone(), emoji);
-        if let Some(content) = content {
-            messages_to_send.push(content);
-        }
+        actions.push(ActionContentV1::remove_reaction(
+            target_message_id.clone(),
+            emoji,
+        ));
     } else {
-        // Remove old reaction if exists, then add new one
         if let Some(old_emoji) = existing_reaction {
-            let content = build_remove_reaction_content(&ctx, target_message_id.clone(), old_emoji);
-            if let Some(content) = content {
-                messages_to_send.push(content);
-            }
+            actions.push(ActionContentV1::remove_reaction(
+                target_message_id.clone(),
+                old_emoji,
+            ));
         }
-
-        let content = build_add_reaction_content(&ctx, target_message_id.clone(), emoji);
-        if let Some(content) = content {
-            messages_to_send.push(content);
-        }
+        actions.push(ActionContentV1::reaction(target_message_id.clone(), emoji));
     }
 
-    send_action_messages(ctx, messages_to_send).await;
+    send_actions(ctx, actions).await;
 }
 
 /// Delete a message
 pub async fn delete_message(ctx: ActionContext, target_message_id: MessageId) {
     let action = ActionContentV1::delete(target_message_id.clone());
-    let Some(content) = seal_action(&ctx, action, &target_message_id) else {
-        return;
-    };
-
-    send_action_messages(ctx, vec![content]).await;
+    send_actions(ctx, vec![action]).await;
 }
 
 /// Edit a message
@@ -232,11 +225,7 @@ pub async fn edit_message(
     }
 
     let action = ActionContentV1::edit(target_message_id.clone(), new_title, new_text);
-    let Some(content) = seal_action(&ctx, action, &target_message_id) else {
-        return;
-    };
-
-    send_action_messages(ctx, vec![content]).await;
+    send_actions(ctx, vec![action]).await;
 }
 
 /// Edit a category
@@ -315,6 +304,60 @@ pub async fn edit_category(
     send_action_messages(ctx, vec![content]).await;
 }
 
+/// Pin/unpin or close/reopen a post. The contract verifies the signer's power
+/// and scope against the public moderation state.
+pub fn set_post_flag(
+    ctx: ActionContext,
+    target: MessageId,
+    pinned: Option<bool>,
+    closed: Option<bool>,
+) -> Result<(), String> {
+    let current = ctx
+        .board_state
+        .moderation
+        .flag_for(&target)
+        .cloned()
+        .unwrap_or(PostFlag {
+            target,
+            pinned: false,
+            closed: false,
+            generation: 0,
+        });
+    let flag = PostFlag {
+        target,
+        pinned: pinned.unwrap_or(current.pinned),
+        closed: closed.unwrap_or(current.closed),
+        generation: current.generation + 1,
+    };
+    let authorized = AuthorizedPostFlag::new(flag, &ctx.self_sk);
+    let delta = ChatBoardStateV1Delta {
+        moderation: Some(ModerationDelta {
+            routes: Vec::new(),
+            flags: vec![authorized],
+        }),
+        ..Default::default()
+    };
+    let parent = ctx.board_state.clone();
+    let owner = ctx.current_board;
+    let mut error: Option<String> = None;
+    BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.map.get_mut(&owner) {
+            if let Err(e) = board.board_state.apply_delta(
+                &parent,
+                &ChatBoardParametersV1 { owner },
+                &Some(delta),
+            ) {
+                error = Some(e);
+            }
+        }
+    });
+    if let Some(e) = error {
+        return Err(e);
+    }
+    crate::components::app::mark_needs_sync(owner);
+    Ok(())
+}
+
 /// Build the action that moves a section to a new parent. Restricted sections
 /// keep their sealed name and ACL; the parent change does not need the key.
 fn move_category_action(
@@ -386,6 +429,32 @@ fn build_add_reaction_content(
 ) -> Option<BoardMessageBody> {
     let action = ActionContentV1::reaction(target_message_id.clone(), emoji);
     seal_action(ctx, action, &target_message_id)
+}
+
+/// Wrap each action in the public moderation envelope. The contract reads the
+/// type and target; the payload stays sealed on private boards.
+async fn send_actions(ctx: ActionContext, actions: Vec<ActionContentV1>) {
+    let mut contents = Vec::new();
+    for action in actions {
+        let encoded = action.encode();
+        let payload = if let Some((_, key, version)) = ctx.category_secret_for(&action.target) {
+            seal_bytes(&encoded, &key, version)
+        } else if ctx.is_private {
+            let Some((key, version)) = ctx.secret_opt else {
+                return;
+            };
+            seal_bytes(&encoded, &key, version)
+        } else {
+            SealedBytes::public(encoded)
+        };
+        let envelope = ModerationActionV1::new(action.action_type, action.target, payload);
+        contents.push(BoardMessageBody::public_raw(
+            CONTENT_TYPE_MODERATION_ACTION,
+            ACTION_CONTENT_VERSION,
+            envelope.encode(),
+        ));
+    }
+    send_action_messages(ctx, contents).await;
 }
 
 // Send action messages and apply delta

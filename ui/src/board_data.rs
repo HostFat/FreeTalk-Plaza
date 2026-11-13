@@ -356,17 +356,50 @@ impl BoardData {
             .messages
             .iter()
             .filter(|message| message.message.content.is_action())
-            .filter_map(|message| {
-                let BoardMessageBody::Private {
+            .filter_map(|message| match &message.message.content {
+                BoardMessageBody::Private {
                     ciphertext, nonce, ..
-                } = &message.message.content
-                else {
-                    return None;
-                };
-                let (key, _) = self.body_secret(&message.message.content)?;
-                decrypt_with_symmetric_key(&key, ciphertext, nonce)
-                    .ok()
-                    .map(|plaintext| (message.id(), plaintext))
+                } => {
+                    let (key, _) = self.body_secret(&message.message.content)?;
+                    decrypt_with_symmetric_key(&key, ciphertext, nonce)
+                        .ok()
+                        .map(|plaintext| (message.id(), plaintext))
+                }
+                BoardMessageBody::Public {
+                    content_type, data, ..
+                } if *content_type == plaza_core::board_state::content::CONTENT_TYPE_ACTION => {
+                    Some((message.id(), data.clone()))
+                }
+                BoardMessageBody::Public {
+                    content_type, data, ..
+                } if *content_type
+                    == plaza_core::board_state::content::CONTENT_TYPE_MODERATION_ACTION =>
+                {
+                    let envelope =
+                        plaza_core::board_state::content::ModerationActionV1::decode(data).ok()?;
+                    match envelope.payload {
+                        plaza_core::board_state::privacy::SealedBytes::Public { value } => {
+                            Some((message.id(), value))
+                        }
+                        plaza_core::board_state::privacy::SealedBytes::Private {
+                            ciphertext,
+                            nonce,
+                            secret_version,
+                            ..
+                        } => {
+                            let category_key = self
+                                .category_secret(&envelope.target)
+                                .filter(|(version, _)| *version == secret_version)
+                                .map(|(_, key)| key);
+                            let key = category_key
+                                .or_else(|| self.get_secret_for_version(secret_version).copied())?;
+                            decrypt_with_symmetric_key(&key, &ciphertext, &nonce)
+                                .ok()
+                                .map(|plaintext| (message.id(), plaintext))
+                        }
+                    }
+                }
+                _ => None,
             })
             .collect();
 
@@ -1392,6 +1425,11 @@ mod tests {
                                 generation: 0,
                                 can_manage_access: false,
                                 can_distribute_keys: true,
+                                can_edit_posts: false,
+                                can_delete_posts: false,
+                                can_close_posts: false,
+                                can_pin_posts: false,
+                                scope: Vec::new(),
                                 deleted: false,
                             },
                             &owner_sk,

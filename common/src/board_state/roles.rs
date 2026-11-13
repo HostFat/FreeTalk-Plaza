@@ -4,6 +4,7 @@
 //! generation wins and a tombstone wins ties, so merging is order independent.
 
 use crate::board_state::member::MemberId;
+use crate::board_state::message::MessageId;
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::{sign_struct, verify_struct};
 use crate::ChatBoardStateV1;
@@ -16,6 +17,15 @@ pub type RoleId = [u8; 16];
 
 /// Resolve the key that signed a management record: the owner, or a member of
 /// the board.
+/// Owner or a current board admin.
+pub fn is_board_admin(state: &ChatBoardStateV1, member: &MemberId) -> bool {
+    state
+        .admin
+        .admins
+        .iter()
+        .any(|admin| admin.admin.id() == *member)
+}
+
 pub(crate) fn signer_key(
     state: &ChatBoardStateV1,
     parameters: &ChatBoardParametersV1,
@@ -45,6 +55,19 @@ pub struct Role {
     /// verifying byte for byte.
     #[serde(default, skip_serializing_if = "is_false")]
     pub can_distribute_keys: bool,
+    /// Moderation powers. Each one can be enabled or disabled independently.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub can_edit_posts: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub can_delete_posts: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub can_close_posts: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub can_pin_posts: bool,
+    /// Sections where the moderation powers apply, including their
+    /// subsections. Empty means the whole board.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope: Vec<MessageId>,
     /// A deleted role grants nothing; the tombstone keeps the id reserved.
     pub deleted: bool,
 }
@@ -57,6 +80,9 @@ fn is_false(value: &bool) -> bool {
 pub struct AuthorizedRole {
     pub role: Role,
     pub signature: Signature,
+    /// Who signed it. `None` means the owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<MemberId>,
 }
 
 impl AuthorizedRole {
@@ -64,13 +90,40 @@ impl AuthorizedRole {
         Self {
             signature: sign_struct(&role, owner_sk),
             role,
+            signer: None,
         }
+    }
+
+    /// A role definition signed by a board admin.
+    pub fn signed_by(role: Role, signer: MemberId, signing_key: &SigningKey) -> Self {
+        Self {
+            signature: sign_struct(&role, signing_key),
+            role,
+            signer: Some(signer),
+        }
+    }
+
+    pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
+        self.signer.unwrap_or_else(|| parameters.owner_id())
     }
 
     pub fn verify_signature(&self, owner_vk: &VerifyingKey) -> Result<(), String> {
         verify_struct(&self.role, &self.signature, owner_vk)
             .map_err(|e| format!("Invalid role signature: {}", e))
     }
+
+    pub fn verify_signature_with(&self, signing_key: &VerifyingKey) -> Result<(), String> {
+        verify_struct(&self.role, &self.signature, signing_key)
+            .map_err(|e| format!("Invalid role signature: {}", e))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ModerationPower {
+    Edit,
+    Delete,
+    Close,
+    Pin,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -142,9 +195,14 @@ impl ComposableState for RolesV1 {
     ) -> Result<(), String> {
         let mut role_ids = std::collections::HashSet::new();
         for role in &self.roles {
-            // Role definitions stay owner-only: a manager must not be able to
-            // create a role that grants more access.
-            role.verify_signature(&parameters.owner)?;
+            // Owner and board admins may define roles. Managers cannot, so a
+            // delegated access manager cannot grant itself moderation powers.
+            let signer = role.signer_id(parameters);
+            if signer != parameters.owner_id() && !is_board_admin(parent_state, &signer) {
+                return Err("Role definition signer must be the owner or an admin".to_string());
+            }
+            let signing_key = signer_key(parent_state, parameters, &signer)?;
+            role.verify_signature_with(&signing_key)?;
             if !role_ids.insert(role.role.id) {
                 return Err("Duplicate role record".to_string());
             }
@@ -248,9 +306,14 @@ impl ComposableState for RolesV1 {
         delta: &Option<Self::Delta>,
     ) -> Result<(), String> {
         if let Some(delta) = delta {
-            // Definitions: owner only.
+            // Definitions: owner or a current board admin.
             for role in &delta.roles {
-                role.verify_signature(&parameters.owner)?;
+                let signer = role.signer_id(parameters);
+                if signer != parameters.owner_id() && !is_board_admin(parent_state, &signer) {
+                    return Err("Role definition signer must be the owner or an admin".to_string());
+                }
+                let signing_key = signer_key(parent_state, parameters, &signer)?;
+                role.verify_signature_with(&signing_key)?;
             }
 
             // Merge first, then validate assignments against the resulting
@@ -373,6 +436,31 @@ impl RolesV1 {
             .any(|role| role.can_distribute_keys)
     }
 
+    /// Whether a moderation power applies to a target whose category chain is
+    /// `scope_chain` (the target section and its ancestors). An empty role
+    /// scope means the whole board.
+    pub fn has_moderation_power(
+        &self,
+        member_id: &MemberId,
+        power: ModerationPower,
+        scope_chain: &[MessageId],
+    ) -> bool {
+        self.active_roles_of(member_id).iter().any(|role| {
+            let enabled = match power {
+                ModerationPower::Edit => role.can_edit_posts,
+                ModerationPower::Delete => role.can_delete_posts,
+                ModerationPower::Close => role.can_close_posts,
+                ModerationPower::Pin => role.can_pin_posts,
+            };
+            enabled
+                && (role.scope.is_empty()
+                    || role
+                        .scope
+                        .iter()
+                        .any(|scope_id| scope_chain.contains(scope_id)))
+        })
+    }
+
     /// Member ids per role, for role-based permissions and key distribution.
     pub fn members_of_role(&self, role_id: &RoleId) -> Vec<MemberId> {
         self.assignments
@@ -459,6 +547,11 @@ mod delegation_tests {
                 generation: 1,
                 can_manage_access: true,
                 can_distribute_keys: false,
+                can_edit_posts: false,
+                can_delete_posts: false,
+                can_close_posts: false,
+                can_pin_posts: false,
+                scope: Vec::new(),
                 deleted: false,
             },
             owner,
@@ -559,6 +652,11 @@ mod delegation_tests {
             generation: 1,
             can_manage_access: true,
             can_distribute_keys: false,
+            can_edit_posts: false,
+            can_delete_posts: false,
+            can_close_posts: false,
+            can_pin_posts: false,
+            scope: Vec::new(),
             deleted: false,
         };
         let delta = RolesDelta {
@@ -582,6 +680,11 @@ mod delegation_tests {
             generation: 1,
             can_manage_access: false,
             can_distribute_keys: false,
+            can_edit_posts: false,
+            can_delete_posts: false,
+            can_close_posts: false,
+            can_pin_posts: false,
+            scope: Vec::new(),
             deleted: false,
         };
 

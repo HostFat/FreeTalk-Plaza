@@ -77,6 +77,11 @@ pub fn RolesSection() -> Element {
     let mut role_name = use_signal(String::new);
     let mut role_manages = use_signal(|| false);
     let mut role_distributes = use_signal(|| false);
+    let mut role_edit = use_signal(|| false);
+    let mut role_delete = use_signal(|| false);
+    let mut role_close = use_signal(|| false);
+    let mut role_pin = use_signal(|| false);
+    let mut role_scope = use_signal(|| Vec::<plaza_core::board_state::message::MessageId>::new());
     let mut assign_index = use_signal(|| 0usize);
     let mut error = use_signal(|| None::<String>);
 
@@ -85,7 +90,14 @@ pub fn RolesSection() -> Element {
     };
     let is_owner = data.owner_vk == data.self_sk.verifying_key();
     let self_id = MemberId::from(&data.self_sk.verifying_key());
-    let can_manage = is_owner || data.board_state.roles.can_manage_access(&self_id);
+    let is_admin = data
+        .board_state
+        .admin
+        .admins
+        .iter()
+        .any(|admin| admin.admin.id() == self_id);
+    let can_define_roles = is_owner || is_admin;
+    let can_manage = can_define_roles || data.board_state.roles.can_manage_access(&self_id);
     if !can_manage {
         return rsx! {
             div { class: "bg-surface rounded-lg p-4",
@@ -106,6 +118,24 @@ pub fn RolesSection() -> Element {
         .collect();
     let selected_member = members.get(*assign_index.read()).copied();
 
+    // Sections and groups available as moderation scope. Selecting a group
+    // covers all of its sections through the category chain.
+    let scope_options: Vec<(plaza_core::board_state::message::MessageId, String)> = data
+        .board_state
+        .recent_messages
+        .messages
+        .iter()
+        .filter_map(|message| {
+            let category = data.readable_category(&message.id(), &message.message.content)?;
+            let label = if category.is_group {
+                format!("{} (group)", category.name)
+            } else {
+                category.name.clone()
+            };
+            Some((message.id(), label))
+        })
+        .collect();
+
     rsx! {
         if let Some(err) = error.read().as_ref() {
             div { class: "bg-red-500/10 border border-red-500/30 rounded-lg p-3 mb-3 text-red-300 text-sm",
@@ -113,7 +143,7 @@ pub fn RolesSection() -> Element {
             }
         }
 
-        if is_owner {
+        if can_define_roles {
             div { class: "bg-surface rounded-lg p-3 mb-3 flex flex-wrap items-center gap-2",
                 input {
                     class: "flex-1 min-w-40 px-3 py-2 bg-panel border border-border rounded-lg text-text placeholder-text-muted",
@@ -151,6 +181,58 @@ pub fn RolesSection() -> Element {
                         text: "Members with this role can send the keys of restricted categories to members who lack them, even when the owner is offline.".to_string(),
                     }
                 }
+                div { class: "w-full flex flex-wrap items-center gap-3 text-sm text-text-muted",
+                    label { class: "flex items-center gap-1",
+                        input { r#type: "checkbox", checked: *role_edit.read(), onchange: move |e| role_edit.set(e.checked()) }
+                        "edit posts"
+                    }
+                    label { class: "flex items-center gap-1",
+                        input { r#type: "checkbox", checked: *role_delete.read(), onchange: move |e| role_delete.set(e.checked()) }
+                        "delete posts"
+                    }
+                    label { class: "flex items-center gap-1",
+                        input { r#type: "checkbox", checked: *role_close.read(), onchange: move |e| role_close.set(e.checked()) }
+                        "close posts"
+                    }
+                    label { class: "flex items-center gap-1",
+                        input { r#type: "checkbox", checked: *role_pin.read(), onchange: move |e| role_pin.set(e.checked()) }
+                        "pin posts"
+                    }
+                }
+                div { class: "w-full",
+                    p { class: "text-xs text-text-muted mb-1",
+                        "Powers apply to these sections and their subsections. No selection = whole board."
+                    }
+                    div { class: "max-h-32 overflow-y-auto border border-border rounded p-2 space-y-1",
+                        if scope_options.is_empty() {
+                            p { class: "text-xs text-text-muted", "No sections yet." }
+                        }
+                        for (scope_id, scope_name) in scope_options.iter() {
+                            {
+                                let scope_id = *scope_id;
+                                let checked = role_scope.read().contains(&scope_id);
+                                rsx! {
+                                    label { key: "{scope_id:?}", class: "flex items-center gap-2 text-xs text-text-muted",
+                                        input {
+                                            r#type: "checkbox",
+                                            checked: checked,
+                                            onchange: move |e| {
+                                                let mut selected = role_scope.read().clone();
+                                                if e.checked() {
+                                                    if !selected.contains(&scope_id) { selected.push(scope_id); }
+                                                } else {
+                                                    selected.retain(|id| *id != scope_id);
+                                                }
+                                                role_scope.set(selected);
+                                            },
+                                        }
+                                        "{scope_name}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 button {
                     r#type: "button",
                     class: "px-3 py-2 bg-accent hover:bg-accent/80 text-white text-sm rounded-lg",
@@ -158,11 +240,23 @@ pub fn RolesSection() -> Element {
                         let name = role_name.read().clone();
                         let manages = *role_manages.read();
                         let distributes = *role_distributes.read();
-                        match access::create_role(name, manages, distributes) {
+                        let edit = *role_edit.read();
+                        let delete = *role_delete.read();
+                        let close = *role_close.read();
+                        let pin = *role_pin.read();
+                        let scope = role_scope.read().clone();
+                        match access::create_role(
+                            name, manages, distributes, edit, delete, close, pin, scope,
+                        ) {
                             Ok(()) => {
                                 role_name.set(String::new());
                                 role_manages.set(false);
                                 role_distributes.set(false);
+                                role_edit.set(false);
+                                role_delete.set(false);
+                                role_close.set(false);
+                                role_pin.set(false);
+                                role_scope.set(Vec::new());
                                 error.set(None);
                             }
                             Err(e) => error.set(Some(e)),
@@ -183,6 +277,11 @@ pub fn RolesSection() -> Element {
                         let role_name = role.role.name.clone();
                         let manages = role.role.can_manage_access;
                         let distributes = role.role.can_distribute_keys;
+                        let can_edit_posts = role.role.can_edit_posts;
+                        let can_delete_posts = role.role.can_delete_posts;
+                        let can_close_posts = role.role.can_close_posts;
+                        let can_pin_posts = role.role.can_pin_posts;
+                        let role_scope_ids = role.role.scope.clone();
                         let assigned = data.board_state.roles.members_of_role(&role_id);
                         rsx! {
                             div { class: "bg-surface rounded-lg p-3",
@@ -194,10 +293,52 @@ pub fn RolesSection() -> Element {
                                     if distributes {
                                         span { class: "text-xs text-accent", "distributes keys" }
                                     }
+                                    for (enabled, label) in [
+                                        (can_edit_posts, "edit"),
+                                        (can_delete_posts, "delete"),
+                                        (can_close_posts, "close"),
+                                        (can_pin_posts, "pin"),
+                                    ] {
+                                        if enabled {
+                                            span { class: "text-xs text-accent", "{label}" }
+                                        }
+                                    }
                                     span { class: "text-xs text-text-muted",
                                         "{assigned.len()} members"
                                     }
-                                    if is_owner {
+                                    if can_define_roles {
+                                        div { class: "ml-auto flex items-center gap-2 text-xs text-text-muted",
+                                            for (label, enabled, idx) in [
+                                                ("edit", can_edit_posts, 0u8),
+                                                ("delete", can_delete_posts, 1u8),
+                                                ("close", can_close_posts, 2u8),
+                                                ("pin", can_pin_posts, 3u8),
+                                            ] {
+                                                {
+                                                    let scope = role_scope_ids.clone();
+                                                    rsx! {
+                                                        label { class: "flex items-center gap-1",
+                                                            input {
+                                                                r#type: "checkbox",
+                                                                checked: enabled,
+                                                                onchange: move |evt| {
+                                                                    let edit = if idx == 0 { evt.checked() } else { can_edit_posts };
+                                                                    let delete = if idx == 1 { evt.checked() } else { can_delete_posts };
+                                                                    let close = if idx == 2 { evt.checked() } else { can_close_posts };
+                                                                    let pin = if idx == 3 { evt.checked() } else { can_pin_posts };
+                                                                    let _ = access::update_role_moderation(
+                                                                        role_id, edit, delete, close, pin, scope.clone(),
+                                                                    );
+                                                                },
+                                                            }
+                                                            "{label}"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if can_define_roles {
                                         div { class: "ml-auto flex items-center gap-1",
                                             label {
                                                 class: "flex items-center gap-1 text-xs text-text-muted",

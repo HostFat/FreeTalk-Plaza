@@ -62,6 +62,10 @@ pub struct MessageData {
     pub category_locked: bool,
     /// Category is a homepage group containing sections
     pub is_group: bool,
+    /// Post is pinned in its section
+    pub is_pinned: bool,
+    /// Post is closed: readable but not editable, deletable or reactable
+    pub is_closed: bool,
 }
 
 /// A message with its nested replies
@@ -90,6 +94,7 @@ pub fn get_all_messages(
     self_member_id: MemberId,
     secrets: &HashMap<u32, [u8; 32]>,
     category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+    moderation: &plaza_core::board_state::moderation::ModerationV1,
 ) -> Vec<MessageData> {
     let mut messages = Vec::new();
 
@@ -229,6 +234,8 @@ pub fn get_all_messages(
             category_hidden,
             category_locked,
             is_group: category_is_group,
+            is_pinned: moderation.is_pinned(&message_id),
+            is_closed: moderation.is_closed(&message_id),
         });
     }
 
@@ -588,6 +595,7 @@ pub fn Conversation(
                         self_member_id,
                         &board_data.secrets,
                         &board_data.category_secrets,
+                        &board_data.board_state.moderation,
                     );
 
                     // Build member name lookup
@@ -676,6 +684,10 @@ pub fn Conversation(
                     .as_ref()
                     .and_then(|reply| current_board_data.posting_secret_for(&reply.message_id));
 
+                let category_id = crate::components::app::CURRENT_CATEGORY
+                    .read()
+                    .category_id
+                    .clone();
                 spawn_local(async move {
                     send_message(
                         current_board,
@@ -685,6 +697,7 @@ pub fn Conversation(
                         is_private,
                         secret_opt,
                         category_secret,
+                        category_id,
                         title_text,
                         message_text,
                         reply_ctx,
@@ -1568,6 +1581,12 @@ pub fn MessageCard(
     } else {
         title_text.clone()
     };
+    let header_title = match (msg.is_pinned, msg.is_closed) {
+        (true, true) => format!("📌 🔒 {header_title}"),
+        (true, false) => format!("📌 {header_title}"),
+        (false, true) => format!("🔒 {header_title}"),
+        _ => header_title,
+    };
 
     // Determine size based on variant and expanded state
     let size = match variant {
@@ -1782,33 +1801,35 @@ pub fn MessageCard(
                             }
                         }
 
-                        // Reactions
-                        ReactionDisplay {
-                            reactions: reactions.clone(),
-                            self_member_id: self_member_id,
-                            member_names: member_names.clone(),
-                            msg_id: msg_id.clone(),
-                            on_react: on_react.clone(),
-                            size: size,
-                        }
+                        if !msg.is_closed {
+                            // Reactions
+                            ReactionDisplay {
+                                reactions: reactions.clone(),
+                                self_member_id: self_member_id,
+                                member_names: member_names.clone(),
+                                msg_id: msg_id.clone(),
+                                on_react: on_react.clone(),
+                                size: size,
+                            }
 
-                        // Action buttons
-                        ActionButtons {
-                            msg_id: msg_id.clone(),
-                            is_self: is_self,
-                            title_text: title_text.clone(),
-                            content_text: content_text.clone(),
-                            author_name: author_name.clone(),
-                            content_preview: content_preview.clone(),
-                            editing: editing,
-                            edit_title: edit_title,
-                            edit_text: edit_text,
-                            is_hovered: is_hovered,
-                            on_react: on_react.clone(),
-                            on_reply: on_reply.clone(),
-                            on_edit: on_edit.clone(),
-                            on_request_delete: on_request_delete.clone(),
-                            size: size,
+                            // Action buttons
+                            ActionButtons {
+                                msg_id: msg_id.clone(),
+                                is_self: is_self,
+                                title_text: title_text.clone(),
+                                content_text: content_text.clone(),
+                                author_name: author_name.clone(),
+                                content_preview: content_preview.clone(),
+                                editing: editing,
+                                edit_title: edit_title,
+                                edit_text: edit_text,
+                                is_hovered: is_hovered,
+                                on_react: on_react.clone(),
+                                on_reply: on_reply.clone(),
+                                on_edit: on_edit.clone(),
+                                on_request_delete: on_request_delete.clone(),
+                                size: size,
+                            }
                         }
 
                         // Reply summary for the post list

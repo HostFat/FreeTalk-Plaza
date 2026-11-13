@@ -14,6 +14,8 @@ use crate::util::message_actions::{self, ActionContext};
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
+use plaza_core::board_state::moderation::category_chain;
+use plaza_core::board_state::roles::ModerationPower;
 use std::collections::{HashMap, HashSet};
 use wasm_bindgen::JsCast;
 
@@ -197,6 +199,10 @@ fn PostRow(
     post: MessageData,
     reply_count: usize,
     last_reply: Option<(String, String)>,
+    #[props(default)] can_pin: bool,
+    #[props(default)] can_close: bool,
+    #[props(default)] on_pin: Option<EventHandler<bool>>,
+    #[props(default)] on_close: Option<EventHandler<bool>>,
     on_click: EventHandler<()>,
 ) -> Element {
     let title = if post.title_text.trim().is_empty() {
@@ -226,6 +232,12 @@ fn PostRow(
                     alt: "",
                 }
                 div { class: "flex-1 min-w-0 flex flex-wrap items-baseline gap-x-3 gap-y-1",
+                    if post.is_pinned {
+                        span { title: "Pinned", "📌" }
+                    }
+                    if post.is_closed {
+                        span { title: "Closed", "🔒" }
+                    }
                     span { class: "text-base font-semibold text-text truncate", "{title}" }
                     span { class: "text-xs text-text-muted", "·" }
                     span { class: "text-xs text-text-muted", "by {post.author_name}" }
@@ -239,6 +251,41 @@ fn PostRow(
                     }
                     if let Some((author, time)) = last_reply {
                         span { class: "text-xs text-text-muted", "· last {time} by {author}" }
+                    }
+                }
+                if can_pin || can_close {
+                    div { class: "flex items-center gap-1 flex-shrink-0",
+                        onclick: move |evt| evt.stop_propagation(),
+                        if can_pin {
+                            if let Some(handler) = on_pin.as_ref() {
+                                button {
+                                    r#type: "button",
+                                    class: "px-1.5 py-1 text-xs rounded hover:bg-surface",
+                                    title: if post.is_pinned { "Unpin" } else { "Pin" },
+                                    onclick: {
+                                        let handler = handler.clone();
+                                        let next = !post.is_pinned;
+                                        move |_| handler.call(next)
+                                    },
+                                    if post.is_pinned { "📌" } else { "📍" }
+                                }
+                            }
+                        }
+                        if can_close {
+                            if let Some(handler) = on_close.as_ref() {
+                                button {
+                                    r#type: "button",
+                                    class: "px-1.5 py-1 text-xs rounded hover:bg-surface",
+                                    title: if post.is_closed { "Reopen" } else { "Close" },
+                                    onclick: {
+                                        let handler = handler.clone();
+                                        let next = !post.is_closed;
+                                        move |_| handler.call(next)
+                                    },
+                                    if post.is_closed { "🔓" } else { "🔒" }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -394,6 +441,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
             self_member_id,
             &board_data.secrets,
             &board_data.category_secrets,
+            &board_data.board_state.moderation,
         )
     } else {
         Vec::new()
@@ -813,8 +861,14 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                             .filter(|timestamp| *timestamp > 0)
                                             .unwrap_or_else(|| post.time.timestamp_millis())
                                     };
-                                    activity(b).cmp(&activity(a))
+                                    b.is_pinned
+                                        .cmp(&a.is_pinned)
+                                        .then_with(|| activity(b).cmp(&activity(a)))
                                 });
+                            } else {
+                                // Pinned posts first, keeping newest first inside
+                                // each group.
+                                displayed_posts.sort_by_key(|post| !post.is_pinned);
                             }
 
                             // Posts and latest activity inside each category,
@@ -841,6 +895,21 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                 .collect();
 
                             if let Some((self_member_id, is_owner, is_admin)) = board_info {
+                                let viewer_roles = current_board_data
+                                    .as_ref()
+                                    .map(|board| board.board_state.roles.clone())
+                                    .unwrap_or_default();
+                                let scope_chain = current_board_data
+                                    .as_ref()
+                                    .and_then(|board| {
+                                        current_category.as_ref().map(|category| {
+                                            category_chain(
+                                                &board.board_state.moderation.routes_map(),
+                                                &category.message_id,
+                                            )
+                                        })
+                                    })
+                                    .unwrap_or_default();
                                 if !has_categories && !has_posts {
                                     rsx! {
                                         div { class: "flex flex-col items-center justify-center h-64 text-text-muted",
@@ -1101,18 +1170,62 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                             div { class: "space-y-2",
                                                 {displayed_posts.iter().take(*posts_limit.read()).map({
                                                     let board_id = current_board_id.read().clone();
+                                                    let roles = viewer_roles.clone();
+                                                    let scope_chain = scope_chain.clone();
                                                     move |post| {
                                                         let post_id = post.id_string();
                                                         let board_id = board_id.clone();
                                                         let nav = navigator();
                                                         let (reply_count, last_reply, _) =
                                                             post_stats.get(&post.message_id).cloned().unwrap_or_default();
+                                                        let is_author = post.author_id == self_member_id;
+                                                        let can_pin = is_owner
+                                                            || is_admin
+                                                            || roles.has_moderation_power(
+                                                                &self_member_id,
+                                                                ModerationPower::Pin,
+                                                                &scope_chain,
+                                                            );
+                                                        let can_close = is_owner
+                                                            || is_admin
+                                                            || is_author
+                                                            || roles.has_moderation_power(
+                                                                &self_member_id,
+                                                                ModerationPower::Close,
+                                                                &scope_chain,
+                                                            );
+                                                        let pin_target = post.message_id.clone();
+                                                        let close_target = post.message_id.clone();
                                                         rsx! {
                                                             PostRow {
                                                                 key: "{post_id}",
                                                                 post: post.clone(),
                                                                 reply_count: reply_count,
                                                                 last_reply: last_reply,
+                                                                can_pin: can_pin,
+                                                                can_close: can_close,
+                                                                on_pin: move |value| {
+                                                                    let target = pin_target.clone();
+                                                                    if let Some(ctx) = ActionContext::from_current_board() {
+                                                                        let _ = message_actions::set_post_flag(
+                                                                            ctx,
+                                                                            target,
+                                                                            Some(value),
+                                                                            None,
+                                                                        );
+                                                                    }
+                                                                },
+                                                                on_close: move |value| {
+                                                                    let target = close_target.clone();
+                                                                    if let Some(ctx) = ActionContext::from_current_board() {
+                                                                        let _ = message_actions::set_post_flag(
+                                                                            ctx,
+                                                                            target,
+                                                                            None,
+                                                                            Some(value),
+                                                                        );
+                                                                    }
+                                                                },
                                                                 on_click: move |_| {
                                                                     nav.push(Route::Post {
                                                                         board_id: board_id.clone(),
@@ -1245,6 +1358,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                     self_member_id,
                     &board_data.secrets,
                     &board_data.category_secrets,
+                    &board_data.board_state.moderation,
                 );
                 let post = all_messages
                     .iter()

@@ -105,6 +105,7 @@ pub fn TopBar() -> Element {
                 let category_secret = reply_ctx
                     .as_ref()
                     .and_then(|reply| snapshot.posting_secret_for(&reply.message_id));
+                let category_id = CURRENT_CATEGORY.read().category_id.clone();
                 spawn(async move {
                     send_message(
                         current_board,
@@ -114,6 +115,7 @@ pub fn TopBar() -> Element {
                         is_private,
                         secret_opt,
                         category_secret,
+                        category_id,
                         title_text,
                         message_text,
                         reply_ctx,

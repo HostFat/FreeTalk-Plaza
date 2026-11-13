@@ -732,8 +732,11 @@ impl BoardMessageBody {
 
     /// Check if this is an action message (content_type = ACTION)
     pub fn is_action(&self) -> bool {
-        use crate::board_state::content::CONTENT_TYPE_ACTION;
-        self.content_type() == CONTENT_TYPE_ACTION
+        use crate::board_state::content::{CONTENT_TYPE_ACTION, CONTENT_TYPE_MODERATION_ACTION};
+        matches!(
+            self.content_type(),
+            CONTENT_TYPE_ACTION | CONTENT_TYPE_MODERATION_ACTION
+        )
     }
 
     /// Check if this is a category message (content_type = CATEGORY)
@@ -895,7 +898,7 @@ impl fmt::Debug for AuthorizedMessageV1 {
     }
 }
 
-#[derive(Eq, PartialEq, Hash, Serialize, Deserialize, Clone, Debug, Ord, PartialOrd)]
+#[derive(Eq, PartialEq, Hash, Serialize, Deserialize, Copy, Clone, Debug, Ord, PartialOrd)]
 pub struct MessageId(pub FastHash);
 
 impl fmt::Display for MessageId {

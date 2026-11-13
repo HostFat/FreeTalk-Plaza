@@ -19,6 +19,8 @@ pub const CONTENT_TYPE_TEXT: u32 = 1;
 pub const CONTENT_TYPE_ACTION: u32 = 2;
 pub const CONTENT_TYPE_REPLY: u32 = 3;
 pub const CONTENT_TYPE_CATEGORY: u32 = 4;
+/// Public moderation action envelope: type and target in clear, payload sealed.
+pub const CONTENT_TYPE_MODERATION_ACTION: u32 = 9;
 // Future: CONTENT_TYPE_BLOB = 5, CONTENT_TYPE_POLL = 6, etc.
 
 /// Current version for text content
@@ -61,6 +63,38 @@ impl TextContentV1 {
     /// Decode from CBOR bytes
     pub fn decode(data: &[u8]) -> Result<Self, String> {
         decode_cbor(data, "TextContentV1")
+    }
+}
+
+/// Public envelope for edit/delete/reaction actions. The contract can read the
+/// action type and target; the payload stays sealed on private boards.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct ModerationActionV1 {
+    pub action_type: u32,
+    pub target: MessageId,
+    /// Encoded `ActionContentV1`, sealed with the board or category key.
+    pub payload: crate::board_state::privacy::SealedBytes,
+}
+
+impl ModerationActionV1 {
+    pub fn new(
+        action_type: u32,
+        target: MessageId,
+        payload: crate::board_state::privacy::SealedBytes,
+    ) -> Self {
+        Self {
+            action_type,
+            target,
+            payload,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        encode_cbor(self)
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self, String> {
+        decode_cbor(data, "ModerationActionV1")
     }
 }
 
