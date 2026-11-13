@@ -349,21 +349,13 @@ fn move_category_action(
 }
 
 /// Delete a group and move its sections to Ungrouped in the same delta.
-pub async fn delete_group(ctx: ActionContext, group_id: MessageId) -> Result<(), String> {
-    let children: Vec<MessageId> = ctx
-        .board_state
-        .recent_messages
-        .messages
-        .iter()
-        .filter_map(|message| {
-            let category = ctx.category_content(&message.id())?;
-            (!category.is_group && category.parent_category_id.as_ref() == Some(&group_id))
-                .then(|| message.id())
-        })
-        .collect();
-
+pub async fn delete_group(
+    ctx: ActionContext,
+    group_id: MessageId,
+    child_ids: Vec<MessageId>,
+) -> Result<(), String> {
     let mut contents = Vec::new();
-    for child in children {
+    for child in child_ids {
         let body = move_category_action(&ctx, &child, None)
             .ok_or("Could not move a section out of the group")?;
         contents.push(body);

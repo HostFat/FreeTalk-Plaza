@@ -232,6 +232,24 @@ pub fn get_all_messages(
         });
     }
 
+    // A section whose parent was deleted must not disappear: show it as
+    // ungrouped. This also recovers sections orphaned by older group deletes.
+    let live_categories: std::collections::HashSet<MessageId> = messages
+        .iter()
+        .filter(|message| message.is_category)
+        .map(|message| message.message_id.clone())
+        .collect();
+    for message in messages.iter_mut() {
+        if !message.is_category {
+            continue;
+        }
+        if let Some(parent) = message.parent_category_id.clone() {
+            if !live_categories.contains(&parent) {
+                message.parent_category_id = None;
+            }
+        }
+    }
+
     messages
 }
 

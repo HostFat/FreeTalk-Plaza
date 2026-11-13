@@ -286,6 +286,7 @@ fn SectionRow(
 pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
     let mut pending_delete_group = use_signal(|| false);
+    let mut pending_group_children: Signal<Vec<MessageId>> = use_signal(Vec::new);
     let mut recent_first = use_signal(|| false);
     // Posts rendered at a time; "Show more" grows it.
     let mut posts_limit = use_signal(|| 12usize);
@@ -396,10 +397,10 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
         }
     };
     // Deleting a group first moves its sections to Ungrouped.
-    let handle_delete_group = move |group_id: MessageId| {
+    let handle_delete_group = move |group_id: MessageId, children: Vec<MessageId>| {
         if let Some(ctx) = ActionContext::from_current_board() {
             spawn_local(async move {
-                if let Err(e) = message_actions::delete_group(ctx, group_id).await {
+                if let Err(e) = message_actions::delete_group(ctx, group_id, children).await {
                     dioxus::logger::tracing::error!("Failed to delete group: {}", e);
                 }
             });
@@ -818,9 +819,16 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                         open_group_section(group_id.clone())
                                                                     },
                                                                     on_edit: move |data| edit_handler(data),
-                                                                    on_request_delete: move |id| {
-                                                                        pending_delete.set(Some(id));
-                                                                        pending_delete_group.set(true);
+                                                                    on_request_delete: {
+                                                                        let children: Vec<MessageId> = sections
+                                                                            .iter()
+                                                                            .map(|section| section.message_id.clone())
+                                                                            .collect();
+                                                                        move |id| {
+                                                                            pending_delete.set(Some(id));
+                                                                            pending_delete_group.set(true);
+                                                                            pending_group_children.set(children.clone());
+                                                                        }
                                                                     },
                                                                 }
                                                                 if !sections.is_empty() {
@@ -1065,6 +1073,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                     onclick: move |_| {
                                         pending_delete.set(None);
                                         pending_delete_group.set(false);
+                                        pending_group_children.set(Vec::new());
                                     },
                                     "Cancel"
                                 }
@@ -1075,13 +1084,17 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                         let is_group = *pending_delete_group.read();
                                         if let Some(msg_id) = msg_id_opt {
                                             if is_group {
-                                                handle_delete_group(msg_id);
+                                                handle_delete_group(
+                                                    msg_id,
+                                                    pending_group_children.read().clone(),
+                                                );
                                             } else {
                                                 handle_delete_message(msg_id);
                                             }
                                         }
                                         pending_delete.set(None);
                                         pending_delete_group.set(false);
+                                        pending_group_children.set(Vec::new());
                                     },
                                     "Delete"
                                 }
