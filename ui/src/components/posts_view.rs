@@ -1891,8 +1891,11 @@ pub fn SinglePostView(post_id: String) -> Element {
                             };
                             spawn(async move {
                                 if let Some(ctx) = ActionContext::from_current_board() {
+                                    let reason = web_sys::window()
+                                        .and_then(|window| window.prompt_with_message("Reason for hiding this topic").ok().flatten())
+                                        .unwrap_or_else(|| "hidden for review".to_string());
                                     if let Err(error) =
-                                        crate::util::trash_actions::hide_topic(&ctx, id).await
+                                        crate::util::trash_actions::hide_topic(&ctx, id, &reason).await
                                     {
                                         warn!("Could not hide topic: {error}");
                                     }
@@ -1922,10 +1925,18 @@ pub fn SinglePostView(post_id: String) -> Element {
                             if !confirmed {
                                 return;
                             }
+                            let reason = web_sys::window()
+                                .and_then(|window| {
+                                    window
+                                        .prompt_with_message("Reason for the illegal purge")
+                                        .ok()
+                                        .flatten()
+                                })
+                                .unwrap_or_else(|| "illegal content purged".to_string());
                             spawn(async move {
                                 if let Some(ctx) = ActionContext::from_current_board() {
                                     if let Err(error) =
-                                        crate::util::trash_actions::purge_illegal(&ctx, id).await
+                                        crate::util::trash_actions::purge_illegal(&ctx, id, &reason).await
                                     {
                                         warn!("Could not purge topic: {error}");
                                     }

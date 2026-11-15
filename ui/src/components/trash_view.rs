@@ -55,7 +55,8 @@ pub fn TrashView() -> Element {
             )
         })
         .collect::<Vec<_>>();
-    let items = data
+    let has_trash_key = data.trash_secret.is_some();
+    let mut items = data
         .board_state
         .trash
         .items
@@ -63,6 +64,7 @@ pub fn TrashView() -> Element {
         .filter(|item| data.board_state.trash.active_item(&item.item.id).is_some())
         .cloned()
         .collect::<Vec<_>>();
+    items.sort_by_key(|item| std::cmp::Reverse(item.item.hidden_at));
 
     rsx! {
         div { class: "space-y-3",
@@ -72,6 +74,11 @@ pub fn TrashView() -> Element {
             }
             p { class: "text-sm text-text-muted",
                 "Hidden topics stay encrypted here until a moderator restores or purges them. Purge is reserved for the owner and admins."
+            }
+            if !has_trash_key {
+                p { class: "text-sm text-amber-400 border border-amber-600/40 rounded-md p-2",
+                    "You do not have the trash key. Preview and Restore are disabled until a trash manager grants it to you."
+                }
             }
             if let Some(message) = error.read().as_ref() {
                 p { class: "text-sm text-red-400", "{message}" }
@@ -152,6 +159,10 @@ pub fn TrashView() -> Element {
                                 onclick: {
                                     let item = item.clone();
                                     move |_| {
+                                        if !has_trash_key {
+                                            error.set(Some("You do not have the trash key".to_string()));
+                                            return;
+                                        }
                                         let Some(ctx) = ActionContext::from_current_board() else {
                                             return;
                                         };

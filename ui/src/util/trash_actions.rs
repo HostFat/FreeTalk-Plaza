@@ -24,7 +24,7 @@ pub(crate) struct TrashBundleV1 {
     routes: Vec<plaza_core::board_state::moderation::AuthorizedMessageRoute>,
 }
 
-pub async fn hide_topic(ctx: &ActionContext, root: MessageId) -> Result<(), String> {
+pub async fn hide_topic(ctx: &ActionContext, root: MessageId, reason: &str) -> Result<(), String> {
     let self_id = plaza_core::board_state::member::MemberId::from(&ctx.self_sk.verifying_key());
     let is_owner = self_id == plaza_core::board_state::member::MemberId::from(&ctx.current_board);
     let is_admin = ctx
@@ -193,7 +193,7 @@ pub async fn hide_topic(ctx: &ActionContext, root: MessageId) -> Result<(), Stri
         item_key_nonce,
         secret_version,
         hidden_at: chrono::Utc::now().timestamp(),
-        reason: "hidden for review".to_string(),
+        reason: reason.to_string(),
         generation: 1,
     };
     item.id = item.compute_id();
@@ -402,7 +402,11 @@ fn preview_bundle_bytes(
     decrypt_with_symmetric_key(&item_key, &item.item.bundle, &item.item.bundle_nonce, 0)
 }
 
-pub async fn purge_illegal(ctx: &ActionContext, topic: MessageId) -> Result<(), String> {
+pub async fn purge_illegal(
+    ctx: &ActionContext,
+    topic: MessageId,
+    reason: &str,
+) -> Result<(), String> {
     let messages = ctx
         .board_state
         .recent_messages
@@ -439,7 +443,7 @@ pub async fn purge_illegal(ctx: &ActionContext, topic: MessageId) -> Result<(), 
         plaza_core::board_state::moderation::IllegalPurgeV1 {
             topic,
             message_ids: descendants,
-            reason: "illegal content purged".to_string(),
+            reason: reason.to_string(),
             content_hash: Some(content_hash),
             acted_at: chrono::Utc::now().timestamp(),
             generation: 1,
