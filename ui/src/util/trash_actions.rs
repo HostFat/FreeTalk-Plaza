@@ -4,9 +4,12 @@
 use crate::util::ecies::{decrypt_with_symmetric_key, encrypt_with_symmetric_key};
 use crate::util::message_actions::{apply_state_delta, ActionContext};
 use dioxus::prelude::*;
-use plaza_core::board_state::message::MessageId;
+use plaza_core::board_state::message::{
+    AuthorizedMessageV1, BoardMessageBody, MessageId, MessageV1,
+};
 use plaza_core::board_state::moderation::{
-    category_chain, AuthorizedThreadMove, ModerationDelta, ThreadMoveV1,
+    category_chain, AuthorizedMessageRoute, AuthorizedThreadMove, MessageRoute, ModerationDelta,
+    ThreadMoveV1,
 };
 use plaza_core::board_state::trash::{
     AuthorizedTrashAction, AuthorizedTrashItem, TrashActionKind, TrashActionV1, TrashDelta,
@@ -443,16 +446,112 @@ pub async fn purge_illegal(ctx: &ActionContext, topic: MessageId) -> Result<(), 
         },
         &ctx.self_sk,
     );
+    let self_id = plaza_core::board_state::member::MemberId::from(&ctx.self_sk.verifying_key());
+    let owner_id = plaza_core::board_state::member::MemberId::from(&ctx.current_board);
+    let topic_author = ctx
+        .board_state
+        .recent_messages
+        .messages
+        .iter()
+        .find(|message| message.id() == topic)
+        .map(|message| message.message.author);
+
+    // Replacement topic, only on public boards where a public body is valid.
+    let mut messages = Vec::new();
+    let mut routes = Vec::new();
+    if ctx.board_secrets.is_empty() {
+        let section = ctx
+            .board_state
+            .moderation
+            .routes_map()
+            .get(&topic)
+            .and_then(|route| route.category_id);
+        let replacement = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author: self_id,
+                time: std::time::SystemTime::now(),
+                content: BoardMessageBody::public(
+                    "Contenuto rimosso".to_string(),
+                    "Il topic originale è stato rimosso dai moderatori per contenuto illegale."
+                        .to_string(),
+                ),
+            },
+            &ctx.self_sk,
+        );
+        let replacement_id = replacement.id();
+        routes.push(AuthorizedMessageRoute::new(
+            MessageRoute {
+                message_id: replacement_id,
+                reply_to: None,
+                category_id: section,
+                is_category: false,
+                parent_category_id: None,
+                is_group: false,
+                generation: 1,
+            },
+            &ctx.self_sk,
+        ));
+        messages.push(replacement);
+    }
+
+    // Ban the author when they are a regular member or admin, never the owner.
+    let mut bans = Vec::new();
+    if let Some(author) = topic_author {
+        if author != owner_id && author != self_id {
+            if let Some(target) = ctx
+                .board_state
+                .members
+                .members
+                .iter()
+                .find(|member| member.member.id() == author)
+                .cloned()
+            {
+                let mut chain = Vec::new();
+                let mut inviter = target.member.invited_by;
+                while inviter != owner_id {
+                    let Some(member) = ctx
+                        .board_state
+                        .members
+                        .members
+                        .iter()
+                        .find(|member| member.member.id() == inviter)
+                        .cloned()
+                    else {
+                        break;
+                    };
+                    inviter = member.member.invited_by;
+                    chain.push(member);
+                }
+                let ban = plaza_core::board_state::ban::UserBan {
+                    owner_member_id: owner_id,
+                    banned_at: std::time::SystemTime::now(),
+                    banned_user: author,
+                    expires_at: None,
+                    target_member: Some(target),
+                    invite_chain: chain,
+                };
+                bans.push(plaza_core::board_state::ban::AuthorizedUserBan::new(
+                    ban,
+                    self_id,
+                    &ctx.self_sk,
+                ));
+            }
+        }
+    }
+
     apply_state_delta(
         ctx,
         ChatBoardStateV1Delta {
+            recent_messages: Some(messages),
             moderation: Some(ModerationDelta {
-                routes: Vec::new(),
+                routes,
                 feature_flags: Vec::new(),
                 moves: Vec::new(),
                 thread_moves: Vec::new(),
                 illegal_purges: vec![entry],
             }),
+            bans: Some(bans),
             ..Default::default()
         },
     )
