@@ -1430,7 +1430,13 @@ mod tests {
         let post_id = post.id();
 
         let state = ChatBoardStateV1 {
-            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner_sk),
+            configuration: AuthorizedConfigurationV1::new(
+                Configuration {
+                    owner_member_id: owner_id,
+                    ..Configuration::default()
+                },
+                &owner_sk,
+            ),
             members: MembersV1 {
                 members: vec![member],
             },
@@ -1752,7 +1758,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "reproduces a cleanup bug: the replacement topic disappears with purge+ban"]
     fn illegal_purge_with_replacement_and_ban_applies_together() {
         use crate::board_state::ban::{AuthorizedUserBan, UserBan};
         use crate::board_state::ChatBoardStateV1Delta;
