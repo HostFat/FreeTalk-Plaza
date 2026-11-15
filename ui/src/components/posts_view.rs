@@ -1962,7 +1962,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                 if let Some(key) = CURRENT_BOARD.read().owner_key {
                     crate::components::purge_view::PurgeView {
                         board_id: bs58::encode(key.as_bytes()).into_string(),
-                        post_id: post_id.clone(),
+                        post_id: purge_post_id.clone(),
                     }
                 }
             }
