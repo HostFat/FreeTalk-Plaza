@@ -165,6 +165,17 @@ impl ChatBoardStateV1 {
                     );
                 }
             }
+            // Token-joined members must survive cleanup even before their first
+            // message; otherwise publishing the membership alone is pruned and
+            // the client can never reach the state where it may post.
+            required.extend(
+                self.members
+                    .members
+                    .iter()
+                    .filter(|member| member.member.join_proof.is_some())
+                    .map(|member| member.member.id())
+                    .filter(|author| *author != owner_id),
+            );
             let mut to_process: Vec<MemberId> = required.iter().copied().collect();
             while let Some(member_id) = to_process.pop() {
                 if let Some(member) = members_by_id.get(&member_id) {
