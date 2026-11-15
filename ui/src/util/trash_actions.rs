@@ -230,25 +230,40 @@ pub async fn hide_topic(
     })
 }
 
+/// Keys to try for an item, in order: the trash key for its version, then the
+/// board secret for the same version (items hidden before any manager had a PQ
+/// key), then the legacy current key on older boards.
+fn trash_key_candidates(
+    trash_secrets: &std::collections::HashMap<u32, [u8; 32]>,
+    board_secrets: &std::collections::HashMap<u32, [u8; 32]>,
+    current: Option<(u32, [u8; 32])>,
+    item_version: u32,
+) -> Vec<(u32, [u8; 32])> {
+    let mut candidates = Vec::new();
+    if let Some(key) = trash_secrets.get(&item_version) {
+        candidates.push((item_version, *key));
+    }
+    if let Some(key) = board_secrets.get(&item_version) {
+        candidates.push((item_version, *key));
+    }
+    if candidates.is_empty() {
+        if let Some((version, key)) = current {
+            candidates.push((version, key));
+        }
+    }
+    candidates
+}
+
 fn decrypt_bundle(
     ctx: &ActionContext,
     item: &AuthorizedTrashItem,
 ) -> Result<TrashBundleV1, String> {
-    // Items sealed with the trash key record its version. Items hidden before
-    // any manager had a PQ key were sealed with the board secret instead.
-    let mut candidates: Vec<(u32, [u8; 32])> = Vec::new();
-    if let Some(key) = ctx.trash_secrets.get(&item.item.secret_version) {
-        candidates.push((item.item.secret_version, *key));
-    }
-    if let Some(key) = ctx.board_secrets.get(&item.item.secret_version) {
-        candidates.push((item.item.secret_version, *key));
-    }
-    if candidates.is_empty() {
-        // Older boards kept only the current key.
-        if let Some((version, key)) = ctx.trash_secret {
-            candidates.push((version, key));
-        }
-    }
+    let candidates = trash_key_candidates(
+        &ctx.trash_secrets,
+        &ctx.board_secrets,
+        ctx.trash_secret,
+        item.item.secret_version,
+    );
     if candidates.is_empty() {
         return Err("This member has no trash key".to_string());
     }
@@ -1015,5 +1030,38 @@ pub fn run_later<F: FnOnce() + 'static>(work: F) {
     if let Some(window) = web_sys::window() {
         let _ = window
             .set_timeout_with_callback_and_timeout_and_arguments_0(callback.unchecked_ref(), 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trash_key_candidates;
+    use std::collections::HashMap;
+
+    #[test]
+    fn each_item_uses_the_key_for_its_own_version() {
+        let mut trash = HashMap::new();
+        trash.insert(2u32, [2u8; 32]);
+        let mut board = HashMap::new();
+        board.insert(1u32, [1u8; 32]);
+
+        // Older item sealed with the board secret before any trash key existed.
+        assert_eq!(
+            trash_key_candidates(&trash, &board, None, 1),
+            vec![(1, [1u8; 32])]
+        );
+        // Newer item sealed with the rotated trash key.
+        assert_eq!(
+            trash_key_candidates(&trash, &board, None, 2),
+            vec![(2, [2u8; 32])]
+        );
+    }
+
+    #[test]
+    fn a_legacy_board_falls_back_to_the_current_key() {
+        assert_eq!(
+            trash_key_candidates(&HashMap::new(), &HashMap::new(), Some((1, [9u8; 32])), 5),
+            vec![(1, [9u8; 32])]
+        );
     }
 }
