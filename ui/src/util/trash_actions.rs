@@ -471,26 +471,70 @@ pub async fn purge_illegal(
         .find(|message| message.id() == topic)
         .map(|message| message.message.author);
 
-    // Replacement topic, only on public boards where a public body is valid.
+    // Replacement topic, public or sealed with the section/board key.
+    let section = ctx
+        .board_state
+        .moderation
+        .routes_map()
+        .get(&topic)
+        .and_then(|route| route.category_id);
     let mut messages = Vec::new();
     let mut routes = Vec::new();
-    if ctx.board_secrets.is_empty() {
-        let section = ctx
-            .board_state
-            .moderation
-            .routes_map()
-            .get(&topic)
-            .and_then(|route| route.category_id);
+    {
+        use plaza_core::board_state::content::{
+            TextContentV1, CONTENT_TYPE_TEXT, TEXT_CONTENT_VERSION,
+        };
+        use plaza_core::board_state::message::SecretScope;
+
+        let title = "Contenuto rimosso".to_string();
+        let text =
+            "Il topic originale è stato rimosso dai moderatori per contenuto illegale.".to_string();
+
+        let content = if let Some(section) = section {
+            if let Some((version, key)) = ctx.category_secrets.get(&section).copied() {
+                let (ciphertext, nonce) = encrypt_with_symmetric_key(
+                    &key,
+                    &TextContentV1::new(title.clone(), text.clone()).encode(),
+                    version,
+                );
+                BoardMessageBody::Private {
+                    content_type: CONTENT_TYPE_TEXT,
+                    content_version: TEXT_CONTENT_VERSION,
+                    ciphertext,
+                    nonce,
+                    secret_version: version,
+                    secret_scope: SecretScope::Category(section),
+                }
+            } else {
+                public_replacement_body(title, text)
+            }
+        } else if let Some(key) = ctx
+            .board_secrets
+            .get(&ctx.board_state.secrets.current_version)
+        {
+            let version = ctx.board_state.secrets.current_version;
+            let (ciphertext, nonce) = encrypt_with_symmetric_key(
+                key,
+                &TextContentV1::new(title.clone(), text.clone()).encode(),
+                version,
+            );
+            BoardMessageBody::private(
+                CONTENT_TYPE_TEXT,
+                TEXT_CONTENT_VERSION,
+                ciphertext,
+                nonce,
+                version,
+            )
+        } else {
+            public_replacement_body(title, text)
+        };
+
         let replacement = AuthorizedMessageV1::new(
             MessageV1 {
                 board_owner: owner_id,
                 author: self_id,
                 time: std::time::SystemTime::now(),
-                content: BoardMessageBody::public(
-                    "Contenuto rimosso".to_string(),
-                    "Il topic originale è stato rimosso dai moderatori per contenuto illegale."
-                        .to_string(),
-                ),
+                content,
             },
             &ctx.self_sk,
         );
@@ -644,4 +688,8 @@ pub async fn grant_trash_access(
             ..Default::default()
         },
     )
+}
+
+fn public_replacement_body(title: String, text: String) -> BoardMessageBody {
+    BoardMessageBody::public(title, text)
 }
