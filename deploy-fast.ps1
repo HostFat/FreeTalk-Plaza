@@ -19,8 +19,12 @@ param(
     [int]$Version = 0,
     # Skip `npm run build:css` (only if the CSS is already up to date).
     [switch]$SkipCss,
+    # Skip rebuilding the bundled contract/delegate wasm even if sources changed.
+    [switch]$SkipContractBuild,
     # Use the size-optimized release profile (slower) instead of release-fast.
     [switch]$Production,
+    # Do nothing when no source is newer than the last built bundle.
+    [switch]$SkipIfUnchanged,
     [string]$StateDir = (Join-Path $env:APPDATA 'freetalk'),
     [string]$TargetDir = (Join-Path $PSScriptRoot 'target\dx-fast')
 )
@@ -124,6 +128,35 @@ if (-not $contractId) {
 Write-Host "Deploying version $chosenVersion to $contractId"
 Write-Host "  target dir: $TargetDir"
 
+# Skip the whole build and publish when nothing changed since the last bundle.
+if ($SkipIfUnchanged) {
+    $bundleIndex = Get-ChildItem $TargetDir -Recurse -Directory -Filter 'public' -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'index.html') } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if ($bundleIndex) {
+        $lastBuild = (Get-Item (Join-Path $bundleIndex.FullName 'index.html')).LastWriteTime
+        $inputDirs = @('ui\src', 'common\src', 'plaza-contract\src', 'plaza-delegate\src', 'ui\assets', 'ui\public\contracts') |
+            ForEach-Object { Join-Path $repoRoot $_ } |
+            Where-Object { Test-Path $_ }
+        $newestInput = Get-ChildItem $inputDirs -Recurse -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        $rootFiles = @('Cargo.toml', 'Cargo.lock') |
+            ForEach-Object { Join-Path $repoRoot $_ } |
+            Where-Object { Test-Path $_ }
+        $newestRoot = $rootFiles |
+            ForEach-Object { (Get-Item $_).LastWriteTime } |
+            Sort-Object -Descending |
+            Select-Object -First 1
+        if ((-not $newestInput -or $newestInput.LastWriteTime -le $lastBuild) -and
+            (-not $newestRoot -or $newestRoot -le $lastBuild)) {
+            Write-Host "No source changes since the last bundle; nothing to deploy."
+            return
+        }
+    }
+}
+
 # Fast CSS rebuild. It is cheap and keeps styles.css in sync with the source.
 if (-not $SkipCss) {
     if (-not $npm) { throw "npm not found. Pass -SkipCss if the CSS is already built." }
@@ -136,6 +169,37 @@ New-Item -ItemType Directory -Force $TargetDir | Out-Null
 $env:CARGO_TARGET_DIR = $TargetDir
 
 $buildProfile = if ($Production) { "release" } else { "release-fast" }
+
+# Rebuild the bundled contract/delegate only when their sources or the shared
+# common crate changed. The UI embeds these wasm files, so they must match the
+# source. They use the same target dir as the UI build, which shares the
+# compiled dependencies.
+if (-not $SkipContractBuild) {
+    $contractDirs = @(
+        (Join-Path $repoRoot 'common\src'),
+        (Join-Path $repoRoot 'plaza-contract\src'),
+        (Join-Path $repoRoot 'plaza-delegate\src')
+    ) | Where-Object { Test-Path $_ }
+    $newestSource = Get-ChildItem $contractDirs -Recurse -Filter *.rs |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    $wasmProfile = if ($Production) { 'release' } else { 'release-fast' }
+    foreach ($wasmName in @('plaza_contract.wasm', 'plaza_delegate.wasm')) {
+        $wasmPath = Join-Path $repoRoot "ui\public\contracts\$wasmName"
+        if ((Test-Path $wasmPath) -and $newestSource -and
+            (Get-Item $wasmPath).LastWriteTime -ge $newestSource.LastWriteTime) {
+            Write-Host "Contract $wasmName is up to date."
+            continue
+        }
+        $package = if ($wasmName -eq 'plaza_contract.wasm') { 'plaza-contract' } else { 'plaza-delegate' }
+        Write-Host "Building $wasmName with profile $wasmProfile..."
+        & cargo build --locked --profile $wasmProfile --target wasm32-unknown-unknown `
+            -p $package --target-dir $TargetDir
+        if ($LASTEXITCODE -ne 0) { throw "cargo build failed for $package." }
+        Copy-Item (Join-Path $TargetDir "wasm32-unknown-unknown\$wasmProfile\$wasmName") $wasmPath -Force
+    }
+}
+
 Write-Host "Building UI with profile $buildProfile (first run is a full build, later runs are incremental)..."
 $buildTimer = [System.Diagnostics.Stopwatch]::StartNew()
 # DWARF debug info is on by default in dx and roughly doubles the wasm. The
@@ -143,7 +207,7 @@ $buildTimer = [System.Diagnostics.Stopwatch]::StartNew()
 if ($Production) {
     & $dx build --package plaza-ui --base-path "/v1/contract/web/$contractId/" --release --debug-symbols false
 } else {
-    & $dx build --package plaza-ui --base-path "/v1/contract/web/$contractId/" --profile release-fast --debug-symbols false
+    & $dx build --package plaza-ui --base-path "/v1/contract/web/$contractId/" --profile $buildProfile --debug-symbols false
 }
 if ($LASTEXITCODE -ne 0) { throw "dx build failed." }
 $buildTimer.Stop()

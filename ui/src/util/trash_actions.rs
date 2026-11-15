@@ -376,15 +376,8 @@ pub async fn restore_item(
         .into_iter()
         .filter(|route| !existing_routes.contains(&route.route.message_id))
         .collect();
-    let routes_map = ctx.board_state.moderation.routes_map();
-    let source_route_exists = item
-        .item
-        .section
-        .map(|section| {
-            routes_map.get(&section).is_some()
-                && !ctx.board_state.recent_messages.is_deleted(&section)
-        })
-        .unwrap_or(false);
+    // Restore first: a thread move is verified against a state that already
+    // contains the restored message, so the move goes in a second delta.
     apply_state_delta(
         ctx,
         ChatBoardStateV1Delta {
@@ -394,31 +387,52 @@ pub async fn restore_item(
                 routes,
                 feature_flags: Vec::new(),
                 moves: Vec::new(),
-                thread_moves: destination
-                    .map(|destination| {
-                        vec![AuthorizedThreadMove::new(
-                            ThreadMoveV1 {
-                                topic: item.item.root,
-                                // A deleted source section has no route to match.
-                                from_section: if source_route_exists {
-                                    item.item.section
-                                } else {
-                                    None
-                                },
-                                to_section: Some(destination),
-                                message_ids: item.item.messages.clone(),
-                                generation: 1,
-                                moved_at: chrono::Utc::now().timestamp(),
-                                leave_redirect: false,
-                            },
-                            &ctx.self_sk,
-                        )]
-                    })
-                    .unwrap_or_default(),
+                thread_moves: Vec::new(),
             }),
             trash: Some(TrashDelta {
                 items: Vec::new(),
                 actions: vec![action],
+            }),
+            ..Default::default()
+        },
+    )?;
+
+    let Some(destination) = destination else {
+        return Ok(());
+    };
+    let Some(fresh) = ActionContext::from_current_board() else {
+        return Err("Board context is gone after the restore".to_string());
+    };
+    if fresh.current_board != ctx.current_board {
+        return Err("The board changed during the restore".to_string());
+    }
+    let routes_map = fresh.board_state.moderation.routes_map();
+    // The restored route still points at the deleted section, and the move
+    // must match it; only the destination is rewritten.
+    let from_section = item
+        .item
+        .section
+        .filter(|section| routes_map.contains_key(section));
+    apply_state_delta(
+        &fresh,
+        ChatBoardStateV1Delta {
+            moderation: Some(ModerationDelta {
+                illegal_purges: Vec::new(),
+                routes: Vec::new(),
+                feature_flags: Vec::new(),
+                moves: Vec::new(),
+                thread_moves: vec![AuthorizedThreadMove::new(
+                    ThreadMoveV1 {
+                        topic: item.item.root,
+                        from_section,
+                        to_section: Some(destination),
+                        message_ids: item.item.messages.clone(),
+                        generation: 1,
+                        moved_at: chrono::Utc::now().timestamp(),
+                        leave_redirect: false,
+                    },
+                    &fresh.self_sk,
+                )],
             }),
             ..Default::default()
         },
