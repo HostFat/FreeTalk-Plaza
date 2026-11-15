@@ -560,11 +560,7 @@ pub async fn purge_illegal(
         let message = MessageV1 {
             board_owner: owner_id,
             author: self_id,
-            time: if reason == "debug replacement" {
-                std::time::UNIX_EPOCH
-            } else {
-                std::time::SystemTime::now()
-            },
+            time: chrono::Utc::now().into(),
             content,
         };
         // In debug mode skip signing entirely: a dummy signature lets us see
@@ -648,7 +644,7 @@ pub async fn purge_illegal(
                 }
                 let ban = plaza_core::board_state::ban::UserBan {
                     owner_member_id: owner_id,
-                    banned_at: std::time::SystemTime::now(),
+                    banned_at: chrono::Utc::now().into(),
                     banned_user: author,
                     expires_at: None,
                     target_member: Some(target),
