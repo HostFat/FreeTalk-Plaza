@@ -68,6 +68,9 @@ pub struct Role {
     /// Move, merge and split posts between sections.
     #[serde(default, skip_serializing_if = "is_false")]
     pub can_move_posts: bool,
+    /// See the trash and restore items. Permanent purge stays with owner/admins.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub can_manage_trash: bool,
     /// Sections where the moderation powers apply, including their
     /// subsections. Empty means the whole board.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -856,6 +859,13 @@ impl RolesV1 {
             .any(|role| role.can_distribute_keys)
     }
 
+    /// Whether the member may see and restore trash items.
+    pub fn can_manage_trash(&self, member_id: &MemberId) -> bool {
+        self.active_roles_of(member_id)
+            .iter()
+            .any(|role| role.can_manage_trash)
+    }
+
     /// Whether a moderation power applies to a target whose category chain is
     /// `scope_chain` (the target section and its ancestors). An empty role
     /// scope means the whole board.
@@ -984,6 +994,7 @@ mod delegation_tests {
                 can_close_posts: false,
                 can_pin_posts: false,
                 can_move_posts: false,
+                can_manage_trash: false,
                 scope: Vec::new(),
                 deleted: false,
             },
@@ -1090,6 +1101,7 @@ mod delegation_tests {
             can_close_posts: false,
             can_pin_posts: false,
             can_move_posts: false,
+            can_manage_trash: false,
             scope: Vec::new(),
             deleted: false,
         };
@@ -1145,6 +1157,7 @@ mod delegation_tests {
             can_close_posts: false,
             can_pin_posts: false,
             can_move_posts: false,
+            can_manage_trash: false,
             scope: Vec::new(),
             deleted: false,
         };
@@ -1182,6 +1195,7 @@ mod delegation_tests {
             can_close_posts: false,
             can_pin_posts: false,
             can_move_posts: false,
+            can_manage_trash: false,
             scope: Vec::new(),
             deleted: false,
         }
@@ -1337,6 +1351,7 @@ mod delegation_tests {
             can_close_posts: false,
             can_pin_posts: false,
             can_move_posts: false,
+            can_manage_trash: false,
             scope: Vec::new(),
             deleted: false,
         };

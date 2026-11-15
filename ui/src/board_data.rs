@@ -2229,6 +2229,7 @@ mod tests {
                                 can_close_posts: false,
                                 can_pin_posts: false,
                                 can_move_posts: false,
+                                can_manage_trash: false,
                                 scope: Vec::new(),
                                 deleted: false,
                             },

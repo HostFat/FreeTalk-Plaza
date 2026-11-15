@@ -17,6 +17,7 @@ pub mod privacy;
 pub mod reports;
 pub mod roles;
 pub mod secret;
+pub mod trash;
 pub mod upgrade;
 pub mod version;
 
@@ -87,6 +88,10 @@ pub struct ChatBoardStateV1 {
 
     /// The most recent messages in the chat board, the number is limited by the board configuration.
     pub recent_messages: MessagesV1,
+
+    /// Encrypted moderator trash. References messages in `recent_messages`.
+    #[serde(default)]
+    pub trash: crate::board_state::trash::TrashV1,
 
     /// Public routing and post flags used by the contract to verify moderation.
     #[serde(default)]

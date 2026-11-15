@@ -206,6 +206,7 @@ pub fn create_role(
             can_close_posts,
             can_pin_posts,
             can_move_posts,
+            can_manage_trash: false,
             scope,
             deleted: false,
         };
