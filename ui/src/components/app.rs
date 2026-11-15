@@ -717,5 +717,8 @@ fn DebugEventProbe() -> Element {
             },
             "Probe {count}"
         }
+        div { class: "fixed bottom-2 left-24 z-50 px-2 py-1 text-xs bg-black/80 text-amber-300 rounded",
+            "Purge: {crate::components::app::PURGE_STEP.read()}"
+        }
     }
 }
