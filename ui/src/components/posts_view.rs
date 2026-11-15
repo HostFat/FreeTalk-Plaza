@@ -1915,6 +1915,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                         r#type: "button",
                         class: "ml-2 px-3 py-1.5 text-xs rounded-md bg-red-700 hover:bg-red-600 text-white",
                         onclick: move |_| {
+                            web_sys::console::log_1(&"purge button clicked".into());
                             let Some(id) = purge_id.parse::<MessageId>().ok() else {
                                 return;
                             };
@@ -1926,19 +1927,35 @@ pub fn SinglePostView(post_id: String) -> Element {
                             if !crate::util::trash_actions::ask_confirmation_word("PURGE") {
                                 return;
                             }
+                            web_sys::console::log_1(&"purge prompts accepted, spawning".into());
                             spawn(async move {
-                                if let Some(ctx) = ActionContext::from_current_board() {
-                                    match crate::util::trash_actions::purge_illegal(&ctx, id, &reason, code).await {
-                                        Ok(()) => {
-                                            if let Some(history) = web_sys::window().and_then(|w| w.history().ok()) {
-                                                let _ = history.back();
+                                match ActionContext::from_current_board() {
+                                    Some(ctx) => {
+                                        web_sys::console::log_1(&"purge context ok".into());
+                                        match crate::util::trash_actions::purge_illegal(
+                                            &ctx, id, &reason, code,
+                                        )
+                                        .await
+                                        {
+                                            Ok(()) => {
+                                                if let Some(history) = web_sys::window()
+                                                    .and_then(|w| w.history().ok())
+                                                {
+                                                    let _ = history.back();
+                                                }
+                                            }
+                                            Err(error) => {
+                                                web_sys::console::log_1(
+                                                    &format!("purge error: {error}").into(),
+                                                );
+                                                if let Some(window) = web_sys::window() {
+                                                    let _ = window.alert_with_message(&error);
+                                                }
                                             }
                                         }
-                                        Err(error) => {
-                                        if let Some(window) = web_sys::window() {
-                                            let _ = window.alert_with_message(&error);
-                                        }
                                     }
+                                    None => {
+                                        web_sys::console::log_1(&"purge context none".into());
                                     }
                                 }
                             });

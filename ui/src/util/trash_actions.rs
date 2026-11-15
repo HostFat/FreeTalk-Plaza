@@ -417,6 +417,9 @@ pub async fn purge_illegal(
     reason: &str,
     code: ReasonCode,
 ) -> Result<(), String> {
+    log_debug(&format!(
+        "purge_illegal start topic={topic} reason={reason}"
+    ));
     let messages = ctx
         .board_state
         .recent_messages
@@ -601,6 +604,7 @@ pub async fn purge_illegal(
 
     // Three separate updates so a rejection in the replacement or the ban
     // does not hide which part failed.
+    log_debug("purge phase 1: illegal purge record");
     apply_state_delta(
         ctx,
         ChatBoardStateV1Delta {
@@ -616,6 +620,10 @@ pub async fn purge_illegal(
     )
     .map_err(|error| format!("Purge record rejected: {error}"))?;
 
+    log_debug(&format!(
+        "purge phase 1 ok, replacement messages={}",
+        messages.len()
+    ));
     if !messages.is_empty() || !routes.is_empty() {
         let ctx =
             ActionContext::from_current_board().ok_or("Board context is gone after the purge")?;
@@ -636,6 +644,7 @@ pub async fn purge_illegal(
         .map_err(|error| format!("Replacement topic rejected: {error}"))?;
     }
 
+    log_debug("purge phase 2 ok, applying ban");
     if !bans.is_empty() {
         let ctx =
             ActionContext::from_current_board().ok_or("Board context is gone after the purge")?;
@@ -648,7 +657,12 @@ pub async fn purge_illegal(
         )
         .map_err(|error| format!("Author ban rejected: {error}"))?;
     }
+    log_debug("purge completed");
     Ok(())
+}
+
+fn log_debug(message: &str) {
+    web_sys::console::log_1(&message.into());
 }
 
 pub fn parse_reason_code(code: &str) -> ReasonCode {
