@@ -11,6 +11,7 @@ pub mod member;
 pub mod member_info;
 pub mod member_moderation;
 pub mod message;
+pub mod message_keys;
 pub mod moderation;
 pub mod pq_secrets;
 pub mod privacy;
@@ -92,6 +93,10 @@ pub struct ChatBoardStateV1 {
     /// Encrypted moderator trash. References messages in `recent_messages`.
     #[serde(default)]
     pub trash: crate::board_state::trash::TrashV1,
+
+    /// Per-message content keys wrapped for each section.
+    #[serde(default)]
+    pub message_keys: crate::board_state::message_keys::MessageKeysV1,
 
     /// Public routing and post flags used by the contract to verify moderation.
     #[serde(default)]
