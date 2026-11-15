@@ -173,7 +173,8 @@ pub async fn hide_topic(
                     secrets: sealed,
                 },
                 &ctx.self_sk,
-            );
+            )
+            .with_optional_authority(trash_authority(ctx));
             pq_set = Some(PqSecretsDelta {
                 keys: Vec::new(),
                 sets: vec![set],
@@ -203,7 +204,8 @@ pub async fn hide_topic(
         generation: 1,
     };
     item.id = item.compute_id();
-    let authorized = AuthorizedTrashItem::new(item, &ctx.self_sk);
+    let authorized = AuthorizedTrashItem::new(item, &ctx.self_sk)
+        .with_optional_authority(trash_authority(ctx));
 
     apply_state_delta(
         ctx,
@@ -298,7 +300,8 @@ pub async fn restore_item(
             content_hash: None,
         },
         &ctx.self_sk,
-    );
+    )
+    .with_optional_authority(trash_authority(ctx));
 
     let existing_messages: std::collections::HashSet<_> = ctx
         .board_state
@@ -381,7 +384,8 @@ pub async fn purge_item(
             content_hash,
         },
         &ctx.self_sk,
-    );
+    )
+    .with_optional_authority(trash_authority(ctx));
     apply_state_delta(
         ctx,
         ChatBoardStateV1Delta {
@@ -787,7 +791,8 @@ pub async fn grant_trash_access(
             secrets,
         },
         &ctx.self_sk,
-    );
+    )
+    .with_optional_authority(trash_authority(ctx));
     apply_state_delta(
         ctx,
         ChatBoardStateV1Delta {
@@ -837,7 +842,8 @@ pub async fn revoke_trash_access(
             secrets,
         },
         &ctx.self_sk,
-    );
+    )
+    .with_optional_authority(trash_authority(ctx));
     apply_state_delta(
         ctx,
         ChatBoardStateV1Delta {
@@ -852,6 +858,17 @@ pub async fn revoke_trash_access(
 
 fn public_replacement_body(title: String, text: String) -> BoardMessageBody {
     BoardMessageBody::public(title, text)
+}
+
+/// Authority the current signer holds for a Trash set. Keeping the admin record
+/// or the role grant in the set lets it verify after the signer loses the role.
+fn trash_authority(
+    ctx: &ActionContext,
+) -> Option<plaza_core::board_state::roles::AuthorityProof> {
+    use plaza_core::board_state::roles::{admin_authority_proof, trash_authority_proof};
+    let signer = plaza_core::board_state::member::MemberId::from(&ctx.self_sk.verifying_key());
+    admin_authority_proof(&ctx.board_state, &signer)
+        .or_else(|| trash_authority_proof(&ctx.board_state, &signer))
 }
 
 /// Native fallback used while the custom modal has an event-handling issue.

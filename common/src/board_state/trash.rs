@@ -219,6 +219,15 @@ impl TrashV1 {
             .filter(|item| item.item.messages.contains(message))
             .any(|item| self.active_item(&item.item.id).is_some())
     }
+
+    /// Drop actions whose signer can no longer be verified. A manager who loses
+    /// the role keeps a restore only when the record carries the grant that
+    /// allowed it; old records without that proof are dropped so the state stays
+    /// valid, matching how reports and approvals converge.
+    pub fn cleanup(&mut self, state: &ChatBoardStateV1, parameters: &ChatBoardParametersV1) {
+        self.actions
+            .retain(|entry| verify_action(state, parameters, entry, &[]).is_ok());
+    }
 }
 
 fn verify_item(
@@ -231,12 +240,16 @@ fn verify_item(
     let key = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
     entry.verify_signature_with(&key)?;
 
-    let allowed = signer == parameters.owner_id()
-        || is_board_admin(state, &signer)
-        || state.roles.can_manage_trash(&signer)
-        || verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8)
-            .is_ok();
-    if !allowed {
+    // Keep the item verifiable after its signer loses the role: the stored
+    // grant proves the permission at signing time.
+    if crate::board_state::roles::verify_trash_authority(
+        state,
+        parameters,
+        &signer,
+        entry.authority.as_deref(),
+    )
+    .is_err()
+    {
         return Err("Signer cannot manage the trash".to_string());
     }
 
@@ -309,7 +322,15 @@ fn verify_action(
         || verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8)
             .is_ok();
     let allowed = match action.kind {
-        TrashActionKind::Restore => is_owner_or_admin || state.roles.can_manage_trash(&signer),
+        // A restore stays valid after the manager loses the role when the
+        // action carries the grant that allowed it.
+        TrashActionKind::Restore => crate::board_state::roles::verify_trash_authority(
+            state,
+            parameters,
+            &signer,
+            entry.authority.as_deref(),
+        )
+        .is_ok(),
         TrashActionKind::Purge => is_owner_or_admin,
     };
     if !allowed {
@@ -638,5 +659,135 @@ mod tests {
             .verify(&state.clone(), &parameters)
             .expect("trash manager can restore");
         assert!(state.trash.active_item(&trash_item.id).is_none());
+    }
+
+    #[test]
+    fn trash_records_signed_by_a_manager_survive_losing_the_role() {
+        use crate::board_state::roles::trash_authority_proof;
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let moderator = SigningKey::from_bytes(&[2u8; 32]);
+        let parameters = params(&owner);
+        let owner_id = parameters.owner_id();
+        let moderator_id = MemberId::from(&moderator.verifying_key());
+
+        let mut state = board(&owner);
+        state
+            .members
+            .members
+            .push(member(&moderator, owner_id, &owner));
+        let post = post(&moderator, owner_id, "hello");
+        let post_id = post.id();
+        state.recent_messages = MessagesV1 {
+            messages: vec![post],
+            ..Default::default()
+        };
+        let role_id = [9u8; 16];
+        state.roles.roles.push(AuthorizedRole::new(
+            Role {
+                id: role_id,
+                name: "trash".to_string(),
+                generation: 1,
+                can_manage_access: false,
+                can_distribute_keys: false,
+                can_edit_posts: false,
+                can_delete_posts: false,
+                can_close_posts: false,
+                can_pin_posts: false,
+                can_move_posts: false,
+                can_manage_trash: true,
+                scope: Vec::new(),
+                deleted: false,
+            },
+            &owner,
+        ));
+        state.roles.assignments.push(AuthorizedRoleAssignment::new(
+            RoleAssignment {
+                role_id,
+                member_id: moderator_id,
+                generation: 1,
+                revoked: false,
+            },
+            &owner,
+        ));
+
+        let proof = trash_authority_proof(&state, &moderator_id);
+        let mut trash_item = item(post_id, vec![post_id], 1);
+        trash_item.id = trash_item.compute_id();
+        state.trash.items.push(
+            AuthorizedTrashItem::new(trash_item.clone(), &moderator)
+                .with_optional_authority(proof.clone()),
+        );
+        state.trash.actions.push(
+            AuthorizedTrashAction::new(
+                TrashActionV1 {
+                    item_id: trash_item.id,
+                    kind: TrashActionKind::Restore,
+                    generation: 2,
+                    acted_at: 2,
+                    reason_code: ReasonCode::Other,
+                    reason: "restored".to_string(),
+                    content_hash: None,
+                },
+                &moderator,
+            )
+            .with_optional_authority(proof),
+        );
+
+        state.roles.assignments[0] = AuthorizedRoleAssignment::new(
+            RoleAssignment {
+                role_id,
+                member_id: moderator_id,
+                generation: 2,
+                revoked: true,
+            },
+            &owner,
+        );
+        assert!(!state.roles.can_manage_trash(&moderator_id));
+        state
+            .trash
+            .verify(&state.clone(), &parameters)
+            .expect("the stored grant keeps the item and the restore valid");
+    }
+
+    #[test]
+    fn cleanup_drops_actions_with_an_unauthorized_signer() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let stranger = SigningKey::from_bytes(&[3u8; 32]);
+        let parameters = params(&owner);
+        let owner_id = parameters.owner_id();
+        let mut state = board(&owner);
+        state
+            .members
+            .members
+            .push(member(&stranger, owner_id, &owner));
+        let post = post(&stranger, owner_id, "hi");
+        let post_id = post.id();
+        state.recent_messages = MessagesV1 {
+            messages: vec![post],
+            ..Default::default()
+        };
+        let mut trash_item = item(post_id, vec![post_id], 1);
+        trash_item.id = trash_item.compute_id();
+        state
+            .trash
+            .items
+            .push(AuthorizedTrashItem::new(trash_item.clone(), &owner));
+        state.trash.actions.push(AuthorizedTrashAction::new(
+            TrashActionV1 {
+                item_id: trash_item.id,
+                kind: TrashActionKind::Restore,
+                generation: 2,
+                acted_at: 2,
+                reason_code: ReasonCode::Other,
+                reason: "x".to_string(),
+                content_hash: None,
+            },
+            &stranger,
+        ));
+        assert!(state.trash.verify(&state.clone(), &parameters).is_err());
+
+        let mut trash = std::mem::take(&mut state.trash);
+        trash.cleanup(&state, &parameters);
+        assert!(trash.actions.is_empty(), "unauthorized action is dropped");
     }
 }

@@ -355,6 +355,10 @@ impl ChatBoardStateV1 {
         pq.cleanup(self, parameters);
         self.pq_secrets = pq;
 
+        let mut trash = std::mem::take(&mut self.trash);
+        trash.cleanup(self, parameters);
+        self.trash = trash;
+
         let mut moderation = std::mem::take(&mut self.moderation);
         moderation.cleanup(self, parameters);
         self.moderation = moderation;

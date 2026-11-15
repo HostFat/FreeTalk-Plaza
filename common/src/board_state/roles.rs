@@ -346,6 +346,31 @@ pub fn verify_distributor_authority(
     )
 }
 
+/// Verify that the signer may publish a Trash key set: the owner, an admin, a
+/// current trash manager, or a signer whose stored proof shows the role at
+/// signing time. The proof keeps the set verifiable after the role is revoked
+/// or deleted; without it, cleanup would drop the trash key for the whole board.
+pub fn verify_trash_authority(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    signer: &MemberId,
+    proof: Option<&AuthorityProof>,
+) -> Result<(), String> {
+    if state.roles.can_manage_trash(signer) {
+        return Ok(());
+    }
+    verify_admin_authority(state, parameters, signer, proof, MAX_AUTHORITY_DEPTH).or_else(|_| {
+        verify_role_grant(
+            state,
+            parameters,
+            signer,
+            proof,
+            MAX_AUTHORITY_DEPTH,
+            &|role| role.can_manage_trash,
+        )
+    })
+}
+
 /// Proof for a signer who currently holds a moderation power over the chain.
 pub fn moderation_authority_proof(
     state: &ChatBoardStateV1,
@@ -387,6 +412,34 @@ pub fn distributor_authority_proof(
             && state.roles.roles.iter().any(|role| {
                 role.role.id == entry.assignment.role_id
                     && role.role.can_distribute_keys
+                    && !role.role.deleted
+            })
+    })?;
+    let role = state
+        .roles
+        .roles
+        .iter()
+        .find(|role| role.role.id == assignment.assignment.role_id)?;
+    Some(AuthorityProof {
+        admin: None,
+        grant: Some(Box::new(RoleGrantProof {
+            role: role.clone(),
+            assignment: assignment.clone(),
+        })),
+    })
+}
+
+/// Proof for a signer who may publish Trash key sets through a role.
+pub fn trash_authority_proof(
+    state: &ChatBoardStateV1,
+    signer: &MemberId,
+) -> Option<AuthorityProof> {
+    let assignment = state.roles.assignments.iter().find(|entry| {
+        entry.assignment.member_id == *signer
+            && !entry.assignment.revoked
+            && state.roles.roles.iter().any(|role| {
+                role.role.id == entry.assignment.role_id
+                    && role.role.can_manage_trash
                     && !role.role.deleted
             })
     })?;

@@ -224,9 +224,13 @@ fn verify_set(
             || verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8)
                 .is_ok()
     } else if is_trash {
-        state.roles.can_manage_trash(&signer)
-            || verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8)
-                .is_ok()
+        crate::board_state::roles::verify_trash_authority(
+            state,
+            parameters,
+            &signer,
+            entry.authority.as_deref(),
+        )
+        .is_ok()
     } else {
         verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8).is_ok()
     };
@@ -649,6 +653,139 @@ mod tests {
         bad.key.ek = vec![0u8; 10];
         bad.signature = sign_struct(&bad.key, &member_sk);
         state.pq_secrets.keys.push(bad);
+        assert!(state.pq_secrets.verify(&state, &parameters).is_err());
+    }
+
+    fn trash_manager_state() -> (
+        ChatBoardStateV1,
+        ChatBoardParametersV1,
+        SigningKey,
+        SigningKey,
+        MemberId,
+    ) {
+        use crate::board_state::roles::{
+            AuthorizedRole, AuthorizedRoleAssignment, Role, RoleAssignment,
+        };
+        let (mut state, parameters, owner_sk, moderator_sk, moderator_id) = board();
+        let role_id = [9u8; 16];
+        state.roles.roles.push(AuthorizedRole::new(
+            Role {
+                id: role_id,
+                name: "moderator".to_string(),
+                generation: 1,
+                can_manage_access: false,
+                can_distribute_keys: false,
+                can_edit_posts: false,
+                can_delete_posts: false,
+                can_close_posts: false,
+                can_pin_posts: false,
+                can_move_posts: false,
+                can_manage_trash: true,
+                scope: Vec::new(),
+                deleted: false,
+            },
+            &owner_sk,
+        ));
+        state
+            .roles
+            .assignments
+            .push(AuthorizedRoleAssignment::new(
+                RoleAssignment {
+                    role_id,
+                    member_id: moderator_id,
+                    generation: 1,
+                    revoked: false,
+                },
+                &owner_sk,
+            ));
+        (state, parameters, owner_sk, moderator_sk, moderator_id)
+    }
+
+    fn trash_set(signer: &SigningKey, member_id: MemberId) -> AuthorizedPqSecretSet {
+        AuthorizedPqSecretSet::new(
+            PqSecretSet {
+                scope: PqScope::Trash,
+                version: 1,
+                secret_version: 1,
+                secrets: vec![PqSealedSecret {
+                    member_id,
+                    kem_ciphertext: vec![1u8; PQ_KEM_CT_LEN],
+                    nonce: [0u8; PQ_NONCE_LEN],
+                    sealed: vec![2u8; PQ_MIN_SEALED_LEN],
+                    suite: PqSuite::MlKem,
+                    x25519_public: None,
+                }],
+            },
+            signer,
+        )
+    }
+
+    fn revoke_assignment(state: &mut ChatBoardStateV1, owner_sk: &SigningKey) {
+        use crate::board_state::roles::{AuthorizedRoleAssignment, RoleAssignment};
+        let assignment = state.roles.assignments[0].assignment.clone();
+        state.roles.assignments[0] = AuthorizedRoleAssignment::new(
+            RoleAssignment {
+                generation: assignment.generation + 1,
+                revoked: true,
+                ..assignment
+            },
+            owner_sk,
+        );
+    }
+
+    #[test]
+    fn a_trash_set_signed_by_a_manager_survives_losing_the_role() {
+        use crate::board_state::roles::{trash_authority_proof, AuthorizedRole, Role};
+        let (mut state, parameters, owner_sk, moderator_sk, moderator_id) = trash_manager_state();
+        state.pq_secrets.keys.push(key(moderator_id, &moderator_sk));
+        let set = trash_set(&moderator_sk, moderator_id)
+            .with_optional_authority(trash_authority_proof(&state, &moderator_id));
+        state.pq_secrets.sets.push(set);
+        state
+            .pq_secrets
+            .verify(&state, &parameters)
+            .expect("a trash manager can publish a trash set");
+
+        revoke_assignment(&mut state, &owner_sk);
+        assert!(!state.roles.can_manage_trash(&moderator_id));
+        state
+            .pq_secrets
+            .verify(&state, &parameters)
+            .expect("the stored grant keeps the set valid after the role is revoked");
+
+        let role = state.roles.roles[0].role.clone();
+        state.roles.roles[0] = AuthorizedRole::new(
+            Role {
+                generation: role.generation + 1,
+                deleted: true,
+                ..role
+            },
+            &owner_sk,
+        );
+        state
+            .pq_secrets
+            .verify(&state, &parameters)
+            .expect("the stored grant keeps the set valid after the role is deleted");
+
+        let mut pq = std::mem::take(&mut state.pq_secrets);
+        pq.cleanup(&state, &parameters);
+        assert_eq!(pq.sets.len(), 1, "cleanup must keep a verifiable set");
+    }
+
+    #[test]
+    fn a_trash_set_without_a_grant_is_dropped_after_the_role_is_revoked() {
+        let (mut state, parameters, owner_sk, moderator_sk, moderator_id) = trash_manager_state();
+        state.pq_secrets.keys.push(key(moderator_id, &moderator_sk));
+        state
+            .pq_secrets
+            .sets
+            .push(trash_set(&moderator_sk, moderator_id));
+        state
+            .pq_secrets
+            .verify(&state, &parameters)
+            .expect("a current manager can publish a trash set");
+
+        revoke_assignment(&mut state, &owner_sk);
         assert!(state.pq_secrets.verify(&state, &parameters).is_err());
     }
 }
