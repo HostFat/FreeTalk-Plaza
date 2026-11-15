@@ -515,7 +515,9 @@ pub async fn purge_illegal(
         let text =
             "Il topic originale è stato rimosso dai moderatori per contenuto illegale.".to_string();
 
-        let content = if let Some(section) = section {
+        let content = if reason == "debug replacement" {
+            BoardMessageBody::public(title.clone(), text.clone())
+        } else if let Some(section) = section {
             if let Some((version, key)) = ctx.category_secrets.get(&section).copied() {
                 let (ciphertext, nonce) = encrypt_with_symmetric_key(
                     &key,
