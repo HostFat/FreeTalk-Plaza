@@ -207,7 +207,7 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
     rsx! {
         div { class: "flex-1 flex flex-col p-6 overflow-y-auto",
             // Header
-            h1 { class: "text-2xl font-bold text-text mb-4", "Admin Management" }
+            h1 { class: "text-2xl font-bold text-text mb-4", "Manage" }
 
             // Tabs and admin actions on one row
             div { class: "flex flex-wrap items-center justify-between gap-3 mb-6",
