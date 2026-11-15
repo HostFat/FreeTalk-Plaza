@@ -36,8 +36,8 @@ pub fn ReasonDialog(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4",
-            div { class: "w-full max-w-md bg-panel border border-border rounded-xl shadow-xl p-4 space-y-3",
+            class: "fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 pointer-events-auto",
+            div { class: "w-full max-w-md bg-panel border border-border rounded-xl shadow-xl p-4 space-y-3 pointer-events-auto",
                 h2 { class: "text-lg font-semibold text-text", "{title}" }
                 div { class: "flex flex-wrap gap-2",
                     for (code, label) in PRESETS {
