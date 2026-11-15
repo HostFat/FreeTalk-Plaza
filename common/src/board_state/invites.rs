@@ -638,6 +638,33 @@ mod tests {
         state.verify(&state.clone(), &params).unwrap();
     }
 
+    /// A token-joined member has no messages yet, so cleanup must keep the
+    /// record by itself. Otherwise the join delta is accepted and immediately
+    /// pruned, and the member can never be assigned a role.
+    #[test]
+    fn a_token_joined_member_survives_cleanup_before_their_first_message() {
+        let owner = owner();
+        let role_id = [5u8; 16];
+        let params = params(&owner);
+        let state = base_state(&owner, role_id, Some(2));
+        let joined = joining_member(7, params.owner_id());
+
+        let delta = crate::board_state::ChatBoardStateV1Delta {
+            members: Some(crate::board_state::member::MembersDelta::new(vec![
+                joined.clone(),
+            ])),
+            ..Default::default()
+        };
+        let mut updated = state.clone();
+        updated
+            .apply_delta(&state, &params, &Some(delta))
+            .expect("join delta applies");
+
+        assert_eq!(updated.members.members.len(), 1, "member survives cleanup");
+        assert_eq!(updated.members.members[0].member.id(), joined.member.id());
+        updated.verify(&updated, &params).unwrap();
+    }
+
     #[test]
     fn a_forged_proof_is_rejected() {
         let owner = owner();

@@ -28,6 +28,11 @@ pub fn handle_subscribe_response(key: ContractKey, subscribed: bool) -> bool {
                 SYNC_INFO
                     .write()
                     .update_sync_status(&owner_vk, BoardSyncStatus::Subscribed);
+                // A local change may have been applied while the board was still
+                // subscribing. `needs_to_send_update` ignores boards that are not
+                // subscribed and the pending marker was already consumed, so the
+                // change would never be sent. Re-check now that it can send.
+                crate::components::app::mark_needs_sync(owner_vk);
             });
             false
         } else {

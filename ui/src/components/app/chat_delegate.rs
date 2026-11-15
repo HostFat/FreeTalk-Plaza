@@ -243,8 +243,36 @@ pub async fn load_boards_from_delegate() -> Result<(), String> {
     }
 }
 
+/// Serializes delegate saves. A Store and a Get share the pending-request key
+/// `boards_data`, so two overlapping saves would drop one response
+/// ("Response channel was cancelled"). A save requested while one runs is
+/// repeated once after it finishes.
+static SAVE_RUNNING: AtomicBool = AtomicBool::new(false);
+static SAVE_AGAIN: AtomicBool = AtomicBool::new(false);
+
+/// Set while a save reads the stored map before writing. The response handler
+/// must not run the startup load path for that read.
+pub(crate) static BOARDS_READ_FOR_MERGE: AtomicBool = AtomicBool::new(false);
+
 /// Save boards to the delegate storage
 pub async fn save_boards_to_delegate() -> Result<(), String> {
+    if SAVE_RUNNING.swap(true, Ordering::SeqCst) {
+        SAVE_AGAIN.store(true, Ordering::SeqCst);
+        return Ok(());
+    }
+    let mut result;
+    loop {
+        result = save_boards_once().await;
+        SAVE_RUNNING.store(false, Ordering::SeqCst);
+        // No await between these atomics, so no other task can interleave.
+        if !SAVE_AGAIN.swap(false, Ordering::SeqCst) {
+            return result;
+        }
+        SAVE_RUNNING.store(true, Ordering::SeqCst);
+    }
+}
+
+async fn save_boards_once() -> Result<(), String> {
     // Never write before the initial load has completed: at startup `BOARDS` is
     // empty and `CURRENT_BOARD` may already be set from the URL, so a save here
     // would store an empty map and wipe the boards kept in the delegate.
@@ -260,6 +288,8 @@ pub async fn save_boards_to_delegate() -> Result<(), String> {
         warn!("Skipping delegate save: stored boards would be overwritten with an empty map");
         return Ok(());
     }
+
+    merge_stored_boards().await;
 
     info!("Saving boards to delegate storage");
 
@@ -285,6 +315,39 @@ pub async fn save_boards_to_delegate() -> Result<(), String> {
         Ok(ChatDelegateResponseMsg::StoreResponse { result, .. }) => result,
         Ok(other) => Err(format!("Unexpected response: {:?}", other)),
         Err(e) => Err(e),
+    }
+}
+
+/// Add boards that another tab stored but this one never loaded. Local entries
+/// win: they may hold changes this tab has not saved yet.
+async fn merge_stored_boards() {
+    BOARDS_READ_FOR_MERGE.store(true, Ordering::SeqCst);
+    let stored = match send_delegate_request(ChatDelegateRequestMsg::GetRequest {
+        key: ChatDelegateKey::new(BOARDS_STORAGE_KEY.to_vec()),
+    })
+    .await
+    {
+        Ok(ChatDelegateResponseMsg::GetResponse {
+            value: Some(bytes), ..
+        }) => ciborium::de::from_reader::<crate::board_data::Boards, _>(bytes.as_slice()).ok(),
+        _ => None,
+    };
+    BOARDS_READ_FOR_MERGE.store(false, Ordering::SeqCst);
+
+    let Some(stored) = stored else {
+        return;
+    };
+    let mut added = 0usize;
+    BOARDS.with_mut(|boards| {
+        for (key, board) in stored.map {
+            if let std::collections::hash_map::Entry::Vacant(entry) = boards.map.entry(key) {
+                entry.insert(board);
+                added += 1;
+            }
+        }
+    });
+    if added > 0 {
+        info!("Merged {added} boards stored by another tab");
     }
 }
 

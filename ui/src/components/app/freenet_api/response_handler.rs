@@ -224,8 +224,13 @@ impl ResponseHandler {
                                             value.is_some()
                                         );
 
-                                        // Check if this is the boards data
-                                        if key.as_bytes() == BOARDS_STORAGE_KEY {
+                                        // Check if this is the boards data. A save reads it
+                                        // first to merge boards added by another tab; that
+                                        // read must not run the startup load path.
+                                        if key.as_bytes() == BOARDS_STORAGE_KEY
+                                            && !crate::components::app::chat_delegate::BOARDS_READ_FOR_MERGE
+                                                .swap(false, std::sync::atomic::Ordering::SeqCst)
+                                        {
                                             if let Some(boards_data) = value {
                                                 // Deserialize the boards data
                                                 match from_reader::<Boards, _>(&boards_data[..]) {

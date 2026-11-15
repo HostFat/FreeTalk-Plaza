@@ -329,6 +329,7 @@ pub fn RolesSection() -> Element {
                                         (can_close_posts, "close"),
                                         (can_pin_posts, "pin"),
                                         (can_move_posts, "move"),
+                                        (role.role.can_manage_trash, "trash"),
                                     ] {
                                         if enabled {
                                             span { class: "text-xs text-accent", "{label}" }
@@ -391,6 +392,24 @@ pub fn RolesSection() -> Element {
                                             }
                                             InfoHint {
                                                 text: "Allow this role's members to distribute the keys of restricted categories to new members. The owner can always do it.".to_string(),
+                                            }
+                                            label {
+                                                class: "flex items-center gap-1 text-xs text-text-muted",
+                                                title: "Members with this role can see and restore trashed items. Permanent purge stays with the owner and admins.",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: role.role.can_manage_trash,
+                                                    onchange: move |evt| {
+                                                        let _ = access::set_role_can_manage_trash(
+                                                            role_id,
+                                                            evt.checked(),
+                                                        );
+                                                    },
+                                                }
+                                                "trash"
+                                            }
+                                            InfoHint {
+                                                text: "Members with this role can see and restore trashed items. Permanent purge stays with the owner and admins.".to_string(),
                                             }
                                         }
                                         button {

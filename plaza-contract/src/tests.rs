@@ -59,6 +59,7 @@ mod tests {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
                 member_vk: member_key.verifying_key(),
+                join_proof: None,
             },
             &owner,
         ));

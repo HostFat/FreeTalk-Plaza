@@ -100,6 +100,13 @@ pub async fn handle_get_response(
                 )
             };
 
+            // Remove the invitation now, before any deferred UI work runs.
+            // The node can deliver another GET for the same key immediately,
+            // and leaving the entry here re-enters this branch in a loop.
+            PENDING_INVITES.with_mut(|pending| {
+                pending.map.remove(&owner_vk);
+            });
+
             // Prepare the member ID for checking
             let member_id: MemberId = authorized_member.member.member_vk.into();
 
@@ -367,10 +374,29 @@ pub async fn handle_get_response(
                                 MemberId::from(owner_vk)
                             );
                         }
+                        // The board is now in BOARDS. Keeping the invitation
+                        // here would make every later GET run the join branch
+                        // again, PUT, and trigger another GET in a loop.
+                        pending.map.remove(&owner_vk);
                     });
                     CURRENT_BOARD.with_mut(|current_board| {
                         current_board.owner_key = Some(owner_vk);
                     });
+                });
+
+                // Publish the stored membership as soon as the board is
+                // current, instead of waiting for the next housekeeping tick.
+                log::info!("join: scheduling stored membership publication");
+                crate::util::defer(|| {
+                    log::info!("join: deferred membership publication");
+                    crate::util::membership::restore_self_membership();
+                });
+                // The deferred call above can run before the board insertion
+                // callback has completed; retry shortly after.
+                wasm_bindgen_futures::spawn_local(async {
+                    futures_timer::Delay::new(std::time::Duration::from_millis(500)).await;
+                    log::info!("join: delayed membership publication");
+                    crate::util::membership::restore_self_membership();
                 });
 
                 {
@@ -399,6 +425,24 @@ pub async fn handle_get_response(
                     // We do NOT trigger ProcessBoards because we haven't modified the
                     // board state — membership will be published with the first message.
                     crate::components::app::mark_needs_sync(owner_vk);
+
+                    // Joining changes no board state, so no delta will trigger the
+                    // usual save. Persist the board explicitly, waiting for the
+                    // initial delegate load so an empty in-memory map cannot
+                    // overwrite the stored boards.
+                    wasm_bindgen_futures::spawn_local(async move {
+                        for _ in 0..40 {
+                            if *crate::components::app::BOARDS_LOADED.read() {
+                                break;
+                            }
+                            futures_timer::Delay::new(std::time::Duration::from_millis(250)).await;
+                        }
+                        if let Err(e) =
+                            crate::components::app::chat_delegate::save_boards_to_delegate().await
+                        {
+                            error!("Failed to save the joined board to the delegate: {}", e);
+                        }
+                    });
                 }
             }
         } else if is_existing_board {

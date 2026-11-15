@@ -195,6 +195,7 @@ async fn test_invitation_message_propagation() -> TestResult {
             let bob_member = plaza_core::board_state::member::Member {
                 owner_member_id: alice_verifying_key.into(),
                 member_vk: bob_verifying_key,
+                join_proof: None,
                 invited_by: alice_verifying_key.into(),
             };
 

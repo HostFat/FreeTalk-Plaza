@@ -301,6 +301,33 @@ pub fn set_role_can_distribute_keys(role_id: RoleId, value: bool) -> Result<(), 
     })
 }
 
+/// Owner-only: allow or stop a role from seeing and restoring the trash.
+pub fn set_role_can_manage_trash(role_id: RoleId, value: bool) -> Result<(), String> {
+    with_owner_board(|data, owner_sk, board_key| {
+        let current = data
+            .board_state
+            .roles
+            .roles
+            .iter()
+            .find(|r| r.role.id == role_id)
+            .map(|r| r.role.clone())
+            .ok_or("Role not found")?;
+        let role = Role {
+            generation: current.generation + 1,
+            can_manage_trash: value,
+            ..current
+        };
+        let delta = ChatBoardStateV1Delta {
+            roles: Some(RolesDelta {
+                roles: vec![AuthorizedRole::new(role, &owner_sk)],
+                assignments: vec![],
+            }),
+            ..Default::default()
+        };
+        apply_and_sync(board_key, &data.board_state.clone(), delta)
+    })
+}
+
 pub fn remove_role(role_id: RoleId) -> Result<(), String> {
     with_owner_board(|data, owner_sk, board_key| {
         let current = data

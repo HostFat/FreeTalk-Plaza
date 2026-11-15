@@ -800,6 +800,56 @@ pub async fn grant_trash_access(
     )
 }
 
+/// Remove a member from the trash key set. This stops future distribution only:
+/// a member who already decrypted the key keeps it until the key is rotated.
+pub async fn revoke_trash_access(
+    ctx: &ActionContext,
+    member: plaza_core::board_state::member::MemberId,
+) -> Result<(), String> {
+    use plaza_core::board_state::pq_secrets::{
+        AuthorizedPqSecretSet, PqScope, PqSecretSet, PqSecretsDelta,
+    };
+
+    let owner_id = plaza_core::board_state::member::MemberId::from(&ctx.current_board);
+    if member == owner_id {
+        return Err("The owner always keeps the trash key".to_string());
+    }
+    let (_, _) = ctx.trash_secret.ok_or("You do not have the trash key")?;
+    let latest = ctx
+        .board_state
+        .pq_secrets
+        .sets
+        .iter()
+        .filter(|entry| matches!(entry.set.scope, PqScope::Trash))
+        .max_by_key(|entry| entry.set.version)
+        .ok_or("This board has no trash key yet")?;
+    let mut secrets = latest.set.secrets.clone();
+    let before = secrets.len();
+    secrets.retain(|entry| entry.member_id != member);
+    if secrets.len() == before {
+        return Err("That member does not have the trash key".to_string());
+    }
+    let set = AuthorizedPqSecretSet::new(
+        PqSecretSet {
+            scope: PqScope::Trash,
+            version: latest.set.version + 1,
+            secret_version: latest.set.secret_version,
+            secrets,
+        },
+        &ctx.self_sk,
+    );
+    apply_state_delta(
+        ctx,
+        ChatBoardStateV1Delta {
+            pq_secrets: Some(PqSecretsDelta {
+                keys: Vec::new(),
+                sets: vec![set],
+            }),
+            ..Default::default()
+        },
+    )
+}
+
 fn public_replacement_body(title: String, text: String) -> BoardMessageBody {
     BoardMessageBody::public(title, text)
 }

@@ -199,6 +199,28 @@ pub fn mark_needs_sync(board_key: ed25519_dalek::VerifyingKey) {
     });
 }
 
+/// Send the queued user changes to the synchronizer and persist the boards.
+/// Safe to call when the queue is empty.
+pub fn flush_pending_sync() {
+    if NEEDS_SYNC.read().is_empty() {
+        return;
+    }
+    let sender = SYNCHRONIZER.read().get_message_sender();
+    match sender.unbounded_send(SynchronizerMessage::ProcessBoards) {
+        Ok(()) => {
+            NEEDS_SYNC.write().clear();
+            wasm_bindgen_futures::spawn_local(async {
+                if let Err(error) = chat_delegate::save_boards_to_delegate().await {
+                    log::error!("Failed to save boards to delegate: {error}");
+                }
+            });
+        }
+        Err(error) => {
+            log::error!("Failed to send ProcessBoards message: {error}");
+        }
+    }
+}
+
 // Build metadata from build.rs
 const BUILD_TIMESTAMP: &str = env!("BUILD_TIMESTAMP_ISO");
 const GIT_COMMIT: &str = env!("GIT_COMMIT_HASH");

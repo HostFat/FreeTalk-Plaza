@@ -67,6 +67,8 @@ impl BoardSynchronizer {
         // so an update is sent without waiting for the next sync tick.
         let mut distributed_secrets = false;
 
+
+
         BOARDS.with_mut(|boards| {
             if let Some(board_data) = boards.map.get_mut(&owner_vk) {
                 let params = ChatBoardParametersV1 { owner: owner_vk };
@@ -109,6 +111,8 @@ impl BoardSynchronizer {
                         // sealed per category.
                         board_data.decrypt_board_secrets();
                         board_data.decrypt_category_secrets();
+                        // A manager may have shared the trash key in this delta.
+                        board_data.decrypt_pq_trash_secret();
                         board_data.rebuild_actions_with_local_secrets(&params);
 
                         // Log versions after applying delta
@@ -123,6 +127,8 @@ impl BoardSynchronizer {
 
                         // Keep cached self membership data up to date
                         board_data.capture_self_membership_data(&params);
+
+
 
                         // If we own a private board, hand the board secret to
                         // members who joined since the last distribution. This
@@ -758,6 +764,8 @@ impl BoardSynchronizer {
                         };
                         board_data.decrypt_board_secrets();
                         board_data.decrypt_category_secrets();
+                        // A manager may have shared the trash key in this state.
+                        board_data.decrypt_pq_trash_secret();
                         board_data.rebuild_actions_with_local_secrets(&params);
 
                         // Log member info versions after merge

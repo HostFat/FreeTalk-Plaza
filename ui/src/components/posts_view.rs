@@ -675,6 +675,8 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
             .as_ref()
             .map(|board| board.can_participate().is_ok())
             .unwrap_or(false);
+
+
     // Update CURRENT_CATEGORY for auto-parenting posts/categories
     // Compare before writing to avoid unnecessary updates
     {
@@ -1694,9 +1696,6 @@ pub fn SinglePostView(post_id: String) -> Element {
     let mut show_purge = use_signal(|| false);
     let hide_id = post_id.clone();
     let purge_post_id = post_id.clone();
-    let purge_id = post_id.clone();
-    let debug_id = post_id.clone();
-    let debug_repl_id = post_id.clone();
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
 
     // Get current board_id for navigation
@@ -1948,50 +1947,6 @@ pub fn SinglePostView(post_id: String) -> Element {
                         class: "ml-2 px-3 py-1.5 text-xs rounded-md bg-red-700 hover:bg-red-600 text-white",
                         onclick: move |_| show_purge.set(true),
                         "Purge"
-                    }
-                    button {
-                        r#type: "button",
-                        class: "ml-2 px-3 py-1.5 text-xs rounded-md bg-amber-700 hover:bg-amber-600 text-white",
-                        title: "Debug: purge without prompts",
-                        onclick: move |_| {
-                            let Ok(id) = debug_id.parse::<MessageId>() else {
-                                return;
-                            };
-                            wasm_bindgen_futures::spawn_local(async move {
-                                if let Some(ctx) = ActionContext::from_current_board() {
-                                    if let Err(error) = crate::util::trash_actions::purge_illegal(
-                                        &ctx,
-                                        id,
-                                        "debug purge",
-                                        plaza_core::board_state::trash::ReasonCode::Severe,
-                                    )
-                                    .await
-                                    {
-                                        if let Some(window) = web_sys::window() {
-                                            let _ = window.alert_with_message(&error);
-                                        }
-                                    }
-                                } else if let Some(window) = web_sys::window() {
-                                    let _ = window.alert_with_message("No board context");
-                                }
-                            });
-                        },
-                        "Purge debug"
-                    }
-                    button {
-                        r#type: "button",
-                        class: "ml-2 px-3 py-1.5 text-xs rounded-md bg-amber-800 hover:bg-amber-700 text-white",
-                        onclick: move |_| {
-                            let Ok(id) = debug_repl_id.parse::<MessageId>() else { return; };
-                            wasm_bindgen_futures::spawn_local(async move {
-                                if let Some(ctx) = ActionContext::from_current_board() {
-                                    if let Err(error) = crate::util::trash_actions::purge_illegal(&ctx, id, "debug replacement", plaza_core::board_state::trash::ReasonCode::Severe).await {
-                                        if let Some(window) = web_sys::window() { let _ = window.alert_with_message(&error); }
-                                    }
-                                }
-                            });
-                        },
-                        "Purge + repl"
                     }
                 }
             }

@@ -23,11 +23,14 @@ pub fn TopBar() -> Element {
     // Housekeeping for bans: the owner lifts expired bans, and a member who is
     // no longer banned puts its stored membership back. Both are idempotent.
     use_effect(move || {
-        spawn(async move {
+        // Dioxus `spawn` has been unreliable for long-running loops in this
+        // wasm app; use the browser task scheduler instead.
+        wasm_bindgen_futures::spawn_local(async move {
             loop {
                 crate::components::members::member_info_modal::ban_button::auto_lift_expired_bans();
                 crate::util::membership::restore_self_membership();
                 crate::util::pq::housekeeping();
+                crate::components::app::flush_pending_sync();
                 futures_timer::Delay::new(std::time::Duration::from_secs(60)).await;
             }
         });

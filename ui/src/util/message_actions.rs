@@ -5,6 +5,7 @@ use crate::util::ecies::encrypt_with_symmetric_key;
 use crate::util::ecies::seal_bytes;
 use crate::util::ecies::unseal_bytes;
 use crate::util::get_current_system_time;
+use dioxus::logger::tracing::warn;
 use dioxus::prelude::*;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
@@ -55,7 +56,10 @@ impl ActionContext {
             if let Some(board_data) = boards.map.get(&key) {
                 // One gate for every action: banned, suspended and non-member
                 // identities get no context, so no action can be sent.
-                board_data.ensure_can_write().ok()?;
+                if let Err(error) = board_data.ensure_can_write() {
+                    warn!("action context blocked: {error}");
+                    return None;
+                }
                 return Some(Self {
                     current_board: key,
                     board_key: board_data.board_key(),
@@ -542,6 +546,7 @@ pub(crate) fn apply_state_delta(
         }
     });
     if let Some(error) = error {
+        warn!("state delta rejected locally: {error}");
         return Err(error);
     }
     mark_needs_sync(owner);
@@ -876,3 +881,4 @@ async fn send_action_messages(ctx: ActionContext, contents: Vec<BoardMessageBody
         });
     }
 }
+

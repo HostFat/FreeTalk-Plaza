@@ -230,6 +230,18 @@ impl ChatBoardStateV1 {
                 }
             }
 
+            // Token-joined members keep their record before their first
+            // message. Without this the membership delta is applied and then
+            // pruned by this same cleanup, so the join never reaches the
+            // contract.
+            required_ids.extend(
+                members_by_id
+                    .values()
+                    .filter(|member| member.member.join_proof.is_some())
+                    .map(|member| member.member.id())
+                    .filter(|member_id| *member_id != owner_id),
+            );
+
             // Walk invite chains upward, adding all ancestors (stop at owner)
             let mut to_process: Vec<MemberId> = required_ids.iter().cloned().collect();
             while let Some(member_id) = to_process.pop() {

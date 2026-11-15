@@ -46,18 +46,21 @@ impl BoardTestState {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: member1_verifying_key,
+            join_proof: None,
         };
 
         let member2 = plaza_core::board_state::member::Member {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: member2_verifying_key,
+            join_proof: None,
         };
 
         let member3 = plaza_core::board_state::member::Member {
             owner_member_id: owner_id,
             invited_by: owner_id,
             member_vk: member3_verifying_key,
+            join_proof: None,
         };
 
         let authorized_member1 =

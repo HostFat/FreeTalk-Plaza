@@ -20,6 +20,10 @@ pub async fn handle_put_response(
         let sync_info = SYNC_INFO.read();
         sync_info.get_owner_vk_for_instance_id(contract_id)
     };
+    // A PutResponse for a board that is already tracked must not reset its
+    // sync state: resetting it back to AwaitingSubscription makes the next
+    // ProcessBoards send the PUT again.
+    let already_tracked = owner_vk_opt.is_some();
 
     // If not found in SYNC_INFO, try fallback lookup from boards
     // This handles the case where the board creator's SYNC_INFO wasn't properly initialized
@@ -57,12 +61,16 @@ pub async fn handle_put_response(
                 MemberId::from(owner_vk)
             );
 
-            // Register board in SYNC_INFO (deferred — subscribe doesn't read SYNC_INFO)
-            crate::util::defer(move || {
-                SYNC_INFO.with_mut(|sync_info| {
-                    sync_info.register_new_board(owner_vk);
+            // Register the board only the first time it is seen. Re-registering
+            // on every PutResponse resets the status to AwaitingSubscription,
+            // which makes the synchronizer send another PUT in a loop.
+            if !already_tracked {
+                crate::util::defer(move || {
+                    SYNC_INFO.with_mut(|sync_info| {
+                        sync_info.register_new_board(owner_vk);
+                    });
                 });
-            });
+            }
 
             // Now subscribe to the contract
             let subscribe_result = board_synchronizer.subscribe_to_contract(&key).await;

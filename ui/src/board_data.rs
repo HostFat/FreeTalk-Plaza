@@ -884,25 +884,29 @@ impl BoardData {
     pub fn decrypt_pq_trash_secret(&mut self) {
         use plaza_core::board_state::pq_secrets::PqScope;
         let self_id = MemberId::from(&self.self_sk.verifying_key());
-        if let Some((version, secret)) = self
+        let Some(latest) = self
             .board_state
             .pq_secrets
             .sets
             .iter()
             .filter(|entry| matches!(entry.set.scope, PqScope::Trash))
-            .flat_map(|entry| {
-                entry
-                    .set
-                    .secrets
-                    .iter()
-                    .filter(|secret| secret.member_id == self_id)
-                    .map(move |secret| (entry.set.secret_version, secret.clone()))
-            })
-            .max_by_key(|(version, _)| *version)
+            .max_by_key(|entry| entry.set.version)
+        else {
+            return;
+        };
+        match latest
+            .set
+            .secrets
+            .iter()
+            .find(|secret| secret.member_id == self_id)
         {
-            if let Ok(key) = crate::util::pq::open_secret(&self.self_sk, &secret) {
-                self.trash_secret = Some((version, key));
+            Some(secret) => {
+                if let Ok(key) = crate::util::pq::open_secret(&self.self_sk, secret) {
+                    self.trash_secret = Some((latest.set.secret_version, key));
+                }
             }
+            // A newer set without our record means access was revoked.
+            None => self.trash_secret = None,
         }
     }
 
