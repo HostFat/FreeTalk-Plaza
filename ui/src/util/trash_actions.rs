@@ -469,6 +469,7 @@ pub async fn purge_illegal(
         &ctx.self_sk,
     );
     log_debug("purge: building replacement");
+    *crate::components::app::PURGE_STEP.write() = "replacement-build".to_string();
     *crate::components::app::PURGE_STEP.write() = "entry".to_string();
     let self_id = plaza_core::board_state::member::MemberId::from(&ctx.self_sk.verifying_key());
     let owner_id = plaza_core::board_state::member::MemberId::from(&ctx.current_board);
@@ -538,6 +539,7 @@ pub async fn purge_illegal(
             public_replacement_body(title, text)
         };
 
+        *crate::components::app::PURGE_STEP.write() = "replacement-content".to_string();
         let replacement = AuthorizedMessageV1::new(
             MessageV1 {
                 board_owner: owner_id,
@@ -565,6 +567,7 @@ pub async fn purge_illegal(
 
     log_debug("purge: replacement built, building ban");
     *crate::components::app::PURGE_STEP.write() = "replacement".to_string();
+    *crate::components::app::PURGE_STEP.write() = "ban-build".to_string();
     // Ban the author when they are a regular member or admin, never the owner.
     let mut bans = Vec::new();
     if let Some(author) = topic_author {
