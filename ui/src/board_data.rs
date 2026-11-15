@@ -1689,6 +1689,39 @@ impl BoardData {
             }
         }
 
+        // Also seal every older version. The board name and old posts may be
+        // sealed with a version before the current one; a new member needs all
+        // of them to read the board, not just the latest key.
+        for member in &self.board_state.members.members {
+            let member_id = MemberId::from(&member.member.member_vk);
+            for (version, secret) in &self.secrets {
+                if *version == current_version {
+                    continue;
+                }
+                let already_has = self.board_state.secrets.encrypted_secrets.iter().any(|s| {
+                    s.secret.member_id == member_id && s.secret.secret_version == *version
+                });
+                if already_has {
+                    continue;
+                }
+                let (ciphertext, nonce, ephemeral_key) =
+                    encrypt_secret_for_member(secret, &member.member.member_vk);
+                let encrypted_secret = EncryptedSecretForMemberV1 {
+                    member_id,
+                    secret_version: *version,
+                    ciphertext,
+                    nonce,
+                    sender_ephemeral_public_key: ephemeral_key.to_bytes(),
+                    provider: self.owner_vk.into(),
+                    category_id: None,
+                };
+                new_encrypted_secrets.push(AuthorizedEncryptedSecretForMember::new(
+                    encrypted_secret,
+                    &self.self_sk,
+                ));
+            }
+        }
+
         if new_encrypted_secrets.is_empty() {
             return None;
         }
