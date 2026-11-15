@@ -359,7 +359,6 @@ pub fn App() -> Element {
                     }
                 }
             }
-            crate::components::moderation_reason_modal::ModerationReasonModal {}
             EditBoardModal {}
             MemberInfoModal {}
             CreateBoardModal {}

@@ -284,8 +284,30 @@ pub fn TrashView() -> Element {
                                     onclick: {
                                         let item = item.clone();
                                         move |_| {
-                                            *crate::components::app::PENDING_MODERATION.write() =
-                                                Some(crate::components::app::PendingModerationAction::PurgeTrash(item.clone()));
+                                            let Some((code, reason)) =
+                                                crate::util::trash_actions::ask_reason("spam")
+                                            else {
+                                                return;
+                                            };
+                                            if item.item.messages.len() >= 10
+                                                && !crate::util::trash_actions::ask_confirmation_word("PURGE")
+                                            {
+                                                return;
+                                            }
+                                            let Some(ctx) = ActionContext::from_current_board() else {
+                                                return;
+                                            };
+                                            let item = item.clone();
+                                            spawn(async move {
+                                                if let Err(message) =
+                                                    crate::util::trash_actions::purge_item(
+                                                        &ctx, &item, &reason, code,
+                                                    )
+                                                    .await
+                                                {
+                                                    error.set(Some(message));
+                                                }
+                                            });
                                         }
                                     },
                                     "Purge"
