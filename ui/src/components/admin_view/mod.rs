@@ -11,6 +11,7 @@ use crate::components::audit_view::AuditView;
 use crate::components::members::member_info_modal::ban_button::{lift_ban, BanButton};
 use crate::components::moderation_view::ModerationView;
 use crate::components::structure_view::StructureView;
+use crate::components::trash_view::TrashView;
 use crate::util::format_utc_as_local_time;
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
@@ -27,6 +28,7 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
             "moderation" => format!("/board/{board_id}/admin/moderation"),
             "structure" => format!("/board/{board_id}/admin/structure"),
             "audit" => format!("/board/{board_id}/admin/audit"),
+            "trash" => format!("/board/{board_id}/admin/trash"),
             _ => format!("/board/{board_id}/admin"),
         };
         if let Some(win) = web_sys::window() {
@@ -82,6 +84,18 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
             })
             .unwrap_or(false)
     });
+
+    let can_manage_trash = use_memo(move || {
+        current_board_data
+            .read()
+            .as_ref()
+            .map(|board_data| {
+                let self_id = MemberId::from(&board_data.self_sk.verifying_key());
+                board_data.board_state.roles.can_manage_trash(&self_id)
+            })
+            .unwrap_or(false)
+    });
+    let show_all = move || *is_owner.read() || *is_admin.read();
 
     // Get list of current admins
     let admins = use_memo(move || {
@@ -165,10 +179,20 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
         };
     }
 
-    if !*is_owner.read() && !*is_admin.read() {
+    if !show_all() && !*can_manage_trash.read() {
         return rsx! {
             div { class: "flex-1 flex items-center justify-center p-4",
-                p { class: "text-text-muted", "Only the board owner and admins can open this page." }
+                p { class: "text-text-muted", "Only the board owner, admins and trash managers can open this page." }
+            }
+        };
+    }
+
+    // Trash managers who are not admins get a focused Manage page with Trash.
+    if !show_all() {
+        return rsx! {
+            div { class: "flex-1 flex flex-col p-6 overflow-y-auto space-y-4",
+                h1 { class: "text-xl font-semibold text-text", "Manage" }
+                TrashView {}
             }
         };
     }
@@ -177,6 +201,7 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
     let tab_board_bans = board_id_for_tabs.clone();
     let tab_board_moderation = board_id_for_tabs.clone();
     let tab_board_structure = board_id_for_tabs.clone();
+    let tab_board_trash = board_id_for_tabs.clone();
     let tab_board_roles = board_id_for_tabs.clone();
     let tab_board_links = board_id_for_tabs.clone();
     rsx! {
@@ -239,6 +264,16 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                             move |_| navigate_admin_tab(&board, "audit")
                         },
                         "Audit"
+                    }
+                    button {
+                        r#type: "button",
+                        class: if active == "trash" {
+                            "px-4 py-2 rounded-md text-sm bg-accent text-white"
+                        } else {
+                            "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
+                        },
+                        onclick: move |_| navigate_admin_tab(&tab_board_trash, "trash"),
+                        "Trash"
                     }
                     button {
                         r#type: "button",
@@ -487,6 +522,8 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                 StructureView {}
             } else if active == "audit" {
                 AuditView {}
+            } else if active == "trash" {
+                TrashView {}
             } else if active == "roles" {
                 RolesSection {}
             } else {

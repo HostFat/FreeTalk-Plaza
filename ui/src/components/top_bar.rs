@@ -191,6 +191,11 @@ pub fn TopBar() -> Element {
         .iter()
         .any(|a| a.admin.id() == self_member_id);
     let can_participate = board_data.can_participate();
+    let can_manage_trash = board_data
+        .board_state
+        .roles
+        .can_manage_trash(&self_member_id);
+    let can_open_manage = is_owner || is_admin || can_manage_trash;
 
     let self_nickname = board_data
         .board_state
@@ -346,11 +351,11 @@ pub fn TopBar() -> Element {
                         span { "👥" }
                         span { "Members" }
                     }
-                    // Admin button for owners or admins
-                    if is_owner || is_admin {
+                    // Manage button for owners, admins and trash managers.
+                    if can_open_manage {
                         button {
                             r#type: "button",
-                                title: "Manage Admins",
+                            title: "Manage",
                             class: tab_class(admin_active),
                             onclick: move |ev: MouseEvent| {
                                 ev.prevent_default();
@@ -359,7 +364,7 @@ pub fn TopBar() -> Element {
                                 }
                             },
                             span { "⚙" }
-                            span { "Admin" }
+                            span { "Manage" }
                         }
                     }
                 }
@@ -435,7 +440,7 @@ pub fn TopBar() -> Element {
                                 span { "👥" }
                                 span { "Members" }
                             }
-                            if is_owner || is_admin {
+                            if can_open_manage {
                                 button {
                                     r#type: "button",
                                     class: "flex items-center gap-3 px-4 py-3 text-text hover:bg-surface transition-colors w-full text-left",
@@ -446,7 +451,7 @@ pub fn TopBar() -> Element {
                                         }
                                     },
                                     span { "⚙" }
-                                    span { "Admin" }
+                                    span { "Manage" }
                                 }
                             }
                         }

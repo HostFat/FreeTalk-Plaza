@@ -17,3 +17,4 @@ pub mod report_modal;
 pub mod search_view;
 pub mod structure_view;
 pub mod top_bar;
+pub mod trash_view;
