@@ -468,6 +468,21 @@ pub async fn purge_illegal(
         },
         &ctx.self_sk,
     );
+    if reason == "debug purge" {
+        return apply_state_delta(
+            ctx,
+            ChatBoardStateV1Delta {
+                moderation: Some(ModerationDelta {
+                    routes: Vec::new(),
+                    feature_flags: Vec::new(),
+                    moves: Vec::new(),
+                    thread_moves: Vec::new(),
+                    illegal_purges: vec![entry],
+                }),
+                ..Default::default()
+            },
+        );
+    }
     log_debug("purge: building replacement");
     *crate::components::app::PURGE_STEP.write() = "replacement-build".to_string();
     *crate::components::app::PURGE_STEP.write() = "entry".to_string();
