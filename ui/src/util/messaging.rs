@@ -81,6 +81,29 @@ pub async fn send_message(
         }
     }
 
+    // A freshly joined member is not in board_state yet. Publish the stored
+    // membership first; otherwise the message delta is verified against a
+    // parent state that does not contain the author and is rejected.
+    let needs_membership = BOARDS
+        .read()
+        .map
+        .get(&current_board)
+        .map(|board_data| {
+            let self_vk = board_data.self_sk.verifying_key();
+            self_vk != board_data.owner_vk
+                && !board_data
+                    .board_state
+                    .members
+                    .members
+                    .iter()
+                    .any(|member| member.member.member_vk == self_vk)
+                && board_data.self_authorized_member.is_some()
+        })
+        .unwrap_or(false);
+    if needs_membership {
+        let _ = crate::util::membership::restore_self_membership();
+    }
+
     let now_ms = chrono::Utc::now().timestamp_millis();
     if now_ms - LAST_SEND_MS.with(Cell::get) < MIN_SEND_INTERVAL_MS {
         warn!("Ignoring a second send inside the cooldown window");
