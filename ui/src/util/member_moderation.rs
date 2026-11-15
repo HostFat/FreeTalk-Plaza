@@ -7,7 +7,9 @@ use plaza_core::board_state::member_moderation::{
     WarningsDelta,
 };
 use plaza_core::board_state::reports::ReportReason;
-use plaza_core::board_state::roles::admin_authority_proof;
+use plaza_core::board_state::roles::{
+    admin_authority_proof, AuthorizedRoleAssignment, RoleAssignment, RolesDelta,
+};
 use plaza_core::board_state::ChatBoardStateV1Delta;
 
 pub fn warn_member(
@@ -60,6 +62,27 @@ pub fn suspend_member(
         created_at: now,
         generation,
     };
+    // A suspended member must not keep moderation powers. The contract cannot
+    // read a clock, so the role assignment is revoked explicitly; the owner
+    // re-assigns it after the suspension if the member should keep the role.
+    let role_revocations: Vec<_> = ctx
+        .board_state
+        .roles
+        .assignments
+        .iter()
+        .filter(|entry| entry.assignment.member_id == target && !entry.assignment.revoked)
+        .map(|entry| {
+            AuthorizedRoleAssignment::new(
+                RoleAssignment {
+                    role_id: entry.assignment.role_id,
+                    member_id: target,
+                    generation: entry.assignment.generation + 1,
+                    revoked: true,
+                },
+                &ctx.self_sk,
+            )
+        })
+        .collect();
     let delta = ChatBoardStateV1Delta {
         suspensions: Some(SuspensionsDelta {
             suspensions: vec![AuthorizedSuspension::new(suspension, &ctx.self_sk)
@@ -67,6 +90,10 @@ pub fn suspend_member(
                     &ctx.board_state,
                     &MemberId::from(&ctx.self_sk.verifying_key()),
                 ))],
+        }),
+        roles: Some(RolesDelta {
+            roles: Vec::new(),
+            assignments: role_revocations,
         }),
         ..Default::default()
     };

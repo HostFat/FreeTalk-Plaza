@@ -444,6 +444,11 @@ fn MemberModerationPanel(member_id: MemberId, is_owner: bool) -> Element {
             if let Some(message) = error.read().as_ref() {
                 p { class: "text-xs text-red-400", "{message}" }
             }
+            if active_until.is_none() {
+                p { class: "text-xs text-text-muted",
+                    "Suspending also removes this member's roles. Assign them again after lifting the suspension."
+                }
+            }
             if warnings.is_empty() {
                 p { class: "text-xs text-text-muted", "No warnings." }
             } else {
