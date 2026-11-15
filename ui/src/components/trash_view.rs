@@ -144,18 +144,21 @@ pub fn TrashView() -> Element {
                     button {
                         r#type: "button",
                         class: "px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
-                        title: "Reload the board state from the local node",
+                        title: "Reload the app and read the board state from the local node",
                         onclick: move |_| {
                             if let Some(window) = web_sys::window() {
                                 let _ = window.location().reload();
                             }
                         },
-                        "Refresh"
+                        "Reload page"
                     }
                 }
             }
             p { class: "text-sm text-text-muted",
                 "Hidden topics stay encrypted here until a moderator restores or purges them. Purge is reserved for the owner and admins."
+            }
+            p { class: "text-xs text-text-muted",
+                "If another moderator just acted, use Reload page to read the latest state from your node."
             }
             if !has_trash_key {
                 p { class: "text-sm text-amber-400 border border-amber-600/40 rounded-md p-2",
