@@ -1671,6 +1671,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
 pub fn SinglePostView(post_id: String) -> Element {
     let mut show_purge = use_signal(|| false);
     let hide_id = post_id.clone();
+    let purge_post_id = post_id.clone();
     let purge_id = post_id.clone();
     let debug_id = post_id.clone();
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
