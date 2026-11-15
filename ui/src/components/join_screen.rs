@@ -11,6 +11,7 @@ pub fn JoinScreen(token: String) -> Element {
     let mut nickname = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut joining = use_signal(|| false);
+    let mut timed_out = use_signal(|| false);
 
     let board_key = decoded_value.as_ref().ok().map(|link| link.board);
 
@@ -68,15 +69,47 @@ pub fn JoinScreen(token: String) -> Element {
                             disabled: *joining.read() || nickname.read().trim().is_empty(),
                             onclick: move |_| {
                                 match crate::util::access::join_with_token(&link, nickname.read().clone()) {
-                                    Ok(()) => { joining.set(true); error.set(None); }
+                                    Ok(()) => {
+                                        joining.set(true);
+                                        timed_out.set(false);
+                                        error.set(None);
+                                        if let Some(key) = board_key {
+                                            wasm_bindgen_futures::spawn_local(async move {
+                                                futures_timer::Delay::new(std::time::Duration::from_secs(25)).await;
+                                                if !BOARDS.read().map.contains_key(&key) {
+                                                    timed_out.set(true);
+                                                }
+                                            });
+                                        }
+                                    }
                                     Err(e) => error.set(Some(e)),
                                 }
                             },
                             if *joining.read() { "Joining..." } else { "Join" }
                         }
-                        if *joining.read() {
+                        if *joining.read() && !*timed_out.read() {
                             p { class: "text-xs text-text-muted mt-3",
                                 "Fetching the board state. You will be taken there as soon as it arrives."
+                            }
+                        }
+                        if *timed_out.read() {
+                            div { class: "mt-3 space-y-2",
+                                p { class: "text-sm text-amber-400",
+                                    "The board did not arrive from your Freenet node. Check that the node has peers, then retry."
+                                }
+                                p { class: "text-xs text-text-muted",
+                                    "Node dashboard: 127.0.0.1:7509 · version and peer count are on the home page."
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "px-3 py-2 text-sm rounded-md bg-surface hover:bg-surface-hover text-text",
+                                    onclick: move |_| {
+                                        joining.set(false);
+                                        timed_out.set(false);
+                                        error.set(Some("Retry: enter the nickname and press Join again.".to_string()));
+                                    },
+                                    "Retry"
+                                }
                             }
                         }
                     }
