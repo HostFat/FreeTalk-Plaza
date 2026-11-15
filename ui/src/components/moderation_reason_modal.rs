@@ -22,14 +22,63 @@ const PRESETS: &[(&str, ReasonCode, &str)] = &[
 
 #[component]
 pub fn ModerationReasonModal() -> Element {
+    // Hooks must run unconditionally; the early return comes after them.
     let request = PENDING_MODERATION.read().clone();
-    let Some(request) = request else {
-        return rsx! {};
-    };
-
     let mut selected = use_signal(|| ReasonCode::Severe);
     let mut custom = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
+    let mut confirmed = use_signal(|| false);
+
+    let effect_action = request.clone();
+    use_effect(move || {
+        if !*confirmed.read() {
+            return;
+        }
+        confirmed.set(false);
+        let Some(action) = effect_action.clone() else {
+            return;
+        };
+        let reason_text = custom.read().trim().to_string();
+        let reason = if reason_text.is_empty() {
+            match *selected.read() {
+                ReasonCode::Severe => "severe rule violation",
+                ReasonCode::Spam => "spam",
+                ReasonCode::Harassment => "harassment",
+                ReasonCode::OffTopic => "off-topic",
+                ReasonCode::Rules => "other rule violation",
+                ReasonCode::Other => "other",
+            }
+            .to_string()
+        } else {
+            reason_text
+        };
+        let code = *selected.read();
+        *PENDING_MODERATION.write() = None;
+        spawn(async move {
+            let Some(ctx) = ActionContext::from_current_board() else {
+                error.set(Some("Board context is not available".to_string()));
+                return;
+            };
+            let result = match action {
+                crate::components::app::PendingModerationAction::Hide(id) => {
+                    crate::util::trash_actions::hide_topic(&ctx, id, &reason, code).await
+                }
+                crate::components::app::PendingModerationAction::Purge(id) => {
+                    crate::util::trash_actions::purge_illegal(&ctx, id, &reason, code).await
+                }
+                crate::components::app::PendingModerationAction::PurgeTrash(item) => {
+                    purge_trash(&ctx, &item, &reason, code)
+                }
+            };
+            if let Err(message) = result {
+                error.set(Some(message));
+            }
+        });
+    });
+
+    let Some(request) = request else {
+        return rsx! {};
+    };
 
     let confirm_word = match &request {
         crate::components::app::PendingModerationAction::Hide(_) => None,
@@ -99,42 +148,7 @@ pub fn ModerationReasonModal() -> Element {
                                     return;
                                 }
                             }
-                            let reason_text = custom.read().trim().to_string();
-                            let reason = if reason_text.is_empty() {
-                                match *selected.read() {
-                                    ReasonCode::Severe => "severe rule violation",
-                                    ReasonCode::Spam => "spam",
-                                    ReasonCode::Harassment => "harassment",
-                                    ReasonCode::OffTopic => "off-topic",
-                                    ReasonCode::Rules => "other rule violation",
-                                    ReasonCode::Other => "other",
-                                }
-                                .to_string()
-                            } else {
-                                reason_text
-                            };
-                            let code = *selected.read();
-                            let action = action.clone();
-                            *PENDING_MODERATION.write() = None;
-                            spawn(async move {
-                                let Some(ctx) = ActionContext::from_current_board() else {
-                                    return;
-                                };
-                                let result = match action {
-                                    crate::components::app::PendingModerationAction::Hide(id) => {
-                                        crate::util::trash_actions::hide_topic(&ctx, id, &reason, code).await
-                                    }
-                                    crate::components::app::PendingModerationAction::Purge(id) => {
-                                        crate::util::trash_actions::purge_illegal(&ctx, id, &reason, code).await
-                                    }
-                                    crate::components::app::PendingModerationAction::PurgeTrash(item) => {
-                                        purge_trash(&ctx, &item, &reason, code)
-                                    }
-                                };
-                                if let Err(message) = result {
-                                    error.set(Some(message));
-                                }
-                            });
+                            confirmed.set(true);
                         },
                         "Confirm"
                     }
