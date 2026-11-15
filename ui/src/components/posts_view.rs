@@ -653,10 +653,35 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
         })
         .unwrap_or(false);
 
-    let can_write = current_board_data
+    let is_member = current_board_data
         .as_ref()
-        .map(|board| board.can_participate().is_ok())
+        .map(|board| {
+            let self_vk = board.self_sk.verifying_key();
+            self_vk == board.owner_vk
+                || board
+                    .board_state
+                    .members
+                    .members
+                    .iter()
+                    .any(|member| member.member.member_vk == self_vk)
+        })
         .unwrap_or(false);
+    let joining = current_board_data
+        .as_ref()
+        .map(|board| !is_member && board.self_authorized_member.is_some())
+        .unwrap_or(false);
+    let can_write = is_member
+        && current_board_data
+            .as_ref()
+            .map(|board| board.can_participate().is_ok())
+            .unwrap_or(false);
+    let mut restore_attempted = use_signal(|| false);
+    use_effect(move || {
+        if !is_member && !*restore_attempted.read() {
+            restore_attempted.set(true);
+            let _ = crate::util::membership::restore_self_membership();
+        }
+    });
 
     // Update CURRENT_CATEGORY for auto-parenting posts/categories
     // Compare before writing to avoid unnecessary updates
@@ -1419,7 +1444,12 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                         if has_posts {
                                             if has_categories {
                                                 div { class: "flex items-center justify-between mb-4",
-                                                    h2 { class: "text-lg font-semibold text-text-muted", "Topics" }
+                                                    div {
+                                                        h2 { class: "text-lg font-semibold text-text-muted", "Topics" }
+                                                        if joining {
+                                                            p { class: "text-xs text-amber-400", "Completing join: membership is being published before posting." }
+                                                        }
+                                                    }
                                                     if can_write {
                                                         button {
                                                             r#type: "button",
