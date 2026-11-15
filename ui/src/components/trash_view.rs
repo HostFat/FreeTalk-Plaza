@@ -25,6 +25,12 @@ pub fn TrashView() -> Element {
     };
 
     let mut error = use_signal(|| None::<String>);
+    let mut preview = use_signal(|| {
+        None::<(
+            plaza_core::board_state::message::MessageId,
+            Vec<(String, String)>,
+        )>
+    });
     let items = data
         .board_state
         .trash
@@ -45,6 +51,25 @@ pub fn TrashView() -> Element {
             }
             if let Some(message) = error.read().as_ref() {
                 p { class: "text-sm text-red-400", "{message}" }
+            }
+            if let Some((_, messages)) = preview.read().as_ref() {
+                div { class: "border border-accent/40 rounded-lg p-3 bg-panel space-y-2 max-h-80 overflow-y-auto",
+                    div { class: "flex items-center justify-between",
+                        h3 { class: "text-sm font-semibold text-text", "Preview" }
+                        button {
+                            r#type: "button",
+                            class: "text-xs text-text-muted hover:text-text",
+                            onclick: move |_| preview.set(None),
+                            "Close"
+                        }
+                    }
+                    for (title, body) in messages {
+                        div { class: "border-t border-border pt-2",
+                            p { class: "text-sm font-medium text-text", "{title}" }
+                            p { class: "text-xs text-text-muted whitespace-pre-wrap", "{body}" }
+                        }
+                    }
+                }
             }
             if items.is_empty() {
                 p { class: "text-sm text-text-muted", "The trash is empty." }
@@ -70,10 +95,27 @@ pub fn TrashView() -> Element {
                                         let Some(ctx) = ActionContext::from_current_board() else {
                                             return;
                                         };
+                                        match crate::util::trash_actions::preview_item(&ctx, &item) {
+                                            Ok(messages) => preview.set(Some((item.item.id, messages))),
+                                            Err(message) => error.set(Some(message)),
+                                        }
+                                    }
+                                },
+                                "Preview"
+                            }
+                            button {
+                                r#type: "button",
+                                class: "px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
+                                onclick: {
+                                    let item = item.clone();
+                                    move |_| {
+                                        let Some(ctx) = ActionContext::from_current_board() else {
+                                            return;
+                                        };
                                         let item = item.clone();
                                         spawn(async move {
                                             if let Err(message) =
-                                                crate::util::trash_actions::restore_item(&ctx, &item)
+                                                crate::util::trash_actions::restore_item(&ctx, &item, None)
                                                     .await
                                             {
                                                 error.set(Some(message));

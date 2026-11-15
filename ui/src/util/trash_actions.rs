@@ -3,8 +3,11 @@
 
 use crate::util::ecies::{decrypt_with_symmetric_key, encrypt_with_symmetric_key};
 use crate::util::message_actions::{apply_state_delta, ActionContext};
+use dioxus::prelude::*;
 use plaza_core::board_state::message::MessageId;
-use plaza_core::board_state::moderation::{category_chain, ModerationDelta};
+use plaza_core::board_state::moderation::{
+    category_chain, AuthorizedThreadMove, ModerationDelta, ThreadMoveV1,
+};
 use plaza_core::board_state::trash::{
     AuthorizedTrashAction, AuthorizedTrashItem, TrashActionKind, TrashActionV1, TrashDelta,
     TrashItemV1,
@@ -215,7 +218,10 @@ pub async fn hide_topic(ctx: &ActionContext, root: MessageId) -> Result<(), Stri
     })
 }
 
-pub async fn restore_item(ctx: &ActionContext, item: &AuthorizedTrashItem) -> Result<(), String> {
+fn decrypt_bundle(
+    ctx: &ActionContext,
+    item: &AuthorizedTrashItem,
+) -> Result<TrashBundleV1, String> {
     let (secret_version, trash_key) = ctx.trash_secret.ok_or("This member has no trash key")?;
     let item_key = decrypt_with_symmetric_key(
         &trash_key,
@@ -228,8 +234,49 @@ pub async fn restore_item(ctx: &ActionContext, item: &AuthorizedTrashItem) -> Re
         .map_err(|_| "Trash item key has an invalid length".to_string())?;
     let plaintext =
         decrypt_with_symmetric_key(&item_key, &item.item.bundle, &item.item.bundle_nonce, 0)?;
-    let bundle: TrashBundleV1 = ciborium::de::from_reader(plaintext.as_slice())
-        .map_err(|error| format!("Could not decode the trash bundle: {error}"))?;
+    ciborium::de::from_reader(plaintext.as_slice())
+        .map_err(|error| format!("Could not decode the trash bundle: {error}"))
+}
+
+/// Decrypted titles and bodies, for the moderator preview.
+pub fn preview_item(
+    ctx: &ActionContext,
+    item: &AuthorizedTrashItem,
+) -> Result<Vec<(String, String)>, String> {
+    let bundle = decrypt_bundle(ctx, item)?;
+    let mut temporary = ctx.board_state.clone();
+    temporary.trash = Default::default();
+    temporary.recent_messages = plaza_core::board_state::message::MessagesV1 {
+        messages: bundle.messages,
+        ..Default::default()
+    };
+    temporary.moderation.routes = bundle.routes;
+    let data = crate::components::app::BOARDS
+        .read()
+        .map
+        .get(&ctx.current_board)
+        .cloned()
+        .ok_or("Board data is not available")?;
+    let messages = crate::components::conversation::get_all_messages(
+        &temporary,
+        plaza_core::board_state::member::MemberId::from(&ctx.self_sk.verifying_key()),
+        &data.secrets,
+        &data.category_secrets,
+        &data.old_category_secrets,
+    );
+    Ok(messages
+        .into_iter()
+        .filter(|message| !message.is_category)
+        .map(|message| (message.title_text, message.content_text))
+        .collect())
+}
+
+pub async fn restore_item(
+    ctx: &ActionContext,
+    item: &AuthorizedTrashItem,
+    destination: Option<MessageId>,
+) -> Result<(), String> {
+    let bundle = decrypt_bundle(ctx, item)?;
 
     let action = AuthorizedTrashAction::new(
         TrashActionV1 {
@@ -275,7 +322,22 @@ pub async fn restore_item(ctx: &ActionContext, item: &AuthorizedTrashItem) -> Re
                 routes,
                 feature_flags: Vec::new(),
                 moves: Vec::new(),
-                thread_moves: Vec::new(),
+                thread_moves: destination
+                    .map(|destination| {
+                        vec![AuthorizedThreadMove::new(
+                            ThreadMoveV1 {
+                                topic: item.item.root,
+                                from_section: item.item.section,
+                                to_section: Some(destination),
+                                message_ids: item.item.messages.clone(),
+                                generation: 1,
+                                moved_at: chrono::Utc::now().timestamp(),
+                                leave_redirect: false,
+                            },
+                            &ctx.self_sk,
+                        )]
+                    })
+                    .unwrap_or_default(),
             }),
             trash: Some(TrashDelta {
                 items: Vec::new(),
