@@ -1923,6 +1923,7 @@ pub fn SinglePostView(post_id: String) -> Element {
             crate::components::reason_dialog::ReasonDialog {
                 open: illegal_reason_open,
                 title: "Purge illegal content".to_string(),
+                confirm_word: Some("PURGE".to_string()),
                 on_confirm: move |(code, reason): (String, String)| {
                     let Some(id) = purge_id.parse::<MessageId>().ok() else {
                         return;

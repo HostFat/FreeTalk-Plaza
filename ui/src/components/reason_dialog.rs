@@ -15,9 +15,14 @@ pub fn ReasonDialog(
     open: Signal<bool>,
     title: String,
     on_confirm: EventHandler<(String, String)>,
+    /// When set, the user must type this word to confirm.
+    #[props(default)]
+    confirm_word: Option<String>,
 ) -> Element {
     let mut selected = use_signal(|| PRESETS[0].0.to_string());
     let mut custom = use_signal(String::new);
+    let mut typed = use_signal(String::new);
+    let mut mismatch = use_signal(|| false);
     if !*open.read() {
         return rsx! {};
     }
@@ -57,6 +62,22 @@ pub fn ReasonDialog(
                     value: "{custom}",
                     oninput: move |event| custom.set(event.value()),
                 }
+                if let Some(word) = confirm_word.as_ref() {
+                    div { class: "space-y-1",
+                        p { class: "text-xs text-text-muted", "Type {word} to confirm this large action." }
+                        input {
+                            class: "w-full bg-panel border border-border rounded-md px-3 py-2 text-sm text-text",
+                            value: "{typed}",
+                            oninput: move |event| {
+                                typed.set(event.value());
+                                mismatch.set(false);
+                            },
+                        }
+                        if *mismatch.read() {
+                            p { class: "text-xs text-red-400", "The confirmation word does not match." }
+                        }
+                    }
+                }
                 div { class: "flex justify-end gap-2",
                     button {
                         r#type: "button",
@@ -68,6 +89,12 @@ pub fn ReasonDialog(
                         r#type: "button",
                         class: "px-3 py-2 text-sm rounded-md bg-red-600 hover:bg-red-500 text-white",
                         onclick: move |_| {
+                            if let Some(word) = confirm_word.as_ref() {
+                                if typed.read().trim() != word {
+                                    mismatch.set(true);
+                                    return;
+                                }
+                            }
                             on_confirm.call((selected.read().clone(), final_reason.clone()));
                             open.set(false);
                         },

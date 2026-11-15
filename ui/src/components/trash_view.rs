@@ -70,6 +70,11 @@ pub fn TrashView() -> Element {
         .cloned()
         .collect::<Vec<_>>();
     items.sort_by_key(|item| std::cmp::Reverse(item.item.hidden_at));
+    let purge_confirm_word = purge_target
+        .read()
+        .as_ref()
+        .filter(|item| item.item.messages.len() >= 10)
+        .map(|_| "PURGE".to_string());
 
     rsx! {
         div { class: "space-y-3",
@@ -110,6 +115,7 @@ pub fn TrashView() -> Element {
             crate::components::reason_dialog::ReasonDialog {
                 open: purge_reason_open,
                 title: "Purge permanently".to_string(),
+                confirm_word: purge_confirm_word,
                 on_confirm: move |(code, reason): (String, String)| {
                     let Some(item) = purge_target.read().clone() else {
                         return;
