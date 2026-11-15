@@ -9,7 +9,7 @@ use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::moderation::category_chain;
 use plaza_core::board_state::roles::ModerationPower;
 use plaza_core::board_state::trash::AuthorizedTrashItem;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[component]
 pub fn TrashView() -> Element {
@@ -44,6 +44,7 @@ pub fn TrashView() -> Element {
     let mut purge_target = use_signal(|| None::<AuthorizedTrashItem>);
     let mut handled = use_signal(std::collections::HashSet::<MessageId>::new);
     let mut purge_reason_open = use_signal(|| false);
+    let mut grant_target = use_signal(|| None::<plaza_core::board_state::member::MemberId>);
     let routes = data.board_state.moderation.routes_map();
     let is_owner_or_admin = self_id
         == plaza_core::board_state::member::MemberId::from(&data.owner_vk)
@@ -79,6 +80,44 @@ pub fn TrashView() -> Element {
             )
         })
         .collect::<Vec<_>>();
+    let sealed_members: HashSet<_> = data
+        .board_state
+        .pq_secrets
+        .sets
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.set.scope,
+                plaza_core::board_state::pq_secrets::PqScope::Trash
+            )
+        })
+        .flat_map(|entry| entry.set.secrets.iter().map(|secret| secret.member_id))
+        .collect();
+    let mut grant_candidates: Vec<_> = data
+        .board_state
+        .admin
+        .admins
+        .iter()
+        .map(|admin| admin.admin.id())
+        .chain(
+            data.board_state
+                .roles
+                .assignments
+                .iter()
+                .filter(|assignment| {
+                    !assignment.assignment.revoked
+                        && data.board_state.roles.roles.iter().any(|role| {
+                            role.role.id == assignment.assignment.role_id
+                                && role.role.can_manage_trash
+                                && !role.role.deleted
+                        })
+                })
+                .map(|assignment| assignment.assignment.member_id),
+        )
+        .filter(|member| *member != self_id && !sealed_members.contains(member))
+        .collect();
+    grant_candidates.sort();
+    grant_candidates.dedup();
     let has_trash_key = data.trash_secret.is_some();
     let mut items = data
         .board_state
@@ -157,6 +196,49 @@ pub fn TrashView() -> Element {
                         }
                     });
                 },
+            }
+            if has_trash_key && !grant_candidates.is_empty() {
+                div { class: "border border-border rounded-lg p-3 bg-panel space-y-2",
+                    p { class: "text-sm text-text", "Grant trash access" }
+                    p { class: "text-xs text-text-muted",
+                        "A new manager needs the trash key before preview and restore work."
+                    }
+                    div { class: "flex items-center gap-2",
+                        select {
+                            class: "flex-1 bg-panel border border-border rounded-md px-2 py-1 text-xs text-text",
+                            onchange: move |event| {
+                                if let Ok(member) = event.value().parse() {
+                                    grant_target.set(Some(member));
+                                }
+                            },
+                            option { value: "", "Choose a member" }
+                            for member in &grant_candidates {
+                                option { value: "{member}", "{member}" }
+                            }
+                        }
+                        button {
+                            r#type: "button",
+                            class: "px-3 py-1.5 text-xs rounded-md bg-accent hover:bg-accent/80 text-white",
+                            onclick: move |_| {
+                                let Some(member) = *grant_target.read() else {
+                                    error.set(Some("Choose a member".to_string()));
+                                    return;
+                                };
+                                let Some(ctx) = ActionContext::from_current_board() else {
+                                    return;
+                                };
+                                spawn(async move {
+                                    if let Err(message) =
+                                        crate::util::trash_actions::grant_trash_access(&ctx, member).await
+                                    {
+                                        error.set(Some(message));
+                                    }
+                                });
+                            },
+                            "Grant"
+                        }
+                    }
+                }
             }
             if items.is_empty() {
                 p { class: "text-sm text-text-muted", "The trash is empty." }

@@ -582,3 +582,66 @@ pub fn parse_reason_code(code: &str) -> ReasonCode {
         _ => ReasonCode::Other,
     }
 }
+
+pub async fn grant_trash_access(
+    ctx: &ActionContext,
+    member: plaza_core::board_state::member::MemberId,
+) -> Result<(), String> {
+    use plaza_core::board_state::pq_secrets::{
+        AuthorizedPqSecretSet, PqScope, PqSecretSet, PqSecretsDelta,
+    };
+
+    let (secret_version, trash_key) = ctx.trash_secret.ok_or("You do not have the trash key")?;
+    let kem = ctx
+        .board_state
+        .pq_secrets
+        .key_for(member)
+        .ok_or("That member has no PQ key yet; they must open the board first")?;
+    let owner_id = plaza_core::board_state::member::MemberId::from(&ctx.current_board);
+    let vk = if member == owner_id {
+        ctx.current_board
+    } else {
+        ctx.board_state
+            .members
+            .members
+            .iter()
+            .find(|entry| entry.member.id() == member)
+            .map(|entry| entry.member.member_vk)
+            .ok_or("That member is not in the member list")?
+    };
+    let sealed = crate::util::pq::seal_secret(&trash_key, &kem.ek, member, &vk)
+        .map_err(|error| format!("Could not seal the trash key: {error}"))?;
+
+    let latest = ctx
+        .board_state
+        .pq_secrets
+        .sets
+        .iter()
+        .filter(|entry| matches!(entry.set.scope, PqScope::Trash))
+        .max_by_key(|entry| entry.set.version);
+    let mut secrets = latest
+        .map(|entry| entry.set.secrets.clone())
+        .unwrap_or_default();
+    secrets.retain(|entry| entry.member_id != member);
+    secrets.push(sealed);
+    let version = latest.map(|entry| entry.set.version).unwrap_or(0) + 1;
+    let set = AuthorizedPqSecretSet::new(
+        PqSecretSet {
+            scope: PqScope::Trash,
+            version,
+            secret_version,
+            secrets,
+        },
+        &ctx.self_sk,
+    );
+    apply_state_delta(
+        ctx,
+        ChatBoardStateV1Delta {
+            pq_secrets: Some(PqSecretsDelta {
+                keys: Vec::new(),
+                sets: vec![set],
+            }),
+            ..Default::default()
+        },
+    )
+}
