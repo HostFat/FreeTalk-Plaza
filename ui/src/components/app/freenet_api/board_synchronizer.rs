@@ -379,8 +379,11 @@ impl BoardSynchronizer {
                 let get_request = ContractRequest::Get {
                     key: *contract_key.id(),
                     return_contract_code: request_code,
-                    subscribe: false,
-                    blocking_subscribe: false,
+                    // A pending invitation must fetch the contract even when
+                    // this node does not cache it yet; a non-blocking,
+                    // non-subscribing GET can return no response at all.
+                    subscribe: true,
+                    blocking_subscribe: true,
                 };
 
                 let client_request = ClientRequest::ContractOp(get_request);
