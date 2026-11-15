@@ -675,14 +675,6 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
             .as_ref()
             .map(|board| board.can_participate().is_ok())
             .unwrap_or(false);
-    let mut restore_attempted = use_signal(|| false);
-    use_effect(move || {
-        if !is_member && !*restore_attempted.read() {
-            restore_attempted.set(true);
-            let _ = crate::util::membership::restore_self_membership();
-        }
-    });
-
     // Update CURRENT_CATEGORY for auto-parenting posts/categories
     // Compare before writing to avoid unnecessary updates
     {
