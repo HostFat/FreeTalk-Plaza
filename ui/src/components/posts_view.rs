@@ -1899,7 +1899,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                                 return;
                             };
                             crate::util::trash_actions::run_later(move || {
-                                spawn(async move {
+                                wasm_bindgen_futures::spawn_local(async move {
                                 if let Some(ctx) = ActionContext::from_current_board() {
                                     match crate::util::trash_actions::hide_topic(&ctx, id, &reason, code).await {
                                         Ok(()) => {
@@ -1961,7 +1961,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                         class: "ml-2 px-3 py-1.5 text-xs rounded-md bg-amber-800 hover:bg-amber-700 text-white",
                         onclick: move |_| {
                             let Ok(id) = debug_repl_id.parse::<MessageId>() else { return; };
-                            spawn(async move {
+                            wasm_bindgen_futures::spawn_local(async move {
                                 if let Some(ctx) = ActionContext::from_current_board() {
                                     if let Err(error) = crate::util::trash_actions::purge_illegal(&ctx, id, "debug replacement", plaza_core::board_state::trash::ReasonCode::Severe).await {
                                         if let Some(window) = web_sys::window() { let _ = window.alert_with_message(&error); }

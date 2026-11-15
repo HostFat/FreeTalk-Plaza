@@ -260,7 +260,7 @@ pub fn TrashView() -> Element {
                                             error.set(Some("Choose a section for the restored topic".to_string()));
                                             return;
                                         }
-                                        spawn(async move {
+                                        wasm_bindgen_futures::spawn_local(async move {
                                             if let Err(message) =
                                                 crate::util::trash_actions::restore_item(&ctx, &item, destination)
                                                     .await
@@ -298,7 +298,7 @@ pub fn TrashView() -> Element {
                                                 return;
                                             };
                                             let item = item.clone();
-                                            spawn(async move {
+                                            wasm_bindgen_futures::spawn_local(async move {
                                                 if let Err(message) =
                                                     crate::util::trash_actions::purge_item(
                                                         &ctx, &item, &reason, code,
