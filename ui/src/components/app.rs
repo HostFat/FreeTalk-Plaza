@@ -66,7 +66,7 @@ pub enum Route {
     AdminAudit { board_id: String },
     #[route("/board/:board_id/admin/trash")]
     AdminTrash { board_id: String },
-    #[route("/board/:board_id/admin/purge/:post_id")]
+    #[route("/board/:board_id/purge/:post_id")]
     AdminPurge { board_id: String, post_id: String },
     #[route("/board/:board_id/admin/roles")]
     AdminRoles { board_id: String },

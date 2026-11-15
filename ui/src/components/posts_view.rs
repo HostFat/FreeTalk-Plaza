@@ -1925,7 +1925,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                             if let Some(key) = CURRENT_BOARD.read().owner_key {
                                 let board_id = bs58::encode(key.as_bytes()).into_string();
                                 if let Some(window) = web_sys::window() {
-                                    let _ = window.location().set_hash(&format!("/board/{board_id}/admin/purge/{purge_id}"));
+                                    let _ = window.location().set_hash(&format!("/board/{board_id}/purge/{purge_id}"));
                                 }
                             }
                         },
