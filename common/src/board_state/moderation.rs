@@ -188,6 +188,71 @@ impl AuthorizedPostMove {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct ThreadMoveV1 {
+    pub topic: MessageId,
+    pub from_section: Option<MessageId>,
+    pub to_section: Option<MessageId>,
+    /// The topic and every descendant reply, sorted and deduplicated.
+    pub message_ids: Vec<MessageId>,
+    pub generation: u64,
+    pub moved_at: i64,
+    #[serde(default)]
+    pub leave_redirect: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct AuthorizedThreadMove {
+    pub change: ThreadMoveV1,
+    pub signature: Signature,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<MemberId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
+}
+
+impl AuthorizedThreadMove {
+    pub fn new(change: ThreadMoveV1, signing_key: &SigningKey) -> Self {
+        Self {
+            signature: sign_struct(&change, signing_key),
+            change,
+            signer: Some(MemberId::from(&signing_key.verifying_key())),
+            signer_key: Some(signing_key.verifying_key()),
+            authority: None,
+        }
+    }
+
+    pub fn with_optional_authority(mut self, proof: Option<AuthorityProof>) -> Self {
+        self.authority = proof.map(Box::new);
+        self
+    }
+
+    pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
+        self.signer.unwrap_or_else(|| parameters.owner_id())
+    }
+
+    fn verify_signature_with(&self, key: &VerifyingKey) -> Result<(), String> {
+        verify_struct(&self.change, &self.signature, key)
+            .map_err(|e| format!("Invalid thread move signature: {e}"))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct ThreadMoveState {
+    pub to_section: Option<MessageId>,
+    pub generation: u64,
+    #[serde(default)]
+    pub digest: i64,
+}
+
+fn thread_digest<T: serde::Serialize>(value: &T) -> i64 {
+    let mut bytes = Vec::new();
+    let _ = ciborium::ser::into_writer(value, &mut bytes);
+    freenet_scaffold::util::fast_hash(&bytes).0
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
 pub struct ModerationV1 {
     pub routes: Vec<AuthorizedMessageRoute>,
@@ -195,6 +260,8 @@ pub struct ModerationV1 {
     pub feature_flags: Vec<AuthorizedFeatureFlag>,
     #[serde(default)]
     pub moves: Vec<AuthorizedPostMove>,
+    #[serde(default)]
+    pub thread_moves: Vec<AuthorizedThreadMove>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -225,6 +292,8 @@ pub struct ModerationSummary {
     pub routes: BTreeMap<MessageId, RouteState>,
     pub feature_flags: BTreeMap<(MessageId, FeatureKind), FeatureFlagState>,
     pub moves: BTreeMap<MessageId, MoveState>,
+    #[serde(default)]
+    pub thread_moves: BTreeMap<MessageId, ThreadMoveState>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -235,6 +304,8 @@ pub struct ModerationDelta {
     pub feature_flags: Vec<AuthorizedFeatureFlag>,
     #[serde(default)]
     pub moves: Vec<AuthorizedPostMove>,
+    #[serde(default)]
+    pub thread_moves: Vec<AuthorizedThreadMove>,
 }
 
 fn route_map(routes: &[AuthorizedMessageRoute]) -> BTreeMap<MessageId, RouteState> {
@@ -320,6 +391,99 @@ fn verify_scope_chain(state: &ChatBoardStateV1, chain: &[MessageId]) -> Result<(
             }
         }
     }
+    Ok(())
+}
+
+fn thread_descendants(state: &ChatBoardStateV1, topic: &MessageId) -> Vec<MessageId> {
+    let mut children: BTreeMap<MessageId, Vec<MessageId>> = BTreeMap::new();
+    for route in &state.moderation.routes {
+        if let Some(parent) = route.route.reply_to {
+            children
+                .entry(parent)
+                .or_default()
+                .push(route.route.message_id);
+        }
+    }
+    let mut result = Vec::new();
+    let mut stack = vec![*topic];
+    while let Some(id) = stack.pop() {
+        if result.contains(&id) {
+            continue;
+        }
+        result.push(id);
+        if let Some(replies) = children.get(&id) {
+            stack.extend(replies.iter().copied());
+        }
+    }
+    result.sort();
+    result.dedup();
+    result
+}
+
+fn verify_thread_move(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    entry: &AuthorizedThreadMove,
+) -> Result<(), String> {
+    let change = &entry.change;
+    let signer = entry.signer_id(parameters);
+    let key = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
+    entry.verify_signature_with(&key)?;
+
+    if change.generation == 0 {
+        return Err("Thread move needs a generation".to_string());
+    }
+    let topic = state
+        .recent_messages
+        .messages
+        .iter()
+        .find(|message| message.id() == change.topic)
+        .ok_or("Thread move targets a missing topic")?;
+    if topic.message.content.is_category() {
+        return Err("Thread move cannot target a category".to_string());
+    }
+
+    let routes = route_map(&state.moderation.routes);
+    let from_chain = category_chain(&routes, &change.topic);
+    if change.from_section != from_chain.first().copied() {
+        return Err("Thread move source section does not match".to_string());
+    }
+    let to_chain = match change.to_section {
+        None => Vec::new(),
+        Some(section) => {
+            let route = routes
+                .get(&section)
+                .ok_or("Thread move destination is missing")?;
+            if !route.is_category {
+                return Err("Thread move destination is not a category".to_string());
+            }
+            category_chain(&routes, &section)
+        }
+    };
+
+    let expected = thread_descendants(state, &change.topic);
+    if change.message_ids != expected {
+        return Err("Thread move must include the whole thread".to_string());
+    }
+
+    verify_moderation_authority(
+        state,
+        parameters,
+        &signer,
+        ModerationPower::Move,
+        &from_chain,
+        entry.authority.as_deref(),
+    )
+    .map_err(|_| "Signer cannot move this thread from its section".to_string())?;
+    verify_moderation_authority(
+        state,
+        parameters,
+        &signer,
+        ModerationPower::Move,
+        &to_chain,
+        entry.authority.as_deref(),
+    )
+    .map_err(|_| "Signer cannot move this thread to its destination".to_string())?;
     Ok(())
 }
 
@@ -527,6 +691,22 @@ fn move_map(moves: &[AuthorizedPostMove]) -> BTreeMap<MessageId, MoveState> {
         .collect()
 }
 
+fn thread_move_map(moves: &[AuthorizedThreadMove]) -> BTreeMap<MessageId, ThreadMoveState> {
+    moves
+        .iter()
+        .map(|entry| {
+            (
+                entry.change.topic,
+                ThreadMoveState {
+                    to_section: entry.change.to_section,
+                    generation: entry.change.generation,
+                    digest: thread_digest(&entry.change),
+                },
+            )
+        })
+        .collect()
+}
+
 fn route_parent(routes: &BTreeMap<MessageId, RouteState>, id: &MessageId) -> Option<MessageId> {
     routes.get(id).and_then(|route| {
         if route.is_category {
@@ -669,7 +849,26 @@ impl ModerationV1 {
     }
 
     pub fn routes_map(&self) -> BTreeMap<MessageId, RouteState> {
-        route_map(&self.routes)
+        let mut map = route_map(&self.routes);
+        let mut latest: BTreeMap<MessageId, &AuthorizedThreadMove> = BTreeMap::new();
+        for entry in &self.thread_moves {
+            latest
+                .entry(entry.change.topic)
+                .and_modify(|existing| {
+                    if entry.change.generation > existing.change.generation {
+                        *existing = entry;
+                    }
+                })
+                .or_insert(entry);
+        }
+        for entry in latest.values() {
+            for id in &entry.change.message_ids {
+                if let Some(route) = map.get_mut(id) {
+                    route.category_id = entry.change.to_section;
+                }
+            }
+        }
+        map
     }
 
     /// Contract check for new action envelopes and replies to closed posts.
@@ -796,6 +995,14 @@ impl ModerationV1 {
         });
         self.moves.dedup_by_key(|entry| entry.change.target);
         self.moves.sort_by_key(|entry| entry.change.target.0 .0);
+
+        self.thread_moves.retain(|entry| {
+            live.contains(&entry.change.topic)
+                && verify_thread_move(state, parameters, entry).is_ok()
+        });
+        self.thread_moves
+            .sort_by_key(|entry| (entry.change.topic.0 .0, entry.change.generation));
+        self.thread_moves.dedup_by_key(|entry| entry.change.topic);
     }
 }
 
@@ -817,7 +1024,14 @@ impl ComposableState for ModerationV1 {
             }
             verify_route(parent_state, parameters, route)?;
         }
-        let routes = route_map(&self.routes);
+        let mut thread_ids = std::collections::HashSet::new();
+        for entry in &self.thread_moves {
+            if !thread_ids.insert(entry.change.topic) {
+                return Err("Duplicate thread move".to_string());
+            }
+            verify_thread_move(parent_state, parameters, entry)?;
+        }
+        let routes = self.routes_map();
         let mut flag_ids = std::collections::HashSet::new();
         for flag in &self.feature_flags {
             if !flag_ids.insert((flag.flag.target, flag.flag.kind)) {
@@ -844,6 +1058,7 @@ impl ComposableState for ModerationV1 {
             routes: route_map(&self.routes),
             feature_flags: feature_flag_map(&self.feature_flags),
             moves: move_map(&self.moves),
+            thread_moves: thread_move_map(&self.thread_moves),
         }
     }
 
@@ -894,13 +1109,30 @@ impl ComposableState for ModerationV1 {
             })
             .cloned()
             .collect();
-        if routes.is_empty() && flags.is_empty() && moves.is_empty() {
+        let thread_moves: Vec<AuthorizedThreadMove> = self
+            .thread_moves
+            .iter()
+            .filter(|entry| {
+                old_state
+                    .thread_moves
+                    .get(&entry.change.topic)
+                    .map(|old| {
+                        old.generation < entry.change.generation
+                            || (old.generation == entry.change.generation
+                                && old.digest != thread_digest(&entry.change))
+                    })
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        if routes.is_empty() && flags.is_empty() && moves.is_empty() && thread_moves.is_empty() {
             None
         } else {
             Some(ModerationDelta {
                 routes,
                 feature_flags: flags,
                 moves,
+                thread_moves,
             })
         }
     }
@@ -961,6 +1193,25 @@ impl ComposableState for ModerationV1 {
                     self.moves
                         .retain(|existing| existing.change.target != entry.change.target);
                     self.moves.push(entry.clone());
+                }
+            }
+        }
+        for entry in &delta.thread_moves {
+            verify_thread_move(parent_state, parameters, entry)?;
+            match self
+                .thread_moves
+                .iter()
+                .find(|existing| existing.change.topic == entry.change.topic)
+            {
+                Some(existing)
+                    if existing.change.generation > entry.change.generation
+                        || (existing.change.generation == entry.change.generation
+                            && thread_digest(&existing.change) <= thread_digest(&entry.change)) => {
+                }
+                _ => {
+                    self.thread_moves
+                        .retain(|existing| existing.change.topic != entry.change.topic);
+                    self.thread_moves.push(entry.clone());
                 }
             }
         }

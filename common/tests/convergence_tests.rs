@@ -2916,6 +2916,7 @@ fn moderation_record_with_historical_authority_converges() {
         moderation: Some(ModerationDelta {
             routes: Vec::new(),
             feature_flags: vec![flag],
+            thread_moves: Vec::new(),
             moves: Vec::new(),
         }),
         ..Default::default()

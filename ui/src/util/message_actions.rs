@@ -495,6 +495,7 @@ pub fn set_post_flag(
     }
     let delta = ChatBoardStateV1Delta {
         moderation: Some(ModerationDelta {
+            thread_moves: Vec::new(),
             routes: Vec::new(),
             feature_flags: flags,
             moves: Vec::new(),
@@ -562,6 +563,7 @@ pub fn move_post(
     };
     let delta = ChatBoardStateV1Delta {
         moderation: Some(ModerationDelta {
+            thread_moves: Vec::new(),
             routes: Vec::new(),
             feature_flags: Vec::new(),
             moves: vec![AuthorizedPostMove::new(change, &ctx.self_sk)
@@ -638,6 +640,7 @@ pub fn merge_topic(
             .collect();
     let delta = ChatBoardStateV1Delta {
         moderation: Some(ModerationDelta {
+            thread_moves: Vec::new(),
             routes: Vec::new(),
             feature_flags: vec![merged, closed],
             moves,
