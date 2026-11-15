@@ -759,10 +759,22 @@ impl BoardData {
     /// Publish this member's ML-KEM key on a private board. Idempotent.
     pub fn ensure_pq_key(&mut self) -> bool {
         let has_restricted = !self.restricted_categories().is_empty();
-        if !(self.is_private() || has_restricted) || !self.self_is_member_or_owner() {
+        let self_id = MemberId::from(&self.self_sk.verifying_key());
+        // Trash managers need a KEM key even on a public board, so the trash
+        // secret can be sealed to them.
+        let is_trash_manager = self.board_state.roles.can_manage_trash(&self_id);
+        let is_owner = self.self_sk.verifying_key() == self.owner_vk;
+        let is_admin = self
+            .board_state
+            .admin
+            .admins
+            .iter()
+            .any(|admin| admin.admin.id() == self_id);
+        if !(self.is_private() || has_restricted || is_trash_manager || is_owner || is_admin)
+            || !self.self_is_member_or_owner()
+        {
             return false;
         }
-        let self_id = MemberId::from(&self.self_sk.verifying_key());
         let ek = crate::util::pq::encapsulation_key(&self.self_sk);
         let existing = self.board_state.pq_secrets.key_for(self_id);
         if existing.map(|key| key.ek == ek).unwrap_or(false) {

@@ -176,10 +176,25 @@ pub fn housekeeping() {
         let Some(board) = boards.map.get_mut(&board_key) else {
             return;
         };
-        if !board.is_private() && board.restricted_categories().is_empty() {
+        let self_id =
+            plaza_core::board_state::member::MemberId::from(&board.self_sk.verifying_key());
+        let trash_manager = board.board_state.roles.can_manage_trash(&self_id);
+        let owner_or_admin = board.self_sk.verifying_key() == board.owner_vk
+            || board
+                .board_state
+                .admin
+                .admins
+                .iter()
+                .any(|admin| admin.admin.id() == self_id);
+        if !board.is_private()
+            && board.restricted_categories().is_empty()
+            && !trash_manager
+            && !owner_or_admin
+        {
             return;
         }
         board.decrypt_pq_board_secrets();
+        board.decrypt_pq_trash_secret();
         changed |= board.ensure_pq_key();
         changed |= board.generate_missing_pq_secrets();
         changed |= board.generate_missing_pq_category_secrets();
