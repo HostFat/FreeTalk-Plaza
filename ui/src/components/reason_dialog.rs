@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 
 const PRESETS: &[(&str, &str)] = &[
-    ("illegal", "Severe rule violation"),
+    ("severe", "Severe rule violation"),
     ("spam", "Spam"),
     ("harassment", "Harassment"),
     ("off_topic", "Off-topic"),

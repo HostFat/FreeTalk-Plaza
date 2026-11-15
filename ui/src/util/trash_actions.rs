@@ -599,26 +599,61 @@ pub async fn purge_illegal(
         }
     }
 
+    // Three separate updates so a rejection in the replacement or the ban
+    // does not hide which part failed.
     apply_state_delta(
         ctx,
         ChatBoardStateV1Delta {
-            recent_messages: Some(messages),
             moderation: Some(ModerationDelta {
-                routes,
+                routes: Vec::new(),
                 feature_flags: Vec::new(),
                 moves: Vec::new(),
                 thread_moves: Vec::new(),
                 illegal_purges: vec![entry],
             }),
-            bans: Some(bans),
             ..Default::default()
         },
     )
+    .map_err(|error| format!("Purge record rejected: {error}"))?;
+
+    if !messages.is_empty() || !routes.is_empty() {
+        let ctx =
+            ActionContext::from_current_board().ok_or("Board context is gone after the purge")?;
+        apply_state_delta(
+            &ctx,
+            ChatBoardStateV1Delta {
+                recent_messages: Some(messages),
+                moderation: Some(ModerationDelta {
+                    routes,
+                    feature_flags: Vec::new(),
+                    moves: Vec::new(),
+                    thread_moves: Vec::new(),
+                    illegal_purges: Vec::new(),
+                }),
+                ..Default::default()
+            },
+        )
+        .map_err(|error| format!("Replacement topic rejected: {error}"))?;
+    }
+
+    if !bans.is_empty() {
+        let ctx =
+            ActionContext::from_current_board().ok_or("Board context is gone after the purge")?;
+        apply_state_delta(
+            &ctx,
+            ChatBoardStateV1Delta {
+                bans: Some(bans),
+                ..Default::default()
+            },
+        )
+        .map_err(|error| format!("Author ban rejected: {error}"))?;
+    }
+    Ok(())
 }
 
 pub fn parse_reason_code(code: &str) -> ReasonCode {
     match code {
-        "illegal" => ReasonCode::Illegal,
+        "severe" | "illegal" => ReasonCode::Severe,
         "spam" => ReasonCode::Spam,
         "harassment" => ReasonCode::Harassment,
         "off_topic" => ReasonCode::OffTopic,
@@ -709,7 +744,7 @@ pub fn ask_reason(default: &str) -> Option<(ReasonCode, String)> {
     }
     let lower = trimmed.to_lowercase();
     let code = if lower.starts_with("severe") || lower.starts_with("illegal") {
-        ReasonCode::Illegal
+        ReasonCode::Severe
     } else if lower.starts_with("spam") {
         ReasonCode::Spam
     } else if lower.starts_with("harassment") {

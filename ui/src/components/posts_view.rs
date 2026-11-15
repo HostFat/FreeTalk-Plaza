@@ -1934,7 +1934,11 @@ pub fn SinglePostView(post_id: String) -> Element {
                                                 let _ = history.back();
                                             }
                                         }
-                                        Err(error) => warn!("Could not purge topic: {error}"),
+                                        Err(error) => {
+                                        if let Some(window) = web_sys::window() {
+                                            let _ = window.alert_with_message(&error);
+                                        }
+                                    }
                                     }
                                 }
                             });

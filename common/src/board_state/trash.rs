@@ -25,7 +25,8 @@ const MAX_REASON_CHARS: usize = 500;
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasonCode {
-    Illegal,
+    #[serde(alias = "illegal")]
+    Severe,
     Spam,
     Harassment,
     OffTopic,
