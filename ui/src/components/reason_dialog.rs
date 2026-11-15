@@ -83,12 +83,15 @@ pub fn ReasonDialog(
                         r#type: "button",
                         class: "px-3 py-2 text-sm rounded-md bg-surface hover:bg-surface-hover text-text",
                         onclick: move |_| open.set(false),
+                        onmousedown: move |_| open.set(false),
                         "Cancel"
                     }
                     button {
                         r#type: "button",
                         class: "px-3 py-2 text-sm rounded-md bg-red-600 hover:bg-red-500 text-white",
-                        onclick: move |_| {
+                        onclick: {
+                            let confirm_word = confirm_word.clone();
+                            move |_| {
                             if let Some(word) = confirm_word.as_ref() {
                                 if typed.read().trim() != word {
                                     mismatch.set(true);
@@ -97,6 +100,7 @@ pub fn ReasonDialog(
                             }
                             on_confirm.call((selected.read().clone(), final_reason.clone()));
                             open.set(false);
+                            }
                         },
                         "Confirm"
                     }
