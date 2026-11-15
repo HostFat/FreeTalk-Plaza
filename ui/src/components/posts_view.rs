@@ -1669,6 +1669,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
 /// Single post view - displays a single post by ID with replies
 #[component]
 pub fn SinglePostView(post_id: String) -> Element {
+    let hide_id = post_id.clone();
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
 
     // Get current board_id for navigation
@@ -1812,6 +1813,27 @@ pub fn SinglePostView(post_id: String) -> Element {
         .as_ref()
         .and_then(|(_, _, _, _, category, _)| category.clone());
     let has_category = category_id.is_some();
+    let can_hide = use_memo(move || {
+        CURRENT_BOARD
+            .read()
+            .owner_key
+            .as_ref()
+            .and_then(|key| BOARDS.read().map.get(key).cloned())
+            .map(|board_data| {
+                let self_id = MemberId::from(&board_data.self_sk.verifying_key());
+                let owner_id = MemberId::from(&board_data.owner_vk);
+                self_id == owner_id
+                    || board_data
+                        .board_state
+                        .admin
+                        .admins
+                        .iter()
+                        .any(|admin| admin.admin.id() == self_id)
+                    || board_data.board_state.roles.can_manage_trash(&self_id)
+            })
+            .unwrap_or(false)
+    });
+
     let back_target = match category_id {
         Some(category) => format!("/board/{}/category/{}", current_board_id.read(), category),
         None => format!("/board/{}", current_board_id.read()),
@@ -1838,6 +1860,27 @@ pub fn SinglePostView(post_id: String) -> Element {
                         }
                     },
                     "{back_label}"
+                }
+                if *can_hide.read() {
+                    button {
+                        r#type: "button",
+                        class: "ml-auto px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
+                        onclick: move |_| {
+                            let Some(id) = hide_id.parse::<MessageId>().ok() else {
+                                return;
+                            };
+                            spawn(async move {
+                                if let Some(ctx) = ActionContext::from_current_board() {
+                                    if let Err(error) =
+                                        crate::util::trash_actions::hide_topic(&ctx, id).await
+                                    {
+                                        warn!("Could not hide topic: {error}");
+                                    }
+                                }
+                            });
+                        },
+                        "Hide"
+                    }
                 }
             }
 

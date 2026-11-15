@@ -193,6 +193,9 @@ pub fn get_all_messages(
     }
 
     for message in state.recent_messages.display_messages() {
+        if state.trash.is_trashed(&message.id()) {
+            continue;
+        }
         let author_id = message.message.author;
         let now = Utc::now();
         let raw_time = DateTime::<Utc>::from(message.message.time);

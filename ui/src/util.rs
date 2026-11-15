@@ -13,6 +13,7 @@ pub mod moderation_queue;
 pub mod notifications;
 pub mod pq;
 pub mod subscriptions;
+pub mod trash_actions;
 
 use ed25519_dalek::VerifyingKey;
 use freenet_stdlib::prelude::{ContractCode, ContractKey, Parameters};
