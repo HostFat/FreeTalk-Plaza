@@ -6,6 +6,8 @@ use crate::components::app::{BOARDS, CURRENT_BOARD};
 use crate::util::message_actions::ActionContext;
 use dioxus::prelude::*;
 use plaza_core::board_state::message::MessageId;
+use plaza_core::board_state::moderation::category_chain;
+use plaza_core::board_state::roles::ModerationPower;
 use plaza_core::board_state::trash::AuthorizedTrashItem;
 use std::collections::HashMap;
 
@@ -42,6 +44,15 @@ pub fn TrashView() -> Element {
     let mut purge_target = use_signal(|| None::<AuthorizedTrashItem>);
     let mut handled = use_signal(std::collections::HashSet::<MessageId>::new);
     let mut purge_reason_open = use_signal(|| false);
+    let routes = data.board_state.moderation.routes_map();
+    let is_owner_or_admin = self_id
+        == plaza_core::board_state::member::MemberId::from(&data.owner_vk)
+        || data
+            .board_state
+            .admin
+            .admins
+            .iter()
+            .any(|admin| admin.admin.id() == self_id);
     let categories = data
         .board_state
         .recent_messages
@@ -49,13 +60,22 @@ pub fn TrashView() -> Element {
         .iter()
         .filter(|message| message.message.content.is_category())
         .map(|message| {
+            let id = message.id();
+            let chain = category_chain(&routes, &id);
+            let can_move = is_owner_or_admin
+                || data.board_state.roles.has_moderation_power(
+                    &self_id,
+                    ModerationPower::Move,
+                    &chain,
+                );
             (
-                message.id(),
+                id,
                 message
                     .message
                     .content
                     .title()
                     .unwrap_or_else(|| "Section".to_string()),
+                can_move,
             )
         })
         .collect::<Vec<_>>();
@@ -165,8 +185,12 @@ pub fn TrashView() -> Element {
                                         }
                                     },
                                     option { value: "", "Original section deleted — choose one" }
-                                    for (id, name) in &categories {
-                                        option { value: "{id}", "{name}" }
+                                    for (id, name, enabled) in &categories {
+                                        option {
+                                            value: "{id}",
+                                            disabled: !*enabled,
+                                            if *enabled { "{name}" } else { "{name} (no Move permission)" }
+                                        }
                                     }
                                 }
                             }
