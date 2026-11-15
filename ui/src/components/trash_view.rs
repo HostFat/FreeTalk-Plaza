@@ -58,7 +58,13 @@ pub fn TrashView() -> Element {
         .recent_messages
         .messages
         .iter()
-        .filter(|message| message.message.content.is_category())
+        .filter(|message| {
+            message.message.content.is_category()
+                && !data
+                    .board_state
+                    .recent_messages
+                    .is_deleted(&message.id())
+        })
         .map(|message| {
             let id = message.id();
             let chain = category_chain(&routes, &id);
@@ -364,6 +370,10 @@ pub fn TrashView() -> Element {
                             }
                             if item.item.section.map(|section| {
                                 data.board_state.moderation.routes_map().get(&section).is_none()
+                                    || data
+                                        .board_state
+                                        .recent_messages
+                                        .is_deleted(&section)
                             }).unwrap_or(false) {
                                 select {
                                     class: "mt-2 w-full bg-panel border border-border rounded-md px-2 py-1 text-xs text-text",
@@ -430,6 +440,7 @@ pub fn TrashView() -> Element {
                                         let item = item.clone();
                                         let section_missing = item.item.section.map(|section| {
                                             ctx.board_state.moderation.routes_map().get(&section).is_none()
+                                                || ctx.board_state.recent_messages.is_deleted(&section)
                                         }).unwrap_or(false);
                                         let destination = if section_missing {
                                             restore_targets.read().get(&item.item.id).copied()

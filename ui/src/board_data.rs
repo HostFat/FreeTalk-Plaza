@@ -2012,6 +2012,9 @@ impl Boards {
             // show restricted categories without waiting for a network round trip.
             board_data.decrypt_board_secrets();
             board_data.decrypt_category_secrets();
+            // Moderation actions are stored as messages; recompute the derived
+            // deleted/edited state so a loaded board reflects them immediately.
+            board_data.rebuild_actions_with_local_secrets(&ChatBoardParametersV1 { owner: vk });
 
             // If the contract key changed (WASM was updated), track for upgrade pointer
             if old_contract_key != board_data.contract_key {

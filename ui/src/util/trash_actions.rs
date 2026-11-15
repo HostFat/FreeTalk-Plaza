@@ -376,6 +376,15 @@ pub async fn restore_item(
         .into_iter()
         .filter(|route| !existing_routes.contains(&route.route.message_id))
         .collect();
+    let routes_map = ctx.board_state.moderation.routes_map();
+    let source_route_exists = item
+        .item
+        .section
+        .map(|section| {
+            routes_map.get(&section).is_some()
+                && !ctx.board_state.recent_messages.is_deleted(&section)
+        })
+        .unwrap_or(false);
     apply_state_delta(
         ctx,
         ChatBoardStateV1Delta {
@@ -390,7 +399,12 @@ pub async fn restore_item(
                         vec![AuthorizedThreadMove::new(
                             ThreadMoveV1 {
                                 topic: item.item.root,
-                                from_section: item.item.section,
+                                // A deleted source section has no route to match.
+                                from_section: if source_route_exists {
+                                    item.item.section
+                                } else {
+                                    None
+                                },
                                 to_section: Some(destination),
                                 message_ids: item.item.messages.clone(),
                                 generation: 1,

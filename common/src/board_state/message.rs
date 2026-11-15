@@ -272,9 +272,11 @@ impl MessagesV1 {
         moderation: Option<&ModerationPermissions>,
     ) {
         use crate::board_state::content::{
-            ActionContentV1, DecodedContent, ACTION_TYPE_DELETE, ACTION_TYPE_EDIT,
-            ACTION_TYPE_EDIT_CATEGORY, ACTION_TYPE_REACTION, ACTION_TYPE_REMOVE_REACTION,
+            ActionContentV1, DecodedContent, ModerationActionV1, ACTION_TYPE_DELETE,
+            ACTION_TYPE_EDIT, ACTION_TYPE_EDIT_CATEGORY, ACTION_TYPE_REACTION,
+            ACTION_TYPE_REMOVE_REACTION,
         };
+        use crate::board_state::privacy::SealedBytes;
 
         // Clear existing computed state
         self.actions_state = MessageActionsState::default();
@@ -304,28 +306,43 @@ impl MessagesV1 {
                 continue;
             }
 
-            // Decode the action content - either from public data or decrypted bytes
-            let action = match &msg.message.content {
-                BoardMessageBody::Public { .. } => {
-                    // Public action - decode directly
+            // Decode the action content. A moderation action travels in an
+            // envelope; its payload is either public or sealed locally in
+            // `decrypted_content`.
+            let action = if let Some(plaintext) = decrypted_content.get(&msg.id()) {
+                match ActionContentV1::decode(plaintext) {
+                    Ok(action) => action,
+                    Err(_) => continue,
+                }
+            } else if let BoardMessageBody::Public {
+                content_type, data, ..
+            } = &msg.message.content
+            {
+                if *content_type
+                    == crate::board_state::content::CONTENT_TYPE_MODERATION_ACTION
+                {
+                    let envelope = match ModerationActionV1::decode(data) {
+                        Ok(envelope) => envelope,
+                        Err(_) => continue,
+                    };
+                    match envelope.payload {
+                        SealedBytes::Public { value } => {
+                            match ActionContentV1::decode(&value) {
+                                Ok(action) => action,
+                                Err(_) => continue,
+                            }
+                        }
+                        // A sealed payload needs the client-side key.
+                        SealedBytes::Private { .. } => continue,
+                    }
+                } else {
                     match msg.message.content.decode_content() {
                         Some(DecodedContent::Action(action)) => action,
                         _ => continue,
                     }
                 }
-                BoardMessageBody::Private { .. } => {
-                    // Private action - use provided decrypted content
-                    let msg_id = msg.id();
-                    if let Some(plaintext) = decrypted_content.get(&msg_id) {
-                        match ActionContentV1::decode(plaintext) {
-                            Ok(action) => action,
-                            Err(_) => continue,
-                        }
-                    } else {
-                        // No decrypted content provided - skip this action
-                        continue;
-                    }
-                }
+            } else {
+                continue;
             };
 
             let target = &action.target;
@@ -1667,6 +1684,54 @@ mod tests {
         // Verify display_messages excludes deleted message
         let display: Vec<_> = messages.display_messages().collect();
         assert_eq!(display.len(), 0);
+    }
+
+    #[test]
+    fn test_envelope_delete_action_on_category() {
+        use crate::board_state::content::{
+            ActionContentV1, ModerationActionV1, ACTION_CONTENT_VERSION, ACTION_TYPE_DELETE,
+            CONTENT_TYPE_MODERATION_ACTION,
+        };
+        use crate::board_state::privacy::SealedBytes;
+
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let owner_id = MemberId::from(&signing_key.verifying_key());
+
+        let category = MessageV1 {
+            board_owner: owner_id,
+            author: owner_id,
+            time: SystemTime::now(),
+            content: BoardMessageBody::public_raw(4, 1, vec![0xa0]),
+        };
+        let auth_category = AuthorizedMessageV1::new(category, &signing_key);
+        let category_id = auth_category.id();
+
+        // The UI sends deletes inside a moderation envelope, not as a direct
+        // action body.
+        let envelope = ModerationActionV1::new(
+            ACTION_TYPE_DELETE,
+            category_id,
+            SealedBytes::public(ActionContentV1::delete(category_id).encode()),
+        );
+        let delete_msg = MessageV1 {
+            board_owner: owner_id,
+            author: owner_id,
+            time: SystemTime::now() + Duration::from_secs(1),
+            content: BoardMessageBody::public_raw(
+                CONTENT_TYPE_MODERATION_ACTION,
+                ACTION_CONTENT_VERSION,
+                envelope.encode(),
+            ),
+        };
+        let auth_delete = AuthorizedMessageV1::new(delete_msg, &signing_key);
+
+        let mut messages = MessagesV1 {
+            messages: vec![auth_category, auth_delete],
+            ..Default::default()
+        };
+        messages.rebuild_actions_state();
+        assert!(messages.is_deleted(&category_id));
+        assert_eq!(messages.display_messages().count(), 0);
     }
 
     #[test]
