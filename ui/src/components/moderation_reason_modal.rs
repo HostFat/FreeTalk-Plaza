@@ -27,6 +27,8 @@ pub fn ModerationReasonModal() -> Element {
     let mut selected = use_signal(|| ReasonCode::Severe);
     let mut custom = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
+    let mut typed = use_signal(String::new);
+    let mut mismatch = use_signal(|| false);
     let Some(request) = request else {
         return rsx! {};
     };
@@ -80,6 +82,22 @@ pub fn ModerationReasonModal() -> Element {
                     value: "{custom}",
                     oninput: move |event| custom.set(event.value()),
                 }
+                if let Some(word) = confirm_word.as_ref() {
+                    div { class: "space-y-1",
+                        p { class: "text-xs text-text-muted", "Type {word} to confirm this large action." }
+                        input {
+                            class: "w-full bg-panel border border-border rounded-md px-3 py-2 text-sm text-text",
+                            value: "{typed}",
+                            oninput: move |event| {
+                                typed.set(event.value());
+                                mismatch.set(false);
+                            },
+                        }
+                        if *mismatch.read() {
+                            p { class: "text-xs text-red-400", "The confirmation word does not match." }
+                        }
+                    }
+                }
                 if let Some(message) = error.read().as_ref() {
                     p { class: "text-xs text-red-400", "{message}" }
                 }
@@ -95,7 +113,8 @@ pub fn ModerationReasonModal() -> Element {
                         class: "px-3 py-2 text-sm rounded-md bg-red-600 hover:bg-red-500 text-white",
                         onclick: move |_| {
                             if let Some(word) = confirm_word.as_ref() {
-                                if !crate::util::trash_actions::ask_confirmation_word(word) {
+                                if typed.read().trim() != word {
+                                    mismatch.set(true);
                                     return;
                                 }
                             }
