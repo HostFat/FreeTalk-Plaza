@@ -34,6 +34,8 @@ pub const PQ_MAX_SEALED_LEN: usize = 4096;
 pub enum PqScope {
     Board,
     Category(MessageId),
+    /// Key for the moderator trash, shared only with `can_manage_trash`.
+    Trash,
 }
 
 impl Default for PqScope {
@@ -216,8 +218,13 @@ fn verify_set(
     let verifying = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
     entry.verify_signature_with(&verifying)?;
     let is_category = matches!(entry.set.scope, PqScope::Category(_));
+    let is_trash = matches!(entry.set.scope, PqScope::Trash);
     let authorized = if is_category {
         verify_distributor_authority(state, parameters, &signer, entry.authority.as_deref()).is_ok()
+            || verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8)
+                .is_ok()
+    } else if is_trash {
+        state.roles.can_manage_trash(&signer)
             || verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8)
                 .is_ok()
     } else {
@@ -245,6 +252,7 @@ fn verify_set(
                 return Err("PQ set references an unknown category secret version".to_string());
             }
         }
+        PqScope::Trash => {}
     }
     if let PqScope::Category(category_id) = &entry.set.scope {
         let category = state

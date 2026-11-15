@@ -236,24 +236,15 @@ fn verify_item(
     if item.messages.is_empty() || !item.messages.contains(&item.root) {
         return Err("Trash bundle must contain the root message".to_string());
     }
-    for id in &item.messages {
-        if !state
-            .recent_messages
-            .messages
-            .iter()
-            .any(|message| message.id() == *id)
-        {
-            return Err("Trash bundle references a missing message".to_string());
-        }
-    }
+    // Hidden messages are removed from `recent_messages`; the encrypted bundle
+    // keeps the original records. Only the moderator-signed item is checked
+    // here, not the live message list.
     if let Some(section) = item.section {
         let routes = state.moderation.routes_map();
-        if !routes
-            .get(&section)
-            .map(|route| route.is_category)
-            .unwrap_or(false)
-        {
-            return Err("Trash item section is not a category".to_string());
+        if let Some(route) = routes.get(&section) {
+            if !route.is_category {
+                return Err("Trash item section is not a category".to_string());
+            }
         }
     }
     Ok(())
@@ -270,7 +261,9 @@ fn verify_action(
     let key = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
     entry.verify_signature_with(&key)?;
 
-    let item = state
+    // The action may outlive the item: purge removes the bundle and leaves the
+    // action as a compact tombstone.
+    if let Some(item) = state
         .trash
         .items
         .iter()
@@ -280,9 +273,10 @@ fn verify_action(
                 .iter()
                 .find(|item| item.item.id == action.item_id)
         })
-        .ok_or("Trash action targets a missing item")?;
-    if action.generation < item.item.generation {
-        return Err("Trash action generation is older than the item".to_string());
+    {
+        if action.generation < item.item.generation {
+            return Err("Trash action generation is older than the item".to_string());
+        }
     }
     if action.reason.chars().count() > MAX_REASON_CHARS {
         return Err("Trash action reason is too long".to_string());
@@ -438,6 +432,11 @@ impl ComposableState for TrashV1 {
                     self.actions.push(action.clone());
                 }
             }
+            // Purge and restore both drop the encrypted bundle; the action
+            // above is the tombstone that prevents a stale peer from bringing
+            // the item back.
+            self.items
+                .retain(|item| item.item.id != action.action.item_id);
         }
         Ok(())
     }
