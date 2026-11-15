@@ -1750,4 +1750,112 @@ mod tests {
         assert_eq!(board.state.moderation.illegal_purges.len(), 1);
         let _ = owner_id;
     }
+
+    #[test]
+    #[ignore = "reproduces a cleanup bug: the replacement topic disappears with purge+ban"]
+    fn illegal_purge_with_replacement_and_ban_applies_together() {
+        use crate::board_state::ban::{AuthorizedUserBan, UserBan};
+        use crate::board_state::ChatBoardStateV1Delta;
+
+        let mut board = board();
+        board
+            .state
+            .moderation
+            .routes
+            .push(AuthorizedMessageRoute::new(
+                MessageRoute {
+                    message_id: board.post,
+                    reply_to: None,
+                    category_id: None,
+                    is_category: false,
+                    parent_category_id: None,
+                    is_group: false,
+                    generation: 1,
+                },
+                &board.member_sk,
+            ));
+        let owner_id = MemberId::from(&board.owner_sk.verifying_key());
+        let member_id = MemberId::from(&board.member_sk.verifying_key());
+
+        let replacement = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author: owner_id,
+                time: SystemTime::now(),
+                content: BoardMessageBody::public("Contenuto rimosso".into(), "Rimosso.".into()),
+            },
+            &board.owner_sk,
+        );
+        let replacement_id = replacement.id();
+        let route = AuthorizedMessageRoute::new(
+            MessageRoute {
+                message_id: replacement_id,
+                reply_to: None,
+                category_id: None,
+                is_category: false,
+                parent_category_id: None,
+                is_group: false,
+                generation: 1,
+            },
+            &board.owner_sk,
+        );
+
+        let purge = AuthorizedIllegalPurge::new(
+            IllegalPurgeV1 {
+                topic: board.post,
+                message_ids: vec![board.post],
+                reason_code: crate::board_state::trash::ReasonCode::Severe,
+                reason: "severe rule violation".to_string(),
+                content_hash: Some([7u8; 32]),
+                acted_at: 1,
+                generation: 1,
+            },
+            &board.owner_sk,
+        );
+
+        let target = board.state.members.members[0].clone();
+        let ban = AuthorizedUserBan::new(
+            UserBan {
+                owner_member_id: owner_id,
+                banned_at: SystemTime::now(),
+                banned_user: member_id,
+                expires_at: None,
+                target_member: Some(target),
+                invite_chain: Vec::new(),
+            },
+            owner_id,
+            &board.owner_sk,
+        );
+
+        let delta = ChatBoardStateV1Delta {
+            recent_messages: Some(vec![replacement]),
+            moderation: Some(ModerationDelta {
+                routes: vec![route],
+                feature_flags: Vec::new(),
+                moves: Vec::new(),
+                thread_moves: Vec::new(),
+                illegal_purges: vec![purge],
+            }),
+            bans: Some(vec![ban]),
+            ..Default::default()
+        };
+        let parent = board.state.clone();
+        board
+            .state
+            .apply_delta(&parent, &board.parameters, &Some(delta))
+            .expect("purge, replacement and ban apply together");
+        assert!(!board
+            .state
+            .recent_messages
+            .messages
+            .iter()
+            .any(|message| message.id() == board.post));
+        assert!(board
+            .state
+            .recent_messages
+            .messages
+            .iter()
+            .any(|message| message.id() == replacement_id));
+        assert_eq!(board.state.bans.0.len(), 1);
+    }
 }
