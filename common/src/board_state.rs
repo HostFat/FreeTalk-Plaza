@@ -29,6 +29,7 @@ use crate::board_state::configuration::AuthorizedConfigurationV1;
 use crate::board_state::invites::InviteTokensV1;
 use crate::board_state::member::{MemberId, MembersV1};
 use crate::board_state::member_info::MemberInfoV1;
+use crate::board_state::message::MessageId;
 use crate::board_state::message::MessagesV1;
 use crate::board_state::roles::RolesV1;
 use crate::board_state::secret::BoardSecretsV1;
@@ -153,6 +154,17 @@ impl ChatBoardStateV1 {
                 .map(|message| message.message.author)
                 .filter(|author| *author != owner_id)
                 .collect();
+            for item in &self.trash.items {
+                if self.trash.active_item(&item.item.id).is_some() {
+                    required.extend(
+                        item.item
+                            .authors
+                            .iter()
+                            .copied()
+                            .filter(|author| *author != owner_id),
+                    );
+                }
+            }
             let mut to_process: Vec<MemberId> = required.iter().copied().collect();
             while let Some(member_id) = to_process.pop() {
                 if let Some(member) = members_by_id.get(&member_id) {
@@ -336,6 +348,24 @@ impl ChatBoardStateV1 {
         // the members/messages fixpoint so removed invitees do not leave
         // messages or orphaned descendants behind.
         self.renormalize_members_and_messages();
+
+        // 5h. Remove hidden messages from the live list. The encrypted trash
+        // bundle is the only copy until a restore re-adds it.
+        let trashed: HashSet<MessageId> = self
+            .trash
+            .items
+            .iter()
+            .filter(|item| self.trash.active_item(&item.item.id).is_some())
+            .flat_map(|item| item.item.messages.iter().copied())
+            .collect();
+        if !trashed.is_empty() {
+            self.recent_messages
+                .messages
+                .retain(|message| !trashed.contains(&message.id()));
+            self.moderation
+                .routes
+                .retain(|route| !trashed.contains(&route.route.message_id));
+        }
 
         // 6. Re-sort for deterministic ordering
         self.members.members.sort_by_key(|m| m.member.id());

@@ -26,6 +26,10 @@ pub struct TrashItemV1 {
     pub id: MessageId,
     pub root: MessageId,
     pub messages: Vec<MessageId>,
+    /// Authors of the hidden messages. Kept so cleanup does not prune them
+    /// while the thread is in the trash and restore still has their records.
+    #[serde(default)]
+    pub authors: Vec<MemberId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section: Option<MessageId>,
     pub bundle: Vec<u8>,
@@ -498,6 +502,7 @@ mod tests {
             id: MessageId::from_bytes([0u8; 32]),
             root,
             messages,
+            authors: Vec::new(),
             section: None,
             bundle: vec![1, 2, 3],
             bundle_nonce: [1u8; 12],

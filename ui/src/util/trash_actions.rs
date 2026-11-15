@@ -63,6 +63,10 @@ pub async fn hide_topic(ctx: &ActionContext, root: MessageId) -> Result<(), Stri
         .filter(|route| ids.contains(&route.route.message_id))
         .cloned()
         .collect::<Vec<_>>();
+    let authors: Vec<_> = messages
+        .iter()
+        .map(|message| message.message.author)
+        .collect();
     let bundle = TrashBundleV1 {
         messages,
         routes: route_records,
@@ -175,6 +179,7 @@ pub async fn hide_topic(ctx: &ActionContext, root: MessageId) -> Result<(), Stri
         id: MessageId::from_bytes([0u8; 32]),
         root,
         messages: ids,
+        authors,
         section,
         bundle: bundle_ciphertext,
         bundle_nonce,
