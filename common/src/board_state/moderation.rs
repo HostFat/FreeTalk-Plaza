@@ -9,7 +9,8 @@ use crate::board_state::content::CONTENT_TYPE_MODERATION_ACTION;
 use crate::board_state::member::MemberId;
 use crate::board_state::message::MessageId;
 use crate::board_state::roles::{
-    resolve_signer_key, verify_moderation_authority, AuthorityProof, ModerationPower,
+    is_board_admin, resolve_signer_key, verify_admin_authority, verify_moderation_authority,
+    AuthorityProof, ModerationPower,
 };
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::{sign_struct, verify_struct};
@@ -239,6 +240,61 @@ impl AuthorizedThreadMove {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct IllegalPurgeV1 {
+    pub topic: MessageId,
+    pub message_ids: Vec<MessageId>,
+    pub reason: String,
+    pub content_hash: Option<[u8; 32]>,
+    pub acted_at: i64,
+    pub generation: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct AuthorizedIllegalPurge {
+    pub purge: IllegalPurgeV1,
+    pub signature: Signature,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<MemberId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
+}
+
+impl AuthorizedIllegalPurge {
+    pub fn new(purge: IllegalPurgeV1, signing_key: &SigningKey) -> Self {
+        Self {
+            signature: sign_struct(&purge, signing_key),
+            purge,
+            signer: Some(MemberId::from(&signing_key.verifying_key())),
+            signer_key: Some(signing_key.verifying_key()),
+            authority: None,
+        }
+    }
+
+    pub fn with_optional_authority(mut self, proof: Option<AuthorityProof>) -> Self {
+        self.authority = proof.map(Box::new);
+        self
+    }
+
+    pub fn signer_id(&self, parameters: &ChatBoardParametersV1) -> MemberId {
+        self.signer.unwrap_or_else(|| parameters.owner_id())
+    }
+
+    fn verify_signature_with(&self, key: &VerifyingKey) -> Result<(), String> {
+        verify_struct(&self.purge, &self.signature, key)
+            .map_err(|e| format!("Invalid illegal purge signature: {e}"))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct IllegalPurgeState {
+    pub generation: u64,
+    #[serde(default)]
+    pub digest: i64,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct ThreadMoveState {
     pub to_section: Option<MessageId>,
@@ -262,6 +318,8 @@ pub struct ModerationV1 {
     pub moves: Vec<AuthorizedPostMove>,
     #[serde(default)]
     pub thread_moves: Vec<AuthorizedThreadMove>,
+    #[serde(default)]
+    pub illegal_purges: Vec<AuthorizedIllegalPurge>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -294,6 +352,8 @@ pub struct ModerationSummary {
     pub moves: BTreeMap<MessageId, MoveState>,
     #[serde(default)]
     pub thread_moves: BTreeMap<MessageId, ThreadMoveState>,
+    #[serde(default)]
+    pub illegal_purges: BTreeMap<MessageId, IllegalPurgeState>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -306,6 +366,8 @@ pub struct ModerationDelta {
     pub moves: Vec<AuthorizedPostMove>,
     #[serde(default)]
     pub thread_moves: Vec<AuthorizedThreadMove>,
+    #[serde(default)]
+    pub illegal_purges: Vec<AuthorizedIllegalPurge>,
 }
 
 fn route_map(routes: &[AuthorizedMessageRoute]) -> BTreeMap<MessageId, RouteState> {
@@ -418,6 +480,58 @@ fn thread_descendants(state: &ChatBoardStateV1, topic: &MessageId) -> Vec<Messag
     result.sort();
     result.dedup();
     result
+}
+
+fn verify_illegal_purge(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    entry: &AuthorizedIllegalPurge,
+) -> Result<(), String> {
+    let purge = &entry.purge;
+    let signer = entry.signer_id(parameters);
+    let key = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
+    entry.verify_signature_with(&key)?;
+    if signer != parameters.owner_id()
+        && !is_board_admin(state, &signer)
+        && verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8)
+            .is_err()
+    {
+        return Err("Only owner or admins can purge illegal content".to_string());
+    }
+    if purge.generation == 0 || purge.reason.chars().count() > 500 {
+        return Err("Illegal purge record is invalid".to_string());
+    }
+    // Once the purge is applied the topic is gone; the record remains as an
+    // audit tombstone.
+    if let Some(topic) = state
+        .recent_messages
+        .messages
+        .iter()
+        .find(|message| message.id() == purge.topic)
+    {
+        if topic.message.content.is_category() {
+            return Err("Illegal purge cannot target a category".to_string());
+        }
+        if purge.message_ids != thread_descendants(state, &purge.topic) {
+            return Err("Illegal purge must include the whole thread".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn illegal_purge_map(purges: &[AuthorizedIllegalPurge]) -> BTreeMap<MessageId, IllegalPurgeState> {
+    purges
+        .iter()
+        .map(|entry| {
+            (
+                entry.purge.topic,
+                IllegalPurgeState {
+                    generation: entry.purge.generation,
+                    digest: thread_digest(&entry.purge),
+                },
+            )
+        })
+        .collect()
 }
 
 fn verify_thread_move(
@@ -1031,6 +1145,9 @@ impl ComposableState for ModerationV1 {
             }
             verify_thread_move(parent_state, parameters, entry)?;
         }
+        for entry in &self.illegal_purges {
+            verify_illegal_purge(parent_state, parameters, entry)?;
+        }
         let routes = self.routes_map();
         let mut flag_ids = std::collections::HashSet::new();
         for flag in &self.feature_flags {
@@ -1059,6 +1176,7 @@ impl ComposableState for ModerationV1 {
             feature_flags: feature_flag_map(&self.feature_flags),
             moves: move_map(&self.moves),
             thread_moves: thread_move_map(&self.thread_moves),
+            illegal_purges: illegal_purge_map(&self.illegal_purges),
         }
     }
 
@@ -1125,7 +1243,28 @@ impl ComposableState for ModerationV1 {
             })
             .cloned()
             .collect();
-        if routes.is_empty() && flags.is_empty() && moves.is_empty() && thread_moves.is_empty() {
+        let illegal_purges: Vec<AuthorizedIllegalPurge> = self
+            .illegal_purges
+            .iter()
+            .filter(|entry| {
+                old_state
+                    .illegal_purges
+                    .get(&entry.purge.topic)
+                    .map(|old| {
+                        old.generation < entry.purge.generation
+                            || (old.generation == entry.purge.generation
+                                && old.digest != thread_digest(&entry.purge))
+                    })
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        if routes.is_empty()
+            && flags.is_empty()
+            && moves.is_empty()
+            && thread_moves.is_empty()
+            && illegal_purges.is_empty()
+        {
             None
         } else {
             Some(ModerationDelta {
@@ -1133,6 +1272,7 @@ impl ComposableState for ModerationV1 {
                 feature_flags: flags,
                 moves,
                 thread_moves,
+                illegal_purges,
             })
         }
     }
@@ -1193,6 +1333,24 @@ impl ComposableState for ModerationV1 {
                     self.moves
                         .retain(|existing| existing.change.target != entry.change.target);
                     self.moves.push(entry.clone());
+                }
+            }
+        }
+        for entry in &delta.illegal_purges {
+            verify_illegal_purge(parent_state, parameters, entry)?;
+            match self
+                .illegal_purges
+                .iter()
+                .find(|existing| existing.purge.topic == entry.purge.topic)
+            {
+                Some(existing)
+                    if existing.purge.generation > entry.purge.generation
+                        || (existing.purge.generation == entry.purge.generation
+                            && thread_digest(&existing.purge) <= thread_digest(&entry.purge)) => {}
+                _ => {
+                    self.illegal_purges
+                        .retain(|existing| existing.purge.topic != entry.purge.topic);
+                    self.illegal_purges.push(entry.clone());
                 }
             }
         }

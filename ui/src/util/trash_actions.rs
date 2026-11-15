@@ -319,6 +319,7 @@ pub async fn restore_item(
         ChatBoardStateV1Delta {
             recent_messages: Some(messages),
             moderation: Some(ModerationDelta {
+                illegal_purges: Vec::new(),
                 routes,
                 feature_flags: Vec::new(),
                 moves: Vec::new(),
@@ -396,4 +397,63 @@ fn preview_bundle_bytes(
         .try_into()
         .map_err(|_| "Trash item key has an invalid length".to_string())?;
     decrypt_with_symmetric_key(&item_key, &item.item.bundle, &item.item.bundle_nonce, 0)
+}
+
+pub async fn purge_illegal(ctx: &ActionContext, topic: MessageId) -> Result<(), String> {
+    let messages = ctx
+        .board_state
+        .recent_messages
+        .messages
+        .iter()
+        .filter(|message| message.id() == topic)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut plaintext = Vec::new();
+    ciborium::ser::into_writer(&messages, &mut plaintext)
+        .map_err(|error| format!("Could not encode the purge audit: {error}"))?;
+    let content_hash = *blake3::hash(&plaintext).as_bytes();
+
+    let descendants = {
+        let routes = ctx.board_state.moderation.routes_map();
+        let mut ids = Vec::new();
+        let mut stack = vec![topic];
+        while let Some(id) = stack.pop() {
+            if ids.contains(&id) {
+                continue;
+            }
+            ids.push(id);
+            for (child, route) in &routes {
+                if route.reply_to == Some(id) {
+                    stack.push(*child);
+                }
+            }
+        }
+        ids.sort();
+        ids
+    };
+
+    let entry = plaza_core::board_state::moderation::AuthorizedIllegalPurge::new(
+        plaza_core::board_state::moderation::IllegalPurgeV1 {
+            topic,
+            message_ids: descendants,
+            reason: "illegal content purged".to_string(),
+            content_hash: Some(content_hash),
+            acted_at: chrono::Utc::now().timestamp(),
+            generation: 1,
+        },
+        &ctx.self_sk,
+    );
+    apply_state_delta(
+        ctx,
+        ChatBoardStateV1Delta {
+            moderation: Some(ModerationDelta {
+                routes: Vec::new(),
+                feature_flags: Vec::new(),
+                moves: Vec::new(),
+                thread_moves: Vec::new(),
+                illegal_purges: vec![entry],
+            }),
+            ..Default::default()
+        },
+    )
 }

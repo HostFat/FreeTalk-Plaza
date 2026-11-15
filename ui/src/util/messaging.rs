@@ -315,6 +315,7 @@ pub(crate) async fn publish_message(
         members: members_delta,
         member_info: member_info_delta,
         moderation: Some(ModerationDelta {
+            illegal_purges: Vec::new(),
             thread_moves: Vec::new(),
             routes: vec![route],
             feature_flags: Vec::new(),
@@ -626,6 +627,7 @@ pub async fn send_category(
         recent_messages: Some(vec![auth_message.clone()]),
         category_secrets,
         moderation: Some(ModerationDelta {
+            illegal_purges: Vec::new(),
             thread_moves: Vec::new(),
             routes: vec![route],
             feature_flags: Vec::new(),
@@ -762,6 +764,7 @@ pub async fn send_group(
     let delta = ChatBoardStateV1Delta {
         recent_messages: Some(vec![auth_message]),
         moderation: Some(ModerationDelta {
+            illegal_purges: Vec::new(),
             thread_moves: Vec::new(),
             routes: vec![route],
             feature_flags: Vec::new(),

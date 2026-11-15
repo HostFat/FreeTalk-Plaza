@@ -358,13 +358,20 @@ impl ChatBoardStateV1 {
             .filter(|item| self.trash.active_item(&item.item.id).is_some())
             .flat_map(|item| item.item.messages.iter().copied())
             .collect();
-        if !trashed.is_empty() {
+        let purged: HashSet<MessageId> = self
+            .moderation
+            .illegal_purges
+            .iter()
+            .flat_map(|entry| entry.purge.message_ids.iter().copied())
+            .collect();
+        let hidden: HashSet<MessageId> = trashed.union(&purged).copied().collect();
+        if !hidden.is_empty() {
             self.recent_messages
                 .messages
-                .retain(|message| !trashed.contains(&message.id()));
+                .retain(|message| !hidden.contains(&message.id()));
             self.moderation
                 .routes
-                .retain(|route| !trashed.contains(&route.route.message_id));
+                .retain(|route| !hidden.contains(&route.route.message_id));
         }
 
         // 6. Re-sort for deterministic ordering

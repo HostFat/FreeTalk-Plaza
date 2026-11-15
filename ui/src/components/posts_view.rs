@@ -1670,6 +1670,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
 #[component]
 pub fn SinglePostView(post_id: String) -> Element {
     let hide_id = post_id.clone();
+    let purge_id = post_id.clone();
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
 
     // Get current board_id for navigation
@@ -1813,6 +1814,25 @@ pub fn SinglePostView(post_id: String) -> Element {
         .as_ref()
         .and_then(|(_, _, _, _, category, _)| category.clone());
     let has_category = category_id.is_some();
+    let can_purge_illegal = use_memo(move || {
+        CURRENT_BOARD
+            .read()
+            .owner_key
+            .as_ref()
+            .and_then(|key| BOARDS.read().map.get(key).cloned())
+            .map(|board_data| {
+                let self_id = MemberId::from(&board_data.self_sk.verifying_key());
+                self_id == MemberId::from(&board_data.owner_vk)
+                    || board_data
+                        .board_state
+                        .admin
+                        .admins
+                        .iter()
+                        .any(|admin| admin.admin.id() == self_id)
+            })
+            .unwrap_or(false)
+    });
+
     let can_hide = use_memo(move || {
         CURRENT_BOARD
             .read()
@@ -1880,6 +1900,39 @@ pub fn SinglePostView(post_id: String) -> Element {
                             });
                         },
                         "Hide"
+                    }
+                }
+                if *can_purge_illegal.read() {
+                    button {
+                        r#type: "button",
+                        class: "ml-2 px-3 py-1.5 text-xs rounded-md bg-red-700 hover:bg-red-600 text-white",
+                        onclick: move |_| {
+                            let Some(id) = purge_id.parse::<MessageId>().ok() else {
+                                return;
+                            };
+                            let confirmed = web_sys::window()
+                                .and_then(|window| {
+                                    window
+                                        .confirm_with_message(
+                                            "Purge this topic and all replies as illegal? There is no trash copy.",
+                                        )
+                                        .ok()
+                                })
+                                .unwrap_or(false);
+                            if !confirmed {
+                                return;
+                            }
+                            spawn(async move {
+                                if let Some(ctx) = ActionContext::from_current_board() {
+                                    if let Err(error) =
+                                        crate::util::trash_actions::purge_illegal(&ctx, id).await
+                                    {
+                                        warn!("Could not purge topic: {error}");
+                                    }
+                                }
+                            });
+                        },
+                        "Purge illegal"
                     }
                 }
             }
