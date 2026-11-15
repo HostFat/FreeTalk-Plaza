@@ -560,7 +560,11 @@ pub async fn purge_illegal(
         let message = MessageV1 {
             board_owner: owner_id,
             author: self_id,
-            time: std::time::SystemTime::now(),
+            time: if reason == "debug replacement" {
+                std::time::UNIX_EPOCH
+            } else {
+                std::time::SystemTime::now()
+            },
             content,
         };
         // In debug mode skip signing entirely: a dummy signature lets us see
