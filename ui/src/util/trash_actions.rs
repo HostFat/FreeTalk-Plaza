@@ -1,16 +1,19 @@
 //! Client side of the hide flow: build the encrypted bundle, add the trash
 //! item, and let the normal message filter hide it.
 
-use crate::util::ecies::encrypt_with_symmetric_key;
+use crate::util::ecies::{decrypt_with_symmetric_key, encrypt_with_symmetric_key};
 use crate::util::message_actions::{apply_state_delta, ActionContext};
 use plaza_core::board_state::message::MessageId;
-use plaza_core::board_state::moderation::category_chain;
-use plaza_core::board_state::trash::{AuthorizedTrashItem, TrashDelta, TrashItemV1};
+use plaza_core::board_state::moderation::{category_chain, ModerationDelta};
+use plaza_core::board_state::trash::{
+    AuthorizedTrashAction, AuthorizedTrashItem, TrashActionKind, TrashActionV1, TrashDelta,
+    TrashItemV1,
+};
 use plaza_core::board_state::ChatBoardStateV1Delta;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
-struct TrashBundleV1 {
+pub(crate) struct TrashBundleV1 {
     messages: Vec<plaza_core::board_state::message::AuthorizedMessageV1>,
     routes: Vec<plaza_core::board_state::moderation::AuthorizedMessageRoute>,
 }
@@ -205,4 +208,75 @@ pub async fn hide_topic(ctx: &ActionContext, root: MessageId) -> Result<(), Stri
             board.trash_secret = Some((secret_version, secret));
         }
     })
+}
+
+pub async fn restore_item(ctx: &ActionContext, item: &AuthorizedTrashItem) -> Result<(), String> {
+    let (secret_version, trash_key) = ctx.trash_secret.ok_or("This member has no trash key")?;
+    let item_key = decrypt_with_symmetric_key(
+        &trash_key,
+        &item.item.sealed_item_key,
+        &item.item.item_key_nonce,
+        secret_version,
+    )?;
+    let item_key: [u8; 32] = item_key
+        .try_into()
+        .map_err(|_| "Trash item key has an invalid length".to_string())?;
+    let plaintext =
+        decrypt_with_symmetric_key(&item_key, &item.item.bundle, &item.item.bundle_nonce, 0)?;
+    let bundle: TrashBundleV1 = ciborium::de::from_reader(plaintext.as_slice())
+        .map_err(|error| format!("Could not decode the trash bundle: {error}"))?;
+
+    let action = AuthorizedTrashAction::new(
+        TrashActionV1 {
+            item_id: item.item.id,
+            kind: TrashActionKind::Restore,
+            generation: item.item.generation + 1,
+            acted_at: chrono::Utc::now().timestamp(),
+            reason: "restored by moderator".to_string(),
+            content_hash: None,
+        },
+        &ctx.self_sk,
+    );
+
+    let existing_messages: std::collections::HashSet<_> = ctx
+        .board_state
+        .recent_messages
+        .messages
+        .iter()
+        .map(|message| message.id())
+        .collect();
+    let existing_routes: std::collections::HashSet<_> = ctx
+        .board_state
+        .moderation
+        .routes
+        .iter()
+        .map(|route| route.route.message_id)
+        .collect();
+    let messages = bundle
+        .messages
+        .into_iter()
+        .filter(|message| !existing_messages.contains(&message.id()))
+        .collect();
+    let routes = bundle
+        .routes
+        .into_iter()
+        .filter(|route| !existing_routes.contains(&route.route.message_id))
+        .collect();
+    apply_state_delta(
+        ctx,
+        ChatBoardStateV1Delta {
+            recent_messages: Some(messages),
+            moderation: Some(ModerationDelta {
+                routes,
+                feature_flags: Vec::new(),
+                moves: Vec::new(),
+                thread_moves: Vec::new(),
+            }),
+            trash: Some(TrashDelta {
+                items: Vec::new(),
+                actions: vec![action],
+            }),
+            ..Default::default()
+        },
+    )
 }

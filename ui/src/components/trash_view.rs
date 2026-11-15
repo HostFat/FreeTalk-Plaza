@@ -65,33 +65,20 @@ pub fn TrashView() -> Element {
                                 r#type: "button",
                                 class: "px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
                                 onclick: {
-                                    let id = item.item.id;
-                                    let generation = item.item.generation + 1;
+                                    let item = item.clone();
                                     move |_| {
                                         let Some(ctx) = ActionContext::from_current_board() else {
                                             return;
                                         };
-                                        let action = AuthorizedTrashAction::new(
-                                            TrashActionV1 {
-                                                item_id: id,
-                                                kind: TrashActionKind::Restore,
-                                                generation,
-                                                acted_at: chrono::Utc::now().timestamp(),
-                                                reason: "restored by moderator".to_string(),
-                                                content_hash: None,
-                                            },
-                                            &ctx.self_sk,
-                                        );
-                                        let delta = ChatBoardStateV1Delta {
-                                            trash: Some(TrashDelta {
-                                                items: Vec::new(),
-                                                actions: vec![action],
-                                            }),
-                                            ..Default::default()
-                                        };
-                                        if let Err(message) = apply_state_delta(&ctx, delta) {
-                                            error.set(Some(message));
-                                        }
+                                        let item = item.clone();
+                                        spawn(async move {
+                                            if let Err(message) =
+                                                crate::util::trash_actions::restore_item(&ctx, &item)
+                                                    .await
+                                            {
+                                                error.set(Some(message));
+                                            }
+                                        });
                                     }
                                 },
                                 "Restore"
