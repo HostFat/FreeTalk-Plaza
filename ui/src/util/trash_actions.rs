@@ -432,6 +432,7 @@ pub async fn purge_illegal(
     ciborium::ser::into_writer(&messages, &mut plaintext)
         .map_err(|error| format!("Could not encode the purge audit: {error}"))?;
     let content_hash = *blake3::hash(&plaintext).as_bytes();
+    log_debug("purge: messages collected and hashed");
 
     let descendants = {
         let routes = ctx.board_state.moderation.routes_map();
@@ -452,6 +453,7 @@ pub async fn purge_illegal(
         ids
     };
 
+    log_debug(&format!("purge: descendants={}", descendants.len()));
     let entry = plaza_core::board_state::moderation::AuthorizedIllegalPurge::new(
         plaza_core::board_state::moderation::IllegalPurgeV1 {
             topic,
@@ -464,6 +466,7 @@ pub async fn purge_illegal(
         },
         &ctx.self_sk,
     );
+    log_debug("purge: building replacement");
     let self_id = plaza_core::board_state::member::MemberId::from(&ctx.self_sk.verifying_key());
     let owner_id = plaza_core::board_state::member::MemberId::from(&ctx.current_board);
     let topic_author = ctx
@@ -557,6 +560,7 @@ pub async fn purge_illegal(
         messages.push(replacement);
     }
 
+    log_debug("purge: replacement built, building ban");
     // Ban the author when they are a regular member or admin, never the owner.
     let mut bans = Vec::new();
     if let Some(author) = topic_author {
@@ -604,6 +608,7 @@ pub async fn purge_illegal(
 
     // Three separate updates so a rejection in the replacement or the ban
     // does not hide which part failed.
+    log_debug("purge: ban built, phase 1");
     log_debug("purge phase 1: illegal purge record");
     apply_state_delta(
         ctx,
