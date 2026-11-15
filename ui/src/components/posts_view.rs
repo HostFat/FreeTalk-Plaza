@@ -1896,7 +1896,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                         r#type: "button",
                         class: "ml-2 px-3 py-1.5 text-xs rounded-md bg-red-700 hover:bg-red-600 text-white",
                         onclick: move |_| illegal_reason_open.set(true),
-                        "Purge illegal"
+                        "Purge"
                     }
                 }
             }
@@ -1925,7 +1925,7 @@ pub fn SinglePostView(post_id: String) -> Element {
             }
             crate::components::reason_dialog::ReasonDialog {
                 open: illegal_reason_open,
-                title: "Purge illegal content".to_string(),
+                title: "Purge content".to_string(),
                 confirm_word: Some("PURGE".to_string()),
                 on_confirm: move |(code, reason): (String, String)| {
                     let Some(id) = purge_id.parse::<MessageId>().ok() else {
