@@ -1953,6 +1953,35 @@ pub fn SinglePostView(post_id: String) -> Element {
                         },
                         "Purge"
                     }
+                    button {
+                        r#type: "button",
+                        class: "ml-2 px-3 py-1.5 text-xs rounded-md bg-amber-700 hover:bg-amber-600 text-white",
+                        title: "Debug: purge without prompts",
+                        onclick: move |_| {
+                            let Ok(id) = purge_id.parse::<MessageId>() else {
+                                return;
+                            };
+                            spawn(async move {
+                                if let Some(ctx) = ActionContext::from_current_board() {
+                                    if let Err(error) = crate::util::trash_actions::purge_illegal(
+                                        &ctx,
+                                        id,
+                                        "debug purge",
+                                        plaza_core::board_state::trash::ReasonCode::Severe,
+                                    )
+                                    .await
+                                    {
+                                        if let Some(window) = web_sys::window() {
+                                            let _ = window.alert_with_message(&error);
+                                        }
+                                    }
+                                } else if let Some(window) = web_sys::window() {
+                                    let _ = window.alert_with_message("No board context");
+                                }
+                            });
+                        },
+                        "Purge debug"
+                    }
                 }
             }
 
