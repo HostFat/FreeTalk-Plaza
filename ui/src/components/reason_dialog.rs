@@ -2,21 +2,21 @@
 
 use dioxus::prelude::*;
 
-const PRESETS: &[&str] = &[
-    "Illegal content",
-    "Spam",
-    "Harassment",
-    "Off-topic",
-    "Rules violation",
+const PRESETS: &[(&str, &str)] = &[
+    ("illegal", "Illegal content"),
+    ("spam", "Spam"),
+    ("harassment", "Harassment"),
+    ("off_topic", "Off-topic"),
+    ("rules", "Rules violation"),
 ];
 
 #[component]
 pub fn ReasonDialog(
     open: Signal<bool>,
     title: String,
-    on_confirm: EventHandler<String>,
+    on_confirm: EventHandler<(String, String)>,
 ) -> Element {
-    let mut selected = use_signal(|| PRESETS[0].to_string());
+    let mut selected = use_signal(|| PRESETS[0].0.to_string());
     let mut custom = use_signal(String::new);
     if !*open.read() {
         return rsx! {};
@@ -35,19 +35,19 @@ pub fn ReasonDialog(
             div { class: "w-full max-w-md bg-panel border border-border rounded-xl shadow-xl p-4 space-y-3",
                 h2 { class: "text-lg font-semibold text-text", "{title}" }
                 div { class: "flex flex-wrap gap-2",
-                    for preset in PRESETS {
+                    for (code, label) in PRESETS {
                         button {
                             r#type: "button",
-                            class: if selected.read().as_str() == *preset {
+                            class: if selected.read().as_str() == *code {
                                 "px-3 py-1.5 text-xs rounded-md bg-accent text-white"
                             } else {
                                 "px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text"
                             },
                             onclick: move |_| {
-                                selected.set(preset.to_string());
+                                selected.set(code.to_string());
                                 custom.set(String::new());
                             },
-                            "{preset}"
+                            "{label}"
                         }
                     }
                 }
@@ -68,7 +68,7 @@ pub fn ReasonDialog(
                         r#type: "button",
                         class: "px-3 py-2 text-sm rounded-md bg-red-600 hover:bg-red-500 text-white",
                         onclick: move |_| {
-                            on_confirm.call(final_reason.clone());
+                            on_confirm.call((selected.read().clone(), final_reason.clone()));
                             open.set(false);
                         },
                         "Confirm"

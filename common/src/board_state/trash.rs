@@ -21,6 +21,19 @@ use std::collections::BTreeMap;
 const MAX_BUNDLE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REASON_CHARS: usize = 500;
 
+/// Machine-readable reason for the audit, independent of the UI language.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasonCode {
+    Illegal,
+    Spam,
+    Harassment,
+    OffTopic,
+    Rules,
+    #[default]
+    Other,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct TrashItemV1 {
     pub id: MessageId,
@@ -38,6 +51,8 @@ pub struct TrashItemV1 {
     pub item_key_nonce: [u8; 12],
     pub secret_version: u32,
     pub hidden_at: i64,
+    #[serde(default)]
+    pub reason_code: ReasonCode,
     pub reason: String,
     pub generation: u64,
 }
@@ -103,6 +118,8 @@ pub struct TrashActionV1 {
     pub kind: TrashActionKind,
     pub generation: u64,
     pub acted_at: i64,
+    #[serde(default)]
+    pub reason_code: ReasonCode,
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<[u8; 32]>,
@@ -510,6 +527,7 @@ mod tests {
             item_key_nonce: [2u8; 12],
             secret_version: 1,
             hidden_at: 1,
+            reason_code: ReasonCode::Other,
             reason: "review".to_string(),
             generation,
         }
@@ -591,6 +609,7 @@ mod tests {
                 kind: TrashActionKind::Purge,
                 generation: 1,
                 acted_at: 2,
+                reason_code: ReasonCode::Other,
                 reason: "illegal".to_string(),
                 content_hash: Some([7u8; 32]),
             },
@@ -606,6 +625,7 @@ mod tests {
                 kind: TrashActionKind::Restore,
                 generation: 1,
                 acted_at: 2,
+                reason_code: ReasonCode::Other,
                 reason: "ok".to_string(),
                 content_hash: None,
             },

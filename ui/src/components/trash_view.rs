@@ -108,16 +108,17 @@ pub fn TrashView() -> Element {
             crate::components::reason_dialog::ReasonDialog {
                 open: purge_reason_open,
                 title: "Purge permanently".to_string(),
-                on_confirm: move |reason: String| {
+                on_confirm: move |(code, reason): (String, String)| {
                     let Some(item) = purge_target.read().clone() else {
                         return;
                     };
                     let Some(ctx) = ActionContext::from_current_board() else {
                         return;
                     };
+                    let code = crate::util::trash_actions::parse_reason_code(&code);
                     spawn(async move {
                         if let Err(message) =
-                            crate::util::trash_actions::purge_item(&ctx, &item, &reason).await
+                            crate::util::trash_actions::purge_item(&ctx, &item, &reason, code).await
                         {
                             error.set(Some(message));
                         }

@@ -244,6 +244,8 @@ impl AuthorizedThreadMove {
 pub struct IllegalPurgeV1 {
     pub topic: MessageId,
     pub message_ids: Vec<MessageId>,
+    #[serde(default)]
+    pub reason_code: crate::board_state::trash::ReasonCode,
     pub reason: String,
     pub content_hash: Option<[u8; 32]>,
     pub acted_at: i64,

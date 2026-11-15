@@ -12,8 +12,8 @@ use plaza_core::board_state::moderation::{
     ThreadMoveV1,
 };
 use plaza_core::board_state::trash::{
-    AuthorizedTrashAction, AuthorizedTrashItem, TrashActionKind, TrashActionV1, TrashDelta,
-    TrashItemV1,
+    AuthorizedTrashAction, AuthorizedTrashItem, ReasonCode, TrashActionKind, TrashActionV1,
+    TrashDelta, TrashItemV1,
 };
 use plaza_core::board_state::ChatBoardStateV1Delta;
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,12 @@ pub(crate) struct TrashBundleV1 {
     routes: Vec<plaza_core::board_state::moderation::AuthorizedMessageRoute>,
 }
 
-pub async fn hide_topic(ctx: &ActionContext, root: MessageId, reason: &str) -> Result<(), String> {
+pub async fn hide_topic(
+    ctx: &ActionContext,
+    root: MessageId,
+    reason: &str,
+    code: ReasonCode,
+) -> Result<(), String> {
     let self_id = plaza_core::board_state::member::MemberId::from(&ctx.self_sk.verifying_key());
     let is_owner = self_id == plaza_core::board_state::member::MemberId::from(&ctx.current_board);
     let is_admin = ctx
@@ -193,6 +198,7 @@ pub async fn hide_topic(ctx: &ActionContext, root: MessageId, reason: &str) -> R
         item_key_nonce,
         secret_version,
         hidden_at: chrono::Utc::now().timestamp(),
+        reason_code: code,
         reason: reason.to_string(),
         generation: 1,
     };
@@ -287,6 +293,7 @@ pub async fn restore_item(
             kind: TrashActionKind::Restore,
             generation: item.item.generation + 1,
             acted_at: chrono::Utc::now().timestamp(),
+            reason_code: ReasonCode::Other,
             reason: "restored by moderator".to_string(),
             content_hash: None,
         },
@@ -356,6 +363,7 @@ pub async fn purge_item(
     ctx: &ActionContext,
     item: &AuthorizedTrashItem,
     reason: &str,
+    code: ReasonCode,
 ) -> Result<(), String> {
     // Keep only a hash of the decrypted bundle in the audit. If the admin has
     // no trash key, the purge still proceeds with no content hash.
@@ -366,6 +374,7 @@ pub async fn purge_item(
         TrashActionV1 {
             item_id: item.item.id,
             kind: TrashActionKind::Purge,
+            reason_code: code,
             generation: item.item.generation + 1,
             acted_at: chrono::Utc::now().timestamp(),
             reason: reason.to_string(),
@@ -406,6 +415,7 @@ pub async fn purge_illegal(
     ctx: &ActionContext,
     topic: MessageId,
     reason: &str,
+    code: ReasonCode,
 ) -> Result<(), String> {
     let messages = ctx
         .board_state
@@ -443,6 +453,7 @@ pub async fn purge_illegal(
         plaza_core::board_state::moderation::IllegalPurgeV1 {
             topic,
             message_ids: descendants,
+            reason_code: code,
             reason: reason.to_string(),
             content_hash: Some(content_hash),
             acted_at: chrono::Utc::now().timestamp(),
@@ -559,4 +570,15 @@ pub async fn purge_illegal(
             ..Default::default()
         },
     )
+}
+
+pub fn parse_reason_code(code: &str) -> ReasonCode {
+    match code {
+        "illegal" => ReasonCode::Illegal,
+        "spam" => ReasonCode::Spam,
+        "harassment" => ReasonCode::Harassment,
+        "off_topic" => ReasonCode::OffTopic,
+        "rules" => ReasonCode::Rules,
+        _ => ReasonCode::Other,
+    }
 }
