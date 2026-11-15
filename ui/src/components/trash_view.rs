@@ -40,6 +40,7 @@ pub fn TrashView() -> Element {
             .any(|admin| admin.admin.id() == self_id);
     let mut restore_targets = use_signal(HashMap::<MessageId, MessageId>::new);
     let mut purge_target = use_signal(|| None::<AuthorizedTrashItem>);
+    let handled = use_signal(std::collections::HashSet::<MessageId>::new);
     let mut purge_reason_open = use_signal(|| false);
     let categories = data
         .board_state
@@ -65,6 +66,7 @@ pub fn TrashView() -> Element {
         .items
         .iter()
         .filter(|item| data.board_state.trash.active_item(&item.item.id).is_some())
+        .filter(|item| !handled.read().contains(&item.item.id))
         .cloned()
         .collect::<Vec<_>>();
     items.sort_by_key(|item| std::cmp::Reverse(item.item.hidden_at));
@@ -120,7 +122,12 @@ pub fn TrashView() -> Element {
                         if let Err(message) =
                             crate::util::trash_actions::purge_item(&ctx, &item, &reason, code).await
                         {
-                            error.set(Some(message));
+                            if is_stale(&message) {
+                                handled.write().insert(item.item.id);
+                                error.set(Some("This item was already handled. The list was refreshed.".to_string()));
+                            } else {
+                                error.set(Some(message));
+                            }
                         }
                     });
                 },
@@ -207,7 +214,12 @@ pub fn TrashView() -> Element {
                                                 crate::util::trash_actions::restore_item(&ctx, &item, destination)
                                                     .await
                                             {
-                                                error.set(Some(message));
+                                                if is_stale(&message) {
+                                                    handled.write().insert(item.item.id);
+                                                    error.set(Some("This item was already handled. The list was refreshed.".to_string()));
+                                                } else {
+                                                    error.set(Some(message));
+                                                }
                                             }
                                         });
                                     }
@@ -234,4 +246,9 @@ pub fn TrashView() -> Element {
             }
         }
     }
+}
+
+fn is_stale(message: &str) -> bool {
+    let message = message.to_lowercase();
+    message.contains("missing item") || message.contains("older") || message.contains("already")
 }
