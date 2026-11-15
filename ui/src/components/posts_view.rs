@@ -1669,6 +1669,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
 /// Single post view - displays a single post by ID with replies
 #[component]
 pub fn SinglePostView(post_id: String) -> Element {
+    let mut show_purge = use_signal(|| false);
     let hide_id = post_id.clone();
     let purge_id = post_id.clone();
     let debug_id = post_id.clone();
@@ -1921,14 +1922,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                     button {
                         r#type: "button",
                         class: "ml-2 px-3 py-1.5 text-xs rounded-md bg-red-700 hover:bg-red-600 text-white",
-                        onclick: move |_| {
-                            if let Some(key) = CURRENT_BOARD.read().owner_key {
-                                let board_id = bs58::encode(key.as_bytes()).into_string();
-                                if let Some(window) = web_sys::window() {
-                                    let _ = window.location().set_hash(&format!("/board/{board_id}/purge/{purge_id}"));
-                                }
-                            }
-                        },
+                        onclick: move |_| show_purge.set(true),
                         "Purge"
                     }
                     button {
@@ -1959,6 +1953,15 @@ pub fn SinglePostView(post_id: String) -> Element {
                             });
                         },
                         "Purge debug"
+                    }
+                }
+            }
+
+            if *show_purge.read() {
+                if let Some(key) = CURRENT_BOARD.read().owner_key {
+                    crate::components::purge_view::PurgeView {
+                        board_id: bs58::encode(key.as_bytes()).into_string(),
+                        post_id: post_id.clone(),
                     }
                 }
             }
