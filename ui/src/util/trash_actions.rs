@@ -4,12 +4,16 @@
 use crate::util::ecies::{decrypt_with_symmetric_key, encrypt_with_symmetric_key};
 use crate::util::message_actions::{apply_state_delta, ActionContext};
 use dioxus::prelude::*;
+use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::{
     AuthorizedMessageV1, BoardMessageBody, MessageId, MessageV1,
 };
 use plaza_core::board_state::moderation::{
     category_chain, AuthorizedMessageRoute, AuthorizedThreadMove, MessageRoute, ModerationDelta,
     ThreadMoveV1,
+};
+use plaza_core::board_state::pq_secrets::{
+    AuthorizedPqSecretSet, PqScope, PqSealedSecret, PqSecretSet, PqSecretsDelta,
 };
 use plaza_core::board_state::trash::{
     AuthorizedTrashAction, AuthorizedTrashItem, ReasonCode, TrashActionKind, TrashActionV1,
@@ -753,42 +757,85 @@ pub fn parse_reason_code(code: &str) -> ReasonCode {
     }
 }
 
-pub async fn grant_trash_access(
-    ctx: &ActionContext,
-    member: plaza_core::board_state::member::MemberId,
-) -> Result<(), String> {
-    use plaza_core::board_state::pq_secrets::{
-        AuthorizedPqSecretSet, PqScope, PqSecretSet, PqSecretsDelta,
-    };
-
-    let (secret_version, trash_key) = ctx.trash_secret.ok_or("You do not have the trash key")?;
-    let kem = ctx
-        .board_state
+/// Latest Trash key set on the board.
+fn latest_trash_set(state: &plaza_core::ChatBoardStateV1) -> Option<&AuthorizedPqSecretSet> {
+    state
         .pq_secrets
-        .key_for(member)
-        .ok_or("That member has no PQ key yet; they must open the board first")?;
-    let owner_id = plaza_core::board_state::member::MemberId::from(&ctx.current_board);
-    let vk = if member == owner_id {
+        .sets
+        .iter()
+        .filter(|entry| matches!(entry.set.scope, PqScope::Trash))
+        .max_by_key(|entry| entry.set.version)
+}
+
+/// Members that should hold the trash key: owner, admins and active trash roles.
+fn trash_managers(ctx: &ActionContext) -> std::collections::BTreeSet<MemberId> {
+    let owner_id = MemberId::from(&ctx.current_board);
+    let mut managers = std::collections::BTreeSet::new();
+    managers.insert(owner_id);
+    for admin in &ctx.board_state.admin.admins {
+        managers.insert(admin.admin.id());
+    }
+    for assignment in &ctx.board_state.roles.assignments {
+        if assignment.assignment.revoked {
+            continue;
+        }
+        if ctx.board_state.roles.roles.iter().any(|role| {
+            role.role.id == assignment.assignment.role_id
+                && role.role.can_manage_trash
+                && !role.role.deleted
+        }) {
+            managers.insert(assignment.assignment.member_id);
+        }
+    }
+    managers
+}
+
+fn seal_for_manager(
+    ctx: &ActionContext,
+    member: MemberId,
+    trash_key: &[u8; 32],
+) -> Option<PqSealedSecret> {
+    let kem = ctx.board_state.pq_secrets.key_for(member)?;
+    let vk = if member == MemberId::from(&ctx.current_board) {
         ctx.current_board
     } else {
         ctx.board_state
             .members
             .members
             .iter()
-            .find(|entry| entry.member.id() == member)
-            .map(|entry| entry.member.member_vk)
-            .ok_or("That member is not in the member list")?
+            .find(|entry| entry.member.id() == member)?
+            .member
+            .member_vk
     };
-    let sealed = crate::util::pq::seal_secret(&trash_key, &kem.ek, member, &vk)
-        .map_err(|error| format!("Could not seal the trash key: {error}"))?;
+    crate::util::pq::seal_secret(trash_key, &kem.ek, member, &vk).ok()
+}
 
-    let latest = ctx
-        .board_state
-        .pq_secrets
-        .sets
-        .iter()
-        .filter(|entry| matches!(entry.set.scope, PqScope::Trash))
-        .max_by_key(|entry| entry.set.version);
+/// Ask the synchronizer to GET every board, so a concurrent write shows up.
+fn request_board_refresh() {
+    use crate::components::app::freenet_api::freenet_synchronizer::SynchronizerMessage;
+    let tx = crate::components::app::SYNCHRONIZER
+        .read()
+        .get_message_sender();
+    let _ = tx.unbounded_send(SynchronizerMessage::RefreshAllBoards);
+}
+
+fn trash_set_has_member(state: &plaza_core::ChatBoardStateV1, member: MemberId) -> bool {
+    latest_trash_set(state)
+        .map(|entry| {
+            entry
+                .set
+                .secrets
+                .iter()
+                .any(|secret| secret.member_id == member)
+        })
+        .unwrap_or(false)
+}
+
+fn grant_trash_once(ctx: &ActionContext, member: MemberId) -> Result<(), String> {
+    let (secret_version, trash_key) = ctx.trash_secret.ok_or("You do not have the trash key")?;
+    let sealed = seal_for_manager(ctx, member, &trash_key)
+        .ok_or("That member has no PQ key yet; they must open the board first")?;
+    let latest = latest_trash_set(&ctx.board_state);
     let mut secrets = latest
         .map(|entry| entry.set.secrets.clone())
         .unwrap_or_default();
@@ -817,31 +864,93 @@ pub async fn grant_trash_access(
     )
 }
 
+pub async fn grant_trash_access(ctx: &ActionContext, member: MemberId) -> Result<(), String> {
+    grant_trash_once(ctx, member)?;
+    // Two managers can write the same set version. Refresh once and, if the
+    // board kept the other set, grant again on top of the winning one.
+    let board = ctx.current_board;
+    wasm_bindgen_futures::spawn_local(async move {
+        crate::util::sleep(std::time::Duration::from_secs(3)).await;
+        request_board_refresh();
+        crate::util::sleep(std::time::Duration::from_secs(4)).await;
+        let Some(ctx) = ActionContext::from_current_board() else {
+            return;
+        };
+        if ctx.current_board != board || trash_set_has_member(&ctx.board_state, member) {
+            return;
+        }
+        if let Err(error) = grant_trash_once(&ctx, member) {
+            dioxus::logger::tracing::warn!("trash grant retry failed: {error}");
+        }
+    });
+    Ok(())
+}
+
+/// Seal the current trash key to every manager that has a PQ key. One set, so
+/// a missed grant after a concurrent update is repaired in a single action.
+pub fn grant_missing_trash_access(ctx: &ActionContext) -> Result<usize, String> {
+    let (secret_version, trash_key) = ctx.trash_secret.ok_or("You do not have the trash key")?;
+    let latest = latest_trash_set(&ctx.board_state);
+    let mut secrets = Vec::new();
+    for manager in trash_managers(ctx) {
+        if let Some(record) = seal_for_manager(ctx, manager, &trash_key) {
+            secrets.push(record);
+        }
+    }
+    if secrets.is_empty() {
+        return Err("No manager has a PQ key yet".to_string());
+    }
+    let sealed_count = secrets.len();
+    let version = latest.map(|entry| entry.set.version).unwrap_or(0) + 1;
+    let set = AuthorizedPqSecretSet::new(
+        PqSecretSet {
+            scope: PqScope::Trash,
+            version,
+            secret_version,
+            secrets,
+        },
+        &ctx.self_sk,
+    )
+    .with_optional_authority(trash_authority(ctx));
+    apply_state_delta(
+        ctx,
+        ChatBoardStateV1Delta {
+            pq_secrets: Some(PqSecretsDelta {
+                keys: Vec::new(),
+                sets: vec![set],
+            }),
+            ..Default::default()
+        },
+    )?;
+    Ok(sealed_count)
+}
+
 /// Remove a member from the trash key set and rotate the key. The member keeps
 /// the keys they already opened, so old items stay readable for them; items
 /// hidden after this point are sealed with the new key only.
 pub async fn revoke_trash_access(
     ctx: &ActionContext,
-    member: plaza_core::board_state::member::MemberId,
+    member: MemberId,
 ) -> Result<(), String> {
-    use plaza_core::board_state::pq_secrets::{
-        AuthorizedPqSecretSet, PqScope, PqSecretSet, PqSecretsDelta,
-    };
-    use std::collections::BTreeSet;
-
-    let owner_id = plaza_core::board_state::member::MemberId::from(&ctx.current_board);
+    let owner_id = MemberId::from(&ctx.current_board);
     if member == owner_id {
         return Err("The owner always keeps the trash key".to_string());
     }
-    let (_, _) = ctx.trash_secret.ok_or("You do not have the trash key")?;
-    let latest = ctx
+    // Rotation creates a new key. Two managers rotating at the same time would
+    // seal items with rival keys under one secret_version, so keep it to a
+    // single actor: the owner or an admin.
+    let signer = MemberId::from(&ctx.self_sk.verifying_key());
+    let signer_is_admin = ctx
         .board_state
-        .pq_secrets
-        .sets
+        .admin
+        .admins
         .iter()
-        .filter(|entry| matches!(entry.set.scope, PqScope::Trash))
-        .max_by_key(|entry| entry.set.version)
-        .ok_or("This board has no trash key yet")?;
+        .any(|admin| admin.admin.id() == signer);
+    if signer != owner_id && !signer_is_admin {
+        return Err("Only the owner or an admin can rotate the trash key".to_string());
+    }
+    let (_, _) = ctx.trash_secret.ok_or("You do not have the trash key")?;
+    let latest = latest_trash_set(&ctx.board_state).ok_or("This board has no trash key yet")?;
     if !latest
         .set
         .secrets
@@ -852,47 +961,14 @@ pub async fn revoke_trash_access(
     }
 
     // Keep the key for the owner, the admins and the remaining trash managers.
-    let mut managers: BTreeSet<plaza_core::board_state::member::MemberId> = BTreeSet::new();
-    managers.insert(owner_id);
-    for admin in &ctx.board_state.admin.admins {
-        managers.insert(admin.admin.id());
-    }
-    for assignment in &ctx.board_state.roles.assignments {
-        if assignment.assignment.revoked {
-            continue;
-        }
-        if ctx.board_state.roles.roles.iter().any(|role| {
-            role.role.id == assignment.assignment.role_id
-                && role.role.can_manage_trash
-                && !role.role.deleted
-        }) {
-            managers.insert(assignment.assignment.member_id);
-        }
-    }
+    let mut managers = trash_managers(ctx);
     managers.remove(&member);
 
     let secret_version = latest.set.secret_version + 1;
     let trash_key = rand::random::<[u8; 32]>();
     let mut secrets = Vec::new();
-    for manager in &managers {
-        let Some(kem) = ctx.board_state.pq_secrets.key_for(*manager) else {
-            continue;
-        };
-        let vk = if *manager == owner_id {
-            ctx.current_board
-        } else {
-            match ctx
-                .board_state
-                .members
-                .members
-                .iter()
-                .find(|entry| entry.member.id() == *manager)
-            {
-                Some(entry) => entry.member.member_vk,
-                None => continue,
-            }
-        };
-        if let Ok(record) = crate::util::pq::seal_secret(&trash_key, &kem.ek, *manager, &vk) {
+    for manager in managers {
+        if let Some(record) = seal_for_manager(ctx, manager, &trash_key) {
             secrets.push(record);
         }
     }

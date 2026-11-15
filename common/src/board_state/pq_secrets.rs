@@ -162,10 +162,17 @@ pub struct PqSecretsV1 {
     pub sets: Vec<AuthorizedPqSecretSet>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct PqSecretSetSummary {
+    pub version: u32,
+    pub secret_version: u32,
+    pub digest: u64,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct PqSecretsSummary {
     pub keys: BTreeMap<MemberId, u64>,
-    pub sets: BTreeMap<PqScope, u32>,
+    pub sets: BTreeMap<PqScope, PqSecretSetSummary>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -182,9 +189,26 @@ fn key_map(keys: &[AuthorizedPqMemberKey]) -> BTreeMap<MemberId, u64> {
         .collect()
 }
 
-fn set_map(sets: &[AuthorizedPqSecretSet]) -> BTreeMap<PqScope, u32> {
+/// Deterministic digest of a set, used to order sets that share a version so
+/// every peer converges on the same winner after a concurrent update.
+fn set_digest(entry: &AuthorizedPqSecretSet) -> u64 {
+    let mut bytes = Vec::new();
+    let _ = ciborium::ser::into_writer(entry, &mut bytes);
+    freenet_scaffold::util::fast_hash(&bytes).0 as u64
+}
+
+fn set_map(sets: &[AuthorizedPqSecretSet]) -> BTreeMap<PqScope, PqSecretSetSummary> {
     sets.iter()
-        .map(|entry| (entry.set.scope.clone(), entry.set.version))
+        .map(|entry| {
+            (
+                entry.set.scope.clone(),
+                PqSecretSetSummary {
+                    version: entry.set.version,
+                    secret_version: entry.set.secret_version,
+                    digest: set_digest(entry),
+                },
+            )
+        })
         .collect()
 }
 
@@ -448,7 +472,11 @@ impl ComposableState for PqSecretsV1 {
                 old_state
                     .sets
                     .get(&entry.set.scope)
-                    .map(|old| *old < entry.set.version)
+                    .map(|old| {
+                        old.version < entry.set.version
+                            || (old.version == entry.set.version
+                                && old.digest != set_digest(entry))
+                    })
                     .unwrap_or(true)
             })
             .cloned()
@@ -498,7 +526,12 @@ impl ComposableState for PqSecretsV1 {
                 .iter()
                 .find(|existing| existing.set.scope == entry.set.scope)
             {
-                Some(existing) if existing.set.version >= entry.set.version => {}
+                // Equal versions are ordered by digest so two managers that
+                // wrote the same version converge on the same set everywhere.
+                Some(existing)
+                    if existing.set.version > entry.set.version
+                        || (existing.set.version == entry.set.version
+                            && set_digest(existing) >= set_digest(entry)) => {}
                 _ => {
                     candidate
                         .sets
@@ -654,6 +687,76 @@ mod tests {
         bad.signature = sign_struct(&bad.key, &member_sk);
         state.pq_secrets.keys.push(bad);
         assert!(state.pq_secrets.verify(&state, &parameters).is_err());
+    }
+
+    #[test]
+    fn equal_version_sets_converge_on_the_greater_digest() {
+        let (state, parameters, owner_sk, member_sk, member_id) = board();
+        let mut base = state.clone();
+        base.pq_secrets.keys.push(key(member_id, &member_sk));
+
+        let set_a = set(member_id, &owner_sk);
+        let mut set_b_secret = set(member_id, &owner_sk);
+        set_b_secret.set.secrets[0].sealed = vec![3u8; PQ_MIN_SEALED_LEN];
+        let set_b = AuthorizedPqSecretSet::new(set_b_secret.set.clone(), &owner_sk);
+        assert_ne!(set_digest(&set_a), set_digest(&set_b));
+
+        let delta_a = PqSecretsDelta {
+            keys: Vec::new(),
+            sets: vec![set_a.clone()],
+        };
+        let delta_b = PqSecretsDelta {
+            keys: Vec::new(),
+            sets: vec![set_b.clone()],
+        };
+
+        let mut ab = base.clone();
+        ab.pq_secrets
+            .apply_delta(&base, &parameters, &Some(delta_a.clone()))
+            .unwrap();
+        ab.pq_secrets
+            .apply_delta(&base, &parameters, &Some(delta_b.clone()))
+            .unwrap();
+
+        let mut ba = base.clone();
+        ba.pq_secrets
+            .apply_delta(&base, &parameters, &Some(delta_b))
+            .unwrap();
+        ba.pq_secrets
+            .apply_delta(&base, &parameters, &Some(delta_a))
+            .unwrap();
+
+        assert_eq!(
+            ab.pq_secrets.sets, ba.pq_secrets.sets,
+            "both apply orders keep the same set"
+        );
+        let winner = if set_digest(&set_a) >= set_digest(&set_b) {
+            &set_a
+        } else {
+            &set_b
+        };
+        assert_eq!(set_digest(&ab.pq_secrets.sets[0]), set_digest(winner));
+    }
+
+    #[test]
+    fn delta_carries_an_equal_version_set_with_another_digest() {
+        let (state, parameters, owner_sk, member_sk, member_id) = board();
+        let mut local = state.clone();
+        local.pq_secrets.keys.push(key(member_id, &member_sk));
+        local.pq_secrets.sets = vec![set(member_id, &owner_sk)];
+
+        let mut remote = local.clone();
+        let mut other_secret = set(member_id, &owner_sk);
+        other_secret.set.secrets[0].sealed = vec![3u8; PQ_MIN_SEALED_LEN];
+        remote.pq_secrets.sets =
+            vec![AuthorizedPqSecretSet::new(other_secret.set.clone(), &owner_sk)];
+
+        let summary = local.pq_secrets.summarize(&local, &parameters);
+        let delta = remote.pq_secrets.delta(&local, &parameters, &summary);
+        assert!(
+            delta.is_some(),
+            "an equal-version set with a different digest must travel"
+        );
     }
 
     fn trash_manager_state() -> (

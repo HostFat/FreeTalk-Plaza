@@ -184,7 +184,7 @@ pub fn TrashView() -> Element {
                             for member in key_holders {
                                 span { class: "flex items-center gap-1 bg-surface rounded px-2 py-0.5 text-xs text-text-muted",
                                     "{member_name(&data, member)}"
-                                    if member != owner_id {
+                                    if member != owner_id && is_owner_or_admin {
                                         button {
                                             r#type: "button",
                                             class: "text-red-400",
@@ -227,6 +227,11 @@ pub fn TrashView() -> Element {
                     }
                     p { class: "text-xs text-text-muted",
                         "Share the trash key with the other moderators so they can preview and restore items. A member has to have opened this board once. Removing a member rotates the key: they keep what they already opened, and new items stay sealed to the remaining managers."
+                    }
+                    if can_grant && !is_owner_or_admin {
+                        p { class: "text-xs text-text-muted",
+                            "Only the owner or an admin can rotate the key. You can still share the current key."
+                        }
                     }
                     if !has_current_key {
                         p { class: "text-xs text-amber-400",
@@ -294,6 +299,27 @@ pub fn TrashView() -> Element {
                             p { class: "text-xs text-text-muted",
                                 "This member has not published a PQ key yet. They get one after opening the board with the trash role."
                             }
+                        }
+                    }
+                    if has_current_key {
+                        button {
+                            r#type: "button",
+                            class: "text-xs text-accent hover:underline",
+                            title: "Re-seal the current key to every moderator who has a PQ key",
+                            onclick: move |_| {
+                                let Some(ctx) = ActionContext::from_current_board() else {
+                                    return;
+                                };
+                                grant_notice.set(None);
+                                error.set(None);
+                                match crate::util::trash_actions::grant_missing_trash_access(&ctx) {
+                                    Ok(count) => grant_notice.set(Some(format!(
+                                        "Trash key shared with {count} moderators."
+                                    ))),
+                                    Err(message) => error.set(Some(message)),
+                                }
+                            },
+                            "Share the key with all moderators"
                         }
                     }
                     if let Some(message) = grant_notice.read().as_ref() {
