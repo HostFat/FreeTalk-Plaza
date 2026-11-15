@@ -582,7 +582,9 @@ pub async fn purge_illegal(
             {
                 let mut chain = Vec::new();
                 let mut inviter = target.member.invited_by;
-                while inviter != owner_id {
+                let mut guard = 0;
+                while inviter != owner_id && guard < 64 {
+                    guard += 1;
                     let Some(member) = ctx
                         .board_state
                         .members
