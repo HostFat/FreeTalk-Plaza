@@ -196,6 +196,40 @@ pub fn BoardList() -> Element {
                             }
                         }
 
+                        // Leave the current board on this device.
+                        if let Some(board_key) = CURRENT_BOARD.read().owner_key {
+                            button {
+                                class: "w-full flex items-center gap-4 px-6 py-4 border-t border-border text-red-400 hover:bg-red-500/10 transition-colors",
+                                onclick: move |_| {
+                                    let confirmed = window()
+                                        .and_then(|window| {
+                                            window
+                                                .confirm_with_message(
+                                                    "Remove this board from this device? Your member record stays on the network.",
+                                                )
+                                                .ok()
+                                        })
+                                        .unwrap_or(false);
+                                    if !confirmed {
+                                        return;
+                                    }
+                                    BOARDS.write().map.remove(&board_key);
+                                    if CURRENT_BOARD.read().owner_key == Some(board_key) {
+                                        CURRENT_BOARD.write().owner_key = None;
+                                    }
+                                    is_open.set(false);
+                                    wasm_bindgen_futures::spawn_local(async {
+                                        let _ = save_boards_to_delegate().await;
+                                    });
+                                    if let Some(window) = window() {
+                                        let _ = window.location().set_hash("/");
+                                    }
+                                },
+                                Icon { width: 32, height: 32, icon: FaFileImport }
+                                span { class: "text-2xl", "Leave board" }
+                            }
+                        }
+
                         // Create board button
                         button {
                             class: "w-full flex items-center gap-4 px-6 py-4 border-t border-border text-text-muted hover:text-accent hover:bg-surface transition-colors",
