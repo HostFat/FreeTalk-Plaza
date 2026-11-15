@@ -789,3 +789,15 @@ pub fn ask_confirmation_word(word: &str) -> bool {
         .map(|value| value.trim() == word)
         .unwrap_or(false)
 }
+
+/// Run work after the current event handler returns. Native dialogs block the
+/// Dioxus handler; scheduling on the next tick lets the async action start.
+pub fn run_later<F: FnOnce() + 'static>(work: F) {
+    use wasm_bindgen::JsCast;
+    let callback =
+        wasm_bindgen::closure::Closure::once_into_js(Box::new(work) as Box<dyn FnOnce()>);
+    if let Some(window) = web_sys::window() {
+        let _ = window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(callback.unchecked_ref(), 0);
+    }
+}

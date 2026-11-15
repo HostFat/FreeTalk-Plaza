@@ -1894,7 +1894,8 @@ pub fn SinglePostView(post_id: String) -> Element {
                             else {
                                 return;
                             };
-                            spawn(async move {
+                            crate::util::trash_actions::run_later(move || {
+                                spawn(async move {
                                 if let Some(ctx) = ActionContext::from_current_board() {
                                     match crate::util::trash_actions::hide_topic(&ctx, id, &reason, code).await {
                                         Ok(()) => {
@@ -1909,6 +1910,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                                         }
                                     }
                                 }
+                                });
                             });
                         },
                         "Hide"
@@ -1930,21 +1932,23 @@ pub fn SinglePostView(post_id: String) -> Element {
                             if !crate::util::trash_actions::ask_confirmation_word("PURGE") {
                                 return;
                             }
-                            spawn(async move {
-                                if let Some(ctx) = ActionContext::from_current_board() {
-                                    match crate::util::trash_actions::purge_illegal(&ctx, id, &reason, code).await {
-                                        Ok(()) => {
-                                            if let Some(history) = web_sys::window().and_then(|w| w.history().ok()) {
-                                                let _ = history.back();
+                            crate::util::trash_actions::run_later(move || {
+                                spawn(async move {
+                                    if let Some(ctx) = ActionContext::from_current_board() {
+                                        match crate::util::trash_actions::purge_illegal(&ctx, id, &reason, code).await {
+                                            Ok(()) => {
+                                                if let Some(history) = web_sys::window().and_then(|w| w.history().ok()) {
+                                                    let _ = history.back();
+                                                }
                                             }
-                                        }
-                                        Err(error) => {
-                                            if let Some(window) = web_sys::window() {
-                                                let _ = window.alert_with_message(&error);
+                                            Err(error) => {
+                                                if let Some(window) = web_sys::window() {
+                                                    let _ = window.alert_with_message(&error);
+                                                }
                                             }
                                         }
                                     }
-                                }
+                                });
                             });
                         },
                         "Purge"
