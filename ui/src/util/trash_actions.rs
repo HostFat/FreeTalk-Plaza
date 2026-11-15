@@ -549,7 +549,10 @@ pub async fn purge_illegal(
             },
             &ctx.self_sk,
         );
+        *crate::components::app::PURGE_STEP.write() = "replacement-message".to_string();
         let replacement_id = replacement.id();
+        *crate::components::app::PURGE_STEP.write() = "replacement-id".to_string();
+        *crate::components::app::PURGE_STEP.write() = "replacement-route".to_string();
         routes.push(AuthorizedMessageRoute::new(
             MessageRoute {
                 message_id: replacement_id,
@@ -563,6 +566,7 @@ pub async fn purge_illegal(
             &ctx.self_sk,
         ));
         messages.push(replacement);
+        *crate::components::app::PURGE_STEP.write() = "replacement-pushed".to_string();
     }
 
     log_debug("purge: replacement built, building ban");
