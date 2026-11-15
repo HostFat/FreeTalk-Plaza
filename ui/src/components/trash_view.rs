@@ -139,7 +139,20 @@ pub fn TrashView() -> Element {
         div { class: "space-y-3",
             div { class: "flex items-center justify-between",
                 h2 { class: "text-lg font-semibold text-text", "Trash" }
-                span { class: "text-sm text-text-muted", "{items.len()} items" }
+                div { class: "flex items-center gap-3",
+                    span { class: "text-sm text-text-muted", "{items.len()} items" }
+                    button {
+                        r#type: "button",
+                        class: "px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
+                        title: "Reload the board state from the local node",
+                        onclick: move |_| {
+                            if let Some(window) = web_sys::window() {
+                                let _ = window.location().reload();
+                            }
+                        },
+                        "Refresh"
+                    }
+                }
             }
             p { class: "text-sm text-text-muted",
                 "Hidden topics stay encrypted here until a moderator restores or purges them. Purge is reserved for the owner and admins."
