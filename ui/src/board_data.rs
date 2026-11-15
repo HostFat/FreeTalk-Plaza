@@ -1772,6 +1772,10 @@ pub struct Boards {
     pub map: HashMap<VerifyingKey, BoardData>,
     #[serde(default)]
     pub current_board_key: Option<VerifyingKey>,
+    /// Boards the user left on this device. A stale tab must not resurrect
+    /// them when its save merges the stored map.
+    #[serde(default)]
+    pub removed: Vec<VerifyingKey>,
     /// Boards whose contract key changed due to WASM update.
     /// Each entry is (owner_vk, old_contract_key) for boards where the owner
     /// should send an upgrade pointer to the old contract.
@@ -1781,7 +1785,7 @@ pub struct Boards {
 
 impl PartialEq for Boards {
     fn eq(&self, other: &Self) -> bool {
-        self.map == other.map
+        self.map == other.map && self.removed == other.removed
     }
 }
 
@@ -1954,6 +1958,7 @@ impl Boards {
         }
 
         info!("🟢 Inserting board into map...");
+        self.removed.retain(|vk| *vk != owner_vk);
         self.map.insert(owner_vk, board_data);
         info!("🟢 create_new_board_with_name completed successfully, returning owner_vk");
         owner_vk
@@ -1961,7 +1966,17 @@ impl Boards {
 
     /// Merge the other Boards into this Boards (eg. when Boards are loaded from storage)
     pub fn merge(&mut self, other: Boards) -> Result<(), String> {
+        // A board the user left stays gone even when an older snapshot still
+        // carries it.
+        for key in other.removed {
+            if !self.removed.contains(&key) {
+                self.removed.push(key);
+            }
+        }
         for (vk, mut board_data) in other.map {
+            if self.removed.contains(&vk) {
+                continue;
+            }
             // Signing paths use owner_vk as the delegate board key. An entry whose
             // field disagrees with its map key signs with the wrong key, and the
             // contract rejects every update. Repair it when the stored state
@@ -2040,6 +2055,7 @@ mod tests {
             let mut boards = Boards {
                 map: HashMap::new(),
                 current_board_key: None,
+                removed: Vec::new(),
                 migrated_boards: vec![],
             };
             let key = boards.create_new_board_with_name(
@@ -2080,6 +2096,7 @@ mod tests {
         let mut boards = Boards {
             map: HashMap::new(),
             current_board_key: None,
+            removed: Vec::new(),
             migrated_boards: vec![],
         };
 
@@ -2296,6 +2313,7 @@ mod tests {
         let mut boards = Boards {
             map: HashMap::new(),
             current_board_key: None,
+            removed: Vec::new(),
             migrated_boards: vec![],
         };
         let key = boards.create_new_board_with_name(

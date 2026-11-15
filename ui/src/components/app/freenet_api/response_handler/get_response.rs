@@ -119,6 +119,8 @@ pub async fn handle_get_response(
             // Update the board data
             crate::util::defer(move || {
                 BOARDS.with_mut(|boards| {
+                // Joining or importing a board clears a previous Leave.
+                boards.removed.retain(|vk| *vk != owner_vk);
                 // Get the entry for this board
                 let entry = boards.map.entry(owner_vk);
 

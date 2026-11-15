@@ -135,7 +135,13 @@ pub fn BoardList() -> Element {
                                 if !confirmed {
                                     return;
                                 }
-                                BOARDS.write().map.remove(&board_key);
+                                {
+                                    let mut boards = BOARDS.write();
+                                    boards.map.remove(&board_key);
+                                    if !boards.removed.contains(&board_key) {
+                                        boards.removed.push(board_key);
+                                    }
+                                }
                                 if CURRENT_BOARD.read().owner_key == Some(board_key) {
                                     CURRENT_BOARD.write().owner_key = None;
                                 }

@@ -41,6 +41,7 @@ pub fn create_example_boards() -> Boards {
     Boards {
         map,
         current_board_key: None,
+        removed: Vec::new(),
         migrated_boards: Vec::new(),
     }
 }

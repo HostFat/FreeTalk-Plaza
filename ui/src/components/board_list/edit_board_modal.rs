@@ -200,7 +200,13 @@ pub fn EditBoardModal() -> Element {
 
                                             if let Some(board_vk) = board_vk_to_remove {
                                                 // Perform writes *after* the read borrow is dropped
-                                                BOARDS.write().map.remove(&board_vk);
+                                                {
+                                                    let mut boards = BOARDS.write();
+                                                    boards.map.remove(&board_vk);
+                                                    if !boards.removed.contains(&board_vk) {
+                                                        boards.removed.push(board_vk);
+                                                    }
+                                                }
 
                                                 // Check and potentially clear CURRENT_BOARD
                                                 if CURRENT_BOARD.read().owner_key == Some(board_vk) {

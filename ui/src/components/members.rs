@@ -503,6 +503,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
 
                 // Add to BOARDS and trigger sync
                 BOARDS.with_mut(|boards| {
+                    boards.removed.retain(|vk| *vk != owner_key);
                     boards.map.insert(owner_key, board_data);
                 });
 
