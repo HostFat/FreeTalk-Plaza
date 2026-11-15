@@ -2917,6 +2917,7 @@ fn moderation_record_with_historical_authority_converges() {
             routes: Vec::new(),
             feature_flags: vec![flag],
             thread_moves: Vec::new(),
+            illegal_purges: Vec::new(),
             moves: Vec::new(),
         }),
         ..Default::default()
