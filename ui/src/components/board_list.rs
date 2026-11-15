@@ -102,9 +102,11 @@ pub fn BoardList() -> Element {
         div { class: "relative w-full",
             // Dropdown trigger button - current board display
             div { class: "flex justify-center",
-                button {
-                    class: "w-full md:w-auto flex items-center gap-3 md:gap-6 px-4 md:px-6 py-3 md:py-4 bg-panel text-text hover:bg-surface transition-colors",
+                div {
+                    class: "w-full md:w-auto flex items-center gap-3 md:gap-6 px-4 md:px-6 py-3 md:py-4 bg-panel text-text hover:bg-surface transition-colors cursor-pointer",
                     style: "min-width: min(100vw, 60vw); max-width: 100vw;",
+                    role: "button",
+                    tabindex: "0",
                     onclick: move |_| {
                         is_open.set(!is_open());
                     },
@@ -114,6 +116,40 @@ pub fn BoardList() -> Element {
                         alt: "",
                     }
                     span { class: "flex-1 text-left text-lg sm:text-2xl md:text-4xl font-medium leading-tight whitespace-normal break-words", "{current_board_name}" }
+                    if let Some(board_key) = CURRENT_BOARD.read().owner_key {
+                        button {
+                            r#type: "button",
+                            class: "px-2 py-1 text-xs rounded-md bg-red-500/10 text-red-400 hover:bg-red-500/20",
+                            title: "Remove this board from this device",
+                            onclick: move |event| {
+                                event.stop_propagation();
+                                let confirmed = window()
+                                    .and_then(|window| {
+                                        window
+                                            .confirm_with_message(
+                                                "Remove this board from this device? Your member record stays on the network.",
+                                            )
+                                            .ok()
+                                    })
+                                    .unwrap_or(false);
+                                if !confirmed {
+                                    return;
+                                }
+                                BOARDS.write().map.remove(&board_key);
+                                if CURRENT_BOARD.read().owner_key == Some(board_key) {
+                                    CURRENT_BOARD.write().owner_key = None;
+                                }
+                                is_open.set(false);
+                                wasm_bindgen_futures::spawn_local(async {
+                                    let _ = save_boards_to_delegate().await;
+                                });
+                                if let Some(window) = window() {
+                                    let _ = window.location().set_hash("/");
+                                }
+                            },
+                            "Leave"
+                        }
+                    }
                     Icon {
                         width: 16,
                         height: 16,
@@ -193,40 +229,6 @@ pub fn BoardList() -> Element {
                                 div { class: "px-6 py-8 text-xl text-text-muted text-center",
                                     "No boards yet"
                                 }
-                            }
-                        }
-
-                        // Leave the current board on this device.
-                        if let Some(board_key) = CURRENT_BOARD.read().owner_key {
-                            button {
-                                class: "w-full flex items-center gap-4 px-6 py-4 border-t border-border text-red-400 hover:bg-red-500/10 transition-colors",
-                                onclick: move |_| {
-                                    let confirmed = window()
-                                        .and_then(|window| {
-                                            window
-                                                .confirm_with_message(
-                                                    "Remove this board from this device? Your member record stays on the network.",
-                                                )
-                                                .ok()
-                                        })
-                                        .unwrap_or(false);
-                                    if !confirmed {
-                                        return;
-                                    }
-                                    BOARDS.write().map.remove(&board_key);
-                                    if CURRENT_BOARD.read().owner_key == Some(board_key) {
-                                        CURRENT_BOARD.write().owner_key = None;
-                                    }
-                                    is_open.set(false);
-                                    wasm_bindgen_futures::spawn_local(async {
-                                        let _ = save_boards_to_delegate().await;
-                                    });
-                                    if let Some(window) = window() {
-                                        let _ = window.location().set_hash("/");
-                                    }
-                                },
-                                Icon { width: 32, height: 32, icon: FaFileImport }
-                                span { class: "text-2xl", "Leave board" }
                             }
                         }
 
