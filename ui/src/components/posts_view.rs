@@ -1962,7 +1962,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                             let Ok(id) = debug_id.parse::<MessageId>() else {
                                 return;
                             };
-                            spawn(async move {
+                            wasm_bindgen_futures::spawn_local(async move {
                                 if let Some(ctx) = ActionContext::from_current_board() {
                                     if let Err(error) = crate::util::trash_actions::purge_illegal(
                                         &ctx,
