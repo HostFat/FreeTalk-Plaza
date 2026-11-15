@@ -248,11 +248,11 @@ pub fn AuditView() -> Element {
                         class: "bg-panel border border-border rounded-md px-2 py-1 text-xs text-text",
                         onchange: move |event| purge_filter.set(event.value()),
                         option { value: "", "All reasons" }
-                        option { value: "illegal", "Illegal" }
+                        option { value: "illegal", "Severe rule violation" }
                         option { value: "spam", "Spam" }
                         option { value: "harassment", "Harassment" }
                         option { value: "off_topic", "Off-topic" }
-                        option { value: "rules", "Rules" }
+                        option { value: "rules", "Other rule violation" }
                         option { value: "other", "Other" }
                     }
                 }

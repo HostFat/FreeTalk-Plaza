@@ -1671,8 +1671,6 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
 pub fn SinglePostView(post_id: String) -> Element {
     let hide_id = post_id.clone();
     let purge_id = post_id.clone();
-    let mut hide_reason_open = use_signal(|| false);
-    let mut illegal_reason_open = use_signal(|| false);
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
 
     // Get current board_id for navigation
@@ -1887,7 +1885,28 @@ pub fn SinglePostView(post_id: String) -> Element {
                     button {
                         r#type: "button",
                         class: "ml-auto px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
-                        onclick: move |_| hide_reason_open.set(true),
+                        onclick: move |_| {
+                            let Some(id) = hide_id.parse::<MessageId>().ok() else {
+                                return;
+                            };
+                            let Some((code, reason)) =
+                                crate::util::trash_actions::ask_reason("severe")
+                            else {
+                                return;
+                            };
+                            spawn(async move {
+                                if let Some(ctx) = ActionContext::from_current_board() {
+                                    match crate::util::trash_actions::hide_topic(&ctx, id, &reason, code).await {
+                                        Ok(()) => {
+                                            if let Some(history) = web_sys::window().and_then(|w| w.history().ok()) {
+                                                let _ = history.back();
+                                            }
+                                        }
+                                        Err(error) => warn!("Could not hide topic: {error}"),
+                                    }
+                                }
+                            });
+                        },
                         "Hide"
                     }
                 }
@@ -1895,56 +1914,34 @@ pub fn SinglePostView(post_id: String) -> Element {
                     button {
                         r#type: "button",
                         class: "ml-2 px-3 py-1.5 text-xs rounded-md bg-red-700 hover:bg-red-600 text-white",
-                        onclick: move |_| illegal_reason_open.set(true),
+                        onclick: move |_| {
+                            let Some(id) = purge_id.parse::<MessageId>().ok() else {
+                                return;
+                            };
+                            let Some((code, reason)) =
+                                crate::util::trash_actions::ask_reason("severe")
+                            else {
+                                return;
+                            };
+                            if !crate::util::trash_actions::ask_confirmation_word("PURGE") {
+                                return;
+                            }
+                            spawn(async move {
+                                if let Some(ctx) = ActionContext::from_current_board() {
+                                    match crate::util::trash_actions::purge_illegal(&ctx, id, &reason, code).await {
+                                        Ok(()) => {
+                                            if let Some(history) = web_sys::window().and_then(|w| w.history().ok()) {
+                                                let _ = history.back();
+                                            }
+                                        }
+                                        Err(error) => warn!("Could not purge topic: {error}"),
+                                    }
+                                }
+                            });
+                        },
                         "Purge"
                     }
                 }
-            }
-
-            crate::components::reason_dialog::ReasonDialog {
-                open: hide_reason_open,
-                title: "Hide topic".to_string(),
-                on_confirm: move |(code, reason): (String, String)| {
-                    let Some(id) = hide_id.parse::<MessageId>().ok() else {
-                        return;
-                    };
-                    let code = crate::util::trash_actions::parse_reason_code(&code);
-                    spawn(async move {
-                        if let Some(ctx) = ActionContext::from_current_board() {
-                            match crate::util::trash_actions::hide_topic(&ctx, id, &reason, code).await {
-                                Ok(()) => {
-                                    if let Some(history) = web_sys::window().and_then(|w| w.history().ok()) {
-                                        let _ = history.back();
-                                    }
-                                }
-                                Err(error) => warn!("Could not hide topic: {error}"),
-                            }
-                        }
-                    });
-                },
-            }
-            crate::components::reason_dialog::ReasonDialog {
-                open: illegal_reason_open,
-                title: "Purge content".to_string(),
-                confirm_word: Some("PURGE".to_string()),
-                on_confirm: move |(code, reason): (String, String)| {
-                    let Some(id) = purge_id.parse::<MessageId>().ok() else {
-                        return;
-                    };
-                    let code = crate::util::trash_actions::parse_reason_code(&code);
-                    spawn(async move {
-                        if let Some(ctx) = ActionContext::from_current_board() {
-                            match crate::util::trash_actions::purge_illegal(&ctx, id, &reason, code).await {
-                                Ok(()) => {
-                                    if let Some(history) = web_sys::window().and_then(|w| w.history().ok()) {
-                                        let _ = history.back();
-                                    }
-                                }
-                                Err(error) => warn!("Could not purge topic: {error}"),
-                            }
-                        }
-                    });
-                },
             }
 
             // Post content and replies

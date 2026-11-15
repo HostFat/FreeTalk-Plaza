@@ -693,3 +693,45 @@ pub async fn grant_trash_access(
 fn public_replacement_body(title: String, text: String) -> BoardMessageBody {
     BoardMessageBody::public(title, text)
 }
+
+/// Native fallback used while the custom modal has an event-handling issue.
+pub fn ask_reason(default: &str) -> Option<(ReasonCode, String)> {
+    let window = web_sys::window()?;
+    let text = window
+        .prompt_with_message(&format!(
+            "Reason (severe = severe rule violation, spam, harassment, off_topic, rules). Add details after the code. Default: {default}"
+        ))
+        .ok()
+        .flatten()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_lowercase();
+    let code = if lower.starts_with("severe") || lower.starts_with("illegal") {
+        ReasonCode::Illegal
+    } else if lower.starts_with("spam") {
+        ReasonCode::Spam
+    } else if lower.starts_with("harassment") {
+        ReasonCode::Harassment
+    } else if lower.starts_with("off_topic") || lower.starts_with("off-topic") {
+        ReasonCode::OffTopic
+    } else if lower.starts_with("rules") {
+        ReasonCode::Rules
+    } else {
+        ReasonCode::Other
+    };
+    Some((code, trimmed.to_string()))
+}
+
+pub fn ask_confirmation_word(word: &str) -> bool {
+    web_sys::window()
+        .and_then(|window| {
+            window
+                .prompt_with_message(&format!("Type {word} to confirm this action."))
+                .ok()
+                .flatten()
+        })
+        .map(|value| value.trim() == word)
+        .unwrap_or(false)
+}

@@ -8,7 +8,6 @@ use dioxus::prelude::*;
 use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::moderation::category_chain;
 use plaza_core::board_state::roles::ModerationPower;
-use plaza_core::board_state::trash::AuthorizedTrashItem;
 use std::collections::{HashMap, HashSet};
 
 #[component]
@@ -41,9 +40,7 @@ pub fn TrashView() -> Element {
             .iter()
             .any(|admin| admin.admin.id() == self_id);
     let mut restore_targets = use_signal(HashMap::<MessageId, MessageId>::new);
-    let mut purge_target = use_signal(|| None::<AuthorizedTrashItem>);
     let mut handled = use_signal(std::collections::HashSet::<MessageId>::new);
-    let mut purge_reason_open = use_signal(|| false);
     let mut grant_target = use_signal(|| None::<plaza_core::board_state::member::MemberId>);
     let routes = data.board_state.moderation.routes_map();
     let is_owner_or_admin = self_id
@@ -129,11 +126,6 @@ pub fn TrashView() -> Element {
         .cloned()
         .collect::<Vec<_>>();
     items.sort_by_key(|item| std::cmp::Reverse(item.item.hidden_at));
-    let purge_confirm_word = purge_target
-        .read()
-        .as_ref()
-        .filter(|item| item.item.messages.len() >= 10)
-        .map(|_| "PURGE".to_string());
 
     rsx! {
         div { class: "space-y-3",
@@ -183,75 +175,6 @@ pub fn TrashView() -> Element {
                         div { class: "border-t border-border pt-2",
                             p { class: "text-sm font-medium text-text", "{title}" }
                             p { class: "text-xs text-text-muted whitespace-pre-wrap", "{body}" }
-                        }
-                    }
-                }
-            }
-            crate::components::reason_dialog::ReasonDialog {
-                open: purge_reason_open,
-                title: "Purge permanently".to_string(),
-                confirm_word: purge_confirm_word,
-                on_confirm: move |(code, reason): (String, String)| {
-                    let Some(item) = purge_target.read().clone() else {
-                        return;
-                    };
-                    let Some(ctx) = ActionContext::from_current_board() else {
-                        return;
-                    };
-                    let code = crate::util::trash_actions::parse_reason_code(&code);
-                    spawn(async move {
-                        if let Err(message) =
-                            crate::util::trash_actions::purge_item(&ctx, &item, &reason, code).await
-                        {
-                            if is_stale(&message) {
-                                handled.write().insert(item.item.id);
-                                error.set(Some("This item was already handled. The list was refreshed.".to_string()));
-                            } else {
-                                error.set(Some(message));
-                            }
-                        }
-                    });
-                },
-            }
-            if has_trash_key && !grant_candidates.is_empty() {
-                div { class: "border border-border rounded-lg p-3 bg-panel space-y-2",
-                    p { class: "text-sm text-text", "Grant trash access" }
-                    p { class: "text-xs text-text-muted",
-                        "A new manager needs the trash key before preview and restore work."
-                    }
-                    div { class: "flex items-center gap-2",
-                        select {
-                            class: "flex-1 bg-panel border border-border rounded-md px-2 py-1 text-xs text-text",
-                            onchange: move |event| {
-                                if let Ok(member) = event.value().parse() {
-                                    grant_target.set(Some(member));
-                                }
-                            },
-                            option { value: "", "Choose a member" }
-                            for member in &grant_candidates {
-                                option { value: "{member}", "{member}" }
-                            }
-                        }
-                        button {
-                            r#type: "button",
-                            class: "px-3 py-1.5 text-xs rounded-md bg-accent hover:bg-accent/80 text-white",
-                            onclick: move |_| {
-                                let Some(member) = *grant_target.read() else {
-                                    error.set(Some("Choose a member".to_string()));
-                                    return;
-                                };
-                                let Some(ctx) = ActionContext::from_current_board() else {
-                                    return;
-                                };
-                                spawn(async move {
-                                    if let Err(message) =
-                                        crate::util::trash_actions::grant_trash_access(&ctx, member).await
-                                    {
-                                        error.set(Some(message));
-                                    }
-                                });
-                            },
-                            "Grant"
                         }
                     }
                 }
@@ -361,8 +284,30 @@ pub fn TrashView() -> Element {
                                     onclick: {
                                         let item = item.clone();
                                         move |_| {
-                                            purge_target.set(Some(item.clone()));
-                                            purge_reason_open.set(true);
+                                            let Some((code, reason)) =
+                                                crate::util::trash_actions::ask_reason("spam")
+                                            else {
+                                                return;
+                                            };
+                                            if item.item.messages.len() >= 10
+                                                && !crate::util::trash_actions::ask_confirmation_word("PURGE")
+                                            {
+                                                return;
+                                            }
+                                            let Some(ctx) = ActionContext::from_current_board() else {
+                                                return;
+                                            };
+                                            let item = item.clone();
+                                            spawn(async move {
+                                                if let Err(message) =
+                                                    crate::util::trash_actions::purge_item(
+                                                        &ctx, &item, &reason, code,
+                                                    )
+                                                    .await
+                                                {
+                                                    error.set(Some(message));
+                                                }
+                                            });
                                         }
                                     },
                                     "Purge"

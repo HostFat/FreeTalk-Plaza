@@ -3,11 +3,11 @@
 use dioxus::prelude::*;
 
 const PRESETS: &[(&str, &str)] = &[
-    ("illegal", "Illegal content"),
+    ("illegal", "Severe rule violation"),
     ("spam", "Spam"),
     ("harassment", "Harassment"),
     ("off_topic", "Off-topic"),
-    ("rules", "Rules violation"),
+    ("rules", "Other rule violation"),
 ];
 
 #[component]
