@@ -64,6 +64,8 @@ pub enum Route {
     AdminStructure { board_id: String },
     #[route("/board/:board_id/admin/audit")]
     AdminAudit { board_id: String },
+    #[route("/board/:board_id/admin/trash")]
+    AdminTrash { board_id: String },
     #[route("/board/:board_id/admin/roles")]
     AdminRoles { board_id: String },
     #[route("/board/:board_id/admin/links")]
@@ -554,6 +556,14 @@ fn AdminStructure(board_id: String) -> Element {
 fn AdminAudit(board_id: String) -> Element {
     rsx! {
         BoardGate { board_id: board_id.clone(), AdminView { tab: "audit".to_string() } }
+    }
+}
+
+/// Admin view, trash tab
+#[component]
+fn AdminTrash(board_id: String) -> Element {
+    rsx! {
+        BoardGate { board_id: board_id.clone(), AdminView { tab: "trash".to_string() } }
     }
 }
 
