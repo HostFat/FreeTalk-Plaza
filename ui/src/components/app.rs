@@ -66,6 +66,8 @@ pub enum Route {
     AdminAudit { board_id: String },
     #[route("/board/:board_id/admin/trash")]
     AdminTrash { board_id: String },
+    #[route("/board/:board_id/admin/purge/:post_id")]
+    AdminPurge { board_id: String, post_id: String },
     #[route("/board/:board_id/admin/roles")]
     AdminRoles { board_id: String },
     #[route("/board/:board_id/admin/links")]
@@ -566,6 +568,16 @@ fn AdminStructure(board_id: String) -> Element {
 fn AdminAudit(board_id: String) -> Element {
     rsx! {
         BoardGate { board_id: board_id.clone(), AdminView { tab: "audit".to_string() } }
+    }
+}
+
+/// Dedicated purge route
+#[component]
+fn AdminPurge(board_id: String, post_id: String) -> Element {
+    rsx! {
+        BoardGate { board_id: board_id.clone(),
+            crate::components::purge_view::PurgeView { board_id: board_id.clone(), post_id: post_id.clone() }
+        }
     }
 }
 

@@ -1922,35 +1922,12 @@ pub fn SinglePostView(post_id: String) -> Element {
                         r#type: "button",
                         class: "ml-2 px-3 py-1.5 text-xs rounded-md bg-red-700 hover:bg-red-600 text-white",
                         onclick: move |_| {
-                            let Ok(id) = purge_id.parse::<MessageId>() else {
-                                return;
-                            };
-                            let Some((code, reason)) =
-                                crate::util::trash_actions::ask_reason("severe")
-                            else {
-                                return;
-                            };
-                            if !crate::util::trash_actions::ask_confirmation_word("PURGE") {
-                                return;
+                            if let Some(key) = CURRENT_BOARD.read().owner_key {
+                                let board_id = bs58::encode(key.as_bytes()).into_string();
+                                if let Some(window) = web_sys::window() {
+                                    let _ = window.location().set_hash(&format!("/board/{board_id}/admin/purge/{purge_id}"));
+                                }
                             }
-                            crate::util::trash_actions::run_later(move || {
-                                spawn(async move {
-                                    if let Some(ctx) = ActionContext::from_current_board() {
-                                        match crate::util::trash_actions::purge_illegal(&ctx, id, &reason, code).await {
-                                            Ok(()) => {
-                                                if let Some(history) = web_sys::window().and_then(|w| w.history().ok()) {
-                                                    let _ = history.back();
-                                                }
-                                            }
-                                            Err(error) => {
-                                                if let Some(window) = web_sys::window() {
-                                                    let _ = window.alert_with_message(&error);
-                                                }
-                                            }
-                                        }
-                                    }
-                                });
-                            });
                         },
                         "Purge"
                     }
