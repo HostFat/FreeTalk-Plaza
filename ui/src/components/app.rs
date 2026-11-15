@@ -130,6 +130,16 @@ pub static CURRENT_POST: GlobalSignal<CurrentPostContext> =
 /// Current hash route, used to highlight the active top-bar tab.
 pub static CURRENT_HASH: GlobalSignal<String> = Global::new(String::new);
 
+/// Moderation action waiting for the in-page reason dialog.
+#[derive(Clone, PartialEq)]
+pub enum PendingModerationAction {
+    Hide(plaza_core::board_state::message::MessageId),
+    Purge(plaza_core::board_state::message::MessageId),
+    PurgeTrash(plaza_core::board_state::trash::AuthorizedTrashItem),
+}
+
+pub static PENDING_MODERATION: GlobalSignal<Option<PendingModerationAction>> = Global::new(|| None);
+
 /// Bumped by "New post" buttons elsewhere in the app to open the shared
 /// composer in the top bar (which already knows the current category).
 pub static COMPOSE_REQUEST: GlobalSignal<u64> = Global::new(|| 0);
@@ -349,6 +359,7 @@ pub fn App() -> Element {
                     }
                 }
             }
+            crate::components::moderation_reason_modal::ModerationReasonModal {}
             EditBoardModal {}
             MemberInfoModal {}
             CreateBoardModal {}

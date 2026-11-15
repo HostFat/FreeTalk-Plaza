@@ -1886,26 +1886,10 @@ pub fn SinglePostView(post_id: String) -> Element {
                         r#type: "button",
                         class: "ml-auto px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
                         onclick: move |_| {
-                            let Some(id) = hide_id.parse::<MessageId>().ok() else {
-                                return;
-                            };
-                            let Some((code, reason)) =
-                                crate::util::trash_actions::ask_reason("severe")
-                            else {
-                                return;
-                            };
-                            spawn(async move {
-                                if let Some(ctx) = ActionContext::from_current_board() {
-                                    match crate::util::trash_actions::hide_topic(&ctx, id, &reason, code).await {
-                                        Ok(()) => {
-                                            if let Some(history) = web_sys::window().and_then(|w| w.history().ok()) {
-                                                let _ = history.back();
-                                            }
-                                        }
-                                        Err(error) => warn!("Could not hide topic: {error}"),
-                                    }
-                                }
-                            });
+                            if let Ok(id) = hide_id.parse::<MessageId>() {
+                                *crate::components::app::PENDING_MODERATION.write() =
+                                    Some(crate::components::app::PendingModerationAction::Hide(id));
+                            }
                         },
                         "Hide"
                     }
@@ -1915,50 +1899,10 @@ pub fn SinglePostView(post_id: String) -> Element {
                         r#type: "button",
                         class: "ml-2 px-3 py-1.5 text-xs rounded-md bg-red-700 hover:bg-red-600 text-white",
                         onclick: move |_| {
-                            web_sys::console::log_1(&"purge button clicked".into());
-                            let Some(id) = purge_id.parse::<MessageId>().ok() else {
-                                return;
-                            };
-                            let Some((code, reason)) =
-                                crate::util::trash_actions::ask_reason("severe")
-                            else {
-                                return;
-                            };
-                            if !crate::util::trash_actions::ask_confirmation_word("PURGE") {
-                                return;
+                            if let Ok(id) = purge_id.parse::<MessageId>() {
+                                *crate::components::app::PENDING_MODERATION.write() =
+                                    Some(crate::components::app::PendingModerationAction::Purge(id));
                             }
-                            web_sys::console::log_1(&"purge prompts accepted, spawning".into());
-                            spawn(async move {
-                                match ActionContext::from_current_board() {
-                                    Some(ctx) => {
-                                        web_sys::console::log_1(&"purge context ok".into());
-                                        match crate::util::trash_actions::purge_illegal(
-                                            &ctx, id, &reason, code,
-                                        )
-                                        .await
-                                        {
-                                            Ok(()) => {
-                                                if let Some(history) = web_sys::window()
-                                                    .and_then(|w| w.history().ok())
-                                                {
-                                                    let _ = history.back();
-                                                }
-                                            }
-                                            Err(error) => {
-                                                web_sys::console::log_1(
-                                                    &format!("purge error: {error}").into(),
-                                                );
-                                                if let Some(window) = web_sys::window() {
-                                                    let _ = window.alert_with_message(&error);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    None => {
-                                        web_sys::console::log_1(&"purge context none".into());
-                                    }
-                                }
-                            });
                         },
                         "Purge"
                     }

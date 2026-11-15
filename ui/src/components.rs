@@ -9,6 +9,7 @@ pub mod category_view;
 pub mod conversation;
 pub mod join_screen;
 pub mod members;
+pub mod moderation_reason_modal;
 pub mod moderation_view;
 pub mod notifications_view;
 pub mod posts_view;
