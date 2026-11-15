@@ -1691,4 +1691,63 @@ mod tests {
             .verify(&board.state, &board.parameters)
             .is_err());
     }
+
+    #[test]
+    fn illegal_purge_record_removes_the_thread() {
+        use crate::board_state::ChatBoardStateV1Delta;
+
+        let mut board = board();
+        board
+            .state
+            .moderation
+            .routes
+            .push(AuthorizedMessageRoute::new(
+                MessageRoute {
+                    message_id: board.post,
+                    reply_to: None,
+                    category_id: None,
+                    is_category: false,
+                    parent_category_id: None,
+                    is_group: false,
+                    generation: 1,
+                },
+                &board.member_sk,
+            ));
+        let owner_id = MemberId::from(&board.owner_sk.verifying_key());
+        let purge = AuthorizedIllegalPurge::new(
+            IllegalPurgeV1 {
+                topic: board.post,
+                message_ids: vec![board.post],
+                reason_code: crate::board_state::trash::ReasonCode::Severe,
+                reason: "severe rule violation".to_string(),
+                content_hash: Some([7u8; 32]),
+                acted_at: 1,
+                generation: 1,
+            },
+            &board.owner_sk,
+        );
+        let delta = ChatBoardStateV1Delta {
+            moderation: Some(ModerationDelta {
+                routes: Vec::new(),
+                feature_flags: Vec::new(),
+                moves: Vec::new(),
+                thread_moves: Vec::new(),
+                illegal_purges: vec![purge],
+            }),
+            ..Default::default()
+        };
+        let parent = board.state.clone();
+        board
+            .state
+            .apply_delta(&parent, &board.parameters, &Some(delta))
+            .expect("the contract accepts the illegal purge");
+        assert!(!board
+            .state
+            .recent_messages
+            .messages
+            .iter()
+            .any(|message| message.id() == board.post));
+        assert_eq!(board.state.moderation.illegal_purges.len(), 1);
+        let _ = owner_id;
+    }
 }
