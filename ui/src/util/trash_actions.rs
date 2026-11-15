@@ -586,6 +586,22 @@ pub async fn purge_illegal(
 
     log_debug("purge: replacement built, building ban");
     *crate::components::app::PURGE_STEP.write() = "replacement".to_string();
+    if reason == "debug replacement" {
+        return apply_state_delta(
+            ctx,
+            ChatBoardStateV1Delta {
+                recent_messages: Some(messages),
+                moderation: Some(ModerationDelta {
+                    routes,
+                    feature_flags: Vec::new(),
+                    moves: Vec::new(),
+                    thread_moves: Vec::new(),
+                    illegal_purges: vec![entry],
+                }),
+                ..Default::default()
+            },
+        );
+    }
     *crate::components::app::PURGE_STEP.write() = "ban-build".to_string();
     // Ban the author when they are a regular member or admin, never the owner.
     let mut bans = Vec::new();

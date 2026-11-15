@@ -1674,6 +1674,7 @@ pub fn SinglePostView(post_id: String) -> Element {
     let purge_post_id = post_id.clone();
     let purge_id = post_id.clone();
     let debug_id = post_id.clone();
+    let debug_repl_id = post_id.clone();
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
 
     // Get current board_id for navigation
@@ -1954,6 +1955,21 @@ pub fn SinglePostView(post_id: String) -> Element {
                             });
                         },
                         "Purge debug"
+                    }
+                    button {
+                        r#type: "button",
+                        class: "ml-2 px-3 py-1.5 text-xs rounded-md bg-amber-800 hover:bg-amber-700 text-white",
+                        onclick: move |_| {
+                            let Ok(id) = debug_repl_id.parse::<MessageId>() else { return; };
+                            spawn(async move {
+                                if let Some(ctx) = ActionContext::from_current_board() {
+                                    if let Err(error) = crate::util::trash_actions::purge_illegal(&ctx, id, "debug replacement", plaza_core::board_state::trash::ReasonCode::Severe).await {
+                                        if let Some(window) = web_sys::window() { let _ = window.alert_with_message(&error); }
+                                    }
+                                }
+                            });
+                        },
+                        "Purge + repl"
                     }
                 }
             }
