@@ -22,7 +22,6 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
     };
     board_data.ensure_can_write()?;
 
-    let board_key = board_data.board_key();
     let self_sk = board_data.self_sk.clone();
     let board_state_clone = board_data.board_state.clone();
     let banned_by = MemberId::from(&self_sk.verifying_key());
@@ -40,9 +39,12 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
     let mut invite_chain = Vec::new();
     if let Some(target) = &target_member {
         let owner_id = MemberId::from(&current_board);
+        let target_id = target.member.id();
         let mut current = target.member.invited_by;
         for _ in 0..64 {
-            if current == owner_id {
+            // A token-joined member is self-invited: stop instead of walking
+            // the target back to itself and building a 64-entry chain.
+            if current == owner_id || current == target_id {
                 break;
             }
             let Some(parent) = members.iter().find(|member| member.member.id() == current) else {
@@ -69,15 +71,45 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
     ciborium::ser::into_writer(&ban, &mut ban_bytes)
         .map_err(|e| format!("Failed to serialize ban for signing: {:?}", e))?;
 
-    let signature = crate::signing::sign_ban_with_fallback(board_key, ban_bytes, &self_sk).await;
+    // Sign locally: the delegate round trip can stall the ban, and the client
+    // already holds the same signing key.
+    use ed25519_dalek::Signer;
+    let signature = self_sk.sign(&ban_bytes);
     let authorized_ban = AuthorizedUserBan::with_signature(ban, banned_by, signature)
         .with_signer_key(self_sk.verifying_key())
         .with_optional_authority(plaza_core::board_state::roles::admin_authority_proof(
             &board_state_clone,
             &banned_by,
         ));
+
+    // A banned member must not keep moderation powers through a role. Revoke
+    // every active assignment in the same delta so the ban and the demotion
+    // reach the board together.
+    let role_revocations: Vec<_> = board_state_clone
+        .roles
+        .assignments
+        .iter()
+        .filter(|entry| {
+            entry.assignment.member_id == member_to_ban && !entry.assignment.revoked
+        })
+        .map(|entry| {
+            plaza_core::board_state::roles::AuthorizedRoleAssignment::new(
+                plaza_core::board_state::roles::RoleAssignment {
+                    role_id: entry.assignment.role_id,
+                    member_id: member_to_ban,
+                    generation: entry.assignment.generation + 1,
+                    revoked: true,
+                },
+                &self_sk,
+            )
+        })
+        .collect();
     let delta = ChatBoardStateV1Delta {
         bans: Some(vec![authorized_ban]),
+        roles: Some(plaza_core::board_state::roles::RolesDelta {
+            roles: Vec::new(),
+            assignments: role_revocations,
+        }),
         ..Default::default()
     };
 
@@ -124,23 +156,6 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
 
     if let Some(e) = apply_error {
         return Err(e);
-    }
-
-    // A banned member must not keep moderation powers through a role. The
-    // revocation is signed like any other assignment change and stays auditable.
-    let roles_to_revoke: Vec<_> = board_state_clone
-        .roles
-        .assignments
-        .iter()
-        .filter(|entry| {
-            entry.assignment.member_id == member_to_ban && !entry.assignment.revoked
-        })
-        .map(|entry| entry.assignment.role_id)
-        .collect();
-    for role_id in roles_to_revoke {
-        if let Err(e) = crate::util::access::set_role_member(role_id, member_to_ban, false) {
-            error!("Failed to revoke a role after the ban: {e}");
-        }
     }
 
     mark_needs_sync(current_board);

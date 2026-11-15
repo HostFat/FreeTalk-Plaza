@@ -249,11 +249,15 @@ impl MembersV1 {
     fn get_downstream_members(&self, member_id: MemberId) -> HashSet<MemberId> {
         let mut downstream = HashSet::new();
         let mut to_check = vec![member_id];
+        // A token-joined member invites itself, so the walk must not revisit it.
+        let mut visited = HashSet::new();
+        visited.insert(member_id);
         while let Some(current) = to_check.pop() {
             for member in &self.members {
-                if member.member.invited_by == current {
-                    downstream.insert(member.member.id());
-                    to_check.push(member.member.id());
+                let id = member.member.id();
+                if member.member.invited_by == current && visited.insert(id) {
+                    downstream.insert(id);
+                    to_check.push(id);
                 }
             }
         }
@@ -1021,6 +1025,50 @@ mod tests {
             .members
             .iter()
             .any(|m| m.member.id() == member4.id()));
+    }
+
+    #[test]
+    fn banning_a_token_joined_member_terminates() {
+        let owner_signing_key = SigningKey::generate(&mut OsRng);
+        let owner_verifying_key = owner_signing_key.verifying_key();
+        let owner_id: MemberId = owner_verifying_key.into();
+
+        let joined_signing_key = SigningKey::generate(&mut OsRng);
+        let joined_verifying_key = joined_signing_key.verifying_key();
+        let joined_id = MemberId::from(&joined_verifying_key);
+        let joined = AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: joined_id,
+                member_vk: joined_verifying_key,
+                join_proof: None,
+            },
+            &joined_signing_key,
+        );
+
+        let mut members = MembersV1 {
+            members: vec![joined.clone()],
+        };
+        let parameters = ChatBoardParametersV1 {
+            owner: owner_verifying_key,
+        };
+        let ban = UserBan {
+            owner_member_id: owner_id,
+            banned_at: SystemTime::now(),
+            banned_user: joined_id,
+            expires_at: None,
+            target_member: None,
+            invite_chain: Vec::new(),
+        };
+        let bans = BansV1(vec![AuthorizedUserBan::new(
+            ban,
+            owner_id,
+            &owner_signing_key,
+        )]);
+
+        // The self-invite must not loop the downstream walk.
+        members.remove_banned_members(&bans, &parameters);
+        assert!(members.members.is_empty());
     }
 
     #[test]

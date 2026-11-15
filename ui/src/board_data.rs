@@ -1962,6 +1962,31 @@ impl Boards {
     /// Merge the other Boards into this Boards (eg. when Boards are loaded from storage)
     pub fn merge(&mut self, other: Boards) -> Result<(), String> {
         for (vk, mut board_data) in other.map {
+            // Signing paths use owner_vk as the delegate board key. An entry whose
+            // field disagrees with its map key signs with the wrong key, and the
+            // contract rejects every update. Repair it when the stored state
+            // confirms that the entry belongs to the map key.
+            if board_data.owner_vk != vk {
+                let state_owner = board_data
+                    .board_state
+                    .configuration
+                    .configuration
+                    .owner_member_id;
+                if state_owner == MemberId::from(&vk) {
+                    dioxus::logger::tracing::error!(
+                        "Board entry {:?} carries a stale owner_vk; repairing it from the map key",
+                        MemberId::from(&vk)
+                    );
+                    board_data.owner_vk = vk;
+                } else {
+                    dioxus::logger::tracing::error!(
+                        "Board entry {:?} belongs to a different owner {:?}; updates would be signed with the wrong key",
+                        MemberId::from(&vk),
+                        MemberId::from(&board_data.owner_vk)
+                    );
+                }
+            }
+
             // Capture the old contract key before regeneration
             let old_contract_key = board_data.contract_key;
 
