@@ -40,7 +40,7 @@ pub fn TrashView() -> Element {
             .any(|admin| admin.admin.id() == self_id);
     let mut restore_targets = use_signal(HashMap::<MessageId, MessageId>::new);
     let mut purge_target = use_signal(|| None::<AuthorizedTrashItem>);
-    let handled = use_signal(std::collections::HashSet::<MessageId>::new);
+    let mut handled = use_signal(std::collections::HashSet::<MessageId>::new);
     let mut purge_reason_open = use_signal(|| false);
     let categories = data
         .board_state
