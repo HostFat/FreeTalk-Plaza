@@ -361,6 +361,7 @@ pub fn App() -> Element {
                     }
                 }
             }
+            DebugEventProbe {}
             EditBoardModal {}
             MemberInfoModal {}
             CreateBoardModal {}
@@ -698,6 +699,23 @@ fn get_auth_token_from_window() {
             Err(err) => {
                 error!("Failed to read auth token from window: {:?}", err);
             }
+        }
+    }
+}
+
+#[component]
+fn DebugEventProbe() -> Element {
+    let mut count = use_signal(|| 0);
+    rsx! {
+        button {
+            r#type: "button",
+            class: "fixed bottom-2 left-2 z-50 px-2 py-1 text-xs bg-amber-700 text-white rounded",
+            onclick: move |_| {
+                let next = *count.read() + 1;
+                count.set(next);
+                web_sys::console::log_1(&format!("debug probe click {next}").into());
+            },
+            "Probe {count}"
         }
     }
 }
