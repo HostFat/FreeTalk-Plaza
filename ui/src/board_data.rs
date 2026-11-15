@@ -103,6 +103,10 @@ pub struct BoardData {
     /// Decrypted board trash key: (secret version, key). Local to each manager.
     #[serde(default)]
     pub trash_secret: Option<(u32, [u8; 32])>,
+    /// Every trash key this client has opened, by secret version. Rotation
+    /// replaces the current key; older items stay readable with their version.
+    #[serde(default)]
+    pub trash_secrets: HashMap<u32, [u8; 32]>,
     /// The current (latest) secret version
     #[serde(skip)]
     pub current_secret_version: Option<u32>,
@@ -903,10 +907,15 @@ impl BoardData {
             Some(secret) => {
                 if let Ok(key) = crate::util::pq::open_secret(&self.self_sk, secret) {
                     self.trash_secret = Some((latest.set.secret_version, key));
+                    self.trash_secrets.insert(latest.set.secret_version, key);
                 }
             }
-            // A newer set without our record means access was revoked.
-            None => self.trash_secret = None,
+            None => {
+                // A newer set without our record means access was revoked. Older
+                // keys stay: they only open items sealed before the rotation.
+                self.trash_secrets.remove(&latest.set.secret_version);
+                self.trash_secret = None;
+            }
         }
     }
 
@@ -1931,6 +1940,7 @@ impl Boards {
             category_secrets: HashMap::new(),
             old_category_secrets: HashMap::new(),
             trash_secret: None,
+            trash_secrets: HashMap::new(),
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
@@ -2625,6 +2635,7 @@ mod tests {
             category_secrets: HashMap::new(),
             old_category_secrets: HashMap::new(),
             trash_secret: None,
+            trash_secrets: HashMap::new(),
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
@@ -2704,6 +2715,7 @@ mod tests {
             category_secrets: HashMap::new(),
             old_category_secrets: HashMap::new(),
             trash_secret: None,
+            trash_secrets: HashMap::new(),
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
@@ -2774,6 +2786,7 @@ mod tests {
                 old_category_secrets: HashMap::new(),
 
                 trash_secret: None,
+                trash_secrets: HashMap::new(),
 
                 collapsed_groups: Vec::new(),
                 last_visit: 0,

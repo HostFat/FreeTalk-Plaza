@@ -225,6 +225,7 @@ pub async fn hide_topic(
             .get_mut(&ctx.current_board)
         {
             board.trash_secret = Some((secret_version, secret));
+            board.trash_secrets.insert(secret_version, secret);
         }
     })
 }
@@ -233,20 +234,49 @@ fn decrypt_bundle(
     ctx: &ActionContext,
     item: &AuthorizedTrashItem,
 ) -> Result<TrashBundleV1, String> {
-    let (secret_version, trash_key) = ctx.trash_secret.ok_or("This member has no trash key")?;
-    let item_key = decrypt_with_symmetric_key(
-        &trash_key,
-        &item.item.sealed_item_key,
-        &item.item.item_key_nonce,
-        secret_version,
-    )?;
-    let item_key: [u8; 32] = item_key
-        .try_into()
-        .map_err(|_| "Trash item key has an invalid length".to_string())?;
-    let plaintext =
-        decrypt_with_symmetric_key(&item_key, &item.item.bundle, &item.item.bundle_nonce, 0)?;
-    ciborium::de::from_reader(plaintext.as_slice())
-        .map_err(|error| format!("Could not decode the trash bundle: {error}"))
+    // Items sealed with the trash key record its version. Items hidden before
+    // any manager had a PQ key were sealed with the board secret instead.
+    let mut candidates: Vec<(u32, [u8; 32])> = Vec::new();
+    if let Some(key) = ctx.trash_secrets.get(&item.item.secret_version) {
+        candidates.push((item.item.secret_version, *key));
+    }
+    if let Some(key) = ctx.board_secrets.get(&item.item.secret_version) {
+        candidates.push((item.item.secret_version, *key));
+    }
+    if candidates.is_empty() {
+        // Older boards kept only the current key.
+        if let Some((version, key)) = ctx.trash_secret {
+            candidates.push((version, key));
+        }
+    }
+    if candidates.is_empty() {
+        return Err("This member has no trash key".to_string());
+    }
+
+    let mut last_error = None;
+    for (version, secret) in candidates {
+        let item_key = match decrypt_with_symmetric_key(
+            &secret,
+            &item.item.sealed_item_key,
+            &item.item.item_key_nonce,
+            version,
+        ) {
+            Ok(key) => key,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
+        let item_key: [u8; 32] = match item_key.try_into() {
+            Ok(key) => key,
+            Err(_) => return Err("Trash item key has an invalid length".to_string()),
+        };
+        let plaintext =
+            decrypt_with_symmetric_key(&item_key, &item.item.bundle, &item.item.bundle_nonce, 0)?;
+        return ciborium::de::from_reader(plaintext.as_slice())
+            .map_err(|error| format!("Could not decode the trash bundle: {error}"));
+    }
+    Err(last_error.unwrap_or_else(|| "This member has no trash key".to_string()))
 }
 
 /// Decrypted titles and bodies, for the moderator preview.
@@ -805,8 +835,9 @@ pub async fn grant_trash_access(
     )
 }
 
-/// Remove a member from the trash key set. This stops future distribution only:
-/// a member who already decrypted the key keeps it until the key is rotated.
+/// Remove a member from the trash key set and rotate the key. The member keeps
+/// the keys they already opened, so old items stay readable for them; items
+/// hidden after this point are sealed with the new key only.
 pub async fn revoke_trash_access(
     ctx: &ActionContext,
     member: plaza_core::board_state::member::MemberId,
@@ -814,6 +845,7 @@ pub async fn revoke_trash_access(
     use plaza_core::board_state::pq_secrets::{
         AuthorizedPqSecretSet, PqScope, PqSecretSet, PqSecretsDelta,
     };
+    use std::collections::BTreeSet;
 
     let owner_id = plaza_core::board_state::member::MemberId::from(&ctx.current_board);
     if member == owner_id {
@@ -828,17 +860,69 @@ pub async fn revoke_trash_access(
         .filter(|entry| matches!(entry.set.scope, PqScope::Trash))
         .max_by_key(|entry| entry.set.version)
         .ok_or("This board has no trash key yet")?;
-    let mut secrets = latest.set.secrets.clone();
-    let before = secrets.len();
-    secrets.retain(|entry| entry.member_id != member);
-    if secrets.len() == before {
+    if !latest
+        .set
+        .secrets
+        .iter()
+        .any(|entry| entry.member_id == member)
+    {
         return Err("That member does not have the trash key".to_string());
     }
+
+    // Keep the key for the owner, the admins and the remaining trash managers.
+    let mut managers: BTreeSet<plaza_core::board_state::member::MemberId> = BTreeSet::new();
+    managers.insert(owner_id);
+    for admin in &ctx.board_state.admin.admins {
+        managers.insert(admin.admin.id());
+    }
+    for assignment in &ctx.board_state.roles.assignments {
+        if assignment.assignment.revoked {
+            continue;
+        }
+        if ctx.board_state.roles.roles.iter().any(|role| {
+            role.role.id == assignment.assignment.role_id
+                && role.role.can_manage_trash
+                && !role.role.deleted
+        }) {
+            managers.insert(assignment.assignment.member_id);
+        }
+    }
+    managers.remove(&member);
+
+    let secret_version = latest.set.secret_version + 1;
+    let trash_key = rand::random::<[u8; 32]>();
+    let mut secrets = Vec::new();
+    for manager in &managers {
+        let Some(kem) = ctx.board_state.pq_secrets.key_for(*manager) else {
+            continue;
+        };
+        let vk = if *manager == owner_id {
+            ctx.current_board
+        } else {
+            match ctx
+                .board_state
+                .members
+                .members
+                .iter()
+                .find(|entry| entry.member.id() == *manager)
+            {
+                Some(entry) => entry.member.member_vk,
+                None => continue,
+            }
+        };
+        if let Ok(record) = crate::util::pq::seal_secret(&trash_key, &kem.ek, *manager, &vk) {
+            secrets.push(record);
+        }
+    }
+    if secrets.is_empty() {
+        return Err("Cannot rotate the trash key: no manager has a PQ key yet".to_string());
+    }
+
     let set = AuthorizedPqSecretSet::new(
         PqSecretSet {
             scope: PqScope::Trash,
             version: latest.set.version + 1,
-            secret_version: latest.set.secret_version,
+            secret_version,
             secrets,
         },
         &ctx.self_sk,
@@ -853,7 +937,16 @@ pub async fn revoke_trash_access(
             }),
             ..Default::default()
         },
-    )
+    )?;
+
+    // The manager performing the rotation keeps the new key right away.
+    crate::components::app::BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.map.get_mut(&ctx.current_board) {
+            board.trash_secret = Some((secret_version, trash_key));
+            board.trash_secrets.insert(secret_version, trash_key);
+        }
+    });
+    Ok(())
 }
 
 fn public_replacement_body(title: String, text: String) -> BoardMessageBody {

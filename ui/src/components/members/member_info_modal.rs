@@ -122,37 +122,31 @@ pub fn MemberInfoModal() -> Element {
             };
         }
 
-        // Determine if the current user can ban this member
+        // Determine if the current user can ban this member. The owner and
+        // admins can ban anyone, including token-joined members, whose
+        // self-invite leaves no chain back to the viewer.
+        let viewer_id = MemberId::from(&board_state.self_sk.verifying_key());
+        let viewer_is_owner = owner_key_signal
+            .as_ref()
+            .is_some_and(|key| MemberId::from(&*key) == viewer_id);
+        let viewer_is_admin = board_state
+            .board_state
+            .admin
+            .admins
+            .iter()
+            .any(|admin| admin.admin.id() == viewer_id);
         let is_downstream = member
             .and_then(|m| {
                 owner_key_signal.as_ref().map(|owner| {
                     let params = ChatBoardParametersV1 { owner: *owner };
-                    // Get the invite chain for this member
-                    let invite_chain = board_state.board_state.members.get_invite_chain(m, &params);
-
-                    let self_member_id =
-                        self_member_id().expect("Self member ID should be available");
-
-                    // Check if current user is an admin
-                    let is_self_admin = board_state
-                        .board_state
-                        .admin
-                        .admins
-                        .iter()
-                        .any(|a| a.admin.id() == self_member_id);
-
-                    // Member can be banned if:
-                    // 1. Current user is owner (owner can ban anyone), or
-                    // 2. Current user is admin (admins can ban anyone), or
-                    // 3. Current user appears in their invite chain (upstream of target)
-                    invite_chain.is_ok_and(|chain| {
-                        self_member_id == CURRENT_BOARD.read().owner_id().unwrap()
-                            || is_self_admin
-                            || chain.iter().any(|m| m.member.id() == self_member_id)
-                    })
+                    let invite_chain =
+                        board_state.board_state.members.get_invite_chain(m, &params);
+                    invite_chain
+                        .is_ok_and(|chain| chain.iter().any(|entry| entry.member.id() == viewer_id))
                 })
             })
             .unwrap_or(false);
+        let viewer_can_ban = viewer_is_owner || viewer_is_admin || is_downstream;
 
         info!(
             "Rendering MemberInfoModal for member_id: {:?} is_owner: {:?} is_downstream: {:?}",
@@ -303,7 +297,7 @@ pub fn MemberInfoModal() -> Element {
                                     }
                                     BanButton {
                                         member_to_ban: member_id,
-                                        show_trigger: is_downstream,
+                                        show_trigger: viewer_can_ban,
                                         nickname: member_info.member_info.preferred_nickname.clone()
                                     }
                                     ""

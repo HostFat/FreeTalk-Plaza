@@ -125,6 +125,24 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
     if let Some(e) = apply_error {
         return Err(e);
     }
+
+    // A banned member must not keep moderation powers through a role. The
+    // revocation is signed like any other assignment change and stays auditable.
+    let roles_to_revoke: Vec<_> = board_state_clone
+        .roles
+        .assignments
+        .iter()
+        .filter(|entry| {
+            entry.assignment.member_id == member_to_ban && !entry.assignment.revoked
+        })
+        .map(|entry| entry.assignment.role_id)
+        .collect();
+    for role_id in roles_to_revoke {
+        if let Err(e) = crate::util::access::set_role_member(role_id, member_to_ban, false) {
+            error!("Failed to revoke a role after the ban: {e}");
+        }
+    }
+
     mark_needs_sync(current_board);
     info!("Marked board for synchronization after ban");
     Ok(())

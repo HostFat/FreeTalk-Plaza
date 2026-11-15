@@ -486,6 +486,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     old_category_secrets: HashMap::new(),
 
                     trash_secret: None,
+                    trash_secrets: HashMap::new(),
 
                     collapsed_groups: Vec::new(),
                     last_visit: 0,

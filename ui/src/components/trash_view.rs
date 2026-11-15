@@ -120,7 +120,9 @@ pub fn TrashView() -> Element {
     // The owner, an admin or any member with the trash role may share the key;
     // the contract checks the same signer set for a Trash PQ set.
     let can_grant = is_owner_or_admin || data.board_state.roles.can_manage_trash(&self_id);
-    let has_trash_key = data.trash_secret.is_some();
+    let has_current_key = data.trash_secret.is_some();
+    // A rotated-out manager keeps older keys, so old items stay readable.
+    let has_trash_key = has_current_key || !data.trash_secrets.is_empty();
     let owner_id = MemberId::from(&data.owner_vk);
     let mut key_holders: Vec<MemberId> = sealed_members.iter().copied().collect();
     key_holders.sort();
@@ -164,9 +166,9 @@ pub fn TrashView() -> Element {
             p { class: "text-xs text-text-muted",
                 "If another moderator just acted, use Reload page to read the latest state from your node."
             }
-            if !has_trash_key {
+            if !has_current_key {
                 p { class: "text-sm text-amber-400 border border-amber-600/40 rounded-md p-2",
-                    "You do not have the trash key. Preview and Restore are disabled until a trash manager grants it to you."
+                    "You do not have the current trash key. New items stay locked until a trash manager grants it to you."
                 }
             }
             if can_grant {
@@ -188,6 +190,16 @@ pub fn TrashView() -> Element {
                                             class: "text-red-400",
                                             title: "Stop sharing the trash key with this member",
                                             onclick: move |_| {
+                                                if let Some(window) = web_sys::window() {
+                                                    let confirmed = window
+                                                        .confirm_with_message(
+                                                            "Rotate the trash key and remove this member? They keep the items they already opened.",
+                                                        )
+                                                        .unwrap_or(false);
+                                                    if !confirmed {
+                                                        return;
+                                                    }
+                                                }
                                                 let Some(ctx) = ActionContext::from_current_board() else {
                                                     return;
                                                 };
@@ -214,11 +226,11 @@ pub fn TrashView() -> Element {
                         }
                     }
                     p { class: "text-xs text-text-muted",
-                        "Share the trash key with the other moderators so they can preview and restore items. A member has to have opened this board once. Removing a member stops future sharing; anyone who already has the key keeps it until the key is rotated."
+                        "Share the trash key with the other moderators so they can preview and restore items. A member has to have opened this board once. Removing a member rotates the key: they keep what they already opened, and new items stay sealed to the remaining managers."
                     }
-                    if !has_trash_key {
+                    if !has_current_key {
                         p { class: "text-xs text-amber-400",
-                            "You need the trash key before you can share it."
+                            "You need the current trash key before you can share it."
                         }
                     } else if grant_candidates.is_empty() {
                         p { class: "text-xs text-text-muted",

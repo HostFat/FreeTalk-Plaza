@@ -43,6 +43,7 @@ pub struct ActionContext {
     pub old_category_secrets:
         std::collections::HashMap<MessageId, std::collections::HashMap<u32, [u8; 32]>>,
     pub trash_secret: Option<(u32, [u8; 32])>,
+    pub trash_secrets: std::collections::HashMap<u32, [u8; 32]>,
 }
 
 impl ActionContext {
@@ -71,6 +72,7 @@ impl ActionContext {
                     category_secrets: board_data.category_secrets.clone(),
                     old_category_secrets: board_data.old_category_secrets.clone(),
                     trash_secret: board_data.trash_secret,
+                    trash_secrets: board_data.trash_secrets.clone(),
                 });
             }
         }
