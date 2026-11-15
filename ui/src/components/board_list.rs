@@ -103,17 +103,17 @@ pub fn BoardList() -> Element {
             // Dropdown trigger button - current board display
             div { class: "flex justify-center",
                 button {
-                    class: "w-full md:w-auto flex items-center gap-4 md:gap-6 px-4 md:px-6 py-3 md:py-4 bg-panel text-text hover:bg-surface transition-colors",
+                    class: "w-full md:w-auto flex items-center gap-3 md:gap-6 px-4 md:px-6 py-3 md:py-4 bg-panel text-text hover:bg-surface transition-colors",
                     style: "min-width: min(100vw, 60vw); max-width: 100vw;",
                     onclick: move |_| {
                         is_open.set(!is_open());
                     },
                     img {
                         src: asset!("/assets/plaza_logo.svg"),
-                        class: "w-12 h-12 flex-shrink-0",
+                        class: "w-9 h-9 sm:w-12 sm:h-12 flex-shrink-0",
                         alt: "",
                     }
-                    span { class: "flex-1 text-left text-4xl font-medium truncate", "{current_board_name}" }
+                    span { class: "flex-1 text-left text-lg sm:text-2xl md:text-4xl font-medium leading-tight whitespace-normal break-words", "{current_board_name}" }
                     Icon {
                         width: 16,
                         height: 16,
