@@ -89,7 +89,7 @@ pub fn ReasonDialog(
                     button {
                         r#type: "button",
                         class: "px-3 py-2 text-sm rounded-md bg-red-600 hover:bg-red-500 text-white",
-                        onclick: {
+                        onmousedown: {
                             let confirm_word = confirm_word.clone();
                             move |_| {
                             if let Some(word) = confirm_word.as_ref() {
