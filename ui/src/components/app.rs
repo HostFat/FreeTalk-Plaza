@@ -363,7 +363,6 @@ pub fn App() -> Element {
                     }
                 }
             }
-            DebugEventProbe {}
             EditBoardModal {}
             MemberInfoModal {}
             CreateBoardModal {}
