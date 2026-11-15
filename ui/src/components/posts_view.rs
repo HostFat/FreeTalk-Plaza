@@ -1671,6 +1671,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
 pub fn SinglePostView(post_id: String) -> Element {
     let hide_id = post_id.clone();
     let purge_id = post_id.clone();
+    let debug_id = post_id.clone();
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
 
     // Get current board_id for navigation
@@ -1958,7 +1959,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                         class: "ml-2 px-3 py-1.5 text-xs rounded-md bg-amber-700 hover:bg-amber-600 text-white",
                         title: "Debug: purge without prompts",
                         onclick: move |_| {
-                            let Ok(id) = purge_id.parse::<MessageId>() else {
+                            let Ok(id) = debug_id.parse::<MessageId>() else {
                                 return;
                             };
                             spawn(async move {
