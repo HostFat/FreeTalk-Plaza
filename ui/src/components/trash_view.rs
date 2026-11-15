@@ -6,6 +6,7 @@ use crate::components::app::{BOARDS, CURRENT_BOARD};
 use crate::util::message_actions::ActionContext;
 use dioxus::prelude::*;
 use plaza_core::board_state::message::MessageId;
+use plaza_core::board_state::trash::AuthorizedTrashItem;
 use std::collections::HashMap;
 
 #[component]
@@ -38,6 +39,8 @@ pub fn TrashView() -> Element {
             .iter()
             .any(|admin| admin.admin.id() == self_id);
     let mut restore_targets = use_signal(HashMap::<MessageId, MessageId>::new);
+    let mut purge_target = use_signal(|| None::<AuthorizedTrashItem>);
+    let mut purge_reason_open = use_signal(|| false);
     let categories = data
         .board_state
         .recent_messages
@@ -101,6 +104,25 @@ pub fn TrashView() -> Element {
                         }
                     }
                 }
+            }
+            crate::components::reason_dialog::ReasonDialog {
+                open: purge_reason_open,
+                title: "Purge permanently".to_string(),
+                on_confirm: move |reason: String| {
+                    let Some(item) = purge_target.read().clone() else {
+                        return;
+                    };
+                    let Some(ctx) = ActionContext::from_current_board() else {
+                        return;
+                    };
+                    spawn(async move {
+                        if let Err(message) =
+                            crate::util::trash_actions::purge_item(&ctx, &item, &reason).await
+                        {
+                            error.set(Some(message));
+                        }
+                    });
+                },
             }
             if items.is_empty() {
                 p { class: "text-sm text-text-muted", "The trash is empty." }
@@ -198,34 +220,8 @@ pub fn TrashView() -> Element {
                                     onclick: {
                                         let item = item.clone();
                                         move |_| {
-                                            let confirm = web_sys::window()
-                                                .and_then(|window| {
-                                                    window
-                                                        .confirm_with_message(
-                                                            "Permanently purge this topic? The encrypted bundle and its key will be deleted.",
-                                                        )
-                                                        .ok()
-                                                })
-                                                .unwrap_or(false);
-                                            if !confirm {
-                                                return;
-                                            }
-                                            let Some(ctx) = ActionContext::from_current_board() else {
-                                                return;
-                                            };
-                                            let item = item.clone();
-                                            spawn(async move {
-                                                if let Err(message) =
-                                                    crate::util::trash_actions::purge_item(
-                                                        &ctx,
-                                                        &item,
-                                                        "purged by admin",
-                                                    )
-                                                    .await
-                                                {
-                                                    error.set(Some(message));
-                                                }
-                                            });
+                                            purge_target.set(Some(item.clone()));
+                                            purge_reason_open.set(true);
                                         }
                                     },
                                     "Purge"

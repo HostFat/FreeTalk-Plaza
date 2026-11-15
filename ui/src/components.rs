@@ -13,6 +13,7 @@ pub mod moderation_view;
 pub mod notifications_view;
 pub mod posts_view;
 pub mod profile_view;
+pub mod reason_dialog;
 pub mod report_modal;
 pub mod search_view;
 pub mod structure_view;
