@@ -557,15 +557,22 @@ pub async fn purge_illegal(
         };
 
         *crate::components::app::PURGE_STEP.write() = "replacement-content".to_string();
-        let replacement = AuthorizedMessageV1::new(
-            MessageV1 {
-                board_owner: owner_id,
-                author: self_id,
-                time: std::time::SystemTime::now(),
-                content,
-            },
-            &ctx.self_sk,
-        );
+        let message = MessageV1 {
+            board_owner: owner_id,
+            author: self_id,
+            time: std::time::SystemTime::now(),
+            content,
+        };
+        // In debug mode skip signing entirely: a dummy signature lets us see
+        // whether `AuthorizedMessageV1::new` is the call that blocks.
+        let replacement = if reason == "debug replacement" {
+            AuthorizedMessageV1::with_signature(
+                message,
+                ed25519_dalek::Signature::from_bytes(&[0u8; 64]),
+            )
+        } else {
+            AuthorizedMessageV1::new(message, &ctx.self_sk)
+        };
         *crate::components::app::PURGE_STEP.write() = "replacement-message".to_string();
         let replacement_id = replacement.id();
         *crate::components::app::PURGE_STEP.write() = "replacement-id".to_string();
