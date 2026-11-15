@@ -5,10 +5,12 @@
 use crate::components::app::{BOARDS, CURRENT_BOARD};
 use crate::util::message_actions::{apply_state_delta, ActionContext};
 use dioxus::prelude::*;
+use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::trash::{
     AuthorizedTrashAction, TrashActionKind, TrashActionV1, TrashDelta,
 };
 use plaza_core::board_state::ChatBoardStateV1Delta;
+use std::collections::HashMap;
 
 #[component]
 pub fn TrashView() -> Element {
@@ -31,6 +33,24 @@ pub fn TrashView() -> Element {
             Vec<(String, String)>,
         )>
     });
+    let mut restore_targets = use_signal(HashMap::<MessageId, MessageId>::new);
+    let categories = data
+        .board_state
+        .recent_messages
+        .messages
+        .iter()
+        .filter(|message| message.message.content.is_category())
+        .map(|message| {
+            (
+                message.id(),
+                message
+                    .message
+                    .content
+                    .title()
+                    .unwrap_or_else(|| "Section".to_string()),
+            )
+        })
+        .collect::<Vec<_>>();
     let items = data
         .board_state
         .trash
@@ -84,6 +104,25 @@ pub fn TrashView() -> Element {
                             p { class: "text-xs text-text-muted",
                                 "{item.item.messages.len()} messages · {item.item.reason}"
                             }
+                            if item.item.section.map(|section| {
+                                data.board_state.moderation.routes_map().get(&section).is_none()
+                            }).unwrap_or(false) {
+                                select {
+                                    class: "mt-2 w-full bg-panel border border-border rounded-md px-2 py-1 text-xs text-text",
+                                    onchange: {
+                                        let item_id = item.item.id;
+                                        move |event| {
+                                            if let Ok(section) = event.value().parse::<MessageId>() {
+                                                restore_targets.write().insert(item_id, section);
+                                            }
+                                        }
+                                    },
+                                    option { value: "", "Original section deleted — choose one" }
+                                    for (id, name) in &categories {
+                                        option { value: "{id}", "{name}" }
+                                    }
+                                }
+                            }
                         }
                         div { class: "flex items-center gap-2",
                             button {
@@ -113,9 +152,21 @@ pub fn TrashView() -> Element {
                                             return;
                                         };
                                         let item = item.clone();
+                                        let section_missing = item.item.section.map(|section| {
+                                            ctx.board_state.moderation.routes_map().get(&section).is_none()
+                                        }).unwrap_or(false);
+                                        let destination = if section_missing {
+                                            restore_targets.read().get(&item.item.id).copied()
+                                        } else {
+                                            None
+                                        };
+                                        if section_missing && destination.is_none() {
+                                            error.set(Some("Choose a section for the restored topic".to_string()));
+                                            return;
+                                        }
                                         spawn(async move {
                                             if let Err(message) =
-                                                crate::util::trash_actions::restore_item(&ctx, &item, None)
+                                                crate::util::trash_actions::restore_item(&ctx, &item, destination)
                                                     .await
                                             {
                                                 error.set(Some(message));
