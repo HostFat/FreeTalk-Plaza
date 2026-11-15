@@ -3,13 +3,9 @@
 //! restore/purge actions.
 
 use crate::components::app::{BOARDS, CURRENT_BOARD};
-use crate::util::message_actions::{apply_state_delta, ActionContext};
+use crate::util::message_actions::ActionContext;
 use dioxus::prelude::*;
 use plaza_core::board_state::message::MessageId;
-use plaza_core::board_state::trash::{
-    AuthorizedTrashAction, TrashActionKind, TrashActionV1, TrashDelta,
-};
-use plaza_core::board_state::ChatBoardStateV1Delta;
 use std::collections::HashMap;
 
 #[component]
@@ -33,6 +29,14 @@ pub fn TrashView() -> Element {
             Vec<(String, String)>,
         )>
     });
+    let self_id = plaza_core::board_state::member::MemberId::from(&data.self_sk.verifying_key());
+    let can_purge = self_id == plaza_core::board_state::member::MemberId::from(&data.owner_vk)
+        || data
+            .board_state
+            .admin
+            .admins
+            .iter()
+            .any(|admin| admin.admin.id() == self_id);
     let mut restore_targets = use_signal(HashMap::<MessageId, MessageId>::new);
     let categories = data
         .board_state
@@ -176,40 +180,45 @@ pub fn TrashView() -> Element {
                                 },
                                 "Restore"
                             }
-                            button {
-                                r#type: "button",
-                                class: "px-3 py-1.5 text-xs rounded-md bg-red-600 hover:bg-red-500 text-white",
-                                onclick: {
-                                    let id = item.item.id;
-                                    let generation = item.item.generation + 1;
-                                    move |_| {
-                                        let Some(ctx) = ActionContext::from_current_board() else {
-                                            return;
-                                        };
-                                        let action = AuthorizedTrashAction::new(
-                                            TrashActionV1 {
-                                                item_id: id,
-                                                kind: TrashActionKind::Purge,
-                                                generation,
-                                                acted_at: chrono::Utc::now().timestamp(),
-                                                reason: "purged by admin".to_string(),
-                                                content_hash: None,
-                                            },
-                                            &ctx.self_sk,
-                                        );
-                                        let delta = ChatBoardStateV1Delta {
-                                            trash: Some(TrashDelta {
-                                                items: Vec::new(),
-                                                actions: vec![action],
-                                            }),
-                                            ..Default::default()
-                                        };
-                                        if let Err(message) = apply_state_delta(&ctx, delta) {
-                                            error.set(Some(message));
+                            if can_purge {
+                                button {
+                                    r#type: "button",
+                                    class: "px-3 py-1.5 text-xs rounded-md bg-red-600 hover:bg-red-500 text-white",
+                                    onclick: {
+                                        let item = item.clone();
+                                        move |_| {
+                                            let confirm = web_sys::window()
+                                                .and_then(|window| {
+                                                    window
+                                                        .confirm_with_message(
+                                                            "Permanently purge this topic? The encrypted bundle and its key will be deleted.",
+                                                        )
+                                                        .ok()
+                                                })
+                                                .unwrap_or(false);
+                                            if !confirm {
+                                                return;
+                                            }
+                                            let Some(ctx) = ActionContext::from_current_board() else {
+                                                return;
+                                            };
+                                            let item = item.clone();
+                                            spawn(async move {
+                                                if let Err(message) =
+                                                    crate::util::trash_actions::purge_item(
+                                                        &ctx,
+                                                        &item,
+                                                        "purged by admin",
+                                                    )
+                                                    .await
+                                                {
+                                                    error.set(Some(message));
+                                                }
+                                            });
                                         }
-                                    }
-                                },
-                                "Purge"
+                                    },
+                                    "Purge"
+                                }
                             }
                         }
                     }

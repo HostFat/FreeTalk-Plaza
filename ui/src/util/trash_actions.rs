@@ -347,3 +347,53 @@ pub async fn restore_item(
         },
     )
 }
+
+pub async fn purge_item(
+    ctx: &ActionContext,
+    item: &AuthorizedTrashItem,
+    reason: &str,
+) -> Result<(), String> {
+    // Keep only a hash of the decrypted bundle in the audit. If the admin has
+    // no trash key, the purge still proceeds with no content hash.
+    let content_hash = preview_bundle_bytes(ctx, item)
+        .ok()
+        .map(|bytes| *blake3::hash(&bytes).as_bytes());
+    let action = AuthorizedTrashAction::new(
+        TrashActionV1 {
+            item_id: item.item.id,
+            kind: TrashActionKind::Purge,
+            generation: item.item.generation + 1,
+            acted_at: chrono::Utc::now().timestamp(),
+            reason: reason.to_string(),
+            content_hash,
+        },
+        &ctx.self_sk,
+    );
+    apply_state_delta(
+        ctx,
+        ChatBoardStateV1Delta {
+            trash: Some(TrashDelta {
+                items: Vec::new(),
+                actions: vec![action],
+            }),
+            ..Default::default()
+        },
+    )
+}
+
+fn preview_bundle_bytes(
+    ctx: &ActionContext,
+    item: &AuthorizedTrashItem,
+) -> Result<Vec<u8>, String> {
+    let (secret_version, trash_key) = ctx.trash_secret.ok_or("This member has no trash key")?;
+    let item_key = decrypt_with_symmetric_key(
+        &trash_key,
+        &item.item.sealed_item_key,
+        &item.item.item_key_nonce,
+        secret_version,
+    )?;
+    let item_key: [u8; 32] = item_key
+        .try_into()
+        .map_err(|_| "Trash item key has an invalid length".to_string())?;
+    decrypt_with_symmetric_key(&item_key, &item.item.bundle, &item.item.bundle_nonce, 0)
+}
