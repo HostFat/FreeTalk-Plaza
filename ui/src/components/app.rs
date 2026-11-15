@@ -131,6 +131,8 @@ pub static CURRENT_POST: GlobalSignal<CurrentPostContext> =
 
 /// Current hash route, used to highlight the active top-bar tab.
 pub static CURRENT_HASH: GlobalSignal<String> = Global::new(String::new);
+/// Visible diagnostic step for the purge path.
+pub static PURGE_STEP: GlobalSignal<String> = Global::new(String::new);
 
 /// Moderation action waiting for the in-page reason dialog.
 #[derive(Clone, PartialEq)]
