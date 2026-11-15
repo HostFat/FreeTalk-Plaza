@@ -202,12 +202,73 @@ pub fn AuditView() -> Element {
         entries.push((0, format!("Role {} defined", role.role.name)));
     }
 
+    let mut purge_filter = use_signal(String::new);
+    let mut purges: Vec<(i64, String, String)> = board
+        .board_state
+        .moderation
+        .illegal_purges
+        .iter()
+        .map(|entry| {
+            let code = format!("{:?}", entry.purge.reason_code).to_lowercase();
+            (
+                entry.purge.acted_at,
+                code.clone(),
+                format!(
+                    "Purged illegal thread {} · {} messages · {}{}",
+                    title(&entry.purge.topic),
+                    entry.purge.message_ids.len(),
+                    entry.purge.reason,
+                    entry
+                        .purge
+                        .content_hash
+                        .map(|hash| format!(
+                            " · hash {}",
+                            hash.iter()
+                                .take(4)
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>()
+                        ))
+                        .unwrap_or_default()
+                ),
+            )
+        })
+        .collect();
+    purges.sort_by_key(|(timestamp, _, _)| std::cmp::Reverse(*timestamp));
+
     entries.sort_by_key(|(timestamp, _)| std::cmp::Reverse(*timestamp));
     entries.truncate(100);
 
     rsx! {
         div { class: "bg-surface rounded-lg p-4",
             h2 { class: "text-lg font-semibold text-text mb-3", "Moderation history" }
+            div { class: "bg-panel border border-border rounded-lg p-3 mb-4 space-y-2",
+                div { class: "flex items-center justify-between",
+                    h3 { class: "text-sm font-semibold text-text", "Illegal purges" }
+                    select {
+                        class: "bg-panel border border-border rounded-md px-2 py-1 text-xs text-text",
+                        onchange: move |event| purge_filter.set(event.value()),
+                        option { value: "", "All reasons" }
+                        option { value: "illegal", "Illegal" }
+                        option { value: "spam", "Spam" }
+                        option { value: "harassment", "Harassment" }
+                        option { value: "off_topic", "Off-topic" }
+                        option { value: "rules", "Rules" }
+                        option { value: "other", "Other" }
+                    }
+                }
+                if purges.is_empty() {
+                    p { class: "text-xs text-text-muted", "No illegal purges on record." }
+                } else {
+                    for (timestamp, code, text) in purges.iter() {
+                        if purge_filter.read().is_empty() || purge_filter.read().as_str() == code {
+                            div { class: "flex gap-3 text-xs border-b border-border/50 py-1 last:border-0",
+                                span { class: "text-text-muted w-32 flex-shrink-0", "{format_utc_as_local_time(*timestamp)}" }
+                                span { class: "text-text", "{text}" }
+                            }
+                        }
+                    }
+                }
+            }
             p { class: "text-text-muted text-xs mb-3",
                 "Built from the signed records in board state. Records without a timestamp appear at the end."
             }
