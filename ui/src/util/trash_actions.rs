@@ -70,12 +70,100 @@ pub async fn hide_topic(ctx: &ActionContext, root: MessageId) -> Result<(), Stri
 
     let item_key = rand::random::<[u8; 32]>();
     let (bundle_ciphertext, bundle_nonce) = encrypt_with_symmetric_key(&item_key, &plaintext, 0);
-    let secret_version = ctx.board_state.secrets.current_version;
-    let secret = ctx
-        .board_secrets
-        .get(&secret_version)
-        .copied()
-        .ok_or("The board has no secret to protect the trash")?;
+
+    // Prefer the dedicated trash key, shared only with the trash managers.
+    let mut pq_set = None;
+    let (secret, secret_version) = if let Some((version, key)) = ctx.trash_secret {
+        (key, version)
+    } else {
+        use plaza_core::board_state::pq_secrets::{
+            AuthorizedPqSecretSet, PqScope, PqSecretSet, PqSecretsDelta,
+        };
+        use std::collections::BTreeSet;
+
+        let mut managers = BTreeSet::new();
+        managers.insert(plaza_core::board_state::member::MemberId::from(
+            &ctx.current_board,
+        ));
+        for admin in &ctx.board_state.admin.admins {
+            managers.insert(admin.admin.id());
+        }
+        for assignment in &ctx.board_state.roles.assignments {
+            if assignment.assignment.revoked {
+                continue;
+            }
+            if ctx.board_state.roles.roles.iter().any(|role| {
+                role.role.id == assignment.assignment.role_id
+                    && role.role.can_manage_trash
+                    && !role.role.deleted
+            }) {
+                managers.insert(assignment.assignment.member_id);
+            }
+        }
+
+        let trash_key = rand::random::<[u8; 32]>();
+        let mut sealed = Vec::new();
+        for manager in &managers {
+            let Some(kem) = ctx.board_state.pq_secrets.key_for(*manager) else {
+                continue;
+            };
+            let vk = if *manager
+                == plaza_core::board_state::member::MemberId::from(&ctx.current_board)
+            {
+                ctx.current_board
+            } else if let Some(member) = ctx
+                .board_state
+                .members
+                .members
+                .iter()
+                .find(|member| member.member.id() == *manager)
+            {
+                member.member.member_vk
+            } else {
+                continue;
+            };
+            if let Ok(record) = crate::util::pq::seal_secret(&trash_key, &kem.ek, *manager, &vk) {
+                sealed.push(record);
+            }
+        }
+
+        if sealed.is_empty() {
+            // No manager has a PQ key yet: fall back to the board secret.
+            let version = ctx.board_state.secrets.current_version;
+            let key = ctx
+                .board_secrets
+                .get(&version)
+                .copied()
+                .ok_or("The board has no secret to protect the trash")?;
+            (key, version)
+        } else {
+            let version = ctx
+                .board_state
+                .pq_secrets
+                .sets
+                .iter()
+                .filter(|entry| matches!(entry.set.scope, PqScope::Trash))
+                .map(|entry| entry.set.version)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let set = AuthorizedPqSecretSet::new(
+                PqSecretSet {
+                    scope: PqScope::Trash,
+                    version,
+                    secret_version: 1,
+                    secrets: sealed,
+                },
+                &ctx.self_sk,
+            );
+            pq_set = Some(PqSecretsDelta {
+                keys: Vec::new(),
+                sets: vec![set],
+            });
+            (trash_key, 1)
+        }
+    };
+
     let (sealed_item_key, item_key_nonce) =
         encrypt_with_symmetric_key(&secret, &item_key, secret_version);
 
@@ -104,7 +192,17 @@ pub async fn hide_topic(ctx: &ActionContext, root: MessageId) -> Result<(), Stri
                 items: vec![authorized],
                 actions: Vec::new(),
             }),
+            pq_secrets: pq_set,
             ..Default::default()
         },
     )
+    .map(|_| {
+        if let Some(board) = crate::components::app::BOARDS
+            .write()
+            .map
+            .get_mut(&ctx.current_board)
+        {
+            board.trash_secret = Some((secret_version, secret));
+        }
+    })
 }

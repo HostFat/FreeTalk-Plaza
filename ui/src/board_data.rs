@@ -100,6 +100,9 @@ pub struct BoardData {
     /// before the rotation stay readable. Local to this member.
     #[serde(default)]
     pub old_category_secrets: HashMap<MessageId, HashMap<u32, [u8; 32]>>,
+    /// Decrypted board trash key: (secret version, key). Local to each manager.
+    #[serde(default)]
+    pub trash_secret: Option<(u32, [u8; 32])>,
     /// The current (latest) secret version
     #[serde(skip)]
     pub current_secret_version: Option<u32>,
@@ -822,6 +825,7 @@ impl BoardData {
         }
         self.current_secret_version = Some(current_version);
         self.decrypt_pq_board_secrets();
+        self.decrypt_pq_trash_secret();
     }
 
     /// Try the PQ sets for the board secret. Old versions stay in `secrets`.
@@ -860,6 +864,32 @@ impl BoardData {
                         error
                     );
                 }
+            }
+        }
+    }
+
+    /// Open the PQ sets for the moderator trash key.
+    pub fn decrypt_pq_trash_secret(&mut self) {
+        use plaza_core::board_state::pq_secrets::PqScope;
+        let self_id = MemberId::from(&self.self_sk.verifying_key());
+        if let Some((version, secret)) = self
+            .board_state
+            .pq_secrets
+            .sets
+            .iter()
+            .filter(|entry| matches!(entry.set.scope, PqScope::Trash))
+            .flat_map(|entry| {
+                entry
+                    .set
+                    .secrets
+                    .iter()
+                    .filter(|secret| secret.member_id == self_id)
+                    .map(move |secret| (entry.set.secret_version, secret.clone()))
+            })
+            .max_by_key(|(version, _)| *version)
+        {
+            if let Ok(key) = crate::util::pq::open_secret(&self.self_sk, &secret) {
+                self.trash_secret = Some((version, key));
             }
         }
     }
@@ -1851,6 +1881,7 @@ impl Boards {
             self_member_info: None,
             category_secrets: HashMap::new(),
             old_category_secrets: HashMap::new(),
+            trash_secret: None,
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
@@ -2544,6 +2575,7 @@ mod tests {
             secrets: HashMap::new(),
             category_secrets: HashMap::new(),
             old_category_secrets: HashMap::new(),
+            trash_secret: None,
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
@@ -2622,6 +2654,7 @@ mod tests {
             secrets: HashMap::new(),
             category_secrets: HashMap::new(),
             old_category_secrets: HashMap::new(),
+            trash_secret: None,
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
@@ -2690,6 +2723,9 @@ mod tests {
                 secrets: HashMap::new(),
                 category_secrets: HashMap::new(),
                 old_category_secrets: HashMap::new(),
+
+                trash_secret: None,
+
                 collapsed_groups: Vec::new(),
                 last_visit: 0,
                 read_categories: HashMap::new(),
