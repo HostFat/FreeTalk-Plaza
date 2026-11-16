@@ -451,7 +451,13 @@ impl ComposableState for OwnershipV1 {
             .deactivations
             .extend(delta.deactivations.iter().cloned());
         trial.cleanup(parent_state, parameters);
-        if trial.verify(parent_state, parameters).is_ok() {
+        // A delta may extend the chain, never shorten an accepted one. When a
+        // record elsewhere in the update invalidates an earlier transfer (a
+        // newer admin appointment for the member that transfer handed the board
+        // to), cleanup would drop it and hand the board back. Keep the chain.
+        let keeps_accepted_chain = trial.transfers.len() >= self.transfers.len()
+            && trial.transfers[..self.transfers.len()] == self.transfers[..];
+        if keeps_accepted_chain && trial.verify(parent_state, parameters).is_ok() {
             *self = trial;
         }
         Ok(())
@@ -627,6 +633,63 @@ mod tests {
     /// The transfer screen sends the outgoing owner's admin record in the same
     /// update as the transfer: it is signed while the founder still owns the
     /// board, so the delta cannot wait for the transfer to be recorded.
+    #[test]
+    fn an_invalid_state_cannot_wipe_the_accepted_chain() {
+        let fixture = fixture();
+        let mut ownership = OwnershipV1::default();
+        ownership
+            .apply_delta(
+                &fixture.state,
+                &fixture.parameters,
+                &Some(OwnershipDelta {
+                    transfers: vec![transfer(
+                        fixture.owner_id,
+                        fixture.admin_id,
+                        fixture.admin_sk.verifying_key(),
+                        1,
+                        fixture.now,
+                        &fixture.owner_sk,
+                    )],
+                    deactivations: Vec::new(),
+                }),
+            )
+            .unwrap();
+        assert_eq!(ownership.transfers.len(), 1);
+
+        // A later "keep admin" bundle re-issued the new owner's record with a
+        // newer timestamp: the accepted transfer no longer verifies.
+        let mut later = fixture.state.clone();
+        later.admin.admins = vec![AuthorizedAdmin::new(
+            Admin {
+                member_id: fixture.admin_id,
+                generation: 2,
+                signed_at: fixture.now + std::time::Duration::from_secs(3600),
+            },
+            &fixture.owner_sk,
+        )];
+
+        ownership
+            .apply_delta(
+                &later,
+                &fixture.parameters,
+                &Some(OwnershipDelta {
+                    transfers: Vec::new(),
+                    deactivations: Vec::new(),
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(
+            ownership.transfers.len(),
+            1,
+            "the accepted transfer is kept even when it stops verifying"
+        );
+        assert_eq!(
+            ownership.current_owner(&fixture.parameters),
+            fixture.admin_id
+        );
+    }
+
     #[test]
     fn the_founding_owner_keeps_admin_rights_across_the_transfer() {
         let mut fixture = fixture();
