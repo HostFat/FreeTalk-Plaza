@@ -697,6 +697,56 @@ mod tests {
     }
 
     #[test]
+    fn a_promotion_then_transfer_in_two_updates_succeeds() {
+        let mut fixture = fixture();
+        fixture.state.admin.admins.clear();
+        let now = std::time::SystemTime::now();
+        let parent = fixture.state.clone();
+        fixture
+            .state
+            .apply_delta(
+                &parent,
+                &fixture.parameters,
+                &Some(ChatBoardStateV1Delta {
+                    admin: Some(crate::board_state::admin::AdminsDelta::new(vec![
+                        AuthorizedAdmin::new(
+                            Admin {
+                                member_id: fixture.admin_id,
+                                generation: 1,
+                                signed_at: now,
+                            },
+                            &fixture.owner_sk,
+                        ),
+                    ])),
+                    ..Default::default()
+                }),
+            )
+            .expect("promotion applies");
+
+        apply(
+            &mut fixture.state,
+            &fixture.parameters,
+            OwnershipDelta {
+                transfers: vec![transfer(
+                    fixture.owner_id,
+                    fixture.admin_id,
+                    fixture.admin_sk.verifying_key(),
+                    1,
+                    now + std::time::Duration::from_millis(2),
+                    &fixture.owner_sk,
+                )],
+                deactivations: Vec::new(),
+            },
+        );
+
+        assert_eq!(
+            fixture.state.ownership.current_owner(&fixture.parameters),
+            fixture.admin_id,
+            "the transfer must survive cleanup"
+        );
+    }
+
+    #[test]
     fn a_transfer_target_must_be_an_admin() {
         let mut fixture = fixture();
         fixture.state.admin.admins.clear();

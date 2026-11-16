@@ -70,6 +70,9 @@ pub fn OwnershipView() -> Element {
 
     let history = ctx.board_state.ownership.transfers.clone();
     let deactivations = ctx.board_state.ownership.deactivations.clone();
+    // The select stores the candidate index: `MemberId`'s Display and FromStr
+    // use different encodings, so parsing the printed id fails.
+    let candidate_ids: Vec<MemberId> = candidates.iter().map(|(id, _, _)| *id).collect();
     let names: std::collections::HashMap<MemberId, String> = ctx
         .board_state
         .member_info
@@ -93,7 +96,7 @@ pub fn OwnershipView() -> Element {
             .unwrap_or_else(|| format!("{}", id))
     };
 
-    let transfer = move |_| {
+    let transfer = move |_: dioxus::prelude::Event<dioxus::prelude::MouseData>| {
         if *busy.read() {
             return;
         }
@@ -234,7 +237,7 @@ pub fn OwnershipView() -> Element {
                     error.set(None);
                     confirmed.set(false);
                 }
-                Err(e) => error.set(Some(e)),
+                Err(e) => error.set(Some(format!("Transfer failed: {e}"))),
             }
             busy.set(false);
         });
@@ -269,11 +272,17 @@ pub fn OwnershipView() -> Element {
                         select {
                             class: "w-full bg-background border border-border rounded-lg px-3 py-2 text-text text-sm",
                             onchange: move |event| {
-                                selected.set(event.value().parse().ok());
+                                selected.set(
+                                    event
+                                        .value()
+                                        .parse::<usize>()
+                                        .ok()
+                                        .and_then(|index| candidate_ids.get(index).copied()),
+                                );
                             },
                             option { value: "", "Choose a member" }
-                            for (id, name, is_admin) in candidates.iter() {
-                                option { value: "{id}",
+                            for (index, (_, name, is_admin)) in candidates.iter().enumerate() {
+                                option { value: "{index}",
                                     if *is_admin { "{name} (admin)" } else { "{name}" }
                                 }
                             }

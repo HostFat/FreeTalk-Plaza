@@ -171,9 +171,15 @@ pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
                             select {
                                 class: "w-full bg-surface border border-border rounded-lg px-3 py-2 text-text focus:outline-none focus:ring-2 focus:ring-accent",
                                 onchange: move |evt| {
-                                    if let Ok(member) = evt.value().parse::<MemberId>() {
-                                        selected_member.set(Some(member));
-                                    }
+                                    // `MemberId`'s Display and FromStr use
+                                    // different encodings; match the printed id.
+                                    let value = evt.value();
+                                    let found = available_members
+                                        .read()
+                                        .iter()
+                                        .copied()
+                                        .find(|member_id| member_id.to_string() == value);
+                                    selected_member.set(found);
                                 },
                                 option { value: "", "-- Select a member --" }
                                 for member_id in available_members.read().iter() {
