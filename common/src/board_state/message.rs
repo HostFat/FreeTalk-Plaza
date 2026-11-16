@@ -105,6 +105,22 @@ impl ComposableState for MessagesV1 {
             }
         }
 
+        // A member may not hold more posts than the window allows. The check
+        // uses the signed times, so every peer evaluates it the same way.
+        let configuration = &parent_state.configuration.configuration;
+        if let Some(author) = crate::board_state::rate_limit::exceeding_member(
+            self.messages.iter().map(|message| {
+                (
+                    message.message.author,
+                    crate::board_state::rate_limit::system_time_ms(message.message.time),
+                )
+            }),
+            configuration.rate_window() as i64,
+            configuration.post_limit() as usize,
+        ) {
+            return Err(format!("Author {author:?} exceeded the posting rate limit"));
+        }
+
         Ok(())
     }
 
@@ -207,6 +223,35 @@ impl ComposableState for MessagesV1 {
             // Deduplicate by message ID to prevent duplicate messages from race conditions
             let existing_ids: std::collections::HashSet<_> =
                 self.messages.iter().map(|m| m.id()).collect();
+
+            // Reject a burst before touching the state: no author may exceed
+            // the configured posts per window once the delta is merged.
+            let configuration = &parent_state.configuration.configuration;
+            let incoming_ids: std::collections::HashSet<_> =
+                delta.iter().map(|message| message.id()).collect();
+            let mut times = Vec::with_capacity(self.messages.len() + delta.len());
+            for message in &self.messages {
+                if !incoming_ids.contains(&message.id()) {
+                    times.push((
+                        message.message.author,
+                        crate::board_state::rate_limit::system_time_ms(message.message.time),
+                    ));
+                }
+            }
+            for message in delta {
+                times.push((
+                    message.message.author,
+                    crate::board_state::rate_limit::system_time_ms(message.message.time),
+                ));
+            }
+            if let Some(author) = crate::board_state::rate_limit::exceeding_member(
+                times.into_iter(),
+                configuration.rate_window() as i64,
+                configuration.post_limit() as usize,
+            ) {
+                return Err(format!("Author {author:?} exceeded the posting rate limit"));
+            }
+
             self.messages.extend(
                 delta
                     .iter()
@@ -1080,6 +1125,63 @@ mod tests {
     fn test_messages_v1_default() {
         let default_messages = MessagesV1::default();
         assert!(default_messages.messages.is_empty());
+    }
+
+    /// One member posting faster than the configured window is rejected; the
+    /// limit is evaluated on the signed times so every peer agrees.
+    #[test]
+    fn a_post_burst_is_rejected_by_the_rate_limit() {
+        use crate::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+        use crate::board_state::member::{AuthorizedMember, Member};
+
+        let mut rng = OsRng;
+        let owner_sk = SigningKey::generate(&mut rng);
+        let author_sk = SigningKey::generate(&mut rng);
+        let owner_id = MemberId::from(&owner_sk.verifying_key());
+        let author_id = MemberId::from(&author_sk.verifying_key());
+        let params = ChatBoardParametersV1 {
+            owner: owner_sk.verifying_key(),
+        };
+        let mut state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner_sk),
+            ..Default::default()
+        };
+        state.members.members.push(AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk: author_sk.verifying_key(),
+                join_proof: None,
+            },
+            &owner_sk,
+        ));
+
+        let message = |index: u64| {
+            AuthorizedMessageV1::new(
+                MessageV1 {
+                    board_owner: owner_id,
+                    author: author_id,
+                    // 100 ms apart: the whole burst fits one window.
+                    time: SystemTime::UNIX_EPOCH + Duration::from_millis(index * 100),
+                    content: BoardMessageBody::public(String::new(), "hi".to_string()),
+                },
+                &author_sk,
+            )
+        };
+        let limit = state.configuration.configuration.post_limit() as usize;
+        let mut messages = MessagesV1::default();
+        for index in 0..limit {
+            messages.messages.push(message(index as u64));
+        }
+        messages
+            .verify(&state, &params)
+            .expect("a burst at the limit is allowed");
+
+        messages.messages.push(message(limit as u64));
+        let error = messages
+            .verify(&state, &params)
+            .expect_err("one more post breaks the window");
+        assert!(error.contains("rate limit"), "{error}");
     }
 
     #[test]

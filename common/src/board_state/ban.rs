@@ -421,6 +421,22 @@ impl ComposableState for BansV1 {
                 .map_err(|e| format!("Invalid ban signature: {}", e))?;
         }
 
+        // A banner may not issue more bans than the window allows. The check
+        // uses the signed times, so every peer agrees on the result.
+        let configuration = &parent_state.configuration.configuration;
+        if let Some(banner) = crate::board_state::rate_limit::exceeding_member(
+            self.0.iter().map(|ban| {
+                (
+                    ban.banned_by,
+                    crate::board_state::rate_limit::system_time_ms(ban.ban.banned_at),
+                )
+            }),
+            configuration.rate_window() as i64,
+            configuration.ban_limit() as usize,
+        ) {
+            return Err(format!("Banner {banner:?} exceeded the ban rate limit"));
+        }
+
         Ok(())
     }
 
@@ -499,6 +515,21 @@ impl ComposableState for BansV1 {
             // same update is deferred to the final state verification.
             if let Err(e) = temp_bans.verify_for_apply(parent_state, parameters) {
                 return Err(format!("Invalid delta: {}", e));
+            }
+
+            // Enforce the per-banner window before committing the delta.
+            let configuration = &parent_state.configuration.configuration;
+            if let Some(banner) = crate::board_state::rate_limit::exceeding_member(
+                temp_bans.0.iter().map(|ban| {
+                    (
+                        ban.banned_by,
+                        crate::board_state::rate_limit::system_time_ms(ban.ban.banned_at),
+                    )
+                }),
+                configuration.rate_window() as i64,
+                configuration.ban_limit() as usize,
+            ) {
+                return Err(format!("Banner {banner:?} exceeded the ban rate limit"));
             }
 
             // If verification passes, update the actual board_state

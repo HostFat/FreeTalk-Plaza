@@ -15,6 +15,7 @@ pub mod message_keys;
 pub mod moderation;
 pub mod pq_secrets;
 pub mod privacy;
+pub mod rate_limit;
 pub mod reports;
 pub mod roles;
 pub mod secret;
