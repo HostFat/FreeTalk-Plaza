@@ -152,6 +152,7 @@ pub async fn handle_get_response(
                         self_authorized_member: None,
                         invite_chain: vec![],
                         self_member_info: None,
+                        spectator: false,
                     }
                 });
 

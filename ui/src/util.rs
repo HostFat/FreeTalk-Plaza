@@ -12,6 +12,7 @@ pub mod messaging;
 pub mod moderation_queue;
 pub mod notifications;
 pub mod pq;
+pub mod spectator;
 pub mod subscriptions;
 pub mod trash_actions;
 

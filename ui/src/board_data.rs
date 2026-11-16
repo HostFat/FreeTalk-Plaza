@@ -189,6 +189,10 @@ pub struct BoardData {
     /// being pruned for inactivity and re-added.
     #[serde(default)]
     pub self_member_info: Option<AuthorizedMemberInfo>,
+    /// A public board opened in read-only mode: this client holds a local
+    /// identity that is never published, so the contract grows by nothing.
+    #[serde(default)]
+    pub spectator: bool,
 }
 
 impl BoardData {
@@ -1460,6 +1464,33 @@ impl BoardData {
         })
     }
 
+    /// Whether the board refuses new content from ordinary members.
+    pub fn is_read_only(&self) -> bool {
+        self.board_state.configuration.configuration.read_only
+    }
+
+    /// Whether this identity may create content: the board is not read-only,
+    /// or the identity is the current owner or an admin.
+    pub fn may_write_content(&self) -> bool {
+        if self.is_read_only() {
+            let parameters = ChatBoardParametersV1 {
+                owner: self.owner_vk,
+            };
+            let self_id = MemberId::from(&self.self_sk.verifying_key());
+            let is_owner = self.board_state.ownership.current_owner(&parameters) == self_id;
+            let is_admin = self
+                .board_state
+                .admin
+                .admins
+                .iter()
+                .any(|admin| admin.admin.id() == self_id);
+            if !is_owner && !is_admin {
+                return false;
+            }
+        }
+        self.can_participate().is_ok()
+    }
+
     /// Check if the user can participate in the board (send messages, edit profile).
     /// Returns Ok if user is not banned AND (is owner OR has self_authorized_member OR is in members list).
     pub fn can_participate(&self) -> Result<(), SendMessageError> {
@@ -2097,6 +2128,7 @@ impl Boards {
             self_authorized_member: None,    // Owner doesn't need this
             invite_chain: vec![],
             self_member_info: None,
+            spectator: false,
             category_secrets: HashMap::new(),
             old_category_secrets: HashMap::new(),
             trash_secret: None,
@@ -2984,6 +3016,7 @@ mod tests {
             self_authorized_member: None,
             invite_chain: vec![],
             self_member_info: None,
+            spectator: false,
         };
 
         // With stale key, user should NOT be recognized as a member
@@ -3064,6 +3097,7 @@ mod tests {
             self_authorized_member: None,
             invite_chain: vec![],
             self_member_info: None,
+            spectator: false,
         };
 
         // Before capture, self_member_info should be None
@@ -3136,6 +3170,7 @@ mod tests {
                 self_authorized_member: None,
                 invite_chain: vec![],
                 self_member_info: None,
+                spectator: false,
             }
         };
 

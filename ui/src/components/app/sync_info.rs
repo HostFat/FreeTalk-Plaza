@@ -93,8 +93,12 @@ impl SyncInfo {
         }
     }
 
-    pub fn update_last_synced_state(&mut self, owner_key: &VerifyingKey, state: &ChatBoardStateV1) {
-        if let Some(sync_info) = self.map.get_mut(owner_key) {
+    /// Current sync status of a board, if it is known.
+    pub fn sync_status_of(&self, owner_key: &VerifyingKey) -> Option<BoardSyncStatus> {
+        self.map.get(owner_key).map(|info| info.sync_status.clone())
+    }
+
+    pub fn update_last_synced_state(&mut self, owner_key: &VerifyingKey, state: &ChatBoardStateV1) {        if let Some(sync_info) = self.map.get_mut(owner_key) {
             sync_info.last_synced_state = Some(state.clone());
         }
     }
@@ -126,6 +130,15 @@ impl SyncInfo {
         let current_time = now_ms();
 
         for (key, board_data) in boards.map.iter() {
+            // A read-only visitor never puts its empty state: the board is
+            // fetched with a GET and the local identity is not published.
+            if board_data.spectator {
+                if !self.map.contains_key(key) {
+                    self.register_new_board(*key);
+                }
+                continue;
+            }
+
             // Register new boards automatically
             if !self.map.contains_key(key) {
                 self.register_new_board(*key);
@@ -209,6 +222,10 @@ impl SyncInfo {
         );
 
         for (key, board_data) in boards.map.iter() {
+            // A read-only visitor has nothing to publish.
+            if board_data.spectator {
+                continue;
+            }
             // Register new boards automatically
             if !self.map.contains_key(key) {
                 info!("Registering new board: {:?}", key);

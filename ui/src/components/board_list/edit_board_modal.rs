@@ -70,6 +70,11 @@ pub fn EditBoardModal() -> Element {
                             is_owner: *user_is_owner.read()
                         }
 
+                        super::read_only_field::ReadOnlyField {
+                            config: config.clone(),
+                            is_owner: *user_is_owner.read()
+                        }
+
                         // Read-only board info
                         if let Some(board_data) = editing_board.read().as_ref() {
                             // Board Public Key
@@ -100,6 +105,50 @@ pub fn EditBoardModal() -> Element {
                                     readonly: true,
                                     class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-muted text-sm font-mono cursor-text select-all",
                                     value: "{board_data.contract_key.id()}"
+                                }
+                            }
+
+                            // Read-only demo link: reading needs no membership.
+                            if *user_is_owner.read() {
+                                {
+                                    let demo_link = {
+                                        let base = web_sys::window()
+                                            .and_then(|window| window.location().href().ok())
+                                            .unwrap_or_default();
+                                        let base = base.split('#').next().unwrap_or("").to_string();
+                                        format!(
+                                            "{base}#/view/{}",
+                                            bs58::encode(board_data.owner_vk.as_bytes()).into_string()
+                                        )
+                                    };
+                                    rsx! {
+                                        div {
+                                            class: "mt-4",
+                                            label {
+                                                class: "block text-sm font-medium text-text-muted mb-1",
+                                                "Demo link (read-only)"
+                                            }
+                                            div { class: "flex gap-2",
+                                                input {
+                                                    r#type: "text",
+                                                    readonly: true,
+                                                    class: "flex-1 px-3 py-2 bg-surface border border-border rounded-lg text-text-muted text-xs font-mono cursor-text select-all",
+                                                    value: "{demo_link}"
+                                                }
+                                                button {
+                                                    r#type: "button",
+                                                    class: "px-3 py-2 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg border border-border transition-colors",
+                                                    onclick: move |_| {
+                                                        let _ = crate::util::copy_to_clipboard(&demo_link);
+                                                    },
+                                                    "Copy"
+                                                }
+                                            }
+                                            p { class: "mt-1 text-xs text-text-muted",
+                                                "Anyone with this link reads the board without joining, so the contract does not grow. Works on public boards."
+                                            }
+                                        }
+                                    }
                                 }
                             }
 

@@ -192,6 +192,7 @@ impl Default for Configuration {
             max_board_name: 100,
             max_board_description: 500,
             approval_required: false,
+            read_only: false,
             rate_window_ms: crate::board_state::rate_limit::DEFAULT_RATE_WINDOW_MS,
             max_posts_per_window: crate::board_state::rate_limit::DEFAULT_MAX_POSTS_PER_WINDOW,
             max_bans_per_window: crate::board_state::rate_limit::DEFAULT_MAX_BANS_PER_WINDOW,
@@ -229,6 +230,10 @@ pub struct Configuration {
     /// approves them. Skipped when false so old signed configs keep verifying.
     #[serde(default, skip_serializing_if = "is_false")]
     pub approval_required: bool,
+    /// Only the current owner and admins may create messages; everyone else
+    /// reads. Skipped when false so old signed configs keep verifying.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
     /// Rate-limit window in milliseconds. Zero means the built-in default, so
     /// configurations signed before the field existed keep verifying.
     #[serde(default, skip_serializing_if = "is_zero_u64")]

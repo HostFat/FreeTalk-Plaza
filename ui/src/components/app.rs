@@ -46,6 +46,8 @@ pub enum Route {
     Invite { invite_code: String },
     #[route("/join/:token")]
     JoinBoard { token: String },
+    #[route("/view/:board_id")]
+    ViewOnly { board_id: String },
     #[route("/board/:board_id")]
     Posts { board_id: String },
     #[route("/board/:board_id/post/:post_id")]
@@ -413,10 +415,54 @@ pub fn JoinBoard(token: String) -> Element {
     }
 }
 
+/// Route component: open a public board in read-only mode, without joining.
+#[component]
+fn ViewOnly(board_id: String) -> Element {
+    let mut problem = use_signal(|| None::<String>);
+    let mut started = use_signal(|| false);
+
+    use_effect(move || {
+        if *started.peek() {
+            return;
+        }
+        started.set(true);
+        let board_id = board_id.clone();
+        let Ok(bytes) = bs58::decode(&board_id).into_vec() else {
+            problem.set(Some("This board link is not valid.".to_string()));
+            return;
+        };
+        let Ok(raw) = <[u8; 32]>::try_from(bytes.as_slice()) else {
+            problem.set(Some("This board link is not valid.".to_string()));
+            return;
+        };
+        let Ok(owner_key) = ed25519_dalek::VerifyingKey::from_bytes(&raw) else {
+            problem.set(Some("This board link is not valid.".to_string()));
+            return;
+        };
+        match crate::util::spectator::open_spectator_board(owner_key) {
+            Ok(()) => {
+                if let Some(window) = web_sys::window() {
+                    let _ = window.location().set_hash(&format!("/board/{board_id}"));
+                }
+            }
+            Err(error) => problem.set(Some(error)),
+        }
+    });
+
+    rsx! {
+        div { class: "flex items-center justify-center min-h-screen p-6",
+            if let Some(error) = problem.read().as_ref() {
+                p { class: "text-red-300", "{error}" }
+            } else {
+                p { class: "text-text-muted", "Opening the board in read-only mode..." }
+            }
+        }
+    }
+}
+
 /// Route component for handling invitations
 #[component]
-fn Invite(invite_code: String) -> Element {
-    let invitation = use_memo(move || Invitation::from_encoded_string(&invite_code).ok());
+fn Invite(invite_code: String) -> Element {    let invitation = use_memo(move || Invitation::from_encoded_string(&invite_code).ok());
 
     match invitation() {
         Some(inv) => rsx! {

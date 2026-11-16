@@ -566,6 +566,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     self_authorized_member: Some(export.authorized_member),
                     invite_chain: export.invite_chain,
                     self_member_info: export.member_info,
+                    spectator: false,
                 };
 
                 // Add to BOARDS and trigger sync

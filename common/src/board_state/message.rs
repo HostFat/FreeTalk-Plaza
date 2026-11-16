@@ -15,6 +15,27 @@ use std::time::SystemTime;
 
 use crate::board_state::content::CategoryEditPayload;
 
+/// In a read-only board only the current owner and admins add content.
+/// Every write travels as a message (posts, replies, reactions, edits,
+/// deletes, reports, categories), so this one check covers them all.
+pub fn author_may_write(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    author: MemberId,
+) -> bool {
+    if !state.configuration.configuration.read_only {
+        return true;
+    }
+    if author == state.ownership.current_owner(parameters) {
+        return true;
+    }
+    state
+        .admin
+        .admins
+        .iter()
+        .any(|admin| admin.admin.id() == author)
+}
+
 /// Computed state for message actions (edits, deletes, reactions)
 /// This is rebuilt from action messages and not serialized
 #[derive(Clone, PartialEq, Debug, Default)]
@@ -87,6 +108,12 @@ impl ComposableState for MessagesV1 {
         let owner_id = parameters.owner_id();
 
         for message in &self.messages {
+            if !author_may_write(parent_state, parameters, message.message.author) {
+                return Err(format!(
+                    "Board is read-only: {:?} cannot write",
+                    message.message.author
+                ));
+            }
             let verifying_key = if message.message.author == owner_id {
                 // Owner's messages are validated against the owner's key
                 &parameters.owner
@@ -165,6 +192,12 @@ impl ComposableState for MessagesV1 {
         // Validate message constraints before adding
         if let Some(delta) = delta {
             for msg in delta {
+                if !author_may_write(parent_state, parameters, msg.message.author) {
+                    return Err(format!(
+                        "Board is read-only: {:?} cannot write",
+                        msg.message.author
+                    ));
+                }
                 let content = &msg.message.content;
 
                 // Validate title constraints (for public text/reply messages)
@@ -1079,6 +1112,9 @@ impl AuthorizedMessageV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board_state::admin::{Admin, AuthorizedAdmin};
+    use crate::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+    use crate::board_state::member::{AuthorizedMember, Member};
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
     use std::time::Duration;
@@ -1191,6 +1227,80 @@ mod tests {
             .verify(&state, &params)
             .expect_err("one more post breaks the window");
         assert!(error.contains("rate limit"), "{error}");
+    }
+
+    /// A read-only board accepts content only from the current owner and the
+    /// admins; every other member is refused in verification and in apply.
+    #[test]
+    fn a_read_only_board_accepts_only_the_owner_and_admins() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let member = SigningKey::from_bytes(&[2u8; 32]);
+        let admin = SigningKey::from_bytes(&[3u8; 32]);
+        let owner_id = MemberId::from(&owner.verifying_key());
+        let parameters = ChatBoardParametersV1 {
+            owner: owner.verifying_key(),
+        };
+        let mut configuration = Configuration::default();
+        configuration.read_only = true;
+        let mut state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(configuration, &owner),
+            ..Default::default()
+        };
+        for signer in [&member, &admin] {
+            state.members.members.push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: owner_id,
+                    invited_by: owner_id,
+                    member_vk: signer.verifying_key(),
+                    join_proof: None,
+                },
+                &owner,
+            ));
+        }
+        state.admin.admins.push(AuthorizedAdmin::new(
+            Admin {
+                member_id: MemberId::from(&admin.verifying_key()),
+                generation: 1,
+                signed_at: SystemTime::UNIX_EPOCH,
+            },
+            &owner,
+        ));
+
+        let post = |signer: &SigningKey| {
+            AuthorizedMessageV1::new(
+                MessageV1 {
+                    board_owner: owner_id,
+                    author: MemberId::from(&signer.verifying_key()),
+                    time: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+                    content: BoardMessageBody::public("t".to_string(), "b".to_string()),
+                },
+                signer,
+            )
+        };
+
+        let mut refused = MessagesV1::default();
+        refused.messages.push(post(&member));
+        let error = refused
+            .verify(&state, &parameters)
+            .expect_err("a plain member cannot write on a read-only board");
+        assert!(error.contains("read-only"), "{error}");
+        assert!(
+            refused
+                .apply_delta(&state, &parameters, &Some(refused.messages.clone()))
+                .is_err(),
+            "the delta is refused too"
+        );
+
+        for signer in [&admin, &owner] {
+            let mut allowed = MessagesV1::default();
+            allowed.messages.push(post(signer));
+            allowed
+                .verify(&state, &parameters)
+                .expect("the owner and admins write on a read-only board");
+            allowed
+                .apply_delta(&state, &parameters, &Some(allowed.messages.clone()))
+                .expect("their delta applies");
+        }
     }
 
     #[test]

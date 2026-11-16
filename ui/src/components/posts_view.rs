@@ -673,8 +673,12 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
     let can_write = is_member
         && current_board_data
             .as_ref()
-            .map(|board| board.can_participate().is_ok())
+            .map(|board| board.may_write_content())
             .unwrap_or(false);
+    let read_only_board = current_board_data
+        .as_ref()
+        .map(|board| board.is_read_only())
+        .unwrap_or(false);
 
 
     // Update CURRENT_CATEGORY for auto-parenting posts/categories
@@ -1456,9 +1460,13 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                     }
                                                 }
                                             }
+                                            if read_only_board && !can_write {
+                                                div { class: "mb-3 px-3 py-2 rounded-lg bg-surface text-xs text-text-muted",
+                                                    "This board is read-only: you can read everything, while posting, reactions and reports are reserved to the owner and admins."
+                                                }
+                                            }
                                             div { class: "flex items-center gap-2 mb-4",
-                                                span { class: "text-sm text-text-muted", "Sort:" }
-                                                button {
+                                                span { class: "text-sm text-text-muted", "Sort:" }                                                button {
                                                     r#type: "button",
                                                     class: if !*recent_first.read() {
                                                         "px-3 py-1 text-xs rounded-md bg-accent text-white"

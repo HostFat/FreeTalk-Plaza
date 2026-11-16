@@ -31,6 +31,7 @@ pub fn TopBar() -> Element {
                 crate::util::membership::restore_self_membership();
                 crate::util::pq::housekeeping();
                 crate::components::app::flush_pending_sync();
+                crate::util::spectator::fetch_pending_spectator_boards().await;
                 futures_timer::Delay::new(std::time::Duration::from_secs(60)).await;
             }
         });
