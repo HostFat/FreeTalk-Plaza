@@ -79,6 +79,15 @@ opt-level = 's'
 inherits = "dev"
 opt-level = 1
 
+# Dev and test builds keep no debug info for dependencies: the Dioxus graph
+# dominates the link of the UI test binary, and its debug info is most of that
+# link. The workspace crates keep theirs.
+[profile.dev.package."*"]
+debug = false
+
+[profile.test.package."*"]
+debug = false
+
 [profile.server-dev]
 inherits = "dev"
 
