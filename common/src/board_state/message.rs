@@ -1143,7 +1143,15 @@ mod tests {
             owner: owner_sk.verifying_key(),
         };
         let mut state = ChatBoardStateV1 {
-            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner_sk),
+            // A small window keeps the test fast: every message is signed and
+            // verified in debug builds.
+            configuration: AuthorizedConfigurationV1::new(
+                Configuration {
+                    max_posts_per_window: 3,
+                    ..Configuration::default()
+                },
+                &owner_sk,
+            ),
             ..Default::default()
         };
         state.members.members.push(AuthorizedMember::new(
