@@ -93,15 +93,22 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
             entry.assignment.member_id == member_to_ban && !entry.assignment.revoked
         })
         .map(|entry| {
-            plaza_core::board_state::roles::AuthorizedRoleAssignment::new(
+            // The revocation must name this signer; `new` would claim the
+            // owner signed it and fail verification for an admin.
+            plaza_core::board_state::roles::AuthorizedRoleAssignment::signed_by(
                 plaza_core::board_state::roles::RoleAssignment {
                     role_id: entry.assignment.role_id,
                     member_id: member_to_ban,
                     generation: entry.assignment.generation + 1,
                     revoked: true,
                 },
+                banned_by,
                 &self_sk,
             )
+            .with_optional_authority(plaza_core::board_state::roles::admin_authority_proof(
+                &board_state_clone,
+                &banned_by,
+            ))
         })
         .collect();
     let delta = ChatBoardStateV1Delta {

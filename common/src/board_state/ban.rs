@@ -192,6 +192,12 @@ impl BansV1 {
             .iter()
             .map(|a| a.admin.id())
             .collect();
+        let revoked_admin_ids: HashSet<MemberId> = parent_state
+            .admin
+            .revoked
+            .iter()
+            .map(|entry| entry.id())
+            .collect();
         let mut invalid_bans = HashMap::new();
         let banned_user_ids: HashSet<MemberId> = self.0.iter().map(|b| b.ban.banned_user).collect();
 
@@ -202,6 +208,7 @@ impl BansV1 {
                 &member_map,
                 parameters,
                 &admin_ids,
+                &revoked_admin_ids,
                 &mut invalid_bans,
                 &banned_user_ids,
                 allow_missing_banner,
@@ -221,6 +228,7 @@ impl BansV1 {
         member_map: &HashMap<MemberId, &AuthorizedMember>,
         parameters: &ChatBoardParametersV1,
         admin_ids: &HashSet<MemberId>,
+        revoked_admin_ids: &HashSet<MemberId>,
         invalid_bans: &mut HashMap<BanId, BanValidationError>,
         banned_user_ids: &HashSet<MemberId>,
         allow_missing_banner: bool,
@@ -242,6 +250,8 @@ impl BansV1 {
             .map(|admin| {
                 admin.admin.id() == ban.banned_by
                     && admin.verify_signature(&parameters.owner).is_ok()
+                    // A revoked adminship cannot vouch for later bans.
+                    && !revoked_admin_ids.contains(&ban.banned_by)
             })
             .unwrap_or(false);
         let is_admin = admin_ids.contains(&ban.banned_by) || proof_admin;
@@ -508,6 +518,17 @@ impl ComposableState for BansV1 {
 }
 
 impl BansV1 {
+    /// Drop bans that no longer verify: a revoked admin proof stops vouching
+    /// for the bans it signed. Called by the state cleanup so the state does
+    /// not stay unverifiable forever.
+    pub fn cleanup(&mut self, state: &ChatBoardStateV1, parameters: &ChatBoardParametersV1) {
+        let invalid = self.get_invalid_bans(state, parameters, false);
+        if invalid.is_empty() {
+            return;
+        }
+        self.0.retain(|ban| !invalid.contains_key(&ban.id()));
+    }
+
     /// Trim the collection to `max_user_bans`.
     ///
     /// Eviction is oldest-first (with `BanId` tie-breaking) so every peer drops
@@ -1517,5 +1538,239 @@ mod revocation_tests {
             ..Default::default()
         };
         assert!(state.ban_revocations.verify(&state, &params).is_err());
+    }
+
+    /// A ban signed by an admin with a proof applies and survives the cleanup
+    /// that runs in the same update.
+    #[test]
+    fn an_admin_ban_applies_and_stays() {
+        use crate::board_state::admin::{Admin, AuthorizedAdmin};
+        use crate::board_state::message::{
+            AuthorizedMessageV1, BoardMessageBody, MessageV1,
+        };
+        use crate::board_state::roles::{
+            admin_authority_proof, AuthorizedRole, AuthorizedRoleAssignment, Role, RoleAssignment,
+            RolesDelta,
+        };
+        use crate::board_state::ChatBoardStateV1Delta;
+        use std::time::SystemTime;
+
+        let owner_sk = SigningKey::from_bytes(&[1u8; 32]);
+        let owner_id = MemberId::from(&owner_sk.verifying_key());
+        let admin_sk = SigningKey::from_bytes(&[2u8; 32]);
+        let admin_id = MemberId::from(&admin_sk.verifying_key());
+        let target_sk = SigningKey::from_bytes(&[3u8; 32]);
+        let target_id = MemberId::from(&target_sk.verifying_key());
+        let params = ChatBoardParametersV1 {
+            owner: owner_sk.verifying_key(),
+        };
+        let mut state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(
+                Configuration {
+                    max_user_bans: 10,
+                    ..Default::default()
+                },
+                &owner_sk,
+            ),
+            ..Default::default()
+        };
+        for sk in [&admin_sk, &target_sk] {
+            state.members.members.push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: owner_id,
+                    invited_by: owner_id,
+                    member_vk: sk.verifying_key(),
+                    join_proof: None,
+                },
+                &owner_sk,
+            ));
+            // A member with no message and no token join is pruned by the
+            // cleanup, which would drop the ban with its banner.
+            let author = MemberId::from(&sk.verifying_key());
+            state
+                .recent_messages
+                .messages
+                .push(AuthorizedMessageV1::new(
+                    MessageV1 {
+                        board_owner: owner_id,
+                        author,
+                        time: SystemTime::now(),
+                        content: BoardMessageBody::public("t".to_string(), "b".to_string()),
+                    },
+                    sk,
+                ));
+        }
+        state.admin.admins.push(AuthorizedAdmin::new(
+            Admin {
+                member_id: admin_id,
+                generation: 1,
+            },
+            &owner_sk,
+        ));
+        let proof = admin_authority_proof(&state, &admin_id).expect("admin proof");
+        // The target's signed record keeps the ban valid after the ban prunes
+        // the member in the same update.
+        let target_record = AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk: target_sk.verifying_key(),
+                join_proof: None,
+            },
+            &owner_sk,
+        );
+        let ban = AuthorizedUserBan::new(
+            UserBan {
+                owner_member_id: owner_id,
+                banned_at: SystemTime::now(),
+                banned_user: target_id,
+                expires_at: None,
+                target_member: Some(target_record),
+                invite_chain: Vec::new(),
+            },
+            admin_id,
+            &admin_sk,
+        )
+        .with_optional_authority(Some(proof.clone()));
+
+        // The ban also revokes the target's role, signed by the same admin.
+        let role_id = [7u8; 16];
+        state.roles.roles.push(AuthorizedRole::new(
+            Role {
+                id: role_id,
+                name: "moderator".to_string(),
+                generation: 1,
+                can_manage_access: false,
+                can_distribute_keys: false,
+                can_edit_posts: false,
+                can_delete_posts: false,
+                can_close_posts: false,
+                can_pin_posts: false,
+                can_move_posts: false,
+                can_manage_trash: true,
+                scope: Vec::new(),
+                deleted: false,
+            },
+            &owner_sk,
+        ));
+        state
+            .roles
+            .assignments
+            .push(AuthorizedRoleAssignment::new(
+                RoleAssignment {
+                    role_id,
+                    member_id: target_id,
+                    generation: 1,
+                    revoked: false,
+                },
+                &owner_sk,
+            ));
+        let revocation = AuthorizedRoleAssignment::signed_by(
+            RoleAssignment {
+                role_id,
+                member_id: target_id,
+                generation: 2,
+                revoked: true,
+            },
+            admin_id,
+            &admin_sk,
+        )
+        .with_optional_authority(Some(proof));
+
+        let parent = state.clone();
+        state
+            .apply_delta(
+                &parent,
+                &params,
+                &Some(ChatBoardStateV1Delta {
+                    bans: Some(vec![ban]),
+                    roles: Some(RolesDelta {
+                        roles: Vec::new(),
+                        assignments: vec![revocation],
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .expect("the admin ban applies");
+        assert_eq!(state.bans.0.len(), 1, "the ban stays after cleanup");
+        assert!(state
+            .roles
+            .assignments
+            .iter()
+            .any(|entry| entry.assignment.member_id == target_id && entry.assignment.revoked));
+    }
+
+    /// A ban signed by an admin with a proof stops verifying when the owner
+    /// revokes that admin, so cleanup drops it instead of wedging the state.
+    #[test]
+    fn cleanup_drops_a_ban_signed_by_a_revoked_admin() {
+        use crate::board_state::admin::{Admin, AuthorizedAdmin, AuthorizedAdminRevocation};
+        use crate::board_state::roles::admin_authority_proof;
+        use std::time::SystemTime;
+
+        let owner_sk = SigningKey::from_bytes(&[1u8; 32]);
+        let owner_id = MemberId::from(&owner_sk.verifying_key());
+        let admin_sk = SigningKey::from_bytes(&[2u8; 32]);
+        let admin_id = MemberId::from(&admin_sk.verifying_key());
+        let target_sk = SigningKey::from_bytes(&[3u8; 32]);
+        let target_id = MemberId::from(&target_sk.verifying_key());
+        let params = ChatBoardParametersV1 {
+            owner: owner_sk.verifying_key(),
+        };
+        let mut state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner_sk),
+            ..Default::default()
+        };
+        for sk in [&admin_sk, &target_sk] {
+            state.members.members.push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: owner_id,
+                    invited_by: owner_id,
+                    member_vk: sk.verifying_key(),
+                    join_proof: None,
+                },
+                &owner_sk,
+            ));
+        }
+        state.admin.admins.push(AuthorizedAdmin::new(
+            Admin {
+                member_id: admin_id,
+                generation: 1,
+            },
+            &owner_sk,
+        ));
+        let proof = admin_authority_proof(&state, &admin_id).expect("admin proof");
+        state.bans.0.push(
+            AuthorizedUserBan::new(
+                UserBan {
+                    owner_member_id: owner_id,
+                    banned_at: SystemTime::now(),
+                    banned_user: target_id,
+                    expires_at: None,
+                    target_member: None,
+                    invite_chain: Vec::new(),
+                },
+                admin_id,
+                &admin_sk,
+            )
+            .with_optional_authority(Some(proof)),
+        );
+        state
+            .verify(&state.clone(), &params)
+            .expect("an admin ban with a proof verifies");
+
+        state.admin.admins.clear();
+        state
+            .admin
+            .revoked
+            .push(AuthorizedAdminRevocation::new(admin_id, 2, &owner_sk));
+        let mut bans = std::mem::take(&mut state.bans);
+        bans.cleanup(&state, &params);
+        state.bans = bans;
+
+        assert!(state.bans.0.is_empty(), "the revoked admin's ban is gone");
+        state
+            .verify(&state.clone(), &params)
+            .expect("the state verifies after cleanup");
     }
 }

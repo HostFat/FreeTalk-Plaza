@@ -309,6 +309,17 @@ impl ChatBoardStateV1 {
         // has revoked. Running it here keeps merged states normalized.
         self.admin.resolve_conflicts();
 
+        // 5c-bis. An admin proof stops vouching for records once the owner
+        // revokes that admin. Drop those records instead of leaving a state
+        // that every later verification rejects.
+        let mut bans = std::mem::take(&mut self.bans);
+        bans.cleanup(self, parameters);
+        self.bans = bans;
+
+        let mut roles = std::mem::take(&mut self.roles);
+        roles.cleanup(self, parameters);
+        self.roles = roles;
+
         // 5d. Category key blobs only make sense for current members, signed
         // by the owner or by a current key-distribution role. Dropping the
         // others keeps the state valid after a member is pruned or a role

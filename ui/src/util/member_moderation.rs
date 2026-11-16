@@ -65,6 +65,7 @@ pub fn suspend_member(
     // A suspended member must not keep moderation powers. The contract cannot
     // read a clock, so the role assignment is revoked explicitly; the owner
     // re-assigns it after the suspension if the member should keep the role.
+    let signer_id = MemberId::from(&ctx.self_sk.verifying_key());
     let role_revocations: Vec<_> = ctx
         .board_state
         .roles
@@ -72,15 +73,19 @@ pub fn suspend_member(
         .iter()
         .filter(|entry| entry.assignment.member_id == target && !entry.assignment.revoked)
         .map(|entry| {
-            AuthorizedRoleAssignment::new(
+            // Name the real signer: an admin's revocation signed through
+            // `new` would claim the owner's key and fail verification.
+            AuthorizedRoleAssignment::signed_by(
                 RoleAssignment {
                     role_id: entry.assignment.role_id,
                     member_id: target,
                     generation: entry.assignment.generation + 1,
                     revoked: true,
                 },
+                signer_id,
                 &ctx.self_sk,
             )
+            .with_optional_authority(admin_authority_proof(&ctx.board_state, &signer_id))
         })
         .collect();
     let delta = ChatBoardStateV1Delta {

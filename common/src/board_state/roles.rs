@@ -191,6 +191,16 @@ pub(crate) fn verify_admin_authority(
     if let Some(admin) = &proof.admin {
         admin.verify_signature(&parameters.owner)?;
         if admin.admin.id() == *signer {
+            // The proof shows the appointment, not that it still stands. Once
+            // the owner revokes it, the signer cannot vouch for new records.
+            if state
+                .admin
+                .revoked
+                .iter()
+                .any(|entry| entry.id() == *signer)
+            {
+                return Err("Signer's adminship was revoked".to_string());
+            }
             return Ok(());
         }
     }
@@ -610,6 +620,70 @@ pub struct RolesV1 {
     pub assignments: Vec<AuthorizedRoleAssignment>,
 }
 
+impl RolesV1 {
+    /// Drop records that a revoked admin proof no longer supports. The state
+    /// cleanup takes this field out before calling, so verify against a
+    /// snapshot that still has the roles in place.
+    pub fn cleanup(&mut self, state: &ChatBoardStateV1, parameters: &ChatBoardParametersV1) {
+        if state.admin.revoked.is_empty() {
+            return;
+        }
+        let mut snapshot = state.clone();
+        snapshot.roles = self.clone();
+        self.roles
+            .retain(|role| verify_role_record(&snapshot, parameters, role).is_ok());
+        snapshot.roles = self.clone();
+        self.assignments
+            .retain(|assignment| verify_assignment_record(&snapshot, parameters, assignment).is_ok());
+        self.roles.sort_by_key(|role| role.role.id);
+        self.assignments
+            .sort_by_key(|a| (a.assignment.role_id, a.assignment.member_id));
+    }
+}
+
+fn verify_role_record(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    role: &AuthorizedRole,
+) -> Result<(), String> {
+    let signer = role.signer_id(parameters);
+    let signing_key =
+        resolve_signer_key(state, parameters, &signer, role.signer_key.as_ref())?;
+    role.verify_signature_with(&signing_key)?;
+    verify_admin_authority(
+        state,
+        parameters,
+        &signer,
+        role.authority.as_deref(),
+        MAX_AUTHORITY_DEPTH,
+    )
+}
+
+fn verify_assignment_record(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    assignment: &AuthorizedRoleAssignment,
+) -> Result<(), String> {
+    let signer = assignment.signer_id(parameters);
+    if signer != parameters.owner_id()
+        && assignment.assignment.member_id == signer
+        && !is_board_admin(state, &signer)
+    {
+        return Err("A manager cannot assign a role to themselves".to_string());
+    }
+    let signing_key =
+        resolve_signer_key(state, parameters, &signer, assignment.signer_key.as_ref())?;
+    verify_struct(&assignment.assignment, &assignment.signature, &signing_key)
+        .map_err(|e| format!("Invalid role assignment signature: {}", e))?;
+    verify_manager_authority(
+        state,
+        parameters,
+        &signer,
+        assignment.authority.as_deref(),
+        MAX_AUTHORITY_DEPTH,
+    )
+}
+
 impl ComposableState for RolesV1 {
     type ParentState = ChatBoardStateV1;
     type Summary = RolesSummary;
@@ -626,18 +700,8 @@ impl ComposableState for RolesV1 {
             // Owner and board admins may define roles. Managers cannot, so a
             // delegated access manager cannot grant itself moderation powers.
             // A proof keeps records signed by an admin who has since lost the
-            // seat verifiable.
-            let signer = role.signer_id(parameters);
-            let signing_key =
-                resolve_signer_key(parent_state, parameters, &signer, role.signer_key.as_ref())?;
-            role.verify_signature_with(&signing_key)?;
-            verify_admin_authority(
-                parent_state,
-                parameters,
-                &signer,
-                role.authority.as_deref(),
-                MAX_AUTHORITY_DEPTH,
-            )?;
+            // seat verifiable, unless the owner revoked that admin.
+            verify_role_record(parent_state, parameters, role)?;
             if !role_ids.insert(role.role.id) {
                 return Err("Duplicate role record".to_string());
             }
@@ -645,31 +709,10 @@ impl ComposableState for RolesV1 {
 
         let mut assignment_keys = std::collections::HashSet::new();
         for assignment in &self.assignments {
-            let signer = assignment.signer_id(parameters);
             // Evaluating authority against the list that contains this record
             // would let a manager grant a role to themselves. Delegation to
             // another member is allowed; self-promotion is not.
-            if signer != parameters.owner_id()
-                && assignment.assignment.member_id == signer
-                && !is_board_admin(parent_state, &signer)
-            {
-                return Err("A manager cannot assign a role to themselves".to_string());
-            }
-            let signing_key = resolve_signer_key(
-                parent_state,
-                parameters,
-                &signer,
-                assignment.signer_key.as_ref(),
-            )?;
-            verify_struct(&assignment.assignment, &assignment.signature, &signing_key)
-                .map_err(|e| format!("Invalid role assignment signature: {}", e))?;
-            verify_manager_authority(
-                parent_state,
-                parameters,
-                &signer,
-                assignment.authority.as_deref(),
-                MAX_AUTHORITY_DEPTH,
-            )?;
+            verify_assignment_record(parent_state, parameters, assignment)?;
 
             let key = (
                 assignment.assignment.role_id,
@@ -786,7 +829,12 @@ impl ComposableState for RolesV1 {
             // and use that same grant to pass the check.
             for assignment in &delta.assignments {
                 let signer = assignment.signer_id(parameters);
-                if signer != parameters.owner_id() && !self.can_manage_access(&signer) {
+                // Admins define roles too, so they may assign and revoke them;
+                // `verify` already accepts the same signer set.
+                if signer != parameters.owner_id()
+                    && !self.can_manage_access(&signer)
+                    && !is_board_admin(parent_state, &signer)
+                {
                     return Err("Role assignment signer cannot manage access".to_string());
                 }
                 if signer != parameters.owner_id()
@@ -1255,7 +1303,7 @@ mod delegation_tests {
     }
 
     #[test]
-    fn admin_signed_role_verifies_after_the_admin_is_removed() {
+    fn admin_signed_role_is_dropped_after_the_admin_is_revoked() {
         let owner = SigningKey::from_bytes(&[1u8; 32]);
         let admin_sk = SigningKey::from_bytes(&[6u8; 32]);
         let params = params(&owner);
@@ -1293,9 +1341,15 @@ mod delegation_tests {
             .push(AuthorizedAdminRevocation::new(admin_id, 2, &owner));
         state.members.members.clear();
 
+        // The proof cannot vouch for the role any more, so cleanup drops it
+        // and leaves a state that still verifies.
+        let mut roles = std::mem::take(&mut state.roles);
+        roles.cleanup(&state, &params);
+        assert!(roles.roles.is_empty(), "the revoked admin's role is gone");
+        state.roles = roles;
         state
             .verify(&state.clone(), &params)
-            .expect("historical admin proof keeps the role verifiable");
+            .expect("cleanup leaves a verifiable state");
     }
 
     #[test]
@@ -1420,5 +1474,51 @@ mod delegation_tests {
 
         let signature = sign_struct(&role, &owner);
         assert!(verify_struct(&decoded, &signature, &owner.verifying_key()).is_ok());
+    }
+
+    /// An owner-signed admin record is not a lifetime pass: once the owner
+    /// revokes it, the signer cannot vouch for new records with the proof.
+    #[test]
+    fn a_revoked_admin_cannot_vouch_for_new_records() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let admin_sk = SigningKey::from_bytes(&[2u8; 32]);
+        let admin_id = MemberId::from(&admin_sk.verifying_key());
+        let params = params(&owner);
+        let mut state = ChatBoardStateV1::default();
+        let record = AuthorizedAdmin::new(
+            Admin {
+                member_id: admin_id,
+                generation: 1,
+            },
+            &owner,
+        );
+        state.admin.admins.push(record.clone());
+        let proof = AuthorityProof {
+            admin: Some(record),
+            grant: None,
+        };
+        verify_admin_authority(&state, &params, &admin_id, Some(&proof), 8)
+            .expect("a current admin passes");
+
+        state.admin.admins.clear();
+        state
+            .admin
+            .revoked
+            .push(AuthorizedAdminRevocation::new(admin_id, 2, &owner));
+        let error = verify_admin_authority(&state, &params, &admin_id, Some(&proof), 8)
+            .expect_err("the revoked adminship cannot vouch");
+        assert!(error.contains("revoked"), "{error}");
+
+        // Re-appointment with a higher generation restores the power.
+        state.admin.revoked.clear();
+        state.admin.admins.push(AuthorizedAdmin::new(
+            Admin {
+                member_id: admin_id,
+                generation: 3,
+            },
+            &owner,
+        ));
+        verify_admin_authority(&state, &params, &admin_id, None, 8)
+            .expect("the new appointment grants the power");
     }
 }
