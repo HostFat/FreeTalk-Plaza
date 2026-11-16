@@ -124,32 +124,47 @@ fn start_transfer(
         });
 
         // The outgoing owner rejoins as a member (and optionally an admin).
-        delta.members = Some(MembersDelta::new(vec![AuthorizedMember::new(
-            Member {
-                owner_member_id: parameters.owner_id(),
-                invited_by: owner_id,
-                member_vk: ctx.self_sk.verifying_key(),
-                join_proof: None,
-            },
-            &ctx.self_sk,
-        )]));
-        let next_admin_generation = ctx.board_state.admin.next_generation(&owner_id);
-        if outgoing == OutgoingOwnerAction::KeepAdmin {
-            delta.admin = Some(AdminsDelta::new(vec![AuthorizedAdmin::new(
-                Admin {
-                    member_id: owner_id,
-                    generation: next_admin_generation,
-                    signed_at,
+        // A later handover finds it already on the list: publishing a
+        // self-invitation again is rejected as such.
+        let already_member = ctx
+            .board_state
+            .members
+            .members
+            .iter()
+            .any(|member| member.member.id() == owner_id);
+        if !already_member {
+            delta.members = Some(MembersDelta::new(vec![AuthorizedMember::new(
+                Member {
+                    owner_member_id: parameters.owner_id(),
+                    invited_by: owner_id,
+                    member_vk: ctx.self_sk.verifying_key(),
+                    join_proof: None,
                 },
                 &ctx.self_sk,
             )]));
-        } else if ctx
+        }
+        let next_admin_generation = ctx.board_state.admin.next_generation(&owner_id);
+        let owner_is_admin = ctx
             .board_state
             .admin
             .admins
             .iter()
-            .any(|admin| admin.admin.id() == owner_id)
-        {
+            .any(|admin| admin.admin.id() == owner_id);
+        if outgoing == OutgoingOwnerAction::KeepAdmin {
+            // Adding a newer record would move its signed time past an earlier
+            // transfer that names this owner as the target, which makes that
+            // transfer invalid. Keep the record that is already there.
+            if !owner_is_admin {
+                delta.admin = Some(AdminsDelta::new(vec![AuthorizedAdmin::new(
+                    Admin {
+                        member_id: owner_id,
+                        generation: next_admin_generation,
+                        signed_at,
+                    },
+                    &ctx.self_sk,
+                )]));
+            }
+        } else if owner_is_admin {
             let revocation = AdminRevocation {
                 member_id: owner_id,
                 generation: next_admin_generation,

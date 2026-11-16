@@ -559,22 +559,27 @@ pub(crate) fn apply_state_delta_unchecked(
 ) -> Result<(), String> {
     let parent = ctx.board_state.clone();
     let owner = ctx.current_board;
-    let mut error: Option<String> = None;
+    let parameters = ChatBoardParametersV1 { owner };
+
+    // Apply to a copy and keep it only when the result verifies, exactly as
+    // the contract does. `apply_delta` writes field by field, so a late
+    // rejection would otherwise leave the local state half updated.
+    let mut next = parent.clone();
+    next.apply_delta(&parent, &parameters, &Some(delta))
+        .map_err(|e| {
+            warn!("state delta rejected locally: {e}");
+            e
+        })?;
+    next.verify(&next, &parameters).map_err(|e| {
+        warn!("state delta left an invalid state: {e}");
+        e
+    })?;
+
     BOARDS.with_mut(|boards| {
         if let Some(board) = boards.map.get_mut(&owner) {
-            if let Err(e) = board.board_state.apply_delta(
-                &parent,
-                &ChatBoardParametersV1 { owner },
-                &Some(delta),
-            ) {
-                error = Some(e);
-            }
+            board.board_state = next;
         }
     });
-    if let Some(error) = error {
-        warn!("state delta rejected locally: {error}");
-        return Err(error);
-    }
     mark_needs_sync(owner);
     Ok(())
 }
