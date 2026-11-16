@@ -34,30 +34,22 @@ pub fn OwnershipView() -> Element {
     let owner_id = ctx.board_state.ownership.current_owner(&parameters);
     let is_owner = ctx.self_sk.verifying_key() == ctx.board_state.ownership.current_owner_key(&parameters);
 
-    // Admins that can receive the board: members with a verifying key, not
-    // the current owner, not deactivated.
-    let candidates: Vec<(MemberId, String)> = ctx
+    // Members that can receive the board: a valid key, not the current owner,
+    // not deactivated. An admin target skips the promotion step.
+    let candidates: Vec<(MemberId, String, bool)> = ctx
         .board_state
-        .admin
-        .admins
+        .members
+        .members
         .iter()
-        .filter(|admin| {
-            admin.admin.id() != owner_id
+        .filter(|member| {
+            member.member.id() != owner_id
                 && !ctx
                     .board_state
                     .ownership
-                    .is_deactivated_now(&admin.admin.id())
+                    .is_deactivated_now(&member.member.id())
         })
-        .filter_map(|admin| {
-            let id = admin.admin.id();
-            ctx.board_state
-                .members
-                .members
-                .iter()
-                .find(|member| member.member.id() == id)
-                .map(|member| (id, member.member.member_vk))
-        })
-        .map(|(id, _)| {
+        .map(|member| {
+            let id = member.member.id();
             let name = ctx
                 .board_state
                 .member_info
@@ -66,7 +58,13 @@ pub fn OwnershipView() -> Element {
                 .find(|info| info.member_info.member_id == id)
                 .map(|info| info.member_info.preferred_nickname.to_string_lossy())
                 .unwrap_or_else(|| format!("{}", id));
-            (id, name)
+            let is_admin = ctx
+                .board_state
+                .admin
+                .admins
+                .iter()
+                .any(|admin| admin.admin.id() == id);
+            (id, name, is_admin)
         })
         .collect();
 
@@ -125,6 +123,40 @@ pub fn OwnershipView() -> Element {
         // the outgoing owner as their authority.
         let signed_at = now;
         let transferred_at = now + Duration::from_millis(2);
+
+        // Only admins can receive the board: promote a plain member first.
+        let target_is_admin = ctx
+            .board_state
+            .admin
+            .admins
+            .iter()
+            .any(|admin| admin.admin.id() == target);
+        if !target_is_admin {
+            let generation = ctx.board_state.admin.next_generation(&target);
+            let admin = Admin {
+                member_id: target,
+                generation,
+                signed_at,
+            };
+            let delta = ChatBoardStateV1Delta {
+                admin: Some(AdminsDelta::new(vec![AuthorizedAdmin::new(
+                    admin,
+                    &ctx.self_sk,
+                )])),
+                ..Default::default()
+            };
+            if let Err(e) = apply_state_delta(&ctx, delta) {
+                error.set(Some(format!("Could not promote the target to admin: {e}")));
+                busy.set(false);
+                return;
+            }
+        }
+        let Some(ctx) = ActionContext::from_current_board() else {
+            error.set(Some("The board context is gone after the promotion".to_string()));
+            busy.set(false);
+            return;
+        };
+
         let generation = ctx.board_state.ownership.transfers.len() as u64 + 1;
         let outgoing = *outcome.read();
 
@@ -231,7 +263,7 @@ pub fn OwnershipView() -> Element {
                     h3 { class: "text-text font-medium", "Transfer this board" }
                     if candidates.is_empty() {
                         p { class: "text-text-muted text-sm",
-                            "Add an admin first: only admins can receive the board."
+                            "No member can receive the board: the only member with a key is the current owner."
                         }
                     } else {
                         select {
@@ -239,10 +271,15 @@ pub fn OwnershipView() -> Element {
                             onchange: move |event| {
                                 selected.set(event.value().parse().ok());
                             },
-                            option { value: "", "Choose an admin" }
-                            for (id, name) in candidates.iter() {
-                                option { value: "{id}", "{name}" }
+                            option { value: "", "Choose a member" }
+                            for (id, name, is_admin) in candidates.iter() {
+                                option { value: "{id}",
+                                    if *is_admin { "{name} (admin)" } else { "{name}" }
+                                }
                             }
+                        }
+                        p { class: "text-text-muted text-xs",
+                            "A plain member is promoted to admin in the same transfer."
                         }
                         div { class: "space-y-2 text-sm text-text-muted",
                             label { class: "flex items-center gap-2",

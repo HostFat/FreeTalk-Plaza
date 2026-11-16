@@ -50,17 +50,18 @@ pub struct ChatBoardStateV1 {
     // and then `recent_messages`.
     // This is due to interdependencies between the fields and the order in which they must be applied in
     // the `apply_delta` function. DO NOT reorder fields without fully understanding the implications.
-    /// Signed ownership chain. First so every other field verifies against the
-    /// owner that was current when its records were signed.
-    #[serde(default)]
-    pub ownership: crate::board_state::ownership::OwnershipV1,
-
     /// Configures things like maximum message length, can be updated by the owner.
     pub configuration: AuthorizedConfigurationV1,
 
     /// A list of all administrators
     /// Administrator can ban, remove content
     pub admin: AdminsV1,
+
+    /// Signed ownership chain. After `admin`, so a transfer that promotes its
+    /// target in the same update verifies the appointment, and before the
+    /// fields that resolve the owner at signing time.
+    #[serde(default)]
+    pub ownership: crate::board_state::ownership::OwnershipV1,
 
     /// A list of recently banned members, a banned member can't be present in the
     /// members list and will be removed from it ifc necessary.
