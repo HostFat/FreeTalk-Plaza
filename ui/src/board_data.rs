@@ -1168,6 +1168,7 @@ impl BoardData {
                         version: next_set_version,
                         secret_version,
                         secrets: sealed,
+                        signed_at: chrono::Utc::now().timestamp_millis(),
                     },
                     &self.self_sk,
                 )
@@ -1316,6 +1317,7 @@ impl BoardData {
                 version: next_set_version,
                 secret_version,
                 secrets: sealed,
+                signed_at: chrono::Utc::now().timestamp_millis(),
             },
             &self.self_sk,
         )
@@ -2005,6 +2007,7 @@ impl Boards {
                 },
                 description: None,
             },
+            updated_at: std::time::SystemTime::now(),
             ..Configuration::default()
         };
         board_state.configuration = AuthorizedConfigurationV1::new(config, &self_sk);
@@ -2209,6 +2212,7 @@ mod tests {
                 can_manage_trash: true,
                 scope: Vec::new(),
                 deleted: false,
+                signed_at: std::time::SystemTime::now(),
             },
             &owner_sk,
         ));
@@ -2221,6 +2225,7 @@ mod tests {
                     member_id: member,
                     generation: 1,
                     revoked: false,
+                    signed_at: std::time::SystemTime::now(),
                 },
                 &owner_sk,
             ));
@@ -2626,6 +2631,7 @@ mod tests {
                                 can_manage_trash: false,
                                 scope: Vec::new(),
                                 deleted: false,
+                                signed_at: std::time::SystemTime::now(),
                             },
                             &owner_sk,
                         )],
@@ -2635,6 +2641,7 @@ mod tests {
                                 member_id: invitee_id,
                                 generation: 1,
                                 revoked: false,
+                                signed_at: std::time::SystemTime::now(),
                             },
                             &owner_sk,
                         )],
@@ -2824,6 +2831,7 @@ mod tests {
                                 member_id: outsider_id,
                                 generation: 1,
                                 revoked: false,
+                                signed_at: std::time::SystemTime::now(),
                             },
                             &owner_sk,
                         )],

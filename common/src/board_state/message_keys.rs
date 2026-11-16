@@ -155,10 +155,11 @@ fn verify_grant(
         }
     };
 
+    let at = crate::board_state::rate_limit::system_time_from_ms(entry.grant.created_at);
     let is_author = message.message.author == signer;
-    let is_admin = signer == parameters.owner_id()
+    let is_admin = signer == state.ownership.owner_at(parameters, at)
         || is_board_admin(state, &signer)
-        || verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8)
+        || verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8, at)
             .is_ok();
     let can_move = verify_moderation_authority(
         state,
@@ -167,6 +168,7 @@ fn verify_grant(
         ModerationPower::Move,
         &chain,
         entry.authority.as_deref(),
+        at,
     )
     .is_ok();
 

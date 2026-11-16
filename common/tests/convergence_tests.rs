@@ -2060,6 +2060,7 @@ fn create_test_config(owner_sk: &SigningKey) -> AuthorizedConfigurationV1 {
         Configuration {
             max_user_bans: 10,
             max_message_size: 1000,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
             ..Default::default()
         },
         owner_sk,
@@ -2761,6 +2762,7 @@ fn test_owner_cannot_be_added_as_admin() {
     let admin = Admin {
         member_id: owner_id,
         generation: 0,
+        signed_at: std::time::SystemTime::UNIX_EPOCH,
     };
     let authorized_admin = AuthorizedAdmin::new(admin, &owner_sk);
 
@@ -2796,6 +2798,7 @@ fn test_member_can_be_added_as_admin() {
     let admin = Admin {
         member_id,
         generation: 0,
+        signed_at: std::time::SystemTime::UNIX_EPOCH,
     };
     let authorized_admin = AuthorizedAdmin::new(admin, &owner_sk);
 
@@ -2864,6 +2867,7 @@ fn moderation_record_with_historical_authority_converges() {
             can_manage_trash: false,
             scope: Vec::new(),
             deleted: false,
+            signed_at: std::time::SystemTime::UNIX_EPOCH,
         },
         &owner_sk,
     );
@@ -2874,6 +2878,7 @@ fn moderation_record_with_historical_authority_converges() {
                 member_id: moderator_id,
                 generation,
                 revoked,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner_sk,
         )

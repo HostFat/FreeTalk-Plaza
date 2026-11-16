@@ -43,10 +43,11 @@ impl ComposableState for MembersV1 {
         let members_by_id = self.members_by_member_id();
 
         for member in &self.members {
-            if member.member.id() == owner_id {
+            let has_transferred = !parent_state.ownership.transfers.is_empty();
+            if member.member.id() == owner_id && !has_transferred {
                 return Err("Owner should not be included in the members list".to_string());
             }
-            if member.member.member_vk == parameters.owner {
+            if member.member.member_vk == parameters.owner && !has_transferred {
                 return Err(
                     "Member cannot have the same verifying key as the board owner".to_string(),
                 );
@@ -56,7 +57,20 @@ impl ComposableState for MembersV1 {
                 continue;
             }
             if member.member.invited_by == member.member.id() {
-                return Err("Self-invitation detected".to_string());
+                // A former owner rejoins as a member after handing the board
+                // over; it signs its own record because the new owner cannot
+                // sign on its behalf.
+                if !parent_state.ownership.was_owner(&member.member.id()) {
+                    return Err("Self-invitation detected".to_string());
+                }
+                member.verify_signature(&member.member.member_vk).map_err(|e| {
+                    format!(
+                        "Invalid self-registration signature for member {:?}: {}",
+                        member.member.id(),
+                        e
+                    )
+                })?;
+                continue;
             }
 
             // Verify the full invite chain with Ed25519 signature checks

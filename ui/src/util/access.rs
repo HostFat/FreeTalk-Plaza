@@ -209,6 +209,7 @@ pub fn create_role(
             can_manage_trash: false,
             scope,
             deleted: false,
+            signed_at: std::time::SystemTime::now(),
         };
         let authorized = match signer_for(self_id, board_key) {
             Some(signer) => AuthorizedRole::signed_by(role, signer, &signing_key)
@@ -256,6 +257,7 @@ pub fn update_role_moderation(
             can_pin_posts,
             can_move_posts,
             scope,
+            signed_at: std::time::SystemTime::now(),
             ..current
         };
         let authorized = match signer_for(self_id, board_key) {
@@ -288,6 +290,7 @@ pub fn set_role_can_distribute_keys(role_id: RoleId, value: bool) -> Result<(), 
         let role = Role {
             generation: current.generation + 1,
             can_distribute_keys: value,
+            signed_at: std::time::SystemTime::now(),
             ..current
         };
         let delta = ChatBoardStateV1Delta {
@@ -315,6 +318,7 @@ pub fn set_role_can_manage_trash(role_id: RoleId, value: bool) -> Result<(), Str
         let role = Role {
             generation: current.generation + 1,
             can_manage_trash: value,
+            signed_at: std::time::SystemTime::now(),
             ..current
         };
         let delta = ChatBoardStateV1Delta {
@@ -341,6 +345,7 @@ pub fn remove_role(role_id: RoleId) -> Result<(), String> {
         let role = Role {
             generation: current.generation + 1,
             deleted: true,
+            signed_at: std::time::SystemTime::now(),
             ..current
         };
         let delta = ChatBoardStateV1Delta {
@@ -365,6 +370,7 @@ pub fn set_role_member(role_id: RoleId, member_id: MemberId, grant: bool) -> Res
             member_id,
             generation,
             revoked: !grant,
+            signed_at: std::time::SystemTime::now(),
         };
         let authorized = match signer_for(self_id, board_key) {
             Some(signer) => AuthorizedRoleAssignment::signed_by(assignment, signer, &self_sk)

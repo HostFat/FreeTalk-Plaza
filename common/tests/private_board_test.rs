@@ -110,6 +110,7 @@ fn test_private_board_creation_and_encryption() {
             description: None,
         },
         owner_member_id: owner_id,
+        updated_at: std::time::SystemTime::UNIX_EPOCH,
         ..Default::default()
     };
 
@@ -155,6 +156,7 @@ fn test_private_board_member_addition_with_secrets() {
                     description: None,
                 },
                 owner_member_id: owner_id,
+                updated_at: std::time::SystemTime::UNIX_EPOCH,
                 ..Default::default()
             },
             &owner_sk,
@@ -272,6 +274,7 @@ fn test_secret_rotation() {
                     description: None,
                 },
                 owner_member_id: owner_id,
+                updated_at: std::time::SystemTime::UNIX_EPOCH,
                 ..Default::default()
             },
             &owner_sk,
@@ -441,6 +444,7 @@ fn test_ban_member_excludes_from_new_secrets() {
                     description: None,
                 },
                 owner_member_id: owner_id,
+                updated_at: std::time::SystemTime::UNIX_EPOCH,
                 ..Default::default()
             },
             &owner_sk,
@@ -641,6 +645,7 @@ fn test_encrypted_messages_in_private_board() {
                     description: None,
                 },
                 owner_member_id: owner_id,
+                updated_at: std::time::SystemTime::UNIX_EPOCH,
                 ..Default::default()
             },
             &owner_sk,

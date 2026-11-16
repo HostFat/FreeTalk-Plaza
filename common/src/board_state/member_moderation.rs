@@ -117,9 +117,13 @@ fn verify_warning(
         &signer,
         entry.authority.as_deref(),
         8,
+        crate::board_state::rate_limit::system_time_from_ms(entry.warning.created_at),
     )
     .map_err(|_| "Only the owner or an admin can warn a member".to_string())?;
-    if entry.warning.target == parameters.owner_id() {
+    if entry.warning.target == state.ownership.owner_at(
+        parameters,
+        crate::board_state::rate_limit::system_time_from_ms(entry.warning.created_at),
+    ) {
         return Err("The owner cannot be warned".to_string());
     }
     if !state
@@ -375,9 +379,13 @@ fn verify_suspension(
         &signer,
         entry.authority.as_deref(),
         8,
+        crate::board_state::rate_limit::system_time_from_ms(entry.suspension.created_at),
     )
     .map_err(|_| "Only the owner or an admin can suspend a member".to_string())?;
-    if entry.suspension.target == parameters.owner_id() {
+    if entry.suspension.target == state.ownership.owner_at(
+        parameters,
+        crate::board_state::rate_limit::system_time_from_ms(entry.suspension.created_at),
+    ) {
         return Err("The owner cannot be suspended".to_string());
     }
     if entry.suspension.until <= entry.suspension.created_at {

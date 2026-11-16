@@ -21,6 +21,15 @@ pub fn system_time_ms(time: std::time::SystemTime) -> i64 {
         .unwrap_or(0)
 }
 
+/// Inverse of [`system_time_ms`]; negative values clamp to the epoch.
+pub fn system_time_from_ms(ms: i64) -> std::time::SystemTime {
+    if ms <= 0 {
+        std::time::SystemTime::UNIX_EPOCH
+    } else {
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64)
+    }
+}
+
 /// Whether `times` contains more than `limit` records inside a window of
 /// `window_ms`. The window is half-open: `[t, t + window_ms)`.
 pub fn exceeds_window(times: &[i64], window_ms: i64, limit: usize) -> bool {

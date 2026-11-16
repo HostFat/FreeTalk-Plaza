@@ -8,6 +8,7 @@ use freenet_scaffold::util::{fast_hash, FastHash};
 use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::time::SystemTime;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct AuthorizedConfigurationV1 {
@@ -23,10 +24,13 @@ impl ComposableState for AuthorizedConfigurationV1 {
 
     fn verify(
         &self,
-        _parent_state: &Self::ParentState,
+        parent_state: &Self::ParentState,
         parameters: &Self::Parameters,
     ) -> Result<(), String> {
-        self.verify_signature(&parameters.owner)
+        let owner_key = parent_state
+            .ownership
+            .owner_key_at(parameters, self.configuration.updated_at);
+        self.verify_signature(&owner_key)
             .map_err(|e| format!("Invalid signature: {}", e))
     }
 
@@ -53,14 +57,17 @@ impl ComposableState for AuthorizedConfigurationV1 {
 
     fn apply_delta(
         &mut self,
-        _parent_state: &Self::ParentState,
+        parent_state: &Self::ParentState,
         parameters: &Self::Parameters,
         delta: &Option<Self::Delta>,
     ) -> Result<(), String> {
         if let Some(delta) = delta {
-            // Verify the delta's signature
+            // Verify the delta's signature against the owner at its signed time.
+            let owner_key = parent_state
+                .ownership
+                .owner_key_at(parameters, delta.configuration.updated_at);
             delta
-                .verify_signature(&parameters.owner)
+                .verify_signature(&owner_key)
                 .map_err(|e| format!("Invalid signature: {}", e))?;
 
             // Check if the new version is greater than the current version
@@ -188,6 +195,7 @@ impl Default for Configuration {
             rate_window_ms: crate::board_state::rate_limit::DEFAULT_RATE_WINDOW_MS,
             max_posts_per_window: crate::board_state::rate_limit::DEFAULT_MAX_POSTS_PER_WINDOW,
             max_bans_per_window: crate::board_state::rate_limit::DEFAULT_MAX_BANS_PER_WINDOW,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
         }
     }
 }
@@ -231,6 +239,13 @@ pub struct Configuration {
     /// Bans one member may issue inside the window. Zero means the default.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub max_bans_per_window: u32,
+    /// Signed time of this configuration, used to resolve which owner key had
+    /// the right to sign it. Omitted at the epoch for older configs.
+    #[serde(
+        default = "crate::board_state::admin::epoch_system_time",
+        skip_serializing_if = "crate::board_state::admin::is_epoch"
+    )]
+    pub updated_at: SystemTime,
 }
 
 /// Limits used when a configuration predates the fields (they decode as 0).
@@ -369,6 +384,7 @@ mod tests {
 
         let new_configuration = Configuration {
             configuration_version: 2,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
             ..configuration.clone()
         };
         let new_authorized_configuration =
@@ -388,6 +404,7 @@ mod tests {
         // Create an older configuration (version 1)
         let old_configuration = Configuration {
             configuration_version: 1,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
             ..Configuration::default()
         };
         let old_authorized_configuration =
@@ -427,6 +444,7 @@ mod tests {
 
         let new_configuration = Configuration {
             configuration_version: 2,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
             ..configuration.clone()
         };
         let new_authorized_configuration =
@@ -463,6 +481,7 @@ mod tests {
 
         let new_configuration = Configuration {
             configuration_version: 0,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
             ..configuration.clone()
         };
         let new_authorized_configuration =
@@ -488,6 +507,7 @@ mod tests {
         let owner_verifying_key = VerifyingKey::from(&owner_signing_key);
         let configuration = Configuration {
             owner_member_id: MemberId::from_bytes([1u8; 32]),
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
             ..Configuration::default()
         };
         let mut authorized_configuration =

@@ -13,6 +13,7 @@ pub mod member_moderation;
 pub mod message;
 pub mod message_keys;
 pub mod moderation;
+pub mod ownership;
 pub mod pq_secrets;
 pub mod privacy;
 pub mod rate_limit;
@@ -49,6 +50,11 @@ pub struct ChatBoardStateV1 {
     // and then `recent_messages`.
     // This is due to interdependencies between the fields and the order in which they must be applied in
     // the `apply_delta` function. DO NOT reorder fields without fully understanding the implications.
+    /// Signed ownership chain. First so every other field verifies against the
+    /// owner that was current when its records were signed.
+    #[serde(default)]
+    pub ownership: crate::board_state::ownership::OwnershipV1,
+
     /// Configures things like maximum message length, can be updated by the owner.
     pub configuration: AuthorizedConfigurationV1,
 
@@ -207,6 +213,12 @@ impl ChatBoardStateV1 {
     /// If the banner was merely pruned for inactivity, their bans persist.
     fn post_apply_cleanup(&mut self, parameters: &ChatBoardParametersV1) -> Result<(), String> {
         let owner_id = MemberId::from(&parameters.owner);
+
+        // Normalize the ownership chain first: the cleanups below resolve
+        // authority against it.
+        let mut ownership = std::mem::take(&mut self.ownership);
+        ownership.cleanup(self, parameters);
+        self.ownership = ownership;
 
         // 0. Enforce invite-link use caps first, so members dropped here do not
         // keep their messages alive in the steps below.
@@ -664,6 +676,7 @@ mod tests {
         // Configuration allowing bans and members
         let config = Configuration {
             max_user_bans: 10,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
             ..Default::default()
         };
         let auth_config = AuthorizedConfigurationV1::new(config, &owner_sk);
@@ -982,6 +995,7 @@ mod tests {
 
         let config = Configuration {
             max_user_bans: 10,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
             ..Default::default()
         };
         let auth_config = AuthorizedConfigurationV1::new(config, &owner_sk);
@@ -1145,6 +1159,7 @@ mod tests {
         let mut partially_modified_state = state.clone();
         let new_config = Configuration {
             configuration_version: 2,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
             ..partially_modified_state.configuration.configuration.clone()
         };
         partially_modified_state.configuration =

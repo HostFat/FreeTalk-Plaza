@@ -184,6 +184,10 @@ impl ComposableState for InviteTokensV1 {
                 &signer,
                 token.authority.as_deref(),
                 8,
+                token
+                    .token
+                    .created_at
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
             )?;
             if token.token.label.chars().count() > MAX_INVITE_LABEL {
                 return Err("Invite link label is too long".to_string());
@@ -394,6 +398,7 @@ mod tests {
                 can_manage_trash: false,
                 scope: Vec::new(),
                 deleted: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             owner,
         ));
@@ -469,6 +474,7 @@ mod tests {
                 can_manage_trash: false,
                 scope: Vec::new(),
                 deleted: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -478,6 +484,7 @@ mod tests {
                 member_id: manager_id,
                 generation: 1,
                 revoked: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -516,6 +523,7 @@ mod tests {
                 member_id: manager_id,
                 generation: 2,
                 revoked: true,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -570,6 +578,7 @@ mod tests {
                 can_manage_trash: false,
                 scope: Vec::new(),
                 deleted: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -579,6 +588,7 @@ mod tests {
                 member_id: MemberId::from(&manager.verifying_key()),
                 generation: 1,
                 revoked: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));

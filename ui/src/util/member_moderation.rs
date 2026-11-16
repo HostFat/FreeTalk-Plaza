@@ -81,6 +81,7 @@ pub fn suspend_member(
                     member_id: target,
                     generation: entry.assignment.generation + 1,
                     revoked: true,
+                    signed_at: std::time::SystemTime::now(),
                 },
                 signer_id,
                 &ctx.self_sk,

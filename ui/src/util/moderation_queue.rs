@@ -107,6 +107,7 @@ pub fn approve_post(ctx: &ActionContext, target: MessageId, approved: bool) -> R
         generation,
         scope: message_scope(&ctx.board_state, &target),
         scope_chain: chain,
+        created_at: chrono::Utc::now().timestamp_millis(),
     };
     let proof = moderation_proof(ctx, &target, ModerationPower::Delete);
     let delta = ChatBoardStateV1Delta {

@@ -175,6 +175,7 @@ pub async fn hide_topic(
                     version,
                     secret_version: 1,
                     secrets: sealed,
+                    signed_at: chrono::Utc::now().timestamp_millis(),
                 },
                 &ctx.self_sk,
             )
@@ -880,6 +881,7 @@ fn grant_trash_once(ctx: &ActionContext, member: MemberId) -> Result<(), String>
             version,
             secret_version,
             secrets,
+            signed_at: chrono::Utc::now().timestamp_millis(),
         },
         &ctx.self_sk,
     )
@@ -946,6 +948,7 @@ fn publish_trash_set(ctx: &ActionContext, version: u32) -> Result<usize, String>
             version,
             secret_version,
             secrets,
+            signed_at: chrono::Utc::now().timestamp_millis(),
         },
         &ctx.self_sk,
     )
@@ -1048,6 +1051,7 @@ pub async fn revoke_trash_access(
             version: latest.set.version + 1,
             secret_version,
             secrets,
+            signed_at: chrono::Utc::now().timestamp_millis(),
         },
         &ctx.self_sk,
     )

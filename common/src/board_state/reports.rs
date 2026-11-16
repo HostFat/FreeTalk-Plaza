@@ -259,6 +259,7 @@ fn verify_resolution(
         ModerationPower::Delete,
         &chain,
         entry.authority.as_deref(),
+        crate::board_state::rate_limit::system_time_from_ms(report.report.created_at),
     )
     .map_err(|_| "Signer cannot resolve this report".to_string())?;
     Ok(())

@@ -13,6 +13,7 @@ use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::time::SystemTime;
 
 pub type RoleId = [u8; 16];
 
@@ -77,6 +78,12 @@ pub struct Role {
     pub scope: Vec<MessageId>,
     /// A deleted role grants nothing; the tombstone keeps the id reserved.
     pub deleted: bool,
+    /// Signed time, used to resolve the owner who authorized this definition.
+    #[serde(
+        default = "crate::board_state::admin::epoch_system_time",
+        skip_serializing_if = "crate::board_state::admin::is_epoch"
+    )]
+    pub signed_at: SystemTime,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -180,8 +187,12 @@ pub(crate) fn verify_admin_authority(
     signer: &MemberId,
     proof: Option<&AuthorityProof>,
     depth: u8,
+    at: SystemTime,
 ) -> Result<(), String> {
-    if *signer == parameters.owner_id() || is_board_admin(state, signer) {
+    if state.ownership.is_deactivated_at(signer, at) {
+        return Err("Signer's key was deactivated".to_string());
+    }
+    if *signer == state.ownership.owner_at(parameters, at) || is_board_admin(state, signer) {
         return Ok(());
     }
     if depth == 0 {
@@ -189,7 +200,10 @@ pub(crate) fn verify_admin_authority(
     }
     let proof = proof.ok_or("Signer is not an admin and carries no proof")?;
     if let Some(admin) = &proof.admin {
-        admin.verify_signature(&parameters.owner)?;
+        let owner_key = state
+            .ownership
+            .owner_key_at(parameters, admin.admin.signed_at);
+        admin.verify_signature(&owner_key)?;
         if admin.admin.id() == *signer {
             // The proof shows the appointment, not that it still stands. Once
             // the owner revokes it, the signer cannot vouch for new records.
@@ -265,6 +279,7 @@ fn verify_role_grant(
         &role_signer,
         grant.role.authority.as_deref(),
         depth - 1,
+        grant.role.role.signed_at,
     )?;
 
     let assign_signer = grant.assignment.signer_id(parameters);
@@ -289,6 +304,7 @@ fn verify_role_grant(
         &assign_signer,
         grant.assignment.authority.as_deref(),
         depth - 1,
+        grant.assignment.assignment.signed_at,
     )
 }
 
@@ -298,14 +314,17 @@ pub(crate) fn verify_manager_authority(
     signer: &MemberId,
     proof: Option<&AuthorityProof>,
     depth: u8,
+    at: SystemTime,
 ) -> Result<(), String> {
-    if *signer == parameters.owner_id() || state.roles.can_manage_access(signer) {
+    if *signer == state.ownership.owner_at(parameters, at)
+        || state.roles.can_manage_access(signer)
+    {
         return Ok(());
     }
     // Admins define roles, so they may assign and revoke them; a proof keeps
     // records signed before a demotion verifiable.
     if is_board_admin(state, signer)
-        || verify_admin_authority(state, parameters, signer, proof, depth).is_ok()
+        || verify_admin_authority(state, parameters, signer, proof, depth, at).is_ok()
     {
         return Ok(());
     }
@@ -323,11 +342,12 @@ pub fn verify_moderation_authority(
     power: ModerationPower,
     scope_chain: &[MessageId],
     proof: Option<&AuthorityProof>,
+    at: SystemTime,
 ) -> Result<(), String> {
-    if *signer == parameters.owner_id() {
+    if *signer == state.ownership.owner_at(parameters, at) {
         return Ok(());
     }
-    if verify_admin_authority(state, parameters, signer, proof, MAX_AUTHORITY_DEPTH).is_ok() {
+    if verify_admin_authority(state, parameters, signer, proof, MAX_AUTHORITY_DEPTH, at).is_ok() {
         return Ok(());
     }
     if state.roles.has_moderation_power(signer, power, scope_chain) {
@@ -349,8 +369,11 @@ pub fn verify_distributor_authority(
     parameters: &ChatBoardParametersV1,
     signer: &MemberId,
     proof: Option<&AuthorityProof>,
+    at: SystemTime,
 ) -> Result<(), String> {
-    if *signer == parameters.owner_id() || state.roles.can_distribute_keys(signer) {
+    if *signer == state.ownership.owner_at(parameters, at)
+        || state.roles.can_distribute_keys(signer)
+    {
         return Ok(());
     }
     verify_role_grant(
@@ -372,11 +395,12 @@ pub fn verify_trash_authority(
     parameters: &ChatBoardParametersV1,
     signer: &MemberId,
     proof: Option<&AuthorityProof>,
+    at: SystemTime,
 ) -> Result<(), String> {
     if state.roles.can_manage_trash(signer) {
         return Ok(());
     }
-    verify_admin_authority(state, parameters, signer, proof, MAX_AUTHORITY_DEPTH).or_else(|_| {
+    verify_admin_authority(state, parameters, signer, proof, MAX_AUTHORITY_DEPTH, at).or_else(|_| {
         verify_role_grant(
             state,
             parameters,
@@ -554,6 +578,12 @@ pub struct RoleAssignment {
     pub member_id: MemberId,
     pub generation: u64,
     pub revoked: bool,
+    /// Signed time, used to resolve the owner or manager at signing time.
+    #[serde(
+        default = "crate::board_state::admin::epoch_system_time",
+        skip_serializing_if = "crate::board_state::admin::is_epoch"
+    )]
+    pub signed_at: SystemTime,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -663,6 +693,7 @@ fn verify_role_record(
         &signer,
         role.authority.as_deref(),
         MAX_AUTHORITY_DEPTH,
+        role.role.signed_at,
     )
 }
 
@@ -688,6 +719,7 @@ fn verify_assignment_record(
         &signer,
         assignment.authority.as_deref(),
         MAX_AUTHORITY_DEPTH,
+        assignment.assignment.signed_at,
     )
 }
 
@@ -819,10 +851,13 @@ impl ComposableState for RolesV1 {
         delta: &Option<Self::Delta>,
     ) -> Result<(), String> {
         if let Some(delta) = delta {
-            // Definitions: owner or a current board admin.
+            // Definitions: owner at signing time or a current board admin.
             for role in &delta.roles {
                 let signer = role.signer_id(parameters);
-                if signer != parameters.owner_id() && !is_board_admin(parent_state, &signer) {
+                let owner = parent_state
+                    .ownership
+                    .owner_at(parameters, role.role.signed_at);
+                if signer != owner && !is_board_admin(parent_state, &signer) {
                     return Err("Role definition signer must be the owner or an admin".to_string());
                 }
                 let signing_key = signer_key(parent_state, parameters, &signer)?;
@@ -836,15 +871,18 @@ impl ComposableState for RolesV1 {
             // and use that same grant to pass the check.
             for assignment in &delta.assignments {
                 let signer = assignment.signer_id(parameters);
+                let owner = parent_state
+                    .ownership
+                    .owner_at(parameters, assignment.assignment.signed_at);
                 // Admins define roles too, so they may assign and revoke them;
                 // `verify` already accepts the same signer set.
-                if signer != parameters.owner_id()
+                if signer != owner
                     && !self.can_manage_access(&signer)
                     && !is_board_admin(parent_state, &signer)
                 {
                     return Err("Role assignment signer cannot manage access".to_string());
                 }
-                if signer != parameters.owner_id()
+                if signer != owner
                     && assignment.assignment.member_id == signer
                     && !is_board_admin(parent_state, &signer)
                 {
@@ -1065,6 +1103,7 @@ mod delegation_tests {
     use crate::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
     use crate::board_state::member::{AuthorizedMember, Member};
     use freenet_scaffold::ComposableState;
+    use std::time::SystemTime;
 
     fn params(owner: &SigningKey) -> ChatBoardParametersV1 {
         ChatBoardParametersV1 {
@@ -1105,6 +1144,7 @@ mod delegation_tests {
                 can_manage_trash: false,
                 scope: Vec::new(),
                 deleted: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             owner,
         ));
@@ -1114,6 +1154,7 @@ mod delegation_tests {
                 member_id: manager_id,
                 generation: 1,
                 revoked: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             owner,
         ));
@@ -1133,6 +1174,7 @@ mod delegation_tests {
             member_id: MemberId::from(&other.verifying_key()),
             generation: 1,
             revoked: false,
+            signed_at: std::time::SystemTime::UNIX_EPOCH,
         };
         let delta = RolesDelta {
             roles: vec![],
@@ -1175,6 +1217,7 @@ mod delegation_tests {
             member_id: MemberId::from(&target.verifying_key()),
             generation: 1,
             revoked: false,
+            signed_at: std::time::SystemTime::UNIX_EPOCH,
         };
         let delta = RolesDelta {
             roles: vec![],
@@ -1212,6 +1255,7 @@ mod delegation_tests {
             can_manage_trash: false,
             scope: Vec::new(),
             deleted: false,
+            signed_at: std::time::SystemTime::UNIX_EPOCH,
         };
         state
             .roles
@@ -1231,6 +1275,7 @@ mod delegation_tests {
             member_id: manager_id,
             generation: 1,
             revoked: false,
+            signed_at: std::time::SystemTime::UNIX_EPOCH,
         };
         let delta = RolesDelta {
             roles: vec![],
@@ -1268,6 +1313,7 @@ mod delegation_tests {
             can_manage_trash: false,
             scope: Vec::new(),
             deleted: false,
+            signed_at: std::time::SystemTime::UNIX_EPOCH,
         };
         let delta = RolesDelta {
             roles: vec![AuthorizedRole::new(role, &manager)],
@@ -1306,6 +1352,7 @@ mod delegation_tests {
             can_manage_trash: false,
             scope: Vec::new(),
             deleted: false,
+            signed_at: std::time::SystemTime::UNIX_EPOCH,
         }
     }
 
@@ -1329,6 +1376,7 @@ mod delegation_tests {
             Admin {
                 member_id: admin_id,
                 generation: 1,
+                signed_at: SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -1384,6 +1432,7 @@ mod delegation_tests {
             Admin {
                 member_id: admin_id,
                 generation: 1,
+                signed_at: SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -1417,6 +1466,7 @@ mod delegation_tests {
                     member_id: other_id,
                     generation: 1,
                     revoked: false,
+                    signed_at: std::time::SystemTime::UNIX_EPOCH,
                 },
                 manager_id,
                 &manager,
@@ -1436,6 +1486,7 @@ mod delegation_tests {
                 member_id: manager_id,
                 generation: 2,
                 revoked: true,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -1468,6 +1519,7 @@ mod delegation_tests {
             can_manage_trash: false,
             scope: Vec::new(),
             deleted: false,
+            signed_at: std::time::SystemTime::UNIX_EPOCH,
         };
 
         let mut original = Vec::new();
@@ -1509,6 +1561,7 @@ mod delegation_tests {
             Admin {
                 member_id: admin_id,
                 generation: 1,
+                signed_at: SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -1527,6 +1580,7 @@ mod delegation_tests {
                         member_id,
                         generation: 1,
                         revoked: false,
+                        signed_at: std::time::SystemTime::UNIX_EPOCH,
                     },
                     admin_id,
                     &admin_sk,
@@ -1553,6 +1607,7 @@ mod delegation_tests {
             Admin {
                 member_id: admin_id,
                 generation: 1,
+                signed_at: SystemTime::UNIX_EPOCH,
             },
             &owner,
         );
@@ -1561,7 +1616,7 @@ mod delegation_tests {
             admin: Some(record),
             grant: None,
         };
-        verify_admin_authority(&state, &params, &admin_id, Some(&proof), 8)
+        verify_admin_authority(&state, &params, &admin_id, Some(&proof), 8, SystemTime::UNIX_EPOCH)
             .expect("a current admin passes");
 
         state.admin.admins.clear();
@@ -1569,7 +1624,7 @@ mod delegation_tests {
             .admin
             .revoked
             .push(AuthorizedAdminRevocation::new(admin_id, 2, &owner));
-        let error = verify_admin_authority(&state, &params, &admin_id, Some(&proof), 8)
+        let error = verify_admin_authority(&state, &params, &admin_id, Some(&proof), 8, SystemTime::UNIX_EPOCH)
             .expect_err("the revoked adminship cannot vouch");
         assert!(error.contains("revoked"), "{error}");
 
@@ -1579,10 +1634,11 @@ mod delegation_tests {
             Admin {
                 member_id: admin_id,
                 generation: 3,
+                signed_at: SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
-        verify_admin_authority(&state, &params, &admin_id, None, 8)
+        verify_admin_authority(&state, &params, &admin_id, None, 8, SystemTime::UNIX_EPOCH)
             .expect("the new appointment grants the power");
     }
 }

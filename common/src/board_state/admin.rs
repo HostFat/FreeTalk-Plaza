@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::time::SystemTime;
 
 /// Admin records plus the owner's revocations.
 ///
@@ -46,16 +47,22 @@ impl ComposableState for AdminsV1 {
             }
 
             for admin in &self.admins {
-                if admin.admin.id() == owner_id {
+                if admin.admin.id() == owner_id && parent_state.ownership.transfers.is_empty() {
                     return Err("Owner should not be included in the admins list".to_string());
                 }
 
-                admin.verify_signature(&parameters.owner)?;
+                let owner_key = parent_state
+                    .ownership
+                    .owner_key_at(parameters, admin.admin.signed_at);
+                admin.verify_signature(&owner_key)?;
             }
         }
 
         for revocation in &self.revoked {
-            revocation.verify_signature(&parameters.owner)?;
+            let owner_key = parent_state
+                .ownership
+                .owner_key_at(parameters, revocation.revocation.signed_at);
+            revocation.verify_signature(&owner_key)?;
         }
 
         // One record per member: the winner is decided by generation when the
@@ -152,13 +159,19 @@ impl ComposableState for AdminsV1 {
             let owner_id = parameters.owner_id();
 
             for admin in &delta.added {
-                if admin.admin.id() == owner_id {
+                if admin.admin.id() == owner_id && parent_state.ownership.transfers.is_empty() {
                     return Err("Owner cannot be added as an admin".to_string());
                 }
-                admin.verify_signature(&parameters.owner)?;
+                let owner_key = parent_state
+                    .ownership
+                    .owner_key_at(parameters, admin.admin.signed_at);
+                admin.verify_signature(&owner_key)?;
             }
             for revocation in &delta.revoked {
-                revocation.verify_signature(&parameters.owner)?;
+                let owner_key = parent_state
+                    .ownership
+                    .owner_key_at(parameters, revocation.revocation.signed_at);
+                revocation.verify_signature(&owner_key)?;
             }
 
             for admin in &delta.added {
@@ -351,6 +364,19 @@ pub struct Admin {
     /// verifying byte for byte.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub generation: u64,
+    /// When the owner signed the appointment. The epoch means "before any
+    /// ownership transfer", so records written before this field existed keep
+    /// the founding owner as their authority.
+    #[serde(default = "epoch_system_time", skip_serializing_if = "is_epoch")]
+    pub signed_at: SystemTime,
+}
+
+pub(crate) fn is_epoch(value: &SystemTime) -> bool {
+    *value == SystemTime::UNIX_EPOCH
+}
+
+pub(crate) fn epoch_system_time() -> SystemTime {
+    SystemTime::UNIX_EPOCH
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -378,6 +404,10 @@ pub struct AdminRevocation {
     pub member_id: MemberId,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub generation: u64,
+    /// Signed time of the removal, used to tell records made while the
+    /// member was still an admin from records made afterwards.
+    #[serde(default = "epoch_system_time", skip_serializing_if = "is_epoch")]
+    pub signed_at: SystemTime,
 }
 
 impl AdminRevocation {
@@ -397,6 +427,7 @@ impl AuthorizedAdminRevocation {
         let revocation = AdminRevocation {
             member_id,
             generation,
+            signed_at: SystemTime::now(),
         };
         Self {
             signature: sign_struct(&revocation, owner_sk),
@@ -445,6 +476,7 @@ mod revocation_tests {
             Admin {
                 member_id,
                 generation,
+                signed_at: SystemTime::UNIX_EPOCH,
             },
             owner,
         )

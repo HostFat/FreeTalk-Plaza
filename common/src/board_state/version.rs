@@ -136,6 +136,7 @@ mod tests {
         let mut state = ChatBoardStateV1::default();
         let config = Configuration {
             owner_member_id: owner_vk.into(),
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
             ..Default::default()
         };
         state.configuration = AuthorizedConfigurationV1::new(config, &owner_sk);
@@ -165,6 +166,7 @@ mod tests {
         let mut state = ChatBoardStateV1::default();
         let config = Configuration {
             owner_member_id: owner_vk.into(),
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
             ..Default::default()
         };
         state.configuration = AuthorizedConfigurationV1::new(config, &owner_sk);

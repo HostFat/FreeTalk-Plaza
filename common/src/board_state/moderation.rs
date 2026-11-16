@@ -493,9 +493,10 @@ fn verify_illegal_purge(
     let signer = entry.signer_id(parameters);
     let key = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
     entry.verify_signature_with(&key)?;
-    if signer != parameters.owner_id()
+    let at = crate::board_state::rate_limit::system_time_from_ms(purge.acted_at);
+    if signer != state.ownership.owner_at(parameters, at)
         && !is_board_admin(state, &signer)
-        && verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8)
+        && verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8, at)
             .is_err()
     {
         return Err("Only owner or admins can purge illegal content".to_string());
@@ -546,6 +547,7 @@ fn verify_thread_move(
     let signer = entry.signer_id(parameters);
     let key = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
     entry.verify_signature_with(&key)?;
+    let at = crate::board_state::rate_limit::system_time_from_ms(change.moved_at);
 
     if change.generation == 0 {
         return Err("Thread move needs a generation".to_string());
@@ -589,6 +591,7 @@ fn verify_thread_move(
         ModerationPower::Move,
         &from_chain,
         entry.authority.as_deref(),
+        at,
     )
     .map_err(|_| "Signer cannot move this thread from its section".to_string())?;
     verify_moderation_authority(
@@ -598,6 +601,7 @@ fn verify_thread_move(
         ModerationPower::Move,
         &to_chain,
         entry.authority.as_deref(),
+        at,
     )
     .map_err(|_| "Signer cannot move this thread to its destination".to_string())?;
     Ok(())
@@ -692,6 +696,7 @@ fn verify_feature_flag(
     let chain = flag.scope_chain.clone();
     verify_scope_chain(state, &chain)?;
     let proof = entry.authority.as_deref();
+    let at = crate::board_state::rate_limit::system_time_from_ms(flag.created_at);
     match flag.kind {
         FeatureKind::Pinned => {
             verify_moderation_authority(
@@ -701,6 +706,7 @@ fn verify_feature_flag(
                 ModerationPower::Pin,
                 &chain,
                 proof,
+                at,
             )?;
             if flag.destination.is_some() {
                 return Err("A pin has no destination".to_string());
@@ -715,6 +721,7 @@ fn verify_feature_flag(
                     ModerationPower::Close,
                     &chain,
                     proof,
+                    at,
                 )?;
             }
             if flag.destination.is_some() {
@@ -722,7 +729,7 @@ fn verify_feature_flag(
             }
         }
         FeatureKind::Announced => {
-            crate::board_state::roles::verify_admin_authority(state, parameters, &signer, proof, 8)
+            crate::board_state::roles::verify_admin_authority(state, parameters, &signer, proof, 8, at)
                 .map_err(|_| "Only the owner or an admin can announce a post".to_string())?;
             if flag.destination.is_some() {
                 return Err("An announcement has no destination".to_string());
@@ -762,6 +769,7 @@ fn verify_feature_flag(
                     ModerationPower::Move,
                     &chain,
                     proof,
+                    at,
                 )
                 .map_err(|_| "Signer cannot merge this post".to_string())?;
                 verify_moderation_authority(
@@ -771,6 +779,7 @@ fn verify_feature_flag(
                     ModerationPower::Move,
                     &destination_chain,
                     proof,
+                    at,
                 )
                 .map_err(|_| "Signer cannot merge this post".to_string())?;
             } else {
@@ -784,6 +793,7 @@ fn verify_feature_flag(
                     ModerationPower::Move,
                     &chain,
                     proof,
+                    at,
                 )
                 .map_err(|_| "Signer cannot undo a merge".to_string())?;
             }
@@ -842,6 +852,7 @@ fn verify_move(
     let signer = entry.signer_id(parameters);
     let key = resolve_signer_key(state, parameters, &signer, entry.signer_key.as_ref())?;
     entry.verify_signature_with(&key)?;
+    let at = crate::board_state::rate_limit::system_time_from_ms(entry.change.created_at);
     let target = state
         .recent_messages
         .messages
@@ -886,6 +897,7 @@ fn verify_move(
                 ModerationPower::Move,
                 &from,
                 entry.authority.as_deref(),
+                at,
             )
             .map_err(|_| "Signer cannot move this post here".to_string())?;
             verify_moderation_authority(
@@ -895,6 +907,7 @@ fn verify_move(
                 ModerationPower::Move,
                 &to,
                 entry.authority.as_deref(),
+                at,
             )
             .map_err(|_| "Signer cannot move this post here".to_string())?;
         }
@@ -908,6 +921,7 @@ fn verify_move(
                 ModerationPower::Move,
                 &from,
                 entry.authority.as_deref(),
+                at,
             )
             .map_err(|_| "Signer cannot move this post to the board root".to_string())?;
         }
@@ -1449,6 +1463,7 @@ mod tests {
             configuration: AuthorizedConfigurationV1::new(
                 Configuration {
                     owner_member_id: owner_id,
+                    updated_at: std::time::SystemTime::UNIX_EPOCH,
                     ..Configuration::default()
                 },
                 &owner_sk,
@@ -1624,6 +1639,7 @@ mod tests {
                 can_manage_trash: false,
                 scope: Vec::new(),
                 deleted: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &board.owner_sk,
         ));
@@ -1637,6 +1653,7 @@ mod tests {
                     member_id,
                     generation: 1,
                     revoked: false,
+                    signed_at: std::time::SystemTime::UNIX_EPOCH,
                 },
                 &board.owner_sk,
             ));
@@ -1680,6 +1697,7 @@ mod tests {
                     member_id,
                     generation: 2,
                     revoked: true,
+                    signed_at: std::time::SystemTime::UNIX_EPOCH,
                 },
                 &board.owner_sk,
             ));

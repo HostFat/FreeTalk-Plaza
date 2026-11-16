@@ -31,6 +31,13 @@ pub struct ApprovalV1 {
     /// Section chain of the target at signing time.
     #[serde(default)]
     pub scope_chain: Vec<MessageId>,
+    /// Signed time, used to resolve the owner or moderator at signing time.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub created_at: i64,
+}
+
+pub(crate) fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -157,6 +164,7 @@ fn verify_approval(
         ModerationPower::Delete,
         &chain,
         approval.authority.as_deref(),
+        crate::board_state::rate_limit::system_time_from_ms(approval.approval.created_at),
     )
     .map_err(|_| "Signer cannot approve this post".to_string())?;
     Ok(())
@@ -446,6 +454,7 @@ mod tests {
             generation,
             scope: None,
             scope_chain: Vec::new(),
+            created_at: 0,
         }
     }
 
@@ -605,6 +614,7 @@ mod tests {
                     generation: 1,
                     scope: Some(cat_a),
                     scope_chain: vec![cat_a],
+                    created_at: 0,
                 },
                 &board.owner_sk,
             ));

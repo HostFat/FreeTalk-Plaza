@@ -57,7 +57,13 @@ fn verify_blob(
     let signer = blob.signer_id(parameters);
     let signing_key = resolve_signer_key(state, parameters, &signer, blob.signer_key.as_ref())?;
     blob.verify_signature_with(&signing_key)?;
-    verify_distributor_authority(state, parameters, &signer, blob.authority.as_deref())
+    verify_distributor_authority(
+        state,
+        parameters,
+        &signer,
+        blob.authority.as_deref(),
+        std::time::SystemTime::UNIX_EPOCH,
+    )
         .map_err(|_| "Category key signer cannot distribute keys".to_string())?;
     if !is_board_member(state, parameters, &blob.secret.member_id) {
         return Err("Category key recipient is not a board member".to_string());
@@ -553,6 +559,7 @@ mod tests {
                 can_manage_trash: false,
                 scope: Vec::new(),
                 deleted: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -562,6 +569,7 @@ mod tests {
                 member_id: distributor,
                 generation: 1,
                 revoked: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -737,6 +745,7 @@ mod tests {
                 can_manage_trash: false,
                 scope: Vec::new(),
                 deleted: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -746,6 +755,7 @@ mod tests {
                 member_id: distributor,
                 generation: 1,
                 revoked: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));

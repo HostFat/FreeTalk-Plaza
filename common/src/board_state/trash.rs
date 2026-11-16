@@ -247,6 +247,7 @@ fn verify_item(
         parameters,
         &signer,
         entry.authority.as_deref(),
+        crate::board_state::rate_limit::system_time_from_ms(item.hidden_at),
     )
     .is_err()
     {
@@ -317,9 +318,10 @@ fn verify_action(
         return Err("Trash action reason is too long".to_string());
     }
 
-    let is_owner_or_admin = signer == parameters.owner_id()
+    let at = crate::board_state::rate_limit::system_time_from_ms(action.acted_at);
+    let is_owner_or_admin = signer == state.ownership.owner_at(parameters, at)
         || is_board_admin(state, &signer)
-        || verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8)
+        || verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8, at)
             .is_ok();
     let allowed = match action.kind {
         // A restore stays valid after the manager loses the role when the
@@ -329,6 +331,7 @@ fn verify_action(
             parameters,
             &signer,
             entry.authority.as_deref(),
+            at,
         )
         .is_ok(),
         TrashActionKind::Purge => is_owner_or_admin,
@@ -596,6 +599,7 @@ mod tests {
                 can_manage_trash: true,
                 scope: Vec::new(),
                 deleted: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -605,6 +609,7 @@ mod tests {
                 member_id: moderator_id,
                 generation: 1,
                 revoked: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -697,6 +702,7 @@ mod tests {
                 can_manage_trash: true,
                 scope: Vec::new(),
                 deleted: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -706,6 +712,7 @@ mod tests {
                 member_id: moderator_id,
                 generation: 1,
                 revoked: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         ));
@@ -739,6 +746,7 @@ mod tests {
                 member_id: moderator_id,
                 generation: 2,
                 revoked: true,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner,
         );

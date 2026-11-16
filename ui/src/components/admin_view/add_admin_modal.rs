@@ -85,6 +85,7 @@ pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
             // A generation higher than any previous grant or revocation, so a
             // re-added member gets their rights back.
             generation: board_data.board_state.admin.next_generation(&member_id),
+            signed_at: std::time::SystemTime::now(),
         };
 
         // Close modal and reset selection

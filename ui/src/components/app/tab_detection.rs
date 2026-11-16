@@ -27,6 +27,7 @@ pub enum TabRole {
     Primary,
     /// This is a secondary tab - should be read-only
     Secondary,
+    signed_at: std::time::SystemTime::now(),
 }
 
 /// Force this tab to become the primary tab
@@ -181,4 +182,5 @@ pub async fn check_for_existing_tabs() -> TabRole {
         info!("No other River tabs detected - this is the primary tab");
         TabRole::Primary
     }
+    signed_at: std::time::SystemTime::now(),
 }

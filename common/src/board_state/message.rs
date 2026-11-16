@@ -1148,6 +1148,7 @@ mod tests {
             configuration: AuthorizedConfigurationV1::new(
                 Configuration {
                     max_posts_per_window: 3,
+                    updated_at: std::time::SystemTime::UNIX_EPOCH,
                     ..Configuration::default()
                 },
                 &owner_sk,

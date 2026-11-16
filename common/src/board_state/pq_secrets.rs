@@ -114,6 +114,13 @@ pub struct PqSecretSet {
     /// Board or category secret version the sealed payloads belong to.
     pub secret_version: u32,
     pub secrets: Vec<PqSealedSecret>,
+    /// Signed time, used to resolve the owner or manager at signing time.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub signed_at: i64,
+}
+
+fn is_zero_i64(value: &i64) -> bool {
+    *value == 0
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -244,19 +251,42 @@ fn verify_set(
     let is_category = matches!(entry.set.scope, PqScope::Category(_));
     let is_trash = matches!(entry.set.scope, PqScope::Trash);
     let authorized = if is_category {
-        verify_distributor_authority(state, parameters, &signer, entry.authority.as_deref()).is_ok()
-            || verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8)
-                .is_ok()
+        verify_distributor_authority(
+            state,
+            parameters,
+            &signer,
+            entry.authority.as_deref(),
+            crate::board_state::rate_limit::system_time_from_ms(entry.set.signed_at),
+        )
+        .is_ok()
+            || verify_admin_authority(
+                state,
+                parameters,
+                &signer,
+                entry.authority.as_deref(),
+                8,
+                crate::board_state::rate_limit::system_time_from_ms(entry.set.signed_at),
+            )
+            .is_ok()
     } else if is_trash {
         crate::board_state::roles::verify_trash_authority(
             state,
             parameters,
             &signer,
             entry.authority.as_deref(),
+            crate::board_state::rate_limit::system_time_from_ms(entry.set.signed_at),
         )
         .is_ok()
     } else {
-        verify_admin_authority(state, parameters, &signer, entry.authority.as_deref(), 8).is_ok()
+        verify_admin_authority(
+            state,
+            parameters,
+            &signer,
+            entry.authority.as_deref(),
+            8,
+            crate::board_state::rate_limit::system_time_from_ms(entry.set.signed_at),
+        )
+        .is_ok()
     };
     if !authorized {
         return Err("Signer cannot publish PQ secrets for this scope".to_string());
@@ -600,6 +630,7 @@ mod tests {
                     suite: PqSuite::MlKem,
                     x25519_public: None,
                 }],
+                signed_at: 0,
             },
             sk,
         )
@@ -775,6 +806,7 @@ mod tests {
                 can_manage_trash: true,
                 scope: Vec::new(),
                 deleted: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner_sk,
         ));
@@ -787,6 +819,7 @@ mod tests {
                     member_id: moderator_id,
                     generation: 1,
                     revoked: false,
+                    signed_at: std::time::SystemTime::UNIX_EPOCH,
                 },
                 &owner_sk,
             ));
@@ -807,6 +840,7 @@ mod tests {
                     suite: PqSuite::MlKem,
                     x25519_public: None,
                 }],
+                signed_at: 0,
             },
             signer,
         )
@@ -819,6 +853,7 @@ mod tests {
             RoleAssignment {
                 generation: assignment.generation + 1,
                 revoked: true,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
                 ..assignment
             },
             owner_sk,
@@ -845,6 +880,7 @@ mod tests {
                 version: 1,
                 secret_version: 1,
                 secrets: vec![sealed(owner_id), sealed(moderator_id)],
+                signed_at: 0,
             },
             &owner_sk,
         ));
@@ -868,6 +904,7 @@ mod tests {
                 version: 2,
                 secret_version: 1,
                 secrets: vec![sealed(owner_id)],
+                signed_at: 0,
             },
             &owner_sk,
         ));
@@ -902,6 +939,7 @@ mod tests {
             Role {
                 generation: role.generation + 1,
                 deleted: true,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
                 ..role
             },
             &owner_sk,

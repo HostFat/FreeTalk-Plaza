@@ -207,6 +207,7 @@ impl BansV1 {
                 ban,
                 &member_map,
                 parameters,
+                &parent_state.ownership,
                 &admin_ids,
                 &revoked_admin_ids,
                 &mut invalid_bans,
@@ -227,6 +228,7 @@ impl BansV1 {
         ban: &AuthorizedUserBan,
         member_map: &HashMap<MemberId, &AuthorizedMember>,
         parameters: &ChatBoardParametersV1,
+        ownership: &crate::board_state::ownership::OwnershipV1,
         admin_ids: &HashSet<MemberId>,
         revoked_admin_ids: &HashSet<MemberId>,
         invalid_bans: &mut HashMap<BanId, BanValidationError>,
@@ -242,14 +244,15 @@ impl BansV1 {
             return;
         }
 
-        let is_owner = ban.banned_by == parameters.owner_id();
+        let is_owner = ban.banned_by == ownership.owner_at(parameters, ban.ban.banned_at);
         let proof_admin = ban
             .authority
             .as_ref()
             .and_then(|proof| proof.admin.as_ref())
             .map(|admin| {
+                let owner_key = ownership.owner_key_at(parameters, admin.admin.signed_at);
                 admin.admin.id() == ban.banned_by
-                    && admin.verify_signature(&parameters.owner).is_ok()
+                    && admin.verify_signature(&owner_key).is_ok()
                     // A revoked adminship cannot vouch for later bans.
                     && !revoked_admin_ids.contains(&ban.banned_by)
             })
@@ -781,8 +784,11 @@ fn verify_revocation(
     )?;
     entry.verify_signature_with(&key)?;
     // Owner-only keeps the tombstone verifiable forever: the owner key is in
-    // the contract parameters even if every member record is pruned.
-    if signer != parameters.owner_id() {
+    // the ownership chain even if every member record is pruned.
+    if signer != state
+        .ownership
+        .owner_at(parameters, entry.revocation.revoked_at)
+    {
         return Err("Only the board owner can lift a ban".to_string());
     }
     Ok(())
@@ -1599,6 +1605,7 @@ mod revocation_tests {
             configuration: AuthorizedConfigurationV1::new(
                 Configuration {
                     max_user_bans: 10,
+                    updated_at: std::time::SystemTime::UNIX_EPOCH,
                     ..Default::default()
                 },
                 &owner_sk,
@@ -1635,6 +1642,7 @@ mod revocation_tests {
             Admin {
                 member_id: admin_id,
                 generation: 1,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner_sk,
         ));
@@ -1681,6 +1689,7 @@ mod revocation_tests {
                 can_manage_trash: true,
                 scope: Vec::new(),
                 deleted: false,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner_sk,
         ));
@@ -1693,6 +1702,7 @@ mod revocation_tests {
                     member_id: target_id,
                     generation: 1,
                     revoked: false,
+                    signed_at: std::time::SystemTime::UNIX_EPOCH,
                 },
                 &owner_sk,
             ));
@@ -1702,6 +1712,7 @@ mod revocation_tests {
                 member_id: target_id,
                 generation: 2,
                 revoked: true,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             admin_id,
             &admin_sk,
@@ -1767,6 +1778,7 @@ mod revocation_tests {
             Admin {
                 member_id: admin_id,
                 generation: 1,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner_sk,
         ));
