@@ -145,8 +145,11 @@ impl ChatBoardStateV1 {
     /// Fixpoint for members and messages after invite-cap removal or any
     /// cleanup that drops a member. Messages by absent members are removed,
     /// then members without messages or invite-chain descendants are pruned.
-    fn renormalize_members_and_messages(&mut self) {
-        let owner_id = self.configuration.configuration.owner_member_id;
+    fn renormalize_members_and_messages(&mut self, parameters: &ChatBoardParametersV1) {
+        let owner_id = parameters.owner_id();
+        // A founding owner who handed the board over is an ordinary member: its
+        // record must not be pruned for lack of messages.
+        let founder_is_member = self.ownership.current_owner(parameters) != owner_id;
         for _ in 0..8 {
             let before = self.members.members.len() + self.recent_messages.messages.len();
             let members_by_id = self.members.members_by_member_id();
@@ -193,9 +196,10 @@ impl ChatBoardStateV1 {
                     }
                 }
             }
-            self.members
-                .members
-                .retain(|member| required.contains(&member.member.id()));
+            self.members.members.retain(|member| {
+                required.contains(&member.member.id())
+                    || (founder_is_member && member.member.id() == owner_id)
+            });
 
             if before == self.members.members.len() + self.recent_messages.messages.len() {
                 break;
@@ -271,10 +275,15 @@ impl ChatBoardStateV1 {
             required_ids
         };
 
-        // 3. Prune members not in required set
+        // 3. Prune members not in required set. A founding owner who handed the
+        // board over stays as an ordinary member, like any other former owner.
+        let founder_is_member = self.ownership.current_owner(parameters) != owner_id;
         self.members
             .members
-            .retain(|m| required_ids.contains(&m.member.id()));
+            .retain(|m| {
+                required_ids.contains(&m.member.id())
+                    || (founder_is_member && m.member.id() == owner_id)
+            });
 
         // 4. Clean member_info for pruned members
         self.member_info.member_info.retain(|info| {
@@ -399,7 +408,7 @@ impl ChatBoardStateV1 {
         // 5g. Invite-cap removal happens before the message cleanup. Re-run
         // the members/messages fixpoint so removed invitees do not leave
         // messages or orphaned descendants behind.
-        self.renormalize_members_and_messages();
+        self.renormalize_members_and_messages(parameters);
 
         // 5h. Remove hidden messages from the live list. The encrypted trash
         // bundle is the only copy until a restore re-adds it.

@@ -156,12 +156,12 @@ impl ComposableState for AdminsV1 {
         let max_admins = parent_state.configuration.configuration.max_admins;
 
         if let Some(delta) = delta {
-            let owner_id = parameters.owner_id();
-
+            // No "owner is not an admin" rejection here: an outgoing owner
+            // keeps its admin rights across a transfer, so the appointment is
+            // signed while it still owns the board. The resulting state passes
+            // `verify`, which allows the owner in the list once a transfer
+            // exists.
             for admin in &delta.added {
-                if admin.admin.id() == owner_id && parent_state.ownership.transfers.is_empty() {
-                    return Err("Owner cannot be added as an admin".to_string());
-                }
                 let owner_key = parent_state
                     .ownership
                     .owner_key_at(parameters, admin.admin.signed_at);

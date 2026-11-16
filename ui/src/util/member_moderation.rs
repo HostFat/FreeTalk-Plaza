@@ -1,6 +1,7 @@
 //! Warning and suspension records.
 
 use crate::util::message_actions::{apply_state_delta, ActionContext};
+use crate::util::get_current_system_time;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::member_moderation::{
     AuthorizedSuspension, AuthorizedWarning, SuspensionV1, SuspensionsDelta, WarningV1,
@@ -81,7 +82,7 @@ pub fn suspend_member(
                     member_id: target,
                     generation: entry.assignment.generation + 1,
                     revoked: true,
-                    signed_at: std::time::SystemTime::now(),
+                    signed_at: get_current_system_time(),
                 },
                 signer_id,
                 &ctx.self_sk,

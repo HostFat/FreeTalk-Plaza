@@ -1,5 +1,6 @@
 use crate::board_data::BoardData;
 use crate::components::app::{mark_needs_sync, BOARDS, CURRENT_BOARD};
+use crate::util::get_current_system_time;
 use dioxus::logger::tracing::{error, info};
 use dioxus::prelude::*;
 use freenet_scaffold::ComposableState;
@@ -85,7 +86,7 @@ pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
             // A generation higher than any previous grant or revocation, so a
             // re-added member gets their rights back.
             generation: board_data.board_state.admin.next_generation(&member_id),
-            signed_at: std::time::SystemTime::now(),
+            signed_at: get_current_system_time(),
         };
 
         // Close modal and reset selection

@@ -2032,7 +2032,7 @@ impl Boards {
                 },
                 description: None,
             },
-            updated_at: std::time::SystemTime::now(),
+            updated_at: get_current_system_time(),
             ..Configuration::default()
         };
         board_state.configuration = AuthorizedConfigurationV1::new(config, &self_sk);
@@ -2237,7 +2237,7 @@ mod tests {
                 can_manage_trash: true,
                 scope: Vec::new(),
                 deleted: false,
-                signed_at: std::time::SystemTime::now(),
+                signed_at: get_current_system_time(),
             },
             &owner_sk,
         ));
@@ -2250,7 +2250,7 @@ mod tests {
                     member_id: member,
                     generation: 1,
                     revoked: false,
-                    signed_at: std::time::SystemTime::now(),
+                    signed_at: get_current_system_time(),
                 },
                 &owner_sk,
             ));
@@ -2468,7 +2468,7 @@ mod tests {
                 plaza_core::board_state::message::MessageV1 {
                     board_owner: owner_id,
                     author: invitee_id,
-                    time: std::time::SystemTime::now(),
+                    time: get_current_system_time(),
                     content: plaza_core::board_state::message::BoardMessageBody::public(
                         "hello".to_string(),
                         String::new(),
@@ -2656,7 +2656,7 @@ mod tests {
                                 can_manage_trash: false,
                                 scope: Vec::new(),
                                 deleted: false,
-                                signed_at: std::time::SystemTime::now(),
+                                signed_at: get_current_system_time(),
                             },
                             &owner_sk,
                         )],
@@ -2666,7 +2666,7 @@ mod tests {
                                 member_id: invitee_id,
                                 generation: 1,
                                 revoked: false,
-                                signed_at: std::time::SystemTime::now(),
+                                signed_at: get_current_system_time(),
                             },
                             &owner_sk,
                         )],
@@ -2856,7 +2856,7 @@ mod tests {
                                 member_id: outsider_id,
                                 generation: 1,
                                 revoked: false,
-                                signed_at: std::time::SystemTime::now(),
+                                signed_at: get_current_system_time(),
                             },
                             &owner_sk,
                         )],

@@ -461,9 +461,9 @@ impl ComposableState for OwnershipV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board_state::admin::{Admin, AuthorizedAdmin};
+    use crate::board_state::admin::{Admin, AdminsDelta, AuthorizedAdmin};
     use crate::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
-    use crate::board_state::member::{AuthorizedMember, Member};
+    use crate::board_state::member::{AuthorizedMember, Member, MembersDelta};
     use crate::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
     use crate::board_state::roles::verify_admin_authority;
     use crate::board_state::ChatBoardStateV1Delta;
@@ -624,9 +624,92 @@ mod tests {
         .is_err());
     }
 
+    /// The transfer screen sends the outgoing owner's admin record in the same
+    /// update as the transfer: it is signed while the founder still owns the
+    /// board, so the delta cannot wait for the transfer to be recorded.
     #[test]
-    fn the_new_owner_can_transfer_again() {
+    fn the_founding_owner_keeps_admin_rights_across_the_transfer() {
         let mut fixture = fixture();
+        let parent = fixture.state.clone();
+        // The UI signs the outgoing record first and dates the transfer two
+        // milliseconds later, so the record resolves the founder as authority.
+        let transferred_at = fixture.now + std::time::Duration::from_millis(2);
+        let outgoing_admin = AuthorizedAdmin::new(
+            Admin {
+                member_id: fixture.owner_id,
+                generation: 1,
+                signed_at: fixture.now,
+            },
+            &fixture.owner_sk,
+        );
+
+        fixture
+            .state
+            .apply_delta(
+                &parent,
+                &fixture.parameters,
+                &Some(ChatBoardStateV1Delta {
+                    ownership: Some(OwnershipDelta {
+                        transfers: vec![transfer(
+                            fixture.owner_id,
+                            fixture.admin_id,
+                            fixture.admin_sk.verifying_key(),
+                            1,
+                            transferred_at,
+                            &fixture.owner_sk,
+                        )],
+                        deactivations: Vec::new(),
+                    }),
+                    admin: Some(AdminsDelta::new(vec![outgoing_admin])),
+                    members: Some(MembersDelta::new(vec![AuthorizedMember::new(
+                        Member {
+                            owner_member_id: fixture.owner_id,
+                            invited_by: fixture.owner_id,
+                            member_vk: fixture.owner_sk.verifying_key(),
+                            join_proof: None,
+                        },
+                        &fixture.owner_sk,
+                    )])),
+                    ..Default::default()
+                }),
+            )
+            .expect("the transfer and the outgoing admin record apply together");
+
+        assert!(
+            fixture
+                .state
+                .members
+                .members
+                .iter()
+                .any(|member| member.member.id() == fixture.owner_id),
+            "the former owner stays a member"
+        );
+
+        assert!(fixture
+            .state
+            .admin
+            .admins
+            .iter()
+            .any(|admin| admin.admin.id() == fixture.owner_id));
+        fixture
+            .state
+            .verify(&fixture.state.clone(), &fixture.parameters)
+            .expect("the state verifies after the transfer");
+
+        let later = fixture.now + std::time::Duration::from_secs(60);
+        verify_admin_authority(
+            &fixture.state,
+            &fixture.parameters,
+            &fixture.owner_id,
+            None,
+            8,
+            later,
+        )
+        .expect("the former owner keeps its admin powers");
+    }
+
+    #[test]
+    fn the_new_owner_can_transfer_again() {        let mut fixture = fixture();
         let second_sk = SigningKey::from_bytes(&[3u8; 32]);
         let second_id = MemberId::from(&second_sk.verifying_key());
         fixture.state.members.members.push(AuthorizedMember::new(

@@ -49,6 +49,19 @@ pub struct ActionContext {
 impl ActionContext {
     /// Create an ActionContext from the current board data, if available
     pub fn from_current_board() -> Option<Self> {
+        Self::build(true)
+    }
+
+    /// Like [`Self::from_current_board`] but without the write gate.
+    ///
+    /// One action needs it: a former owner that is not on the members list any
+    /// more publishes its own signed membership to rejoin. The contract still
+    /// verifies that record, so nothing else can pass through here.
+    pub fn from_current_board_for_repair() -> Option<Self> {
+        Self::build(false)
+    }
+
+    fn build(check_write: bool) -> Option<Self> {
         use crate::components::app::CURRENT_BOARD;
 
         let current_board = CURRENT_BOARD.read();
@@ -57,9 +70,11 @@ impl ActionContext {
             if let Some(board_data) = boards.map.get(&key) {
                 // One gate for every action: banned, suspended and non-member
                 // identities get no context, so no action can be sent.
-                if let Err(error) = board_data.ensure_can_write() {
-                    warn!("action context blocked: {error}");
-                    return None;
+                if check_write {
+                    if let Err(error) = board_data.ensure_can_write() {
+                        warn!("action context blocked: {error}");
+                        return None;
+                    }
                 }
                 return Some(Self {
                     current_board: key,
@@ -533,6 +548,15 @@ pub(crate) fn apply_state_delta(
     if let Some(board) = BOARDS.read().map.get(&ctx.current_board) {
         board.ensure_can_write()?;
     }
+    apply_state_delta_unchecked(ctx, delta)
+}
+
+/// Apply a delta without the write gate. Only the former-owner rejoin uses
+/// this: `apply_delta` still verifies every record against the contract rules.
+pub(crate) fn apply_state_delta_unchecked(
+    ctx: &ActionContext,
+    delta: ChatBoardStateV1Delta,
+) -> Result<(), String> {
     let parent = ctx.board_state.clone();
     let owner = ctx.current_board;
     let mut error: Option<String> = None;

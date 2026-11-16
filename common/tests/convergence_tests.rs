@@ -2747,10 +2747,10 @@ fn test_merge_owner_ban_across_diverged_states() {
 
 use plaza_core::board_state::admin::{Admin, AdminsDelta, AdminsV1, AuthorizedAdmin};
 
-/// Test that the owner cannot be added as an admin.
-/// The owner already has full privileges, so adding them as admin is rejected.
+/// An outgoing owner can keep its admin rights across a transfer, so the owner
+/// is allowed to hold an admin record. Its owner powers never depend on it.
 #[test]
-fn test_owner_cannot_be_added_as_admin() {
+fn test_owner_can_hold_an_admin_record() {
     let owner_sk = SigningKey::generate(&mut OsRng);
     let owner_vk = owner_sk.verifying_key();
     let owner_id: MemberId = owner_vk.into();
@@ -2758,7 +2758,6 @@ fn test_owner_cannot_be_added_as_admin() {
     let parameters = ChatBoardParametersV1 { owner: owner_vk };
     let parent_state = ChatBoardStateV1::default();
 
-    // Try to add owner as admin
     let admin = Admin {
         member_id: owner_id,
         generation: 0,
@@ -2769,15 +2768,11 @@ fn test_owner_cannot_be_added_as_admin() {
     let mut admins = AdminsV1::default();
     let delta = AdminsDelta::new(vec![authorized_admin]);
 
-    let result = admins.apply_delta(&parent_state, &parameters, &Some(delta));
-
-    assert!(result.is_err(), "Adding owner as admin should fail");
-    assert!(
-        result
-            .unwrap_err()
-            .contains("Owner cannot be added as an admin"),
-        "Error message should mention owner cannot be admin"
-    );
+    admins
+        .apply_delta(&parent_state, &parameters, &Some(delta))
+        .expect("the owner's admin record is accepted");
+    assert_eq!(admins.admins.len(), 1);
+    assert_eq!(admins.admins[0].admin.id(), owner_id);
 }
 
 /// Test that a regular member can be added as admin.

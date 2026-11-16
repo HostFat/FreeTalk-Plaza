@@ -7,123 +7,57 @@ use plaza_core::board_state::ownership::{
     AuthorizedKeyDeactivation, AuthorizedOwnerTransfer, KeyDeactivationV1, OutgoingOwnerAction,
     OwnerTransferV1, OwnershipDelta,
 };
-use plaza_core::board_state::ChatBoardStateV1Delta;
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 use plaza_core::util::sign_struct;
-use std::time::{Duration, SystemTime};
-
+use crate::util::get_current_system_time;
 use crate::util::message_actions::{apply_state_delta, ActionContext};
+use std::time::Duration;
 
-#[component]
-pub fn OwnershipView() -> Element {
-    let mut error = use_signal(|| None::<String>);
-    let mut selected = use_signal(|| None::<MemberId>);
-    let mut outcome = use_signal(|| OutgoingOwnerAction::KeepAdmin);
-    let mut confirmed = use_signal(|| false);
-    let mut busy = use_signal(|| false);
-
-    let board = ActionContext::from_current_board();
-    let Some(ctx) = board else {
-        return rsx! {
-            div { class: "bg-surface rounded-lg p-4 text-text-muted", "No board selected." }
-        };
-    };
-
-    let parameters = plaza_core::board_state::ChatBoardParametersV1 {
-        owner: ctx.current_board,
-    };
-    let owner_id = ctx.board_state.ownership.current_owner(&parameters);
-    let is_owner = ctx.self_sk.verifying_key() == ctx.board_state.ownership.current_owner_key(&parameters);
-
-    // Members that can receive the board: a valid key, not the current owner,
-    // not deactivated. An admin target skips the promotion step.
-    let candidates: Vec<(MemberId, String, bool)> = ctx
+/// Hand the board to `target`: promote it when needed, then send the transfer,
+/// the outgoing owner's new membership and its admin change.
+///
+/// The work runs in one spawned task. Applying a state delta subscribes the
+/// open views, so it must not run inside the click handler itself.
+#[allow(clippy::too_many_arguments)]
+fn start_transfer(
+    target: MemberId,
+    ctx: ActionContext,
+    owner_id: MemberId,
+    parameters: ChatBoardParametersV1,
+    outgoing: OutgoingOwnerAction,
+    confirmed: bool,
+    mut error: Signal<Option<String>>,
+    mut confirmed_signal: Signal<bool>,
+    mut busy: Signal<bool>,
+) {
+    if *busy.peek() {
+        return;
+    }
+    if !confirmed {
+        error.set(Some("Tick the confirmation to hand the board over".to_string()));
+        return;
+    }
+    let Some(target_key) = ctx
         .board_state
         .members
         .members
         .iter()
-        .filter(|member| {
-            member.member.id() != owner_id
-                && !ctx
-                    .board_state
-                    .ownership
-                    .is_deactivated_now(&member.member.id())
-        })
-        .map(|member| {
-            let id = member.member.id();
-            let name = ctx
-                .board_state
-                .member_info
-                .member_info
-                .iter()
-                .find(|info| info.member_info.member_id == id)
-                .map(|info| info.member_info.preferred_nickname.to_string_lossy())
-                .unwrap_or_else(|| format!("{}", id));
-            let is_admin = ctx
-                .board_state
-                .admin
-                .admins
-                .iter()
-                .any(|admin| admin.admin.id() == id);
-            (id, name, is_admin)
-        })
-        .collect();
-
-    let history = ctx.board_state.ownership.transfers.clone();
-    let deactivations = ctx.board_state.ownership.deactivations.clone();
-    // The select stores the candidate index: `MemberId`'s Display and FromStr
-    // use different encodings, so parsing the printed id fails.
-    let candidate_ids: Vec<MemberId> = candidates.iter().map(|(id, _, _)| *id).collect();
-    let names: std::collections::HashMap<MemberId, String> = ctx
-        .board_state
-        .member_info
-        .member_info
-        .iter()
-        .map(|info| {
-            (
-                info.member_info.member_id,
-                info.member_info.preferred_nickname.to_string_lossy(),
-            )
-        })
-        .collect();
-    let founding_owner = parameters.owner_id();
-    let name_of = |id: MemberId| -> String {
-        if id == founding_owner {
-            return "Owner (founding key)".to_string();
-        }
-        names
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| format!("{}", id))
+        .find(|member| member.member.id() == target)
+        .map(|member| member.member.member_vk)
+    else {
+        error.set(Some("The chosen admin has no member key".to_string()));
+        return;
     };
 
-    let transfer = move |_: dioxus::prelude::Event<dioxus::prelude::MouseData>| {
-        if *busy.read() {
-            return;
-        }
-        let Some(target) = *selected.read() else {
-            error.set(Some("Choose an admin to receive the board".to_string()));
-            return;
-        };
-        if !*confirmed.read() {
-            error.set(Some("Tick the confirmation to hand the board over".to_string()));
-            return;
-        }
-        let Some(target_key) = ctx
-            .board_state
-            .members
-            .members
-            .iter()
-            .find(|member| member.member.id() == target)
-            .map(|member| member.member.member_vk)
-        else {
-            error.set(Some("The chosen admin has no member key".to_string()));
-            return;
-        };
-
-        busy.set(true);
-        let now = SystemTime::now();
-        // Bundle records are signed just before the transfer so they resolve
-        // the outgoing owner as their authority.
+    busy.set(true);
+    error.set(None);
+    // A plain future, like the other state-changing actions: applying a delta
+    // inside a Dioxus task lets the runtime re-render while the board map is
+    // borrowed.
+    wasm_bindgen_futures::spawn_local(async move {
+        let now = get_current_system_time();
+        // Records are signed just before the transfer so they resolve the
+        // outgoing owner as their authority.
         let signed_at = now;
         let transferred_at = now + Duration::from_millis(2);
 
@@ -135,10 +69,9 @@ pub fn OwnershipView() -> Element {
             .iter()
             .any(|admin| admin.admin.id() == target);
         if !target_is_admin {
-            let generation = ctx.board_state.admin.next_generation(&target);
             let admin = Admin {
                 member_id: target,
-                generation,
+                generation: ctx.board_state.admin.next_generation(&target),
                 signed_at,
             };
             let delta = ChatBoardStateV1Delta {
@@ -161,7 +94,6 @@ pub fn OwnershipView() -> Element {
         };
 
         let generation = ctx.board_state.ownership.transfers.len() as u64 + 1;
-        let outgoing = *outcome.read();
 
         let mut delta = ChatBoardStateV1Delta::default();
         let mut deactivations = Vec::new();
@@ -230,18 +162,97 @@ pub fn OwnershipView() -> Element {
             delta.admin = Some(AdminsDelta::revocation(vec![authorized]));
         }
 
-        let apply_ctx = ctx.clone();
-        spawn(async move {
-            match apply_state_delta(&apply_ctx, delta) {
-                Ok(()) => {
-                    error.set(None);
-                    confirmed.set(false);
-                }
-                Err(e) => error.set(Some(format!("Transfer failed: {e}"))),
+        match apply_state_delta(&ctx, delta) {
+            Ok(()) => {
+                error.set(None);
+                confirmed_signal.set(false);
             }
-            busy.set(false);
-        });
+            Err(e) => error.set(Some(format!("Transfer failed: {e}"))),
+        }
+        busy.set(false);
+    });
+}
+
+#[component]
+pub fn OwnershipView() -> Element {
+    let mut error = use_signal(|| None::<String>);
+    let mut outcome = use_signal(|| OutgoingOwnerAction::KeepAdmin);
+    let mut confirmed = use_signal(|| false);
+    let mut busy = use_signal(|| false);
+
+    let board = ActionContext::from_current_board();
+    let Some(ctx) = board else {
+        return rsx! {
+            div { class: "bg-surface rounded-lg p-4 text-text-muted", "No board selected." }
+        };
     };
+
+    let parameters = ChatBoardParametersV1 {
+        owner: ctx.current_board,
+    };
+    let owner_id = ctx.board_state.ownership.current_owner(&parameters);
+    let is_owner =
+        ctx.self_sk.verifying_key() == ctx.board_state.ownership.current_owner_key(&parameters);
+
+    // Members that can receive the board: a valid key, not the current owner,
+    // not deactivated. An admin target skips the promotion step.
+    let candidates: Vec<(MemberId, String, bool)> = ctx
+        .board_state
+        .members
+        .members
+        .iter()
+        .filter(|member| {
+            member.member.id() != owner_id
+                && !ctx
+                    .board_state
+                    .ownership
+                    .is_deactivated_now(&member.member.id())
+        })
+        .map(|member| {
+            let id = member.member.id();
+            let name = ctx
+                .board_state
+                .member_info
+                .member_info
+                .iter()
+                .find(|info| info.member_info.member_id == id)
+                .map(|info| info.member_info.preferred_nickname.to_string_lossy())
+                .unwrap_or_else(|| format!("{}", id));
+            let is_admin = ctx
+                .board_state
+                .admin
+                .admins
+                .iter()
+                .any(|admin| admin.admin.id() == id);
+            (id, name, is_admin)
+        })
+        .collect();
+
+    let history = ctx.board_state.ownership.transfers.clone();
+    let deactivations = ctx.board_state.ownership.deactivations.clone();
+    let names: std::collections::HashMap<MemberId, String> = ctx
+        .board_state
+        .member_info
+        .member_info
+        .iter()
+        .map(|info| {
+            (
+                info.member_info.member_id,
+                info.member_info.preferred_nickname.to_string_lossy(),
+            )
+        })
+        .collect();
+    let founding_owner = parameters.owner_id();
+    let name_of = |id: MemberId| -> String {
+        if id == founding_owner {
+            return "Owner (founding key)".to_string();
+        }
+        names
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| format!("{}", id))
+    };
+
     rsx! {
         div { class: "space-y-4",
             div { class: "bg-surface rounded-lg p-4",
@@ -269,24 +280,6 @@ pub fn OwnershipView() -> Element {
                             "No member can receive the board: the only member with a key is the current owner."
                         }
                     } else {
-                        select {
-                            class: "w-full bg-background border border-border rounded-lg px-3 py-2 text-text text-sm",
-                            onchange: move |event| {
-                                selected.set(
-                                    event
-                                        .value()
-                                        .parse::<usize>()
-                                        .ok()
-                                        .and_then(|index| candidate_ids.get(index).copied()),
-                                );
-                            },
-                            option { value: "", "Choose a member" }
-                            for (index, (_, name, is_admin)) in candidates.iter().enumerate() {
-                                option { value: "{index}",
-                                    if *is_admin { "{name} (admin)" } else { "{name}" }
-                                }
-                            }
-                        }
                         p { class: "text-text-muted text-xs",
                             "A plain member is promoted to admin in the same transfer."
                         }
@@ -327,12 +320,33 @@ pub fn OwnershipView() -> Element {
                             }
                             "I understand the new owner can transfer the board again and can remove me."
                         }
-                        button {
-                            r#type: "button",
-                            class: "px-4 py-2 bg-red-500/80 hover:bg-red-500 text-white rounded-lg text-sm disabled:opacity-50",
-                            disabled: *busy.read(),
-                            onclick: transfer,
-                            if *busy.read() { "Transferring..." } else { "Transfer ownership" }
+                        div { class: "flex flex-wrap gap-2",
+                            for (id, name, is_admin) in candidates.iter() {
+                                {
+                                    let member = *id;
+                                    let click_ctx = ctx.clone();
+                                    let click_parameters = parameters.clone();
+                                    rsx! {
+                                        button {
+                                            r#type: "button",
+                                            class: "px-3 py-1.5 bg-background border border-border rounded-lg text-sm text-text hover:bg-surface-hover disabled:opacity-50",
+                                            disabled: *busy.read(),
+                                            onclick: move |_| start_transfer(
+                                                member,
+                                                click_ctx.clone(),
+                                                owner_id,
+                                                click_parameters.clone(),
+                                                *outcome.peek(),
+                                                *confirmed.peek(),
+                                                error,
+                                                confirmed,
+                                                busy,
+                                            ),
+                                            if *is_admin { "Transfer to {name} (admin)" } else { "Transfer to {name}" }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

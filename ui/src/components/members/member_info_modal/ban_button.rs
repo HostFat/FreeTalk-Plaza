@@ -101,7 +101,7 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
                     member_id: member_to_ban,
                     generation: entry.assignment.generation + 1,
                     revoked: true,
-                    signed_at: std::time::SystemTime::now(),
+                    signed_at: get_current_system_time(),
                 },
                 banned_by,
                 &self_sk,
