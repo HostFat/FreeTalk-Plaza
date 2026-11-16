@@ -199,10 +199,10 @@ fn start_transfer(
 
 #[component]
 pub fn OwnershipView() -> Element {
-    let mut error = use_signal(|| None::<String>);
+    let error = use_signal(|| None::<String>);
     let mut outcome = use_signal(|| OutgoingOwnerAction::KeepAdmin);
     let mut confirmed = use_signal(|| false);
-    let mut busy = use_signal(|| false);
+    let busy = use_signal(|| false);
 
     let board = ActionContext::from_current_board();
     let Some(ctx) = board else {

@@ -340,9 +340,13 @@ async fn merge_stored_boards() {
     let mut added = 0usize;
     BOARDS.with_mut(|boards| {
         for key in stored.removed {
-            if !boards.removed.contains(&key) {
-                boards.removed.push(key);
+            // A board re-added in this session (import or rejoin) must not be
+            // tombstoned again by the copy another tab stored; the next load
+            // would drop it.
+            if boards.map.contains_key(&key) || boards.removed.contains(&key) {
+                continue;
             }
+            boards.removed.push(key);
         }
         for (key, board) in stored.map {
             // A board another tab left must not come back through this save.

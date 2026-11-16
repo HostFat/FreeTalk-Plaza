@@ -450,8 +450,13 @@ pub async fn handle_get_response(
             }
         } else if is_existing_board {
             // This is a refresh GET for an already-subscribed board (e.g., after wake from suspension)
-            info!("Processing GET response for existing board (refresh after suspension)");
             let retrieved_state: ChatBoardStateV1 = from_cbor_slice::<ChatBoardStateV1>(&state);
+            info!(
+                "GET response for existing board {:?}: {} members, {} owner transfers",
+                MemberId::from(owner_vk),
+                retrieved_state.members.members.len(),
+                retrieved_state.ownership.transfers.len()
+            );
 
             crate::util::defer(move || {
                 BOARDS.with_mut(|boards| {

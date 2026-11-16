@@ -1,9 +1,15 @@
-use crate::components::app::{mark_needs_sync, BOARDS, CURRENT_BOARD, MEMBER_INFO_MODAL};
+use crate::components::app::chat_delegate::save_boards_to_delegate;
+use crate::components::app::sync_info::SYNC_INFO;
+use crate::components::app::{
+    mark_needs_sync, BOARDS, CURRENT_BOARD, MEMBER_INFO_MODAL, WEB_API,
+};
 use crate::util::ecies::unseal_bytes_with_secrets;
+use dioxus::logger::tracing::{info, warn};
 use dioxus::prelude::*;
 use dioxus_free_icons::icons::fa_solid_icons::{FaFileExport, FaUserPlus, FaUsers};
 use dioxus_free_icons::Icon;
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use freenet_stdlib::client_api::{ClientRequest, ContractRequest};
 use plaza_core::board_state::identity::IdentityExport;
 use plaza_core::board_state::member::MembersV1;
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
@@ -516,6 +522,47 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
 
                 // Trigger a sync for the new board (deferred to avoid RefCell panics)
                 mark_needs_sync(owner_key);
+
+                // Persist the board before anything else can reload the page: the
+                // housekeeping flush is up to a minute away and an import that
+                // is only in memory disappears on a reload.
+                crate::util::safe_spawn_local(async {
+                    match save_boards_to_delegate().await {
+                        Ok(()) => info!("Import: board saved to the delegate"),
+                        Err(e) => warn!("Import: saving the board to the delegate failed: {e}"),
+                    }
+                });
+
+                // Fetch the current state. Putting the empty imported state
+                // changes nothing on the contract, so no update notification
+                // would ever arrive and the board would stay empty.
+                let contract_id = *crate::util::owner_vk_to_contract_key(&owner_key).id();
+                SYNC_INFO.with_mut(|sync_info| sync_info.register_new_board(owner_key));
+                info!(
+                    "Import: requesting board state for {:?} from contract {}",
+                    MemberId::from(&owner_key),
+                    contract_id
+                );
+                crate::util::safe_spawn_local(async move {
+                    let get_request = ContractRequest::Get {
+                        key: contract_id,
+                        return_contract_code: true,
+                        subscribe: true,
+                        blocking_subscribe: true,
+                    };
+                    let mut web_api = WEB_API.write();
+                    let Some(web_api) = web_api.as_mut() else {
+                        warn!("Import: WebAPI unavailable, state request skipped");
+                        return;
+                    };
+                    match web_api
+                        .send(ClientRequest::ContractOp(get_request))
+                        .await
+                    {
+                        Ok(_) => info!("Import: GetRequest sent for contract {}", contract_id),
+                        Err(e) => warn!("Import: GetRequest failed: {e}"),
+                    }
+                });
 
                 // Migrate the imported signing key to the delegate immediately.
                 // Without this, the delegate may have a stale key from a prior
