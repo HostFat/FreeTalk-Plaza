@@ -368,13 +368,22 @@ pub fn TrashView() -> Element {
                             p { class: "text-xs text-text-muted",
                                 "{item.item.messages.len()} messages · {item.item.reason}"
                             }
-                            if item.item.section.map(|section| {
-                                data.board_state.moderation.routes_map().get(&section).is_none()
-                                    || data
-                                        .board_state
-                                        .recent_messages
-                                        .is_deleted(&section)
-                            }).unwrap_or(false) {
+                            // A section is not a topic: the restore only brings
+                            // it back under its stored parent, so there is no
+                            // destination to choose.
+                            if !crate::util::trash_actions::item_is_section(&item)
+                                && item
+                                    .item
+                                    .section
+                                    .map(|section| {
+                                        data.board_state.moderation.routes_map().get(&section).is_none()
+                                            || data
+                                                .board_state
+                                                .recent_messages
+                                                .is_deleted(&section)
+                                    })
+                                    .unwrap_or(false)
+                            {
                                 select {
                                     class: "mt-2 w-full bg-panel border border-border rounded-md px-2 py-1 text-xs text-text",
                                     onchange: {
@@ -438,16 +447,18 @@ pub fn TrashView() -> Element {
                                             return;
                                         };
                                         let item = item.clone();
+                                        let is_section =
+                                            crate::util::trash_actions::item_is_section(&item);
                                         let section_missing = item.item.section.map(|section| {
                                             ctx.board_state.moderation.routes_map().get(&section).is_none()
                                                 || ctx.board_state.recent_messages.is_deleted(&section)
                                         }).unwrap_or(false);
-                                        let destination = if section_missing {
+                                        let destination = if section_missing && !is_section {
                                             restore_targets.read().get(&item.item.id).copied()
                                         } else {
                                             None
                                         };
-                                        if section_missing && destination.is_none() {
+                                        if section_missing && !is_section && destination.is_none() {
                                             error.set(Some("Choose a section for the restored topic".to_string()));
                                             return;
                                         }

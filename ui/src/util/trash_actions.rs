@@ -397,6 +397,13 @@ pub async fn restore_item(
         },
     )?;
 
+    // A section has no thread move: the contract rejects a category target,
+    // and the restored route already carries its parent. The messages are all
+    // that the restore has to publish.
+    if item_is_section(item) {
+        return Ok(());
+    }
+
     let Some(destination) = destination else {
         return Ok(());
     };
@@ -956,6 +963,13 @@ fn publish_trash_set(ctx: &ActionContext, version: u32) -> Result<usize, String>
     Ok(sealed_count)
 }
 
+/// A trashed section stores itself as its own section; a topic stores the
+/// section it was posted in. A section has no destination: restoring it keeps
+/// the parent from its route.
+pub fn item_is_section(item: &AuthorizedTrashItem) -> bool {
+    item.item.section == Some(item.item.root)
+}
+
 /// Put the Trash key set back when the board no longer carries one.
 ///
 /// A set is one signed blob, so when a holder leaves the board (ban, Leave)
@@ -1130,8 +1144,44 @@ pub fn run_later<F: FnOnce() + 'static>(work: F) {
 
 #[cfg(test)]
 mod tests {
-    use super::trash_key_candidates;
+    use super::{item_is_section, trash_key_candidates};
+    use plaza_core::board_state::message::MessageId;
+    use plaza_core::board_state::trash::{AuthorizedTrashItem, ReasonCode, TrashItemV1};
     use std::collections::HashMap;
+
+    fn item(section: Option<MessageId>, root: MessageId) -> AuthorizedTrashItem {
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        AuthorizedTrashItem::new(
+            TrashItemV1 {
+                id: MessageId::from_bytes([0u8; 32]),
+                root,
+                messages: vec![root],
+                authors: Vec::new(),
+                section,
+                bundle: vec![1u8; 8],
+                bundle_nonce: [0u8; 12],
+                sealed_item_key: vec![2u8; 8],
+                item_key_nonce: [0u8; 12],
+                secret_version: 1,
+                hidden_at: 0,
+                reason_code: ReasonCode::Other,
+                reason: "test".to_string(),
+                generation: 1,
+            },
+            &sk,
+        )
+    }
+
+    #[test]
+    fn a_section_is_recognised_by_its_own_section() {
+        let root = MessageId::from_bytes([3u8; 32]);
+        assert!(item_is_section(&item(Some(root), root)));
+        assert!(!item_is_section(&item(None, root)));
+        assert!(!item_is_section(&item(
+            Some(MessageId::from_bytes([4u8; 32])),
+            root
+        )));
+    }
 
     #[test]
     fn each_item_uses_the_key_for_its_own_version() {
