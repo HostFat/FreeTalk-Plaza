@@ -90,7 +90,7 @@ pub fn CategoryCreateModal() -> Element {
                     .collect::<Vec<_>>();
                 (
                     board_data.can_create_categories(),
-                    board_data.self_sk.verifying_key() == board_data.owner_vk,
+                    board_data.is_current_owner(),
                     roles,
                     groups,
                 )

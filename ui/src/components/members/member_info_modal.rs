@@ -99,9 +99,13 @@ pub fn MemberInfoModal() -> Element {
         let member = members_list.iter().find(|m| m.member.id() == member_id);
 
         // Determine if the member is the board owner
-        let is_owner = owner_key_signal
-            .as_ref()
-            .is_some_and(|k| MemberId::from(&*k) == member_id);
+        let is_owner = owner_key_signal.as_ref().is_some_and(|k| {
+            board_state
+                .board_state
+                .ownership
+                .current_owner(&ChatBoardParametersV1 { owner: *k })
+                == member_id
+        });
 
         // Determine if the member is an admin
         let is_admin = board_state
@@ -126,9 +130,7 @@ pub fn MemberInfoModal() -> Element {
         // admins can ban anyone, including token-joined members, whose
         // self-invite leaves no chain back to the viewer.
         let viewer_id = MemberId::from(&board_state.self_sk.verifying_key());
-        let viewer_is_owner = owner_key_signal
-            .as_ref()
-            .is_some_and(|key| MemberId::from(&*key) == viewer_id);
+        let viewer_is_owner = board_state.is_current_owner();
         let viewer_is_admin = board_state
             .board_state
             .admin

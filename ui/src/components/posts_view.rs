@@ -643,7 +643,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
         .as_ref()
         .map(|board| {
             let self_id = MemberId::from(&board.self_sk.verifying_key());
-            self_id == MemberId::from(&board.owner_vk)
+            board.is_current_owner()
                 || board
                     .board_state
                     .admin
@@ -657,7 +657,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
         .as_ref()
         .map(|board| {
             let self_vk = board.self_sk.verifying_key();
-            self_vk == board.owner_vk
+            board.is_current_owner()
                 || board
                     .board_state
                     .members
@@ -1847,7 +1847,7 @@ pub fn SinglePostView(post_id: String) -> Element {
             .and_then(|key| BOARDS.read().map.get(key).cloned())
             .map(|board_data| {
                 let self_id = MemberId::from(&board_data.self_sk.verifying_key());
-                self_id == MemberId::from(&board_data.owner_vk)
+                board_data.is_current_owner()
                     || board_data
                         .board_state
                         .admin

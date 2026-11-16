@@ -192,6 +192,31 @@ pub struct BoardData {
 }
 
 impl BoardData {
+    /// Contract parameters for this board: the founding owner is the identity.
+    pub fn board_parameters(&self) -> ChatBoardParametersV1 {
+        ChatBoardParametersV1 {
+            owner: self.owner_vk,
+        }
+    }
+
+    /// Current owner from the signed transfer chain.
+    pub fn current_owner_id(&self) -> MemberId {
+        self.board_state
+            .ownership
+            .current_owner(&self.board_parameters())
+    }
+
+    pub fn current_owner_key(&self) -> VerifyingKey {
+        self.board_state
+            .ownership
+            .current_owner_key(&self.board_parameters())
+    }
+
+    /// Whether this client holds the owner powers right now.
+    pub fn is_current_owner(&self) -> bool {
+        self.self_sk.verifying_key() == self.current_owner_key()
+    }
+
     /// Whether this client is suspended right now.
     pub fn is_suspended_now(&self) -> bool {
         is_suspended_now(
@@ -519,7 +544,7 @@ impl BoardData {
         &mut self,
         category_id: &MessageId,
     ) -> Result<CategorySecretsDelta, String> {
-        if self.self_sk.verifying_key() != self.owner_vk {
+        if !self.is_current_owner() {
             return Err("Only the board owner can rotate a category key".to_string());
         }
         let category = self
@@ -692,7 +717,7 @@ impl BoardData {
     /// Whether this client may sign category key distributions: the owner, or
     /// a member of a role the owner allowed to distribute keys.
     pub fn can_distribute_category_keys(&self) -> bool {
-        if self.self_sk.verifying_key() == self.owner_vk {
+        if self.is_current_owner() {
             return true;
         }
         if self.is_suspended_now() {
@@ -708,7 +733,7 @@ impl BoardData {
         if !self.can_distribute_category_keys() {
             return None;
         }
-        let is_owner = self.self_sk.verifying_key() == self.owner_vk;
+        let is_owner = self.is_current_owner();
 
         let mut sets = Vec::new();
         for (category_id, category) in self.restricted_categories() {
@@ -779,7 +804,7 @@ impl BoardData {
     /// messages would still be present and the user should see the normal
     /// can_participate() flow which handles re-adding via self_authorized_member.
     pub fn is_awaiting_initial_sync(&self) -> bool {
-        let is_owner = self.self_sk.verifying_key() == self.owner_vk;
+        let is_owner = self.is_current_owner();
         if is_owner {
             return false;
         }
@@ -814,7 +839,7 @@ impl BoardData {
 
     fn self_is_member_or_owner(&self) -> bool {
         let self_vk = self.self_sk.verifying_key();
-        self_vk == self.owner_vk
+        self_vk == self.current_owner_key()
             || self
                 .board_state
                 .members
@@ -848,7 +873,7 @@ impl BoardData {
         // Trash managers need a KEM key even on a public board, so the trash
         // secret can be sealed to them.
         let is_trash_manager = self.board_state.roles.can_manage_trash(&self_id);
-        let is_owner = self.self_sk.verifying_key() == self.owner_vk;
+        let is_owner = self.is_current_owner();
         let is_admin = self
             .board_state
             .admin
@@ -1196,7 +1221,7 @@ impl BoardData {
         };
         use std::collections::HashSet;
 
-        if !self.is_private() || self.self_sk.verifying_key() != self.owner_vk {
+        if !self.is_private() || !self.is_current_owner() {
             return false;
         }
         let Some((secret, secret_version)) = self.get_secret().map(|(s, v)| (*s, v)) else {
@@ -1351,7 +1376,7 @@ impl BoardData {
         }
 
         // Only the owner can rotate
-        if self.owner_vk != self.self_sk.verifying_key() {
+        if !self.is_current_owner() {
             return false;
         }
 
@@ -1402,7 +1427,7 @@ impl BoardData {
         }
 
         // Owner can always send
-        if verifying_key == self.owner_vk {
+        if verifying_key == self.current_owner_key() {
             return Ok(());
         }
 
@@ -1456,7 +1481,7 @@ impl BoardData {
         }
 
         // Owner can always participate
-        if verifying_key == self.owner_vk {
+        if verifying_key == self.current_owner_key() {
             return Ok(());
         }
 
@@ -1502,7 +1527,7 @@ impl BoardData {
     /// MemberInfo is always updated to the latest version so nickname edits are preserved.
     pub fn capture_self_membership_data(&mut self, parameters: &ChatBoardParametersV1) {
         let verifying_key = self.self_sk.verifying_key();
-        if verifying_key == self.owner_vk {
+        if verifying_key == self.current_owner_key() {
             return; // Owner doesn't need this
         }
 
@@ -1588,7 +1613,7 @@ impl BoardData {
         }
 
         // Only the board owner can rotate secrets
-        if self.owner_vk != self.self_sk.verifying_key() {
+        if !self.is_current_owner() {
             return Err("Only board owner can rotate secrets".to_string());
         }
 

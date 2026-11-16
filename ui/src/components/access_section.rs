@@ -100,7 +100,7 @@ pub fn RolesSection() -> Element {
     let Some(data) = board.read().clone() else {
         return rsx! {};
     };
-    let is_owner = data.owner_vk == data.self_sk.verifying_key();
+    let is_owner = data.is_current_owner();
     let self_id = MemberId::from(&data.self_sk.verifying_key());
     // Admins do not get role definition or assignment powers implicitly. The
     // owner enables them per person through a role with can_manage_access.
@@ -534,7 +534,7 @@ pub fn InviteLinksSection() -> Element {
     let Some(data) = board.read().clone() else {
         return rsx! {};
     };
-    let is_owner = data.owner_vk == data.self_sk.verifying_key();
+    let is_owner = data.is_current_owner();
     let self_id = MemberId::from(&data.self_sk.verifying_key());
     let can_manage = is_owner || crate::board_data::can_manage_access(&data.board_state, self_id);
     if !can_manage {

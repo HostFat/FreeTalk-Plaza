@@ -33,7 +33,7 @@ pub fn TrashView() -> Element {
         )>
     });
     let self_id = plaza_core::board_state::member::MemberId::from(&data.self_sk.verifying_key());
-    let can_purge = self_id == plaza_core::board_state::member::MemberId::from(&data.owner_vk)
+    let can_purge = data.is_current_owner()
         || data
             .board_state
             .admin
@@ -45,8 +45,7 @@ pub fn TrashView() -> Element {
     let mut grant_index = use_signal(|| 0usize);
     let mut grant_notice = use_signal(|| None::<String>);
     let routes = data.board_state.moderation.routes_map();
-    let is_owner_or_admin = self_id
-        == plaza_core::board_state::member::MemberId::from(&data.owner_vk)
+    let is_owner_or_admin = data.is_current_owner()
         || data
             .board_state
             .admin

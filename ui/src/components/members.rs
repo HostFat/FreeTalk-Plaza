@@ -174,7 +174,9 @@ pub fn MembersView() -> Element {
         let board_data = boards_read.map.get(&board_owner)?;
         let board_state = board_data.board_state.clone();
         let self_member_id: MemberId = board_data.self_sk.verifying_key().into();
-        let owner_id: MemberId = board_owner.into();
+        let owner_id: MemberId = board_state.ownership.current_owner(
+            &plaza_core::board_state::ChatBoardParametersV1 { owner: board_owner },
+        );
 
         let member_info = &board_state.member_info;
         let members = &board_state.members;

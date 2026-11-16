@@ -185,8 +185,7 @@ pub fn TopBar() -> Element {
     };
 
     let self_member_id = MemberId::from(&board_data.self_sk.verifying_key());
-    let owner_id = MemberId::from(&board_data.owner_vk);
-    let is_owner = self_member_id == owner_id;
+    let is_owner = board_data.is_current_owner();
     let is_admin = board_data
         .board_state
         .admin

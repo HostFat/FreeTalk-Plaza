@@ -72,6 +72,8 @@ pub enum Route {
     AdminRoles { board_id: String },
     #[route("/board/:board_id/admin/links")]
     AdminLinks { board_id: String },
+    #[route("/board/:board_id/admin/ownership")]
+    AdminOwnership { board_id: String },
     #[route("/board/:board_id/members")]
     Members { board_id: String },
     #[route("/board/:board_id/search")]
@@ -614,6 +616,14 @@ fn AdminRoles(board_id: String) -> Element {
 fn AdminLinks(board_id: String) -> Element {
     rsx! {
         BoardGate { board_id: board_id.clone(), AdminView { tab: "links".to_string() } }
+    }
+}
+
+/// Admin view, ownership tab
+#[component]
+fn AdminOwnership(board_id: String) -> Element {
+    rsx! {
+        BoardGate { board_id: board_id.clone(), AdminView { tab: "ownership".to_string() } }
     }
 }
 

@@ -1,8 +1,10 @@
 //! Admin management view for viewing and adding admins.
 
 mod add_admin_modal;
+mod ownership_view;
 
 use add_admin_modal::AddAdminModal;
+use ownership_view::OwnershipView;
 
 use crate::board_data::BoardData;
 use crate::components::access_section::{InviteLinksSection, RolesSection};
@@ -25,6 +27,7 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
             "bans" => format!("/board/{board_id}/admin/banned"),
             "roles" => format!("/board/{board_id}/admin/roles"),
             "links" => format!("/board/{board_id}/admin/links"),
+            "ownership" => format!("/board/{board_id}/admin/ownership"),
             "moderation" => format!("/board/{board_id}/admin/moderation"),
             "structure" => format!("/board/{board_id}/admin/structure"),
             "audit" => format!("/board/{board_id}/admin/audit"),
@@ -64,9 +67,7 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
         current_board_data
             .read()
             .as_ref()
-            .map_or(false, |board_data| {
-                board_data.owner_vk == board_data.self_sk.verifying_key()
-            })
+            .map_or(false, |board_data| board_data.is_current_owner())
     });
 
     let is_admin = use_memo(move || {
@@ -204,6 +205,7 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
     let tab_board_trash = board_id_for_tabs.clone();
     let tab_board_roles = board_id_for_tabs.clone();
     let tab_board_links = board_id_for_tabs.clone();
+    let tab_board_ownership = board_id_for_tabs.clone();
     rsx! {
         div { class: "flex-1 flex flex-col p-6 overflow-y-auto",
             // Header
@@ -294,6 +296,18 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                         },
                         onclick: move |_| navigate_admin_tab(&tab_board_links, "links"),
                         "Invite links"
+                    }
+                    if *is_owner.read() {
+                        button {
+                            r#type: "button",
+                            class: if active == "ownership" {
+                                "px-4 py-2 rounded-md text-sm bg-accent text-white"
+                            } else {
+                                "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
+                            },
+                            onclick: move |_| navigate_admin_tab(&tab_board_ownership, "ownership"),
+                            "Ownership"
+                        }
                     }
                 }
 
@@ -526,6 +540,8 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                 TrashView {}
             } else if active == "roles" {
                 RolesSection {}
+            } else if active == "ownership" {
+                OwnershipView {}
             } else {
                 InviteLinksSection {}
             }
