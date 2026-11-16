@@ -178,16 +178,16 @@ pub fn EditBoardModal() -> Element {
                             }
                         }
 
-                        // Leave Board Section
+                        // Remove from this device
                         if *show_leave_confirmation.read() {
                             div {
                                 class: "bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-4 mt-4",
                                 p {
                                     class: "text-yellow-400 mb-3",
                                     if *user_is_owner.read() {
-                                        "Warning: You are the owner of this board. Leaving will permanently delete it for you. Other members might retain access if they have the contract key, but coordination will be lost."
+                                        "Warning: you are the owner of this board. Removing it from this device does not remove it from the network: the board keeps working for its members. Keep the identity token to come back."
                                     } else {
-                                        "Are you sure you want to leave this board? This action cannot be undone."
+                                        "Remove this board from this device? Your membership stays on the board; import its identity token to bring it back."
                                     }
                                 }
                                 div {
@@ -227,7 +227,7 @@ pub fn EditBoardModal() -> Element {
                                             // Reset confirmation state regardless
                                             show_leave_confirmation.set(false);
                                         },
-                                        "Confirm Leave"
+                                        "Confirm Remove"
                                     }
                                     button {
                                         class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text rounded-lg transition-colors",
@@ -237,13 +237,13 @@ pub fn EditBoardModal() -> Element {
                                 }
                             }
                         } else {
-                             // Only show Leave button if not confirming
+                            // Only show the remove button if not confirming
                             div {
                                 class: "mt-4",
                                 button {
                                     class: "px-4 py-2 border border-red-500 text-red-500 hover:bg-red-500/10 rounded-lg transition-colors",
                                     onclick: move |_| show_leave_confirmation.set(true),
-                                    "Leave Board"
+                                    "Remove from this device"
                                 }
                             }
                         }

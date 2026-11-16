@@ -16,6 +16,45 @@ use dioxus_free_icons::{
 };
 use web_sys::window;
 
+/// Ask before dropping a board from this device. The identity stays with the
+/// board on the network: importing its token brings it back.
+fn confirm_remove_board(board_name: &str) -> bool {
+    window()
+        .and_then(|window| {
+            window
+                .confirm_with_message(&format!(
+                    "Remove \"{board_name}\" from this device? Your membership stays on the board; import its identity token to bring it back."
+                ))
+                .ok()
+        })
+        .unwrap_or(false)
+}
+
+/// Drop the local copy of a board and its tombstones. The board itself, the
+/// membership and the contract state are untouched.
+fn remove_board_from_device(board_key: ed25519_dalek::VerifyingKey) {
+    BOARDS.with_mut(|boards| {
+        boards.map.remove(&board_key);
+        if !boards.removed.contains(&board_key) {
+            boards.removed.push(board_key);
+        }
+    });
+    let was_current = CURRENT_BOARD.read().owner_key == Some(board_key);
+    if was_current {
+        CURRENT_BOARD.write().owner_key = None;
+    }
+    wasm_bindgen_futures::spawn_local(async {
+        if let Err(error) = save_boards_to_delegate().await {
+            error!("Failed to save boards after removing one: {error}");
+        }
+    });
+    if was_current {
+        if let Some(window) = window() {
+            let _ = window.location().set_hash("/");
+        }
+    }
+}
+
 // Access the build timestamp (ISO 8601 format) environment variable set by build.rs
 const BUILD_TIMESTAMP_ISO: &str = env!("BUILD_TIMESTAMP_ISO", "Build timestamp not set");
 
@@ -123,37 +162,13 @@ pub fn BoardList() -> Element {
                             title: "Remove this board from this device",
                             onclick: move |event| {
                                 event.stop_propagation();
-                                let confirmed = window()
-                                    .and_then(|window| {
-                                        window
-                                            .confirm_with_message(
-                                                "Remove this board from this device? Your member record stays on the network.",
-                                            )
-                                            .ok()
-                                    })
-                                    .unwrap_or(false);
-                                if !confirmed {
+                                if !confirm_remove_board(&current_board_name.read()) {
                                     return;
                                 }
-                                {
-                                    let mut boards = BOARDS.write();
-                                    boards.map.remove(&board_key);
-                                    if !boards.removed.contains(&board_key) {
-                                        boards.removed.push(board_key);
-                                    }
-                                }
-                                if CURRENT_BOARD.read().owner_key == Some(board_key) {
-                                    CURRENT_BOARD.write().owner_key = None;
-                                }
                                 is_open.set(false);
-                                wasm_bindgen_futures::spawn_local(async {
-                                    let _ = save_boards_to_delegate().await;
-                                });
-                                if let Some(window) = window() {
-                                    let _ = window.location().set_hash("/");
-                                }
+                                remove_board_from_device(board_key);
                             },
-                            "Leave"
+                            "Remove"
                         }
                     }
                     Icon {
@@ -185,34 +200,37 @@ pub fn BoardList() -> Element {
                             {board_items.read().iter().map(|(board_key, board_name, is_current, awaiting_sync)| {
                                 let board_key = *board_key;
                                 let board_name = board_name.clone();
+                                let remove_name = board_name.clone();
                                 let is_current = *is_current;
                                 let awaiting_sync = *awaiting_sync;
                                 rsx! {
-                                    button {
+                                    div {
                                         key: "{board_key:?}",
-                                        class: format!(
-                                            "w-full flex items-center gap-4 px-6 py-4 transition-colors {}",
-                                            if is_current {
-                                                "bg-accent/10 text-accent"
-                                            } else {
-                                                "text-text hover:bg-surface"
-                                            }
-                                        ),
-                                        onclick: move |_| {
-                                            // Navigate to board URL using hash (component is outside Router context)
-                                            let board_id = bs58::encode(board_key.as_bytes()).into_string();
-                                            if let Some(win) = window() {
-                                                let _ = win.location().set_hash(&format!("/board/{}", board_id));
-                                            }
-                                            mark_current_board_as_read();
-                                            is_open.set(false);
-                                            spawn(async move {
-                                                if let Err(e) = save_boards_to_delegate().await {
-                                                    error!("Failed to save current board selection: {}", e);
+                                        class: "w-full flex items-center gap-2 pr-3",
+                                        button {
+                                            class: format!(
+                                                "flex-1 flex items-center gap-4 px-6 py-4 transition-colors {}",
+                                                if is_current {
+                                                    "bg-accent/10 text-accent"
+                                                } else {
+                                                    "text-text hover:bg-surface"
                                                 }
-                                            });
-                                        },
-                                        Icon {
+                                            ),
+                                            onclick: move |_| {
+                                                // Navigate to board URL using hash (component is outside Router context)
+                                                let board_id = bs58::encode(board_key.as_bytes()).into_string();
+                                                if let Some(win) = window() {
+                                                    let _ = win.location().set_hash(&format!("/board/{}", board_id));
+                                                }
+                                                mark_current_board_as_read();
+                                                is_open.set(false);
+                                                spawn(async move {
+                                                    if let Err(e) = save_boards_to_delegate().await {
+                                                        error!("Failed to save current board selection: {}", e);
+                                                    }
+                                                });
+                                            },
+                                            Icon {
                                             width: 32,
                                             height: 32,
                                             icon: FaNewspaper,
@@ -225,6 +243,23 @@ pub fn BoardList() -> Element {
                                             }
                                         } else {
                                             span { class: "flex-1 text-left text-2xl truncate", "{board_name}" }
+                                        }
+                                        }
+                                        button {
+                                            r#type: "button",
+                                            class: "px-2 py-1 text-xs rounded-md bg-red-500/10 text-red-400 hover:bg-red-500/20 flex-shrink-0",
+                                            title: "Remove from this device",
+                                            onclick: move |event| {
+                                                event.stop_propagation();
+                                                if !confirm_remove_board(&remove_name) {
+                                                    return;
+                                                }
+                                                if is_current {
+                                                    is_open.set(false);
+                                                }
+                                                remove_board_from_device(board_key);
+                                            },
+                                            "Remove"
                                         }
                                     }
                                 }
