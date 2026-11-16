@@ -406,13 +406,10 @@ pub async fn restore_item(
     if fresh.current_board != ctx.current_board {
         return Err("The board changed during the restore".to_string());
     }
-    let routes_map = fresh.board_state.moderation.routes_map();
     // The restored route still points at the deleted section, and the move
-    // must match it; only the destination is rewritten.
-    let from_section = item
-        .item
-        .section
-        .filter(|section| routes_map.contains_key(section));
+    // must carry that same section as its source; only the destination is
+    // rewritten.
+    let from_section = item.item.section;
     apply_state_delta(
         &fresh,
         ChatBoardStateV1Delta {

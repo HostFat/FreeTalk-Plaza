@@ -539,6 +539,7 @@ fn illegal_purge_map(purges: &[AuthorizedIllegalPurge]) -> BTreeMap<MessageId, I
 fn verify_thread_move(
     state: &ChatBoardStateV1,
     parameters: &ChatBoardParametersV1,
+    routes: &BTreeMap<MessageId, RouteState>,
     entry: &AuthorizedThreadMove,
 ) -> Result<(), String> {
     let change = &entry.change;
@@ -559,8 +560,7 @@ fn verify_thread_move(
         return Err("Thread move cannot target a category".to_string());
     }
 
-    let routes = route_map(&state.moderation.routes);
-    let from_chain = category_chain(&routes, &change.topic);
+    let from_chain = category_chain(routes, &change.topic);
     if change.from_section != from_chain.first().copied() {
         return Err("Thread move source section does not match".to_string());
     }
@@ -573,7 +573,7 @@ fn verify_thread_move(
             if !route.is_category {
                 return Err("Thread move destination is not a category".to_string());
             }
-            category_chain(&routes, &section)
+            category_chain(routes, &section)
         }
     };
 
@@ -1112,9 +1112,11 @@ impl ModerationV1 {
         self.moves.dedup_by_key(|entry| entry.change.target);
         self.moves.sort_by_key(|entry| entry.change.target.0 .0);
 
+        // `post_apply_cleanup` clears `state.moderation` while this cleanup
+        // runs, so the routes come from `self` instead of the parent state.
         self.thread_moves.retain(|entry| {
             live.contains(&entry.change.topic)
-                && verify_thread_move(state, parameters, entry).is_ok()
+                && verify_thread_move(state, parameters, &routes, entry).is_ok()
         });
         self.thread_moves
             .sort_by_key(|entry| (entry.change.topic.0 .0, entry.change.generation));
@@ -1141,11 +1143,12 @@ impl ComposableState for ModerationV1 {
             verify_route(parent_state, parameters, route)?;
         }
         let mut thread_ids = std::collections::HashSet::new();
+        let parent_routes = route_map(&parent_state.moderation.routes);
         for entry in &self.thread_moves {
             if !thread_ids.insert(entry.change.topic) {
                 return Err("Duplicate thread move".to_string());
             }
-            verify_thread_move(parent_state, parameters, entry)?;
+            verify_thread_move(parent_state, parameters, &parent_routes, entry)?;
         }
         for entry in &self.illegal_purges {
             verify_illegal_purge(parent_state, parameters, entry)?;
@@ -1356,8 +1359,21 @@ impl ComposableState for ModerationV1 {
                 }
             }
         }
+        // The parent state predates this delta, so it lacks the routes that
+        // came with it (a restore publishes message and route together). The
+        // move has to be checked against the routes the update actually
+        // supplies, like the final `verify` does.
+        let move_state = if delta.thread_moves.is_empty() {
+            None
+        } else {
+            let mut state = parent_state.clone();
+            state.moderation.routes = self.routes.clone();
+            Some(state)
+        };
+        let move_state = move_state.as_ref().unwrap_or(parent_state);
+        let move_routes = route_map(&move_state.moderation.routes);
         for entry in &delta.thread_moves {
-            verify_thread_move(parent_state, parameters, entry)?;
+            verify_thread_move(move_state, parameters, &move_routes, entry)?;
             match self
                 .thread_moves
                 .iter()
@@ -1862,5 +1878,216 @@ mod tests {
             .iter()
             .any(|message| message.id() == replacement_id));
         assert_eq!(board.state.bans.0.len(), 1);
+    }
+
+    /// Restoring a hidden topic into a section replaces a source section that
+    /// was deleted while the topic sat in the trash. The source route stays in
+    /// the state because only a delete action targets it, so the move must
+    /// verify against that route and survive cleanup.
+    #[test]
+    fn thread_move_from_a_deleted_section_survives_cleanup() {
+        use crate::board_state::ChatBoardStateV1Delta;
+        use std::time::Duration;
+
+        fn category(board: &Board, name: &str, millis: u64) -> AuthorizedMessageV1 {
+            let owner_id = MemberId::from(&board.owner_sk.verifying_key());
+            AuthorizedMessageV1::new(
+                MessageV1 {
+                    board_owner: owner_id,
+                    author: owner_id,
+                    time: SystemTime::now() + Duration::from_millis(millis),
+                    content: BoardMessageBody::category(
+                        name.to_string(),
+                        None,
+                        None,
+                        "#6366f1".to_string(),
+                        None,
+                    ),
+                },
+                &board.owner_sk,
+            )
+        }
+
+        let mut board = board();
+        let owner_id = MemberId::from(&board.owner_sk.verifying_key());
+
+        let destination = category(&board, "Destination", 10);
+        let destination_id = destination.id();
+        let source = category(&board, "Source", 20);
+        let source_id = source.id();
+        let topic = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author: owner_id,
+                time: SystemTime::now() + Duration::from_millis(30),
+                content: BoardMessageBody::public("Orphan".to_string(), "Body".to_string()),
+            },
+            &board.owner_sk,
+        );
+        let topic_id = topic.id();
+        let delete = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author: owner_id,
+                time: SystemTime::now() + Duration::from_millis(40),
+                content: BoardMessageBody::delete(source_id.clone()),
+            },
+            &board.owner_sk,
+        );
+        board.state.recent_messages.messages.push(destination);
+        board.state.recent_messages.messages.push(source);
+        board.state.recent_messages.messages.push(topic);
+        board.state.recent_messages.messages.push(delete);
+        board.state.recent_messages.rebuild_actions_state();
+        assert!(
+            board.state.recent_messages.is_deleted(&source_id),
+            "the source section is deleted"
+        );
+
+        let category_route = |id: &MessageId| {
+            AuthorizedMessageRoute::new(
+                MessageRoute {
+                    message_id: id.clone(),
+                    reply_to: None,
+                    category_id: Some(id.clone()),
+                    is_category: true,
+                    parent_category_id: None,
+                    is_group: false,
+                    generation: 1,
+                },
+                &board.owner_sk,
+            )
+        };
+        let topic_route = AuthorizedMessageRoute::new(
+            MessageRoute {
+                message_id: topic_id.clone(),
+                reply_to: None,
+                category_id: Some(source_id.clone()),
+                is_category: false,
+                parent_category_id: None,
+                is_group: false,
+                generation: 1,
+            },
+            &board.owner_sk,
+        );
+
+        // Step one of the restore publishes the messages and their routes.
+        let parent = board.state.clone();
+        board
+            .state
+            .apply_delta(
+                &parent,
+                &board.parameters,
+                &Some(ChatBoardStateV1Delta {
+                    moderation: Some(ModerationDelta {
+                        routes: vec![
+                            category_route(&destination_id),
+                            category_route(&source_id),
+                            topic_route,
+                        ],
+                        feature_flags: Vec::new(),
+                        moves: Vec::new(),
+                        thread_moves: Vec::new(),
+                        illegal_purges: Vec::new(),
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .expect("the routes of a deleted section still verify");
+
+        // Step two moves the topic to the replacement section.
+        let parent = board.state.clone();
+        board
+            .state
+            .apply_delta(
+                &parent,
+                &board.parameters,
+                &Some(ChatBoardStateV1Delta {
+                    moderation: Some(ModerationDelta {
+                        routes: Vec::new(),
+                        feature_flags: Vec::new(),
+                        moves: Vec::new(),
+                        thread_moves: vec![AuthorizedThreadMove::new(
+                            ThreadMoveV1 {
+                                topic: topic_id.clone(),
+                                from_section: Some(source_id.clone()),
+                                to_section: Some(destination_id.clone()),
+                                message_ids: vec![topic_id.clone()],
+                                generation: 1,
+                                moved_at: 1,
+                                leave_redirect: false,
+                            },
+                            &board.owner_sk,
+                        )],
+                        illegal_purges: Vec::new(),
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .expect("the move out of a deleted section applies");
+
+        assert_eq!(board.state.moderation.thread_moves.len(), 1);
+        assert_eq!(
+            board
+                .state
+                .moderation
+                .routes_map()
+                .get(&topic_id)
+                .and_then(|route| route.category_id),
+            Some(destination_id),
+            "the thread lands in the destination section"
+        );
+        board
+            .state
+            .moderation
+            .verify(&board.state, &board.parameters)
+            .expect("the board verifies with the move");
+
+        // A peer publishes the restored state as one update: the contract
+        // merges it against the state that predates the restore.
+        let mut before = board.state.clone();
+        before
+            .recent_messages
+            .messages
+            .retain(|message| message.id() != topic_id);
+        before
+            .moderation
+            .routes
+            .retain(|route| route.route.message_id != topic_id);
+        before.moderation.thread_moves.clear();
+        let mut merged = before.clone();
+        merged
+            .merge(&before, &board.parameters, &board.state)
+            .expect("a peer accepts the restored state with its move");
+        assert_eq!(merged.moderation.thread_moves.len(), 1);
+        assert_eq!(
+            merged
+                .moderation
+                .routes_map()
+                .get(&topic_id)
+                .and_then(|route| route.category_id),
+            Some(destination_id.clone())
+        );
+
+        // The relaxed call site still checks the source section.
+        let wrong = AuthorizedThreadMove::new(
+            ThreadMoveV1 {
+                topic: topic_id.clone(),
+                from_section: Some(destination_id),
+                to_section: None,
+                message_ids: vec![topic_id],
+                generation: 2,
+                moved_at: 2,
+                leave_redirect: false,
+            },
+            &board.owner_sk,
+        );
+        assert!(verify_thread_move(
+            &board.state,
+            &board.parameters,
+            &route_map(&board.state.moderation.routes),
+            &wrong,
+        )
+        .is_err());
     }
 }
