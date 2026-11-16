@@ -205,6 +205,7 @@ pub fn MembersView() -> Element {
         for &member_id in &ordered_ids {
             let is_owner = member_id == owner_id;
             let is_admin = admin_ids.contains(&member_id);
+            let is_deactivated = board_state.ownership.is_deactivated_now(&member_id);
 
             let nickname = member_info
                 .member_info
@@ -245,10 +246,55 @@ pub fn MembersView() -> Element {
                 },
             };
 
-            all_members.push((format_member_display(&member_display), member_id));
+            all_members.push((
+                format_member_display(&member_display),
+                member_id,
+                is_deactivated,
+            ));
         }
 
         Some(all_members)
+    })()
+    .unwrap_or_default();
+
+    // Identities that retired their key and are no longer on the member list.
+    let retired_identities = use_memo(move || {
+        let board_owner = CURRENT_BOARD.read().owner_key?;
+        let boards_read = BOARDS.read();
+        let board_data = boards_read.map.get(&board_owner)?;
+        let board_state = &board_data.board_state;
+        let member_ids: HashSet<MemberId> = board_state
+            .members
+            .members
+            .iter()
+            .map(|member| member.member.id())
+            .collect();
+        let names: Vec<(String, MemberId)> = board_state
+            .ownership
+            .deactivations
+            .iter()
+            .map(|entry| entry.deactivation.member)
+            .filter(|id| !member_ids.contains(id))
+            .map(|id| {
+                let name = board_state
+                    .member_info
+                    .member_info
+                    .iter()
+                    .find(|info| info.member_info.member_id == id)
+                    .map(|info| {
+                        match unseal_bytes_with_secrets(
+                            &info.member_info.preferred_nickname,
+                            &board_data.secrets,
+                        ) {
+                            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                            Err(_) => info.member_info.preferred_nickname.to_string_lossy(),
+                        }
+                    })
+                    .unwrap_or_else(|| format!("{id}"));
+                (name, id)
+            })
+            .collect();
+        Some(names)
     })()
     .unwrap_or_default();
 
@@ -291,7 +337,7 @@ pub fn MembersView() -> Element {
 
             // Member list - scrollable
             ul { class: "flex-1 px-4 py-4 space-y-1 overflow-y-auto",
-                for (display_name, member_id) in members {
+                for (display_name, member_id, is_deactivated) in members {
                     li { key: "{member_id}",
                         button {
                             class: "w-full text-left px-4 py-2 rounded-lg text-text hover:bg-surface transition-colors",
@@ -300,7 +346,20 @@ pub fn MembersView() -> Element {
                             span {
                                 dangerous_inner_html: "{display_name}"
                             }
+                            if is_deactivated {
+                                span { class: "ml-2 text-xs uppercase tracking-wide text-text-muted",
+                                    "deactivated"
+                                }
+                            }
                         }
+                    }
+                }
+            }
+            if !retired_identities.is_empty() {
+                div { class: "px-4 pb-4 text-xs text-text-muted",
+                    "Deactivated identities: "
+                    for (name, id) in retired_identities.iter() {
+                        span { key: "{id}", class: "text-text mr-2", "{name} ({id})" }
                     }
                 }
             }

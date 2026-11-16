@@ -264,6 +264,12 @@ impl OwnershipV1 {
                 .find(|admin| admin.admin.id() == transfer.to)
             {
                 Some(admin) => Some(system_time_ms(admin.admin.signed_at)),
+                // A revocation recorded after the transfer removed the record,
+                // but the appointment still existed at the transfer time.
+                None if state.admin.revoked.iter().any(|revocation| {
+                    revocation.id() == transfer.to
+                        && system_time_ms(revocation.revocation.signed_at) > at
+                }) => None,
                 // The founding owner is the board's root authority and needs
                 // no appointment of its own.
                 None if transfer.to == parameters.owner_id() => None,
@@ -488,7 +494,9 @@ impl ComposableState for OwnershipV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board_state::admin::{Admin, AdminsDelta, AuthorizedAdmin};
+    use crate::board_state::admin::{
+        Admin, AdminRevocation, AdminsDelta, AuthorizedAdmin, AuthorizedAdminRevocation,
+    };
     use crate::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
     use crate::board_state::member::{AuthorizedMember, Member, MembersDelta};
     use crate::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
@@ -568,6 +576,26 @@ mod tests {
         at: SystemTime,
         signer: &SigningKey,
     ) -> AuthorizedOwnerTransfer {
+        transfer_with_outgoing(
+            from,
+            to,
+            to_key,
+            generation,
+            at,
+            signer,
+            OutgoingOwnerAction::KeepAdmin,
+        )
+    }
+
+    fn transfer_with_outgoing(
+        from: MemberId,
+        to: MemberId,
+        to_key: VerifyingKey,
+        generation: u64,
+        at: SystemTime,
+        signer: &SigningKey,
+        outgoing: OutgoingOwnerAction,
+    ) -> AuthorizedOwnerTransfer {
         AuthorizedOwnerTransfer::new(
             OwnerTransferV1 {
                 from,
@@ -575,7 +603,7 @@ mod tests {
                 to_key,
                 generation,
                 transferred_at: at,
-                outgoing: OutgoingOwnerAction::KeepAdmin,
+                outgoing,
             },
             signer,
         )
@@ -790,6 +818,257 @@ mod tests {
             later,
         )
         .expect("the former owner keeps its admin powers");
+    }
+
+    /// The UI bundle for "I become a plain member": the outgoing owner keeps
+    /// its member record and loses its admin appointment.
+    #[test]
+    fn the_old_owner_can_step_down_to_a_plain_member() {
+        let mut fixture = fixture();
+        let first_sign = fixture.now;
+        let first_at = first_sign + std::time::Duration::from_millis(2);
+        // The founder hands the board over and stays admin: the bundle carries
+        // its member record and its appointment.
+        let parent = fixture.state.clone();
+        fixture
+            .state
+            .apply_delta(
+                &parent,
+                &fixture.parameters,
+                &Some(ChatBoardStateV1Delta {
+                    ownership: Some(OwnershipDelta {
+                        transfers: vec![transfer(
+                            fixture.owner_id,
+                            fixture.admin_id,
+                            fixture.admin_sk.verifying_key(),
+                            1,
+                            first_at,
+                            &fixture.owner_sk,
+                        )],
+                        deactivations: Vec::new(),
+                    }),
+                    members: Some(MembersDelta::new(vec![AuthorizedMember::new(
+                        Member {
+                            owner_member_id: fixture.owner_id,
+                            invited_by: fixture.owner_id,
+                            member_vk: fixture.owner_sk.verifying_key(),
+                            join_proof: None,
+                        },
+                        &fixture.owner_sk,
+                    )])),
+                    admin: Some(AdminsDelta::new(vec![AuthorizedAdmin::new(
+                        Admin {
+                            member_id: fixture.owner_id,
+                            generation: fixture.state.admin.next_generation(&fixture.owner_id),
+                            signed_at: first_sign,
+                        },
+                        &fixture.owner_sk,
+                    )])),
+                    ..Default::default()
+                }),
+            )
+            .expect("the first transfer applies");
+
+        // The admin hands the board back and steps down to a plain member.
+        let back_sign = first_at + std::time::Duration::from_secs(60);
+        let back_at = back_sign + std::time::Duration::from_millis(2);
+        let revocation = AdminRevocation {
+            member_id: fixture.admin_id,
+            generation: fixture.state.admin.next_generation(&fixture.admin_id),
+            signed_at: back_sign,
+        };
+        let parent = fixture.state.clone();
+        fixture
+            .state
+            .apply_delta(
+                &parent,
+                &fixture.parameters,
+                &Some(ChatBoardStateV1Delta {
+                    ownership: Some(OwnershipDelta {
+                        transfers: vec![transfer_with_outgoing(
+                            fixture.admin_id,
+                            fixture.owner_id,
+                            fixture.owner_sk.verifying_key(),
+                            2,
+                            back_at,
+                            &fixture.admin_sk,
+                            OutgoingOwnerAction::Member,
+                        )],
+                        deactivations: Vec::new(),
+                    }),
+                    admin: Some(AdminsDelta::revocation(vec![
+                        AuthorizedAdminRevocation::with_signature(
+                            revocation.clone(),
+                            sign_struct(&revocation, &fixture.admin_sk),
+                        ),
+                    ])),
+                    ..Default::default()
+                }),
+            )
+            .expect("the handover back with a plain-member outcome applies");
+
+        assert_eq!(
+            fixture.state.ownership.current_owner(&fixture.parameters),
+            fixture.owner_id
+        );
+        assert!(
+            fixture
+                .state
+                .admin
+                .admins
+                .iter()
+                .all(|admin| admin.admin.id() != fixture.admin_id),
+            "the outgoing owner lost its appointment"
+        );
+        assert!(
+            fixture
+                .state
+                .members
+                .members
+                .iter()
+                .any(|member| member.member.id() == fixture.admin_id),
+            "the outgoing owner stays a member"
+        );
+        fixture
+            .state
+            .normalize(&fixture.parameters)
+            .expect("cleanup accepts the stepped-down owner");
+        fixture
+            .state
+            .verify(&fixture.state.clone(), &fixture.parameters)
+            .expect("the state verifies after the handover");
+        assert_eq!(
+            fixture.state.ownership.transfers.len(),
+            2,
+            "cleanup kept the chain"
+        );
+
+        // The former owner can no longer transfer: the delta changes nothing.
+        let late = back_sign + std::time::Duration::from_secs(60);
+        let parent = fixture.state.clone();
+        fixture
+            .state
+            .apply_delta(
+                &parent,
+                &fixture.parameters,
+                &Some(ChatBoardStateV1Delta {
+                    ownership: Some(OwnershipDelta {
+                        transfers: vec![transfer(
+                            fixture.admin_id,
+                            fixture.admin_id,
+                            fixture.admin_sk.verifying_key(),
+                            3,
+                            late,
+                            &fixture.admin_sk,
+                        )],
+                        deactivations: Vec::new(),
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .expect("a refused ownership delta is not an apply error");
+        assert_eq!(
+            fixture.state.ownership.transfers.len(),
+            2,
+            "the stepped-down admin cannot transfer"
+        );
+        assert_eq!(
+            fixture.state.ownership.current_owner(&fixture.parameters),
+            fixture.owner_id
+        );
+    }
+
+    /// The UI bundle for "I deactivate my key on this board": the outgoing
+    /// owner retires its key and its appointment.
+    #[test]
+    fn the_old_owner_can_deactivate_its_key() {
+        let mut fixture = fixture();
+        let first_sign = fixture.now;
+        let first_at = first_sign + std::time::Duration::from_millis(2);
+        apply(
+            &mut fixture.state,
+            &fixture.parameters,
+            OwnershipDelta {
+                transfers: vec![transfer(
+                    fixture.owner_id,
+                    fixture.admin_id,
+                    fixture.admin_sk.verifying_key(),
+                    1,
+                    first_at,
+                    &fixture.owner_sk,
+                )],
+                deactivations: Vec::new(),
+            },
+        );
+
+        let back_sign = first_at + std::time::Duration::from_secs(60);
+        let back_at = back_sign + std::time::Duration::from_millis(2);
+        let revocation = AdminRevocation {
+            member_id: fixture.admin_id,
+            generation: fixture.state.admin.next_generation(&fixture.admin_id),
+            signed_at: back_sign,
+        };
+        let parent = fixture.state.clone();
+        fixture
+            .state
+            .apply_delta(
+                &parent,
+                &fixture.parameters,
+                &Some(ChatBoardStateV1Delta {
+                    ownership: Some(OwnershipDelta {
+                        transfers: vec![transfer_with_outgoing(
+                            fixture.admin_id,
+                            fixture.owner_id,
+                            fixture.owner_sk.verifying_key(),
+                            2,
+                            back_at,
+                            &fixture.admin_sk,
+                            OutgoingOwnerAction::Deactivate,
+                        )],
+                        deactivations: vec![AuthorizedKeyDeactivation::new(
+                            KeyDeactivationV1 {
+                                member: fixture.admin_id,
+                                key: fixture.admin_sk.verifying_key(),
+                                generation: 1,
+                                deactivated_at: back_sign,
+                            },
+                            &fixture.admin_sk,
+                        )],
+                    }),
+                    admin: Some(AdminsDelta::revocation(vec![
+                        AuthorizedAdminRevocation::with_signature(
+                            revocation.clone(),
+                            sign_struct(&revocation, &fixture.admin_sk),
+                        ),
+                    ])),
+                    ..Default::default()
+                }),
+            )
+            .expect("the handover back with a deactivation applies");
+
+        assert_eq!(
+            fixture.state.ownership.current_owner(&fixture.parameters),
+            fixture.owner_id
+        );
+        assert!(fixture
+            .state
+            .ownership
+            .is_deactivated_now(&fixture.admin_id));
+        assert_eq!(fixture.state.ownership.deactivations.len(), 1);
+        assert!(fixture
+            .state
+            .admin
+            .admins
+            .iter()
+            .all(|admin| admin.admin.id() != fixture.admin_id));
+        fixture
+            .state
+            .normalize(&fixture.parameters)
+            .expect("cleanup accepts the deactivated owner");
+        fixture
+            .state
+            .verify(&fixture.state.clone(), &fixture.parameters)
+            .expect("the state verifies with a deactivated outgoing owner");
     }
 
     #[test]

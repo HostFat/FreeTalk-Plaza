@@ -393,6 +393,14 @@ pub fn OwnershipView() -> Element {
                                     OutgoingOwnerAction::Member => "became a member",
                                     OutgoingOwnerAction::Deactivate => "deactivated",
                                 };
+                                let digest = change.digest();
+                                let signature: String = entry
+                                    .signature
+                                    .to_bytes()
+                                    .iter()
+                                    .take(8)
+                                    .map(|byte| format!("{byte:02x}"))
+                                    .collect();
                                 rsx! {
                                     div { class: "bg-background rounded-lg p-3",
                                         p { class: "text-text",
@@ -400,6 +408,9 @@ pub fn OwnershipView() -> Element {
                                         }
                                         p { class: "text-text-muted text-xs",
                                             "generation {change.generation} - {when} - outgoing owner {outgoing}"
+                                        }
+                                        p { class: "text-text-muted text-xs font-mono",
+                                            "digest {digest:016x} - signature {signature}..."
                                         }
                                     }
                                 }
