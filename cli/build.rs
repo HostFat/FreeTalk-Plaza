@@ -55,10 +55,8 @@ fn verify_matches_built_artifact(dest_path: &Path) {
         return;
     }
 
-    let expected_built_wasm =
-        Path::new("..").join("target/wasm32-unknown-unknown/release/plaza_contract.wasm");
-
-    if !expected_built_wasm.exists() {
+    let candidates = built_wasm_candidates();
+    if candidates.is_empty() {
         // Nothing to compare against (contract probably not rebuilt yet)
         return;
     }
@@ -74,24 +72,62 @@ fn verify_matches_built_artifact(dest_path: &Path) {
         }
     };
 
-    let built_bytes = match fs::read(&expected_built_wasm) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            eprintln!(
-                "Failed to read built plaza_contract.wasm at {}: {err}",
-                expected_built_wasm.display()
-            );
-            process::exit(1);
+    let mut checked = Vec::new();
+    for candidate in &candidates {
+        let built_bytes = match fs::read(candidate) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!(
+                    "Failed to read built plaza_contract.wasm at {}: {err}",
+                    candidate.display()
+                );
+                process::exit(1);
+            }
+        };
+        if built_bytes == dest_bytes {
+            return;
         }
-    };
-
-    if dest_bytes != built_bytes {
-        panic!(
-            "plaza_contract.wasm is out of date.\n\
-             The CLI is bundling {}, but the freshly built artifact at {}\n\
-             differs. Run `cargo make sync-cli-wasm` to refresh the bundled WASM.",
-            dest_path.display(),
-            expected_built_wasm.display()
-        );
+        checked.push(candidate.display().to_string());
     }
+
+    panic!(
+        "plaza_contract.wasm is out of date.\n\
+         The CLI is bundling {}, which differs from every built artifact:\n  {}\n\
+         Rebuild the contract and copy it to ui/public/contracts/ (deploy-fast.ps1 does that).",
+        dest_path.display(),
+        checked.join("\n  ")
+    );
+}
+
+/// Built contract artifacts to compare the bundled WASM with. `deploy-fast`
+/// builds with `--target-dir target/dx-fast` and the `release-fast` profile,
+/// so the default `target/wasm32-unknown-unknown/release` path alone is not
+/// enough.
+fn built_wasm_candidates() -> Vec<std::path::PathBuf> {
+    let mut roots = vec![
+        std::path::PathBuf::from("..").join("target"),
+        std::path::PathBuf::from("..").join("target").join("dx-fast"),
+    ];
+    if let Ok(dir) = env::var("CARGO_TARGET_DIR") {
+        let path = std::path::PathBuf::from(dir);
+        roots.push(if path.is_absolute() {
+            path
+        } else {
+            std::path::PathBuf::from("..").join(path)
+        });
+    }
+
+    let mut candidates = Vec::new();
+    for root in roots {
+        for profile in ["release", "release-fast"] {
+            let candidate = root
+                .join("wasm32-unknown-unknown")
+                .join(profile)
+                .join("plaza_contract.wasm");
+            if candidate.exists() && !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+    }
+    candidates
 }

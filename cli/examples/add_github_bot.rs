@@ -153,6 +153,7 @@ async fn main() -> Result<()> {
         owner_member_id: board_owner_id,
         invited_by: invite_bot_id,
         member_vk: github_bot_vk,
+        join_proof: None,
     };
     let authorized_member = AuthorizedMember::new(member, &invite_bot_sk);
 
