@@ -238,31 +238,52 @@ impl OwnershipV1 {
             }
 
             // The successor must be a member whose key is the one named, and
-            // an admin at the time of the transfer.
-            let member = state
+            // an admin at the time of the transfer. The founding owner counts
+            // as a member even after cleanup drops its record: once it owns the
+            // board again the owner is implicit, and a return transfer names
+            // exactly it.
+            let member_key = match state
                 .members
                 .members
                 .iter()
                 .find(|member| member.member.id() == transfer.to)
-                .ok_or("Owner transfer target is not a member")?;
-            if member.member.member_vk != transfer.to_key {
+            {
+                Some(member) => member.member.member_vk,
+                None if transfer.to == parameters.owner_id() => parameters.owner,
+                None => {
+                    return Err("Owner transfer target is not a member".to_string());
+                }
+            };
+            if member_key != transfer.to_key {
                 return Err("Owner transfer target key does not match the member".to_string());
             }
-            let admin = state
+            let admin_signed_at = match state
                 .admin
                 .admins
                 .iter()
                 .find(|admin| admin.admin.id() == transfer.to)
-                .ok_or("Owner transfer target is not an admin")?;
-            if system_time_ms(admin.admin.signed_at) > at {
-                return Err("Owner transfer target became admin after the transfer".to_string());
-            }
-            let revoked_before = state.admin.revoked.iter().any(|revocation| {
-                revocation.id() == transfer.to
-                    && system_time_ms(revocation.revocation.signed_at) <= at
-            });
-            if revoked_before {
-                return Err("Owner transfer target was not an admin at the transfer".to_string());
+            {
+                Some(admin) => Some(system_time_ms(admin.admin.signed_at)),
+                // The founding owner is the board's root authority and needs
+                // no appointment of its own.
+                None if transfer.to == parameters.owner_id() => None,
+                None => {
+                    return Err("Owner transfer target is not an admin".to_string());
+                }
+            };
+            if let Some(admin_signed_at) = admin_signed_at {
+                if admin_signed_at > at {
+                    return Err(
+                        "Owner transfer target became admin after the transfer".to_string()
+                    );
+                }
+                let revoked_before = state.admin.revoked.iter().any(|revocation| {
+                    revocation.id() == transfer.to
+                        && system_time_ms(revocation.revocation.signed_at) <= at
+                });
+                if revoked_before {
+                    return Err("Owner transfer target was not an admin at the transfer".to_string());
+                }
             }
 
             from = transfer.to;
@@ -769,6 +790,59 @@ mod tests {
             later,
         )
         .expect("the former owner keeps its admin powers");
+    }
+
+    #[test]
+    fn the_board_can_return_to_the_founding_owner() {
+        let mut fixture = fixture();
+        let first_at = fixture.now;
+        apply(
+            &mut fixture.state,
+            &fixture.parameters,
+            OwnershipDelta {
+                transfers: vec![transfer(
+                    fixture.owner_id,
+                    fixture.admin_id,
+                    fixture.admin_sk.verifying_key(),
+                    1,
+                    first_at,
+                    &fixture.owner_sk,
+                )],
+                deactivations: Vec::new(),
+            },
+        );
+
+        // The new owner hands the board back to the founder, who is no longer
+        // on the members list by then: the owner is implicit.
+        let back_at = first_at + std::time::Duration::from_secs(60);
+        apply(
+            &mut fixture.state,
+            &fixture.parameters,
+            OwnershipDelta {
+                transfers: vec![transfer(
+                    fixture.admin_id,
+                    fixture.owner_id,
+                    fixture.owner_sk.verifying_key(),
+                    2,
+                    back_at,
+                    &fixture.admin_sk,
+                )],
+                deactivations: Vec::new(),
+            },
+        );
+
+        assert_eq!(
+            fixture.state.ownership.current_owner(&fixture.parameters),
+            fixture.owner_id
+        );
+        fixture
+            .state
+            .normalize(&fixture.parameters)
+            .expect("cleanup accepts the returned board");
+        fixture
+            .state
+            .verify(&fixture.state.clone(), &fixture.parameters)
+            .expect("the state verifies after the return transfer");
     }
 
     #[test]

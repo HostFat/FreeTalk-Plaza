@@ -187,6 +187,29 @@ impl ChatBoardStateV1 {
                     .map(|member| member.member.id())
                     .filter(|author| *author != owner_id),
             );
+            // An identity the owner invited directly survives the same way
+            // once it has joined and published a nickname: the invitation is a
+            // deliberate act and the invitee has to post before any message can
+            // keep the record.
+            let current_owner = self.ownership.current_owner(parameters);
+            let with_info: HashSet<MemberId> = self
+                .member_info
+                .member_info
+                .iter()
+                .map(|info| info.member_info.member_id)
+                .collect();
+            required.extend(
+                self.members
+                    .members
+                    .iter()
+                    .filter(|member| {
+                        with_info.contains(&member.member.id())
+                            && (member.member.invited_by == owner_id
+                                || member.member.invited_by == current_owner)
+                    })
+                    .map(|member| member.member.id())
+                    .filter(|id| *id != owner_id),
+            );
             let mut to_process: Vec<MemberId> = required.iter().copied().collect();
             while let Some(member_id) = to_process.pop() {
                 if let Some(member) = members_by_id.get(&member_id) {
@@ -256,6 +279,28 @@ impl ChatBoardStateV1 {
                 members_by_id
                     .values()
                     .filter(|member| member.member.join_proof.is_some())
+                    .map(|member| member.member.id())
+                    .filter(|member_id| *member_id != owner_id),
+            );
+
+            // The same for identities the owner invited directly, once they
+            // have joined and published a nickname: the invitation is
+            // deliberate and its first message may take a while.
+            let current_owner = self.ownership.current_owner(parameters);
+            let with_info: HashSet<MemberId> = self
+                .member_info
+                .member_info
+                .iter()
+                .map(|info| info.member_info.member_id)
+                .collect();
+            required_ids.extend(
+                members_by_id
+                    .values()
+                    .filter(|member| {
+                        with_info.contains(&member.member.id())
+                            && (member.member.invited_by == owner_id
+                                || member.member.invited_by == current_owner)
+                    })
                     .map(|member| member.member.id())
                     .filter(|member_id| *member_id != owner_id),
             );
@@ -519,17 +564,19 @@ mod tests {
         let (mut state, parameters, owner_key) = create_empty_chat_board_state();
         let owner_id = parameters.owner_id();
 
-        // A member with no messages is pruned by cleanup.
+        // A member with no messages and no owner invitation is pruned by
+        // cleanup.
         let member_key = SigningKey::generate(&mut rand::thread_rng());
         let member_id = MemberId::from(member_key.verifying_key());
+        let inviter_key = SigningKey::generate(&mut rand::thread_rng());
         state.members.members.push(AuthorizedMember::new(
             Member {
                 owner_member_id: owner_id,
-                invited_by: owner_id,
+                invited_by: MemberId::from(inviter_key.verifying_key()),
                 member_vk: member_key.verifying_key(),
                 join_proof: None,
             },
-            &owner_key,
+            &inviter_key,
         ));
 
         // Two bans over a cap of one, the owner's being the newest.
@@ -581,6 +628,44 @@ mod tests {
             once.bans.0[0].banned_by, owner_id,
             "the owner's ban survives the cap"
         );
+    }
+
+    #[test]
+    fn an_owner_invitation_survives_cleanup_until_the_first_message() {
+        let (mut state, parameters, owner_key) = create_empty_chat_board_state();
+        let owner_id = parameters.owner_id();
+        let member_key = SigningKey::generate(&mut rand::thread_rng());
+        let member_id = MemberId::from(member_key.verifying_key());
+        state.members.members.push(AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk: member_key.verifying_key(),
+                join_proof: None,
+            },
+            &owner_key,
+        ));
+        // The invitee joins and publishes its nickname.
+        state.member_info.member_info.push(
+            AuthorizedMemberInfo::new_with_member_key(
+                MemberInfo::new_public(member_id, 1, "Invitee".to_string()),
+                &member_key,
+            ),
+        );
+
+        state.normalize(&parameters).unwrap();
+
+        assert!(
+            state
+                .members
+                .members
+                .iter()
+                .any(|member| member.member.id() == member_id),
+            "the invited identity is not pruned before it posts"
+        );
+        state
+            .verify(&state, &parameters)
+            .expect("the state with a pending invitation verifies");
     }
 
     #[test]
@@ -1099,15 +1184,18 @@ mod tests {
         let a_sk = SigningKey::generate(rng);
         let a_vk = a_sk.verifying_key();
         let a_id = MemberId::from(&a_vk);
+        // Invited by another member, so the owner-invitation rule does not
+        // keep the record.
+        let inviter_sk = SigningKey::generate(rng);
 
         let member_a = AuthorizedMember::new(
             Member {
                 owner_member_id: owner_id,
-                invited_by: owner_id,
+                invited_by: MemberId::from(inviter_sk.verifying_key()),
                 member_vk: a_vk,
                 join_proof: None,
             },
-            &owner_sk,
+            &inviter_sk,
         );
 
         // Create member_info for A and owner

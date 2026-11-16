@@ -21,7 +21,7 @@ use std::time::Duration;
 #[allow(clippy::too_many_arguments)]
 fn start_transfer(
     target: MemberId,
-    ctx: ActionContext,
+    _ctx: ActionContext,
     owner_id: MemberId,
     parameters: ChatBoardParametersV1,
     outgoing: OutgoingOwnerAction,
@@ -37,17 +37,6 @@ fn start_transfer(
         error.set(Some("Tick the confirmation to hand the board over".to_string()));
         return;
     }
-    let Some(target_key) = ctx
-        .board_state
-        .members
-        .members
-        .iter()
-        .find(|member| member.member.id() == target)
-        .map(|member| member.member.member_vk)
-    else {
-        error.set(Some("The chosen admin has no member key".to_string()));
-        return;
-    };
 
     busy.set(true);
     error.set(None);
@@ -55,6 +44,26 @@ fn start_transfer(
     // inside a Dioxus task lets the runtime re-render while the board map is
     // borrowed.
     wasm_bindgen_futures::spawn_local(async move {
+        // Read the board again: the view may hold a state from before the
+        // target's membership arrived, and the contract verifies the transfer
+        // against the state it is given.
+        let Some(ctx) = ActionContext::from_current_board() else {
+            error.set(Some("The board context is not available".to_string()));
+            busy.set(false);
+            return;
+        };
+        let Some(target_key) = ctx
+            .board_state
+            .members
+            .members
+            .iter()
+            .find(|member| member.member.id() == target)
+            .map(|member| member.member.member_vk)
+        else {
+            error.set(Some("The chosen member is not on this board".to_string()));
+            busy.set(false);
+            return;
+        };
         let now = get_current_system_time();
         // Records are signed just before the transfer so they resolve the
         // outgoing owner as their authority.
