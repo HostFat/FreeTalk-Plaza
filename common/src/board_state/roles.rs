@@ -302,6 +302,13 @@ pub(crate) fn verify_manager_authority(
     if *signer == parameters.owner_id() || state.roles.can_manage_access(signer) {
         return Ok(());
     }
+    // Admins define roles, so they may assign and revoke them; a proof keeps
+    // records signed before a demotion verifiable.
+    if is_board_admin(state, signer)
+        || verify_admin_authority(state, parameters, signer, proof, depth).is_ok()
+    {
+        return Ok(());
+    }
     verify_role_grant(state, parameters, signer, proof, depth, &|role| {
         role.can_manage_access
     })
@@ -1474,6 +1481,63 @@ mod delegation_tests {
 
         let signature = sign_struct(&role, &owner);
         assert!(verify_struct(&decoded, &signature, &owner.verifying_key()).is_ok());
+    }
+
+    /// An admin can assign a role; the verifier must accept the same signer
+    /// set as `apply_delta`.
+    #[test]
+    fn an_admin_can_assign_a_role() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let admin_sk = SigningKey::from_bytes(&[6u8; 32]);
+        let member_sk = SigningKey::from_bytes(&[7u8; 32]);
+        let params = params(&owner);
+        let owner_id = params.owner_id();
+        let admin_id = MemberId::from(&admin_sk.verifying_key());
+        let member_id = MemberId::from(&member_sk.verifying_key());
+
+        let mut state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner),
+            ..Default::default()
+        };
+        for sk in [&admin_sk, &member_sk] {
+            state
+                .members
+                .members
+                .push(member_record(sk, owner_id, &owner));
+        }
+        state.admin.admins.push(AuthorizedAdmin::new(
+            Admin {
+                member_id: admin_id,
+                generation: 1,
+            },
+            &owner,
+        ));
+        state
+            .roles
+            .roles
+            .push(AuthorizedRole::new(role_record([9u8; 16], "staff", false), &owner));
+        let proof = admin_authority_proof(&state, &admin_id).expect("admin proof");
+        state
+            .roles
+            .assignments
+            .push(
+                AuthorizedRoleAssignment::signed_by(
+                    RoleAssignment {
+                        role_id: [9u8; 16],
+                        member_id,
+                        generation: 1,
+                        revoked: false,
+                    },
+                    admin_id,
+                    &admin_sk,
+                )
+                .with_optional_authority(Some(proof)),
+            );
+
+        state
+            .roles
+            .verify(&state, &params)
+            .expect("an admin may assign a role");
     }
 
     /// An owner-signed admin record is not a lifetime pass: once the owner
