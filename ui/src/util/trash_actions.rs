@@ -914,8 +914,15 @@ pub async fn grant_trash_access(ctx: &ActionContext, member: MemberId) -> Result
 /// Seal the current trash key to every manager that has a PQ key. One set, so
 /// a missed grant after a concurrent update is repaired in a single action.
 pub fn grant_missing_trash_access(ctx: &ActionContext) -> Result<usize, String> {
+    let version = latest_trash_set(&ctx.board_state)
+        .map(|entry| entry.set.version)
+        .unwrap_or(0)
+        + 1;
+    publish_trash_set(ctx, version)
+}
+
+fn publish_trash_set(ctx: &ActionContext, version: u32) -> Result<usize, String> {
     let (secret_version, trash_key) = ctx.trash_secret.ok_or("You do not have the trash key")?;
-    let latest = latest_trash_set(&ctx.board_state);
     let mut secrets = Vec::new();
     for manager in trash_managers(ctx) {
         if let Some(record) = seal_for_manager(ctx, manager, &trash_key) {
@@ -926,7 +933,6 @@ pub fn grant_missing_trash_access(ctx: &ActionContext) -> Result<usize, String> 
         return Err("No manager has a PQ key yet".to_string());
     }
     let sealed_count = secrets.len();
-    let version = latest.map(|entry| entry.set.version).unwrap_or(0) + 1;
     let set = AuthorizedPqSecretSet::new(
         PqSecretSet {
             scope: PqScope::Trash,
@@ -948,6 +954,27 @@ pub fn grant_missing_trash_access(ctx: &ActionContext) -> Result<usize, String> 
         },
     )?;
     Ok(sealed_count)
+}
+
+/// Put the Trash key set back when the board no longer carries one.
+///
+/// A set is one signed blob, so when a holder leaves the board (ban, Leave)
+/// `cleanup` drops the whole set instead of trimming it. The client that still
+/// holds the key republishes it for the current managers.
+pub fn repair_trash_key_set(ctx: &ActionContext) -> Result<bool, String> {
+    if ctx.trash_secret.is_none() {
+        return Ok(false);
+    }
+    if latest_trash_set(&ctx.board_state).is_some() {
+        return Ok(false);
+    }
+    // The dropped set had a version this client no longer knows. A clock
+    // version (seconds) is above any counter it used and still converges
+    // through the "higher version wins" rule, including against a peer that
+    // kept the old set.
+    let version = (chrono::Utc::now().timestamp().clamp(1, u32::MAX as i64)) as u32;
+    publish_trash_set(ctx, version)?;
+    Ok(true)
 }
 
 /// Remove a member from the trash key set and rotate the key. The member keeps

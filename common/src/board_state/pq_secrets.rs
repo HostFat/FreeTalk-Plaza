@@ -364,6 +364,10 @@ impl PqSecretsV1 {
         });
         self.keys.dedup_by_key(|entry| entry.key.member_id);
 
+        // A set is one signed blob, so a secret for a departed member cannot
+        // be trimmed without breaking the signature. `verify_set` rejects the
+        // whole set instead, and a client that still holds the key republishes
+        // it for the remaining managers.
         self.sets.retain(|entry| {
             verify_set(
                 state,
@@ -385,21 +389,6 @@ impl PqSecretsV1 {
             )
         });
         self.sets.dedup_by_key(|entry| entry.set.scope.clone());
-
-        let live_members: HashSet<MemberId> = state
-            .members
-            .members
-            .iter()
-            .map(|member| member.member.id())
-            .chain(std::iter::once(parameters.owner_id()))
-            .collect();
-        let keyed: HashSet<MemberId> = self.keys.iter().map(|entry| entry.key.member_id).collect();
-        for entry in &mut self.sets {
-            entry.set.secrets.retain(|secret| {
-                live_members.contains(&secret.member_id) && keyed.contains(&secret.member_id)
-            });
-        }
-        self.sets.retain(|entry| !entry.set.secrets.is_empty());
     }
 }
 
@@ -834,6 +823,58 @@ mod tests {
             },
             owner_sk,
         );
+    }
+
+    #[test]
+    fn a_trash_set_with_a_departed_member_is_replaced_for_the_remaining_holders() {
+        let (mut state, parameters, owner_sk, moderator_sk, moderator_id) = trash_manager_state();
+        let owner_id = parameters.owner_id();
+        state.pq_secrets.keys.push(key(owner_id, &owner_sk));
+        state.pq_secrets.keys.push(key(moderator_id, &moderator_sk));
+        let sealed = |member_id: MemberId| PqSealedSecret {
+            member_id,
+            kem_ciphertext: vec![1u8; PQ_KEM_CT_LEN],
+            nonce: [0u8; PQ_NONCE_LEN],
+            sealed: vec![2u8; PQ_MIN_SEALED_LEN],
+            suite: PqSuite::MlKem,
+            x25519_public: None,
+        };
+        state.pq_secrets.sets.push(AuthorizedPqSecretSet::new(
+            PqSecretSet {
+                scope: PqScope::Trash,
+                version: 1,
+                secret_version: 1,
+                secrets: vec![sealed(owner_id), sealed(moderator_id)],
+            },
+            &owner_sk,
+        ));
+
+        // The moderator is banned: it leaves the member list and its KEM key
+        // is pruned with it. The set is one signed blob, so the remaining
+        // secrets cannot be trimmed without breaking the signature.
+        state.members = MembersV1::default();
+        state
+            .pq_secrets
+            .keys
+            .retain(|entry| entry.key.member_id != moderator_id);
+        let mut pq = std::mem::take(&mut state.pq_secrets);
+        pq.cleanup(&state, &parameters);
+        assert!(pq.sets.is_empty(), "a set cannot cover a departed member");
+
+        // The owner still holds the key and publishes it again for itself.
+        pq.sets.push(AuthorizedPqSecretSet::new(
+            PqSecretSet {
+                scope: PqScope::Trash,
+                version: 2,
+                secret_version: 1,
+                secrets: vec![sealed(owner_id)],
+            },
+            &owner_sk,
+        ));
+        pq.cleanup(&state, &parameters);
+        assert_eq!(pq.sets.len(), 1);
+        assert_eq!(pq.sets[0].set.secrets.len(), 1);
+        assert_eq!(pq.sets[0].set.secrets[0].member_id, owner_id);
     }
 
     #[test]

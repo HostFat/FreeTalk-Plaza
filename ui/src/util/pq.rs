@@ -202,6 +202,21 @@ pub fn housekeeping() {
     if changed {
         crate::components::app::mark_needs_sync(board_key);
     }
+
+    // A departure drops a Trash key set that named the member, because the
+    // whole set is signed. The client that still holds the key puts it back
+    // for the remaining managers.
+    let Some(ctx) = crate::util::message_actions::ActionContext::from_current_board() else {
+        return;
+    };
+    if ctx.current_board != board_key {
+        return;
+    }
+    match crate::util::trash_actions::repair_trash_key_set(&ctx) {
+        Ok(true) => dioxus::logger::tracing::info!("trash key set republished"),
+        Ok(false) => {}
+        Err(error) => dioxus::logger::tracing::info!("trash key repair skipped: {error}"),
+    }
 }
 
 #[cfg(test)]
