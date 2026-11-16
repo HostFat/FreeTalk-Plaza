@@ -194,10 +194,8 @@ pub fn TopBar() -> Element {
         .iter()
         .any(|a| a.admin.id() == self_member_id);
     let can_participate = board_data.can_participate();
-    let can_manage_trash = board_data
-        .board_state
-        .roles
-        .can_manage_trash(&self_member_id);
+    let can_manage_trash =
+        crate::board_data::can_manage_trash(&board_data.board_state, self_member_id);
     let can_open_manage = is_owner || is_admin || can_manage_trash;
 
     let self_nickname = board_data

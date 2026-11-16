@@ -16,6 +16,7 @@ use plaza_core::board_state::message::{BoardMessageBody, MessageId, SecretScope}
 use plaza_core::board_state::privacy::{
     BoardCipherSpec, BoardDisplayMetadata, PrivacyMode, SealedBytes,
 };
+use plaza_core::board_state::roles::{ModerationPower, RolesV1};
 use plaza_core::board_state::secret::{
     AuthorizedEncryptedSecretForMember, AuthorizedSecretVersionRecord, EncryptedSecretForMemberV1,
     SecretVersionRecordV1,
@@ -31,6 +32,65 @@ pub enum SendMessageError {
     UserNotMember,
     UserBanned,
     UserSuspended,
+}
+
+/// Client-side suspension check. The contract has no clock, so only the
+/// client can tell whether a suspension is still running.
+pub fn is_suspended_now(state: &ChatBoardStateV1, member: MemberId) -> bool {
+    state
+        .suspensions
+        .active_until(member, chrono::Utc::now().timestamp_millis())
+        .is_some()
+}
+
+/// Whether `member` holds `power` over `scope_chain` right now. A suspended
+/// member keeps no power until the suspension ends. The contract still
+/// verifies records signed before the suspension against the raw roles.
+pub fn has_moderation_power(
+    state: &ChatBoardStateV1,
+    member: MemberId,
+    power: ModerationPower,
+    scope_chain: &[MessageId],
+) -> bool {
+    !is_suspended_now(state, member)
+        && state
+            .roles
+            .has_moderation_power(&member, power, scope_chain)
+}
+
+pub fn can_manage_trash(state: &ChatBoardStateV1, member: MemberId) -> bool {
+    !is_suspended_now(state, member) && state.roles.can_manage_trash(&member)
+}
+
+pub fn can_manage_access(state: &ChatBoardStateV1, member: MemberId) -> bool {
+    !is_suspended_now(state, member) && state.roles.can_manage_access(&member)
+}
+
+/// A snapshot of the viewer's powers for closures that outlive the board data.
+#[derive(Clone)]
+pub struct ViewerPowers {
+    roles: RolesV1,
+    member: MemberId,
+    suspended: bool,
+}
+
+impl Default for ViewerPowers {
+    fn default() -> Self {
+        Self {
+            roles: RolesV1::default(),
+            member: MemberId::from_bytes([0u8; 32]),
+            suspended: true,
+        }
+    }
+}
+
+impl ViewerPowers {
+    pub fn has_moderation_power(&self, power: ModerationPower, scope_chain: &[MessageId]) -> bool {
+        !self.suspended
+            && self
+                .roles
+                .has_moderation_power(&self.member, power, scope_chain)
+    }
 }
 
 /// Unsent composer content. Local to this user and persisted in the delegate
@@ -132,6 +192,24 @@ pub struct BoardData {
 }
 
 impl BoardData {
+    /// Whether this client is suspended right now.
+    pub fn is_suspended_now(&self) -> bool {
+        is_suspended_now(
+            &self.board_state,
+            MemberId::from(&self.self_sk.verifying_key()),
+        )
+    }
+
+    /// The viewer's powers as the UI should show them.
+    pub fn viewer_powers(&self) -> ViewerPowers {
+        let member = MemberId::from(&self.self_sk.verifying_key());
+        ViewerPowers {
+            roles: self.board_state.roles.clone(),
+            member,
+            suspended: is_suspended_now(&self.board_state, member),
+        }
+    }
+
     /// Decrypt every category secret this member holds a blob for.
     ///
     /// Categories whose blob is missing stay out of the map: the UI treats them
@@ -616,6 +694,9 @@ impl BoardData {
     pub fn can_distribute_category_keys(&self) -> bool {
         if self.self_sk.verifying_key() == self.owner_vk {
             return true;
+        }
+        if self.is_suspended_now() {
+            return false;
         }
         let self_id = MemberId::from(&self.self_sk.verifying_key());
         self.board_state.roles.can_distribute_keys(&self_id)
@@ -1314,12 +1395,7 @@ impl BoardData {
         {
             return Err(SendMessageError::UserBanned);
         }
-        if self
-            .board_state
-            .suspensions
-            .active_until(member_id, chrono::Utc::now().timestamp_millis())
-            .is_some()
-        {
+        if self.is_suspended_now() {
             return Err(SendMessageError::UserSuspended);
         }
 
@@ -1373,12 +1449,7 @@ impl BoardData {
         {
             return Err(SendMessageError::UserBanned);
         }
-        if self
-            .board_state
-            .suspensions
-            .active_until(member_id, chrono::Utc::now().timestamp_millis())
-            .is_some()
-        {
+        if self.is_suspended_now() {
             return Err(SendMessageError::UserSuspended);
         }
 
@@ -2047,12 +2118,101 @@ mod tests {
     use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
     use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
 
+    /// A suspended member keeps the role assignment but loses its powers until
+    /// the suspension ends. The contract still verifies records signed before
+    /// it against the raw roles.
+    #[test]
+    fn a_suspension_hides_role_powers_until_it_ends() {
+        use plaza_core::board_state::member_moderation::{
+            AuthorizedSuspension, SuspensionV1,
+        };
+        use plaza_core::board_state::reports::ReportReason;
+        use plaza_core::board_state::roles::{
+            AuthorizedRole, AuthorizedRoleAssignment, Role, RoleAssignment,
+        };
+
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let member_sk = SigningKey::generate(&mut rng);
+        let member = MemberId::from(&member_sk.verifying_key());
+        let role_id = [7u8; 16];
+        let mut state = ChatBoardStateV1::default();
+        state.roles.roles.push(AuthorizedRole::new(
+            Role {
+                id: role_id,
+                name: "moderator".to_string(),
+                generation: 1,
+                can_manage_access: false,
+                can_distribute_keys: false,
+                can_edit_posts: false,
+                can_delete_posts: false,
+                can_close_posts: false,
+                can_pin_posts: true,
+                can_move_posts: false,
+                can_manage_trash: true,
+                scope: Vec::new(),
+                deleted: false,
+            },
+            &owner_sk,
+        ));
+        state
+            .roles
+            .assignments
+            .push(AuthorizedRoleAssignment::new(
+                RoleAssignment {
+                    role_id,
+                    member_id: member,
+                    generation: 1,
+                    revoked: false,
+                },
+                &owner_sk,
+            ));
+        assert!(can_manage_trash(&state, member));
+
+        let now = chrono::Utc::now().timestamp_millis();
+        state
+            .suspensions
+            .suspensions
+            .push(AuthorizedSuspension::new(
+                SuspensionV1 {
+                    target: member,
+                    reason: ReportReason::Spam,
+                    until: now + 60_000,
+                    created_at: now,
+                    generation: 1,
+                },
+                &owner_sk,
+            ));
+        assert!(is_suspended_now(&state, member));
+        assert!(!can_manage_trash(&state, member));
+        assert!(!has_moderation_power(&state, member, ModerationPower::Pin, &[]));
+        assert!(state.roles.can_manage_trash(&member), "the role stays");
+
+        // Lifting writes a past `until`, which ends the suspension.
+        state.suspensions.suspensions.clear();
+        state
+            .suspensions
+            .suspensions
+            .push(AuthorizedSuspension::new(
+                SuspensionV1 {
+                    target: member,
+                    reason: ReportReason::Spam,
+                    until: now - 1_000,
+                    created_at: now - 60_000,
+                    generation: 2,
+                },
+                &owner_sk,
+            ));
+        assert!(!is_suspended_now(&state, member));
+        assert!(can_manage_trash(&state, member));
+        assert!(has_moderation_power(&state, member, ModerationPower::Pin, &[]));
+    }
+
     /// A freshly created board must already be a cleanup fixpoint: the contract
     /// rejects published states that cleanup would change, so a PUT of a
     /// non-normalized new board would never be accepted.
     #[test]
-    fn test_new_board_state_is_normalized() {
-        let mut rng = rand::thread_rng();
+    fn test_new_board_state_is_normalized() {        let mut rng = rand::thread_rng();
         for private in [false, true] {
             let owner_sk = SigningKey::generate(&mut rng);
             let mut boards = Boards {

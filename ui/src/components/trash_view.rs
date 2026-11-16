@@ -69,8 +69,9 @@ pub fn TrashView() -> Element {
             let id = message.id();
             let chain = category_chain(&routes, &id);
             let can_move = is_owner_or_admin
-                || data.board_state.roles.has_moderation_power(
-                    &self_id,
+                || crate::board_data::has_moderation_power(
+                    &data.board_state,
+                    self_id,
                     ModerationPower::Move,
                     &chain,
                 );
@@ -125,7 +126,8 @@ pub fn TrashView() -> Element {
     grant_candidates.dedup();
     // The owner, an admin or any member with the trash role may share the key;
     // the contract checks the same signer set for a Trash PQ set.
-    let can_grant = is_owner_or_admin || data.board_state.roles.can_manage_trash(&self_id);
+    let can_grant = is_owner_or_admin
+        || crate::board_data::can_manage_trash(&data.board_state, self_id);
     let has_current_key = data.trash_secret.is_some();
     // A rotated-out manager keeps older keys, so old items stay readable.
     let has_trash_key = has_current_key || !data.trash_secrets.is_empty();

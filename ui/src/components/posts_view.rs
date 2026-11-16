@@ -1183,7 +1183,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                             if let Some((self_member_id, is_owner, is_admin)) = board_info {
                                 let viewer_roles = current_board_data
                                     .as_ref()
-                                    .map(|board| board.board_state.roles.clone())
+                                    .map(|board| board.viewer_powers())
                                     .unwrap_or_default();
                                 let scope_chain = current_board_data
                                     .as_ref()
@@ -1504,7 +1504,6 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                         let can_pin = is_owner
                                                             || is_admin
                                                             || roles.has_moderation_power(
-                                                                &self_member_id,
                                                                 ModerationPower::Pin,
                                                                 &scope_chain,
                                                             );
@@ -1512,7 +1511,6 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                             || is_admin
                                                             || is_author
                                                             || roles.has_moderation_power(
-                                                                &self_member_id,
                                                                 ModerationPower::Close,
                                                                 &scope_chain,
                                                             );
@@ -1756,12 +1754,14 @@ pub fn SinglePostView(post_id: String) -> Element {
                                 chain.push(cat.clone());
                             }
                         }
-                        board_data.board_state.roles.has_moderation_power(
-                            &self_member_id,
+                        crate::board_data::has_moderation_power(
+                            &board_data.board_state,
+                            self_member_id,
                             ModerationPower::Edit,
                             &chain,
-                        ) || board_data.board_state.roles.has_moderation_power(
-                            &self_member_id,
+                        ) || crate::board_data::has_moderation_power(
+                            &board_data.board_state,
+                            self_member_id,
                             ModerationPower::Delete,
                             &chain,
                         )
@@ -1874,7 +1874,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                         .admins
                         .iter()
                         .any(|admin| admin.admin.id() == self_id)
-                    || board_data.board_state.roles.can_manage_trash(&self_id)
+                    || crate::board_data::can_manage_trash(&board_data.board_state, self_id)
             })
             .unwrap_or(false)
     });

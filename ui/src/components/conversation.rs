@@ -212,8 +212,9 @@ pub fn get_all_messages(
             let chain = plaza_core::board_state::moderation::category_chain(&routes, &message_id);
             let can_moderate = self_member_id == owner_id
                 || is_admin
-                || state.roles.has_moderation_power(
-                    &self_member_id,
+                || crate::board_data::has_moderation_power(
+                    state,
+                    self_member_id,
                     plaza_core::board_state::roles::ModerationPower::Delete,
                     &chain,
                 );

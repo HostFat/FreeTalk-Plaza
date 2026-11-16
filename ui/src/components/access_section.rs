@@ -105,7 +105,7 @@ pub fn RolesSection() -> Element {
     // Admins do not get role definition or assignment powers implicitly. The
     // owner enables them per person through a role with can_manage_access.
     let can_define_roles = is_owner;
-    let can_manage = is_owner || data.board_state.roles.can_manage_access(&self_id);
+    let can_manage = is_owner || crate::board_data::can_manage_access(&data.board_state, self_id);
     if !can_manage {
         return rsx! {
             div { class: "bg-surface rounded-lg p-4",
@@ -536,7 +536,7 @@ pub fn InviteLinksSection() -> Element {
     };
     let is_owner = data.owner_vk == data.self_sk.verifying_key();
     let self_id = MemberId::from(&data.self_sk.verifying_key());
-    let can_manage = is_owner || data.board_state.roles.can_manage_access(&self_id);
+    let can_manage = is_owner || crate::board_data::can_manage_access(&data.board_state, self_id);
     if !can_manage {
         return rsx! {
             div { class: "bg-surface rounded-lg p-4",
