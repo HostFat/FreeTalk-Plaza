@@ -329,7 +329,7 @@ async fn merge_stored_boards() {
     {
         Ok(ChatDelegateResponseMsg::GetResponse {
             value: Some(bytes), ..
-        }) => ciborium::de::from_reader::<crate::board_data::Boards, _>(bytes.as_slice()).ok(),
+        }) => crate::board_data::Boards::decode(bytes.as_slice()),
         _ => None,
     };
     BOARDS_READ_FOR_MERGE.store(false, Ordering::SeqCst);

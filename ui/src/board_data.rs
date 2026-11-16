@@ -1861,6 +1861,63 @@ impl PartialEq for Boards {
 }
 
 impl Boards {
+    /// Decode the stored blob even when one board is incompatible. A board
+    /// written by an older schema (the ids changed before v95) must not take
+    /// the whole device's board list down with it: keep every board that
+    /// still decodes and report the rest.
+    pub fn decode(bytes: &[u8]) -> Option<Boards> {
+        use dioxus::logger::tracing::warn;
+
+        if let Ok(boards) = ciborium::de::from_reader::<Boards, _>(bytes) {
+            return Some(boards);
+        }
+        let value: ciborium::value::Value = ciborium::de::from_reader(bytes).ok()?;
+        let entries = value.as_map()?;
+        let mut boards = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+        };
+        let mut dropped = 0usize;
+        for (key, value) in entries {
+            match key.as_text() {
+                Some("map") => {
+                    let Some(map) = value.as_map() else { continue };
+                    for (board_key, board_value) in map {
+                        let Ok(owner) = board_key.deserialized::<VerifyingKey>() else {
+                            dropped += 1;
+                            continue;
+                        };
+                        match board_value.deserialized::<BoardData>() {
+                            Ok(board) => {
+                                boards.map.insert(owner, board);
+                            }
+                            Err(error) => {
+                                dropped += 1;
+                                warn!(
+                                    "Dropping stored board {}: {error}",
+                                    MemberId::from(&owner)
+                                );
+                            }
+                        }
+                    }
+                }
+                Some("current_board_key") => {
+                    boards.current_board_key = value.deserialized().ok();
+                }
+                Some("removed") => {
+                    boards.removed = value.deserialized().unwrap_or_default();
+                }
+                _ => {}
+            }
+        }
+        if dropped > 0 {
+            warn!("Dropped {dropped} stored board(s) written by an incompatible version");
+        }
+        Some(boards)
+    }
+
     pub fn create_new_board_with_name(
         &mut self,
         self_sk: SigningKey,
@@ -2208,11 +2265,52 @@ mod tests {
         assert!(has_moderation_power(&state, member, ModerationPower::Pin, &[]));
     }
 
+    /// A board written by an older schema must not cost the whole list: the
+    /// lenient decode keeps every entry that still deserializes.
+    #[test]
+    fn an_incompatible_stored_board_does_not_drop_the_others() {
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let mut boards = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+        };
+        let key = boards.create_new_board_with_name(
+            owner_sk,
+            "Kept".to_string(),
+            "alice".to_string(),
+            false,
+        );
+
+        let mut value = ciborium::value::Value::serialized(&boards).expect("boards serialize");
+        let entries = value.as_map_mut().expect("boards are a map");
+        let map_value = entries
+            .iter_mut()
+            .find(|(key, _)| key.as_text() == Some("map"))
+            .map(|(_, value)| value)
+            .expect("map entry");
+        let map = map_value.as_map_mut().expect("board map");
+        let old_owner = SigningKey::generate(&mut rng).verifying_key();
+        map.push((
+            ciborium::value::Value::serialized(&old_owner).expect("owner key serializes"),
+            ciborium::value::Value::Text("written by an old schema".to_string()),
+        ));
+
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&value, &mut bytes).expect("encode");
+        let decoded = Boards::decode(&bytes).expect("the blob decodes per board");
+        assert!(decoded.map.contains_key(&key), "the compatible board survives");
+        assert_eq!(decoded.map.len(), 1);
+    }
+
     /// A freshly created board must already be a cleanup fixpoint: the contract
     /// rejects published states that cleanup would change, so a PUT of a
     /// non-normalized new board would never be accepted.
     #[test]
-    fn test_new_board_state_is_normalized() {        let mut rng = rand::thread_rng();
+    fn test_new_board_state_is_normalized() {
+        let mut rng = rand::thread_rng();
         for private in [false, true] {
             let owner_sk = SigningKey::generate(&mut rng);
             let mut boards = Boards {
