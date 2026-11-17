@@ -413,6 +413,7 @@ mod tests {
         );
         let post = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: member_id,
                 time: SystemTime::now(),
@@ -492,6 +493,7 @@ mod tests {
         // approval record.
         let second = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: member_id,
                 time: SystemTime::now(),
@@ -523,6 +525,7 @@ mod tests {
     ) -> MessageId {
         let message = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: owner_id,
                 time: SystemTime::now(),
@@ -562,6 +565,7 @@ mod tests {
         let author = MemberId::from(&board.member_sk.verifying_key());
         let message = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author,
                 time: SystemTime::now(),

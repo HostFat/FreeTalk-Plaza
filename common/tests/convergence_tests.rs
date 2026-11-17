@@ -51,6 +51,7 @@ fn create_test_msg(
 ) -> AuthorizedMessageV1 {
     AuthorizedMessageV1::new(
         MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: author_id,
             time: SystemTime::now() + std::time::Duration::from_secs(time_offset_secs),
@@ -373,6 +374,7 @@ fn test_message_order_convergence() {
     // Create three messages with identical timestamps
     let msg_a = AuthorizedMessageV1::new(
         MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: same_time,
@@ -383,6 +385,7 @@ fn test_message_order_convergence() {
 
     let msg_b = AuthorizedMessageV1::new(
         MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: same_time,
@@ -393,6 +396,7 @@ fn test_message_order_convergence() {
 
     let msg_c = AuthorizedMessageV1::new(
         MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: same_time,
@@ -510,6 +514,7 @@ fn test_message_delta_idempotency() {
 
     let msg = AuthorizedMessageV1::new(
         MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now(),
@@ -736,6 +741,7 @@ fn test_message_convergence_stress_100_messages() {
 
         let msg = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: owner_id,
                 time,
@@ -1055,6 +1061,7 @@ fn test_message_varying_limits_convergence() {
     for i in 0..30 {
         let msg = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: owner_id,
                 time: base_time + std::time::Duration::from_secs(i as u64),
@@ -1228,6 +1235,7 @@ fn test_messages_all_identical_timestamps() {
     for i in 0..10 {
         let msg = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: owner_id,
                 time: same_time,
@@ -1646,6 +1654,7 @@ fn test_regression_message_pruning_order() {
         let time = base_time + std::time::Duration::from_secs(time_offset);
         let msg = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: owner_id,
                 time,
@@ -1751,6 +1760,7 @@ fn test_full_state_merge_commutativity() {
 
     let msg_1 = AuthorizedMessageV1::new(
         MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: time_1,
@@ -1760,6 +1770,7 @@ fn test_full_state_merge_commutativity() {
     );
     let msg_2 = AuthorizedMessageV1::new(
         MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: member_a.id(),
             time: time_2,
@@ -1769,6 +1780,7 @@ fn test_full_state_merge_commutativity() {
     );
     let msg_3 = AuthorizedMessageV1::new(
         MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: member_b.id(),
             time: time_3,
@@ -1921,6 +1933,7 @@ fn test_regression_combined_scenario() {
         let author_idx = i % members.len();
         let msg = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: members[author_idx].0.member.id(),
                 time,

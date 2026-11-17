@@ -530,6 +530,7 @@ mod tests {
     fn post(sk: &SigningKey, owner_id: MemberId, body: &str) -> AuthorizedMessageV1 {
         AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: MemberId::from(&sk.verifying_key()),
                 time: std::time::SystemTime::now(),

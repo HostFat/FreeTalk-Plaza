@@ -655,6 +655,7 @@ fn test_encrypted_messages_in_private_board() {
 
     // Add encrypted message
     let message = MessageV1 {
+        images: Vec::new(),
         board_owner: owner_id,
         author: owner_id,
         content: BoardMessageBody::private_text(

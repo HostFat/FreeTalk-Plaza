@@ -142,6 +142,7 @@ fn test_message_validation_after_invitation_acceptance() -> Result<()> {
 
     // Create a message from the invitee
     let message = MessageV1 {
+        images: Vec::new(),
         board_owner: owner_vk.into(),
         author: invitee_vk.into(),
         content: BoardMessageBody::public(String::new(), "Hello from invited user!".to_string()),
@@ -208,6 +209,7 @@ fn test_uninvited_user_messages_are_filtered() -> Result<()> {
 
     // Create a message from the uninvited user
     let message = MessageV1 {
+        images: Vec::new(),
         board_owner: owner_vk.into(),
         author: uninvited_vk.into(),
         content: BoardMessageBody::public(String::new(), "Hello from uninvited user!".to_string()),

@@ -15,6 +15,34 @@ use std::time::SystemTime;
 
 use crate::board_state::content::CategoryEditPayload;
 
+/// Validate the image references of one message against the board limits.
+pub fn validate_message_images(
+    message: &MessageV1,
+    configuration: &crate::board_state::configuration::Configuration,
+) -> Result<(), String> {
+    if message.images.is_empty() {
+        return Ok(());
+    }
+    if message.content.is_action() || message.content.is_category() {
+        return Err("Only posts and replies can carry images".to_string());
+    }
+    let max_images = configuration.images_per_message() as usize;
+    if message.images.len() > max_images {
+        return Err(format!(
+            "Too many images in one message: {} > {}",
+            message.images.len(),
+            max_images
+        ));
+    }
+    for image in &message.images {
+        image.validate(
+            configuration.image_byte_limit(),
+            configuration.animated_image_byte_limit(),
+        )?;
+    }
+    Ok(())
+}
+
 /// In a read-only board only the current owner and admins add content.
 /// Every write travels as a message (posts, replies, reactions, edits,
 /// deletes, reports, categories), so this one check covers them all.
@@ -130,6 +158,11 @@ impl ComposableState for MessagesV1 {
             if message.validate(verifying_key).is_err() {
                 return Err(format!("Invalid message signature: id:{:?}", message.id()));
             }
+
+            validate_message_images(
+                &message.message,
+                &parent_state.configuration.configuration,
+            )?;
         }
 
         // A member may not hold more posts than the window allows. The check
@@ -198,6 +231,10 @@ impl ComposableState for MessagesV1 {
                         msg.message.author
                     ));
                 }
+                validate_message_images(
+                    &msg.message,
+                    &parent_state.configuration.configuration,
+                )?;
                 let content = &msg.message.content;
 
                 // Validate title constraints (for public text/reply messages)
@@ -1019,6 +1056,10 @@ pub struct MessageV1 {
     pub author: MemberId,
     pub time: SystemTime,
     pub content: BoardMessageBody,
+    /// Images attached to the post. Empty for actions and for messages written
+    /// before images existed; skipped when empty so old signatures verify.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::board_state::images::ImageRef>,
 }
 
 impl Default for MessageV1 {
@@ -1028,6 +1069,7 @@ impl Default for MessageV1 {
             author: MemberId::from_bytes([0u8; 32]),
             time: SystemTime::UNIX_EPOCH,
             content: BoardMessageBody::public(String::new(), String::new()),
+            images: Vec::new(),
         }
     }
 }
@@ -1121,6 +1163,7 @@ mod tests {
 
     fn create_test_message(owner_id: MemberId, author_id: MemberId) -> MessageV1 {
         MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: author_id,
             time: SystemTime::now(),
@@ -1135,6 +1178,7 @@ mod tests {
         let mut rng = OsRng;
         let signing_key = SigningKey::generate(&mut rng);
         let message = MessageV1 {
+            images: Vec::new(),
             board_owner: MemberId::from(&signing_key.verifying_key()),
             author: MemberId::from(&signing_key.verifying_key()),
             content: BoardMessageBody::private_text(vec![1, 2, 3], [0u8; 12], 0),
@@ -1204,6 +1248,7 @@ mod tests {
         let message = |index: u64| {
             AuthorizedMessageV1::new(
                 MessageV1 {
+                    images: Vec::new(),
                     board_owner: owner_id,
                     author: author_id,
                     // 100 ms apart: the whole burst fits one window.
@@ -1269,6 +1314,7 @@ mod tests {
         let post = |signer: &SigningKey| {
             AuthorizedMessageV1::new(
                 MessageV1 {
+                    images: Vec::new(),
                     board_owner: owner_id,
                     author: MemberId::from(&signer.verifying_key()),
                     time: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
@@ -1301,6 +1347,92 @@ mod tests {
                 .apply_delta(&state, &parameters, &Some(allowed.messages.clone()))
                 .expect("their delta applies");
         }
+    }
+
+    /// Images: a valid attachment passes, and every declared limit is enforced.
+    #[test]
+    fn images_are_validated_against_the_board_limits() {
+        use crate::board_state::images::ImageRef;
+
+        let owner = SigningKey::from_bytes(&[5u8; 32]);
+        let owner_id = MemberId::from(&owner.verifying_key());
+        let configuration = Configuration::default();
+        let state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(configuration.clone(), &owner),
+            ..Default::default()
+        };
+        let parameters = ChatBoardParametersV1 {
+            owner: owner.verifying_key(),
+        };
+
+        let image = |bytes: u32, animated: bool| ImageRef {
+            instance: [7u8; 32],
+            sha256: [9u8; 32],
+            mime: "image/webp".to_string(),
+            width: 800,
+            height: 600,
+            bytes,
+            alt: "a cat on a keyboard".to_string(),
+            display: 0,
+            sealed: false,
+            animated,
+            nsfw: false,
+        };
+        let message = |images: Vec<ImageRef>| {
+            AuthorizedMessageV1::new(
+                MessageV1 {
+                    board_owner: owner_id,
+                    author: owner_id,
+                    time: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+                    content: BoardMessageBody::public("t".to_string(), "b".to_string()),
+                    images,
+                },
+                &owner,
+            )
+        };
+        let verify = |images: Vec<ImageRef>| {
+            let mut messages = MessagesV1::default();
+            messages.messages.push(message(images));
+            messages.verify(&state, &parameters)
+        };
+
+        verify(vec![image(1024, false)]).expect("a valid image passes");
+        verify(vec![image(7 * 1024 * 1024, true)]).expect("an animated image up to 8 MiB passes");
+
+        let too_many = verify(vec![image(1024, false); 5]).unwrap_err();
+        assert!(too_many.contains("Too many images"), "{too_many}");
+
+        let oversized = verify(vec![image(5 * 1024 * 1024, false)]).unwrap_err();
+        assert!(oversized.contains("outside the allowed range"), "{oversized}");
+
+        let mut bad_mime = image(1024, false);
+        bad_mime.mime = "image/svg+xml".to_string();
+        assert!(verify(vec![bad_mime]).is_err(), "SVG is not allowed");
+
+        let mut no_alt = image(1024, false);
+        no_alt.alt = "  ".to_string();
+        let missing_alt = verify(vec![no_alt]).unwrap_err();
+        assert!(missing_alt.contains("alternative text"), "{missing_alt}");
+
+        let mut bad_display = image(1024, false);
+        bad_display.display = 10;
+        assert!(verify(vec![bad_display]).is_err(), "display must be 25..100");
+
+        // Images belong to posts, not to actions such as edits or reactions.
+        let action = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author: owner_id,
+                time: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+                content: BoardMessageBody::delete(MessageId(BoardId::hash(b"target"))),
+                images: vec![image(1024, false)],
+            },
+            &owner,
+        );
+        let mut messages = MessagesV1::default();
+        messages.messages.push(action);
+        let on_action = messages.verify(&state, &parameters).unwrap_err();
+        assert!(on_action.contains("Only posts"), "{on_action}");
     }
 
     #[test]
@@ -1556,6 +1688,7 @@ mod tests {
         // Create messages
         let create_message = |time: SystemTime| {
             let message = MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: author_id,
                 time,
@@ -1663,6 +1796,7 @@ mod tests {
         // Create a normal-sized message and an oversized message
         let small_msg = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: author_id,
                 time: SystemTime::now(),
@@ -1672,6 +1806,7 @@ mod tests {
         );
         let big_msg = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: author_id,
                 time: SystemTime::now(),
@@ -1722,6 +1857,7 @@ mod tests {
 
         // Create messages from different users
         let msg1 = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: user1_id,
             content: BoardMessageBody::public(String::new(), "Message from user1".to_string()),
@@ -1729,6 +1865,7 @@ mod tests {
         };
 
         let msg2 = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: user2_id,
             content: BoardMessageBody::public(String::new(), "Message from user2".to_string()),
@@ -1786,6 +1923,7 @@ mod tests {
 
         // Create original message
         let original_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: author_id,
             time: SystemTime::now(),
@@ -1796,6 +1934,7 @@ mod tests {
 
         // Create edit action
         let edit_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: author_id,
             time: SystemTime::now() + Duration::from_secs(1),
@@ -1835,6 +1974,7 @@ mod tests {
 
         // Create message by owner
         let original_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now(),
@@ -1845,6 +1985,7 @@ mod tests {
 
         // Create edit action by OTHER user (should be ignored)
         let edit_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: other_id,
             time: SystemTime::now() + Duration::from_secs(1),
@@ -1876,6 +2017,7 @@ mod tests {
 
         // Create original message
         let original_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now(),
@@ -1886,6 +2028,7 @@ mod tests {
 
         // Create delete action
         let delete_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now() + Duration::from_secs(1),
@@ -1919,6 +2062,7 @@ mod tests {
         let owner_id = MemberId::from(&signing_key.verifying_key());
 
         let category = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now(),
@@ -1935,6 +2079,7 @@ mod tests {
             SealedBytes::public(ActionContentV1::delete(category_id).encode()),
         );
         let delete_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now() + Duration::from_secs(1),
@@ -1967,6 +2112,7 @@ mod tests {
 
         // Create original message
         let original_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: user1_id,
             time: SystemTime::now(),
@@ -1977,6 +2123,7 @@ mod tests {
 
         // Create reaction from user2
         let reaction_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: user2_id,
             time: SystemTime::now() + Duration::from_secs(1),
@@ -1986,6 +2133,7 @@ mod tests {
 
         // Create another reaction from user1
         let reaction_msg2 = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: user1_id,
             time: SystemTime::now() + Duration::from_secs(2),
@@ -2015,6 +2163,7 @@ mod tests {
 
         // Create original message
         let original_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: user_id,
             time: SystemTime::now(),
@@ -2025,6 +2174,7 @@ mod tests {
 
         // Add reaction
         let reaction_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: user_id,
             time: SystemTime::now() + Duration::from_secs(1),
@@ -2034,6 +2184,7 @@ mod tests {
 
         // Remove reaction
         let remove_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: user_id,
             time: SystemTime::now() + Duration::from_secs(2),
@@ -2059,6 +2210,7 @@ mod tests {
 
         // Create original message
         let original_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now(),
@@ -2069,6 +2221,7 @@ mod tests {
 
         // Delete it
         let delete_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now() + Duration::from_secs(1),
@@ -2078,6 +2231,7 @@ mod tests {
 
         // Try to edit deleted message (should be ignored)
         let edit_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now() + Duration::from_secs(2),
@@ -2108,6 +2262,7 @@ mod tests {
 
         // Create regular message
         let msg1 = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now(),
@@ -2118,6 +2273,7 @@ mod tests {
 
         // Create reaction (action message)
         let reaction_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now() + Duration::from_secs(1),
@@ -2127,6 +2283,7 @@ mod tests {
 
         // Create another regular message
         let msg2 = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now() + Duration::from_secs(2),
@@ -2162,6 +2319,7 @@ mod tests {
 
         // Create a category
         let category_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now(),
@@ -2178,6 +2336,7 @@ mod tests {
 
         // Try to edit the category using ACTION_TYPE_EDIT (wrong action type)
         let edit_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now() + Duration::from_secs(1),
@@ -2208,6 +2367,7 @@ mod tests {
 
         // Create a regular text message
         let text_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now(),
@@ -2218,6 +2378,7 @@ mod tests {
 
         // Try to edit the text message using ACTION_TYPE_EDIT_CATEGORY (wrong action type)
         let edit_msg = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             time: SystemTime::now() + Duration::from_secs(1),

@@ -867,6 +867,7 @@ async fn send_action_messages(ctx: ActionContext, contents: Vec<BoardMessageBody
     let mut auth_messages = Vec::new();
     for content in contents {
         let message = MessageV1 {
+            images: Vec::new(),
             board_owner: MemberId::from(ctx.current_board),
             author: MemberId::from(&ctx.self_sk.verifying_key()),
             content,

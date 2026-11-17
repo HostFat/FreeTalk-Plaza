@@ -633,6 +633,7 @@ pub async fn purge_illegal(
         };
 
         let message = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: self_id,
             time: chrono::Utc::now().into(),

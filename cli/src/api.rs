@@ -948,6 +948,7 @@ impl ApiClient {
 
         // Create the message
         let message = plaza_core::board_state::message::MessageV1 {
+            images: Vec::new(),
             board_owner: MemberId::from(*board_owner_key),
             author: sender_member_id,
             content: plaza_core::board_state::message::BoardMessageBody::public(
@@ -1042,6 +1043,7 @@ impl ApiClient {
 
         // Create the message
         let message = plaza_core::board_state::message::MessageV1 {
+            images: Vec::new(),
             board_owner: plaza_core::board_state::member::MemberId::from(*board_owner_key),
             author: plaza_core::board_state::member::MemberId::from(&signing_key.verifying_key()),
             content: plaza_core::board_state::message::BoardMessageBody::public(
@@ -1145,6 +1147,7 @@ impl ApiClient {
 
         // Create the edit action message
         let message = plaza_core::board_state::message::MessageV1 {
+            images: Vec::new(),
             board_owner: MemberId::from(*board_owner_key),
             author: MemberId::from(&signing_key.verifying_key()),
             content: plaza_core::board_state::message::BoardMessageBody::edit(
@@ -1206,6 +1209,7 @@ impl ApiClient {
 
         // Create the delete action message
         let message = plaza_core::board_state::message::MessageV1 {
+            images: Vec::new(),
             board_owner: MemberId::from(*board_owner_key),
             author: MemberId::from(&signing_key.verifying_key()),
             content: plaza_core::board_state::message::BoardMessageBody::delete(target_message_id),
@@ -1265,6 +1269,7 @@ impl ApiClient {
 
         // Create the reaction action message
         let message = plaza_core::board_state::message::MessageV1 {
+            images: Vec::new(),
             board_owner: MemberId::from(*board_owner_key),
             author: MemberId::from(&signing_key.verifying_key()),
             content: plaza_core::board_state::message::BoardMessageBody::reaction(
@@ -1327,6 +1332,7 @@ impl ApiClient {
 
         // Create the remove_reaction action message
         let message = plaza_core::board_state::message::MessageV1 {
+            images: Vec::new(),
             board_owner: MemberId::from(*board_owner_key),
             author: MemberId::from(&signing_key.verifying_key()),
             content: plaza_core::board_state::message::BoardMessageBody::remove_reaction(
@@ -1413,6 +1419,7 @@ impl ApiClient {
 
         // Create the reply message
         let message = plaza_core::board_state::message::MessageV1 {
+            images: Vec::new(),
             board_owner: MemberId::from(*board_owner_key),
             author: MemberId::from(&signing_key.verifying_key()),
             content: plaza_core::board_state::message::BoardMessageBody::reply(

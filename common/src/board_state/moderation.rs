@@ -1450,6 +1450,7 @@ mod tests {
         );
         let post = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: member_id,
                 time: SystemTime::now(),
@@ -1818,6 +1819,7 @@ mod tests {
 
         let replacement = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: owner_id,
                 time: SystemTime::now(),
@@ -1911,6 +1913,7 @@ mod tests {
             let owner_id = MemberId::from(&board.owner_sk.verifying_key());
             AuthorizedMessageV1::new(
                 MessageV1 {
+                    images: Vec::new(),
                     board_owner: owner_id,
                     author: owner_id,
                     time: SystemTime::now() + Duration::from_millis(millis),
@@ -1935,6 +1938,7 @@ mod tests {
         let source_id = source.id();
         let topic = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: owner_id,
                 time: SystemTime::now() + Duration::from_millis(30),
@@ -1945,6 +1949,7 @@ mod tests {
         let topic_id = topic.id();
         let delete = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: owner_id,
                 time: SystemTime::now() + Duration::from_millis(40),

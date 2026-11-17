@@ -291,6 +291,7 @@ pub(crate) async fn publish_message(
         }
     }
     let message = MessageV1 {
+        images: Vec::new(),
         board_owner: MemberId::from(current_board),
         author: MemberId::from(&self_sk.verifying_key()),
         content,
@@ -601,6 +602,7 @@ pub async fn send_category(
     };
 
     let message = MessageV1 {
+        images: Vec::new(),
         board_owner: MemberId::from(current_board),
         author: MemberId::from(&self_sk.verifying_key()),
         content,
@@ -760,6 +762,7 @@ pub async fn send_group(
     };
 
     let message = MessageV1 {
+        images: Vec::new(),
         board_owner: MemberId::from(current_board),
         author: MemberId::from(&self_sk.verifying_key()),
         content,

@@ -542,6 +542,7 @@ mod tests {
             .messages
             .push(AuthorizedMessageV1::new(
                 MessageV1 {
+                    images: Vec::new(),
                     board_owner: owner_id,
                     author: admin_id,
                     time: SystemTime::UNIX_EPOCH,
@@ -1151,6 +1152,7 @@ mod tests {
             .messages
             .push(AuthorizedMessageV1::new(
                 MessageV1 {
+                    images: Vec::new(),
                     board_owner: fixture.owner_id,
                     author: second_id,
                     time: SystemTime::UNIX_EPOCH,

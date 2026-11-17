@@ -523,6 +523,7 @@ mod tests {
         );
         let post = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: member_id,
                 time: SystemTime::now(),

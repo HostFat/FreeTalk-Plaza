@@ -308,6 +308,7 @@ fn add_example_messages(
             .join(" ");
         let msg = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: *owner_id,
                 author: author_id,
                 time: get_time_from_millis(current_time_ms),

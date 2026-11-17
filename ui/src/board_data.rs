@@ -2498,6 +2498,7 @@ mod tests {
         board.board_state.recent_messages.messages.push(
             plaza_core::board_state::message::AuthorizedMessageV1::new(
                 plaza_core::board_state::message::MessageV1 {
+                    images: Vec::new(),
                     board_owner: owner_id,
                     author: invitee_id,
                     time: get_current_system_time(),
@@ -2707,6 +2708,7 @@ mod tests {
                     // the invitee alive with one post, as a real board would.
                     recent_messages: Some(vec![AuthorizedMessageV1::new(
                         MessageV1 {
+                            images: Vec::new(),
                             board_owner: owner_id,
                             author: invitee_id,
                             content: BoardMessageBody::public(String::new(), "hello".to_string()),
@@ -2729,6 +2731,7 @@ mod tests {
         )
         .with_allowed_roles(vec![role_id], sealed_name, true);
         let message = MessageV1 {
+            images: Vec::new(),
             board_owner: owner_id,
             author: owner_id,
             content: BoardMessageBody::public_raw(
@@ -2895,6 +2898,7 @@ mod tests {
                     }),
                     recent_messages: Some(vec![AuthorizedMessageV1::new(
                         MessageV1 {
+                            images: Vec::new(),
                             board_owner: owner_id,
                             author: outsider_id,
                             content: BoardMessageBody::public(
@@ -3198,6 +3202,7 @@ mod tests {
         use plaza_core::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
         let dummy_msg = AuthorizedMessageV1 {
             message: MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_vk.into(),
                 author: owner_vk.into(),
                 content: BoardMessageBody::public(String::new(), "test".to_string()),

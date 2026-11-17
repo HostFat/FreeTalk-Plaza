@@ -1630,6 +1630,7 @@ mod revocation_tests {
                 .messages
                 .push(AuthorizedMessageV1::new(
                     MessageV1 {
+                        images: Vec::new(),
                         board_owner: owner_id,
                         author,
                         time: SystemTime::now(),

@@ -416,6 +416,7 @@ pub async fn send_test_message(
     println!("--> [UPDATE] Sending test message: '{}'", message_content);
 
     let message = plaza_core::board_state::message::MessageV1 {
+        images: Vec::new(),
         board_owner: parameters.owner_id(),
         author: signing_key.verifying_key().into(),
         content: plaza_core::board_state::message::BoardMessageBody::public(

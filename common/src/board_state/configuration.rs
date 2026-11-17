@@ -196,6 +196,9 @@ impl Default for Configuration {
             rate_window_ms: crate::board_state::rate_limit::DEFAULT_RATE_WINDOW_MS,
             max_posts_per_window: crate::board_state::rate_limit::DEFAULT_MAX_POSTS_PER_WINDOW,
             max_bans_per_window: crate::board_state::rate_limit::DEFAULT_MAX_BANS_PER_WINDOW,
+            max_images_per_message: DEFAULT_MAX_IMAGES_PER_MESSAGE,
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            max_animated_image_bytes: DEFAULT_MAX_ANIMATED_IMAGE_BYTES,
             updated_at: std::time::SystemTime::UNIX_EPOCH,
         }
     }
@@ -244,6 +247,15 @@ pub struct Configuration {
     /// Bans one member may issue inside the window. Zero means the default.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub max_bans_per_window: u32,
+    /// Images one message may carry. Zero means the default (4).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub max_images_per_message: u32,
+    /// Bytes allowed for one static image. Zero means the default (4 MiB).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub max_image_bytes: u32,
+    /// Bytes allowed for one animated image. Zero means the default (8 MiB).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub max_animated_image_bytes: u32,
     /// Signed time of this configuration, used to resolve which owner key had
     /// the right to sign it. Omitted at the epoch for older configs.
     #[serde(
@@ -278,7 +290,39 @@ impl Configuration {
             self.max_bans_per_window
         }
     }
+
+    pub fn images_per_message(&self) -> u32 {
+        if self.max_images_per_message == 0 {
+            DEFAULT_MAX_IMAGES_PER_MESSAGE
+        } else {
+            self.max_images_per_message
+        }
+    }
+
+    pub fn image_byte_limit(&self) -> u32 {
+        if self.max_image_bytes == 0 {
+            DEFAULT_MAX_IMAGE_BYTES
+        } else {
+            self.max_image_bytes
+        }
+    }
+
+    pub fn animated_image_byte_limit(&self) -> u32 {
+        if self.max_animated_image_bytes == 0 {
+            DEFAULT_MAX_ANIMATED_IMAGE_BYTES
+        } else {
+            self.max_animated_image_bytes
+        }
+    }
 }
+
+/// Four images per post: enough for a gallery, small enough to keep a message
+/// reference list compact.
+pub const DEFAULT_MAX_IMAGES_PER_MESSAGE: u32 = 4;
+/// 4 MiB for a static image; the client compresses to ~1 MB by default.
+pub const DEFAULT_MAX_IMAGE_BYTES: u32 = 4 * 1024 * 1024;
+/// 8 MiB for a GIF or animated WebP.
+pub const DEFAULT_MAX_ANIMATED_IMAGE_BYTES: u32 = 8 * 1024 * 1024;
 
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0

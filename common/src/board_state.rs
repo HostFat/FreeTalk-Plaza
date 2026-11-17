@@ -6,6 +6,7 @@ pub mod configuration;
 pub mod content;
 pub mod id;
 pub mod identity;
+pub mod images;
 pub mod invites;
 pub mod member;
 pub mod member_info;
@@ -936,6 +937,7 @@ mod tests {
         // Only A has a message
         let msg_a = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: a_id,
                 time: SystemTime::now(),
@@ -1004,6 +1006,7 @@ mod tests {
         // Only B has a message
         let msg_b = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: b_id,
                 time: SystemTime::now(),
@@ -1158,6 +1161,7 @@ mod tests {
         state.members.members.push(member_a);
         let msg = AuthorizedMessageV1::new(
             MessageV1 {
+                images: Vec::new(),
                 board_owner: owner_id,
                 author: a_id,
                 time: SystemTime::now(),

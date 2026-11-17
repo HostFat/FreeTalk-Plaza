@@ -449,6 +449,7 @@ mod tests {
 
     fn make_signed_message(author_sk: &SigningKey, owner_vk: &VerifyingKey) -> AuthorizedMessageV1 {
         let msg = MessageV1 {
+            images: Vec::new(),
             board_owner: MemberId::from(owner_vk),
             author: MemberId::from(&author_sk.verifying_key()),
             content: BoardMessageBody::public(String::new(), "test".to_string()),
