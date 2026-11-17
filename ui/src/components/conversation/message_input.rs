@@ -48,7 +48,14 @@ async fn upload_record(
         });
         return;
     }
-    let result = crate::util::uploads::upload_pending(&board_data, &record).await;
+    let progress_id = id.clone();
+    let progress = move |done: usize, total: usize| {
+        crate::components::app::UPLOAD_PROGRESS
+            .write()
+            .insert(progress_id.clone(), (done, total));
+    };
+    let result =
+        crate::util::uploads::upload_pending(&board_data, &record, Some(&progress)).await;
 
     attachments.with_mut(|list| {
         if let Some(slot) = list.iter_mut().find(|attachment| attachment.id == id) {
@@ -68,6 +75,7 @@ async fn upload_record(
             crate::util::owned_images::record(image, copy.clone());
         }
     }
+    crate::components::app::UPLOAD_PROGRESS.write().remove(&id);
 }
 
 /// Start the upload of the chosen files, one attachment row each. The prepared
@@ -243,6 +251,19 @@ fn file_from_bytes(name: &str, bytes: &[u8], mime: &str) -> Option<web_sys::File
     let file_options = web_sys::FilePropertyBag::new();
     file_options.set_type(mime);
     web_sys::File::new_with_blob_sequence_and_options(&blobs.into(), name, &file_options).ok()
+}
+
+fn ask_percent(label: &str, default: u16) -> u16 {
+    web_sys::window()
+        .and_then(|window| {
+            window
+                .prompt_with_message(&format!("{label} (0-100)"))
+                .ok()
+                .flatten()
+        })
+        .and_then(|value| value.trim().parse().ok())
+        .map(|value: u16| value.min(100))
+        .unwrap_or(default)
 }
 
 /// Rotate or crop an attachment, then upload the edited image again.
@@ -1268,7 +1289,15 @@ pub fn PostInput(
                                         AttachmentState::Uploading => rsx! {
                                             span { class: "text-text-muted flex items-center gap-2",
                                                 div { class: "animate-spin w-3 h-3 border-2 border-text-muted border-t-transparent rounded-full" }
-                                                "Uploading..."
+                                                if let Some((done, total)) = crate::components::app::UPLOAD_PROGRESS
+                                                    .read()
+                                                    .get(&attachment.id)
+                                                    .copied()
+                                                {
+                                                    "Uploading {done}/{total}..."
+                                                } else {
+                                                    "Uploading..."
+                                                }
                                             }
                                         },
                                         AttachmentState::Ready(image) => rsx! {
@@ -1408,6 +1437,37 @@ pub fn PostInput(
                                                     }
                                                 },
                                                 "4:3"
+                                            }
+                                            button {
+                                                r#type: "button",
+                                                class: "px-1 text-xs text-text-muted hover:text-accent",
+                                                title: "Free crop: asks left, top, width and height in percent",
+                                                onclick: {
+                                                    let id = attachment.id.clone();
+                                                    let target = replying_to
+                                                        .read()
+                                                        .as_ref()
+                                                        .map(|reply| reply.message_id.clone());
+                                                    move |_| {
+                                                        let x = ask_percent("Left", 0);
+                                                        let y = ask_percent("Top", 0);
+                                                        let width = ask_percent("Width", 100).max(1);
+                                                        let height = ask_percent("Height", 100).max(1);
+                                                        edit_attachment(
+                                                            id.clone(),
+                                                            crate::util::image_processing::Transform::CropRect {
+                                                                x,
+                                                                y,
+                                                                width,
+                                                                height,
+                                                            },
+                                                            attachments,
+                                                            next_attachment_id,
+                                                            target.clone(),
+                                                        )
+                                                    }
+                                                },
+                                                "✂"
                                             }
                                         },
                                         AttachmentState::Failed(error) => rsx! {

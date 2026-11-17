@@ -107,6 +107,13 @@ pub enum Transform {
     CropSquare,
     CropWide,
     CropClassic,
+    /// Free crop, percentages of the source image.
+    CropRect {
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+    },
 }
 
 impl Transform {
@@ -152,18 +159,50 @@ async fn transform_from_url(url: &str, edit: Transform) -> Result<PreparedImage,
     if source_width == 0 || source_height == 0 {
         return Err("The image has no readable dimensions".to_string());
     }
-    let (width, height) = match edit {
-        Transform::RotateRight | Transform::RotateLeft => (source_height, source_width),
+    let (width, height, crop_x, crop_y) = match edit {
+        Transform::RotateRight | Transform::RotateLeft => {
+            (source_height, source_width, 0.0, 0.0)
+        }
+        Transform::CropRect {
+            x,
+            y,
+            width,
+            height,
+        } => {
+            let cw = ((source_width as f64) * width as f64 / 100.0)
+                .round()
+                .clamp(1.0, source_width as f64) as u32;
+            let ch = ((source_height as f64) * height as f64 / 100.0)
+                .round()
+                .clamp(1.0, source_height as f64) as u32;
+            let sx = ((source_width as f64) * x as f64 / 100.0)
+                .round()
+                .clamp(0.0, (source_width - cw) as f64);
+            let sy = ((source_height as f64) * y as f64 / 100.0)
+                .round()
+                .clamp(0.0, (source_height - ch) as f64);
+            (cw, ch, sx, sy)
+        }
         _ => {
             if let Some(ratio) = edit.target_ratio() {
                 let source_ratio = source_width as f64 / source_height as f64;
                 if source_ratio > ratio {
-                    (((source_height as f64) * ratio).round() as u32, source_height)
+                    (
+                        ((source_height as f64) * ratio).round() as u32,
+                        source_height,
+                        0.0,
+                        0.0,
+                    )
                 } else {
-                    (source_width, ((source_width as f64) / ratio).round() as u32)
+                    (
+                        source_width,
+                        ((source_width as f64) / ratio).round() as u32,
+                        0.0,
+                        0.0,
+                    )
                 }
             } else {
-                (source_width, source_height)
+                (source_width, source_height, 0.0, 0.0)
             }
         }
     };
@@ -204,9 +243,18 @@ async fn transform_from_url(url: &str, edit: Transform) -> Result<PreparedImage,
                 .draw_image_with_html_image_element(&image, 0.0, 0.0)
                 .map_err(|e| format!("{e:?}"))?;
         }
-        Transform::CropSquare | Transform::CropWide | Transform::CropClassic => {
-            let sx = (source_width as f64 - width as f64) / 2.0;
-            let sy = (source_height as f64 - height as f64) / 2.0;
+        Transform::CropSquare
+        | Transform::CropWide
+        | Transform::CropClassic
+        | Transform::CropRect { .. } => {
+            let (sx, sy) = if matches!(edit, Transform::CropRect { .. }) {
+                (crop_x, crop_y)
+            } else {
+                (
+                    (source_width as f64 - width as f64) / 2.0,
+                    (source_height as f64 - height as f64) / 2.0,
+                )
+            };
             context
                 .draw_image_with_html_image_element_and_sw_and_sh_and_dx_and_dy_and_dw_and_dh(
                     &image,

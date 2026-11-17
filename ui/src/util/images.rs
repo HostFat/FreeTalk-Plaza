@@ -140,6 +140,7 @@ pub async fn upload_image(
     owner_founding: VerifyingKey,
     owner_current: VerifyingKey,
     secret: Option<([u8; 32], u32)>,
+    progress: Option<&dyn Fn(usize, usize)>,
 ) -> Result<([u8; 32], [u8; 32], u32, Option<BlobCopy>), String> {
     let plaintext_sha = image_sha256(&bytes);
     let size = bytes.len() as u32;
@@ -188,6 +189,9 @@ pub async fn upload_image(
                         && image_sha256(&blob.data) == parameters.sha256
                     {
                         info!("Image blob {instance:?} already on the node");
+                        if let Some(progress) = progress {
+                            progress(1, 1);
+                        }
                         remember_upload(secret, plaintext_sha, instance, size);
                         return Ok((instance, plaintext_sha, size, None));
                     }
@@ -199,7 +203,13 @@ pub async fn upload_image(
             state: to_cbor_vec(&state),
             chunks: Vec::new(),
         };
+        if let Some(progress) = progress {
+            progress(0, 1);
+        }
         let instance = put_blob_with_retry(&parameters, &state).await?;
+        if let Some(progress) = progress {
+            progress(1, 1);
+        }
         info!("Uploaded image blob {instance:?} ({} bytes)", state.stored_len());
         remember_upload(secret, plaintext_sha, instance, size);
         return Ok((instance, plaintext_sha, size, Some(copy)));
@@ -259,6 +269,8 @@ pub async fn upload_image(
     // confirmation waits overlap. Order inside each batch is preserved.
     let mut chunks = Vec::with_capacity(pieces.len());
     let mut chunk_copies = Vec::with_capacity(pieces.len());
+    let total_steps = pieces.len() + 1;
+    let mut confirmed = 0usize;
     for batch in pieces.chunks(3) {
         let mut in_flight = Vec::new();
         for piece in batch {
@@ -295,6 +307,10 @@ pub async fn upload_image(
                 "Uploaded image blob {:?} ({} bytes)",
                 chunk.instance, chunk.bytes
             );
+            confirmed += 1;
+            if let Some(progress) = progress {
+                progress(confirmed, total_steps);
+            }
             chunks.push(chunk);
             chunk_copies.push(copy);
         }
@@ -317,6 +333,9 @@ pub async fn upload_image(
         chunks: chunk_copies,
     };
     let instance = put_blob_with_retry(&parameters, &state).await?;
+    if let Some(progress) = progress {
+        progress(total_steps, total_steps);
+    }
     info!("Uploaded image manifest {instance:?}");
     remember_upload(secret, plaintext_sha, instance, size);
     Ok((instance, plaintext_sha, size, Some(copy)))

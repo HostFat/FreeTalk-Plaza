@@ -143,7 +143,7 @@ async fn resume_one(board_key: VerifyingKey, board: BoardData, mut draft: Pendin
             warn!("Pending post: image {id} is still being prepared; keeping the draft");
             return;
         } else {
-            match crate::util::uploads::upload_pending(&board, &record).await {
+            match crate::util::uploads::upload_pending(&board, &record, None).await {
                 Ok((image, copy)) => {
                     crate::util::pending_uploads::set_image_for(&board_key, &id, &image);
                     if let Some(copy) = copy {

@@ -93,6 +93,10 @@ pub enum Route {
 
 pub static BOARDS: GlobalSignal<Boards> = Global::new(initial_boards);
 
+/// Confirmed upload steps per attachment, while an upload runs.
+pub static UPLOAD_PROGRESS: GlobalSignal<std::collections::HashMap<String, (usize, usize)>> =
+    Global::new(std::collections::HashMap::new);
+
 /// Set once the boards stored in the delegate have been read (or the delegate
 /// answered that it has none). Until then `BOARDS` is empty only because the
 /// load has not finished, and persisting it would overwrite real data.

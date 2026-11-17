@@ -8,6 +8,7 @@ use plaza_core::board_state::images::{ImageRef, ImageThumbnail};
 pub async fn upload_pending(
     board: &BoardData,
     record: &PendingUpload,
+    progress: Option<&dyn Fn(usize, usize)>,
 ) -> Result<(ImageRef, Option<crate::util::images::BlobCopy>), String> {
     let configuration = &board.board_state.configuration.configuration;
     let limit = if record.animated {
@@ -32,6 +33,7 @@ pub async fn upload_pending(
         board.owner_vk,
         board.current_owner_key(),
         record.secret,
+        progress,
     )
     .await?;
 
@@ -55,6 +57,7 @@ pub async fn upload_pending(
             board.owner_vk,
             board.current_owner_key(),
             record.secret,
+            None,
         )
         .await
         {
