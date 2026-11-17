@@ -1,9 +1,141 @@
 use dioxus::prelude::*;
 use dioxus_free_icons::icons::fa_solid_icons::{FaPen, FaXmark};
 use dioxus_free_icons::Icon;
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::spawn_local;
 
 use super::emoji_picker::EmojiPicker;
 use super::ReplyContext;
+use crate::components::app::{BOARDS, CURRENT_BOARD};
+use crate::util::image_processing::{prepare_image, DEFAULT_MAX_SIDE};
+use crate::util::images::upload_image;
+use plaza_core::board_state::images::ImageRef;
+
+#[derive(Clone, Debug, PartialEq)]
+enum AttachmentState {
+    Uploading,
+    Ready(ImageRef),
+    Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Attachment {
+    id: u64,
+    name: String,
+    alt: String,
+    nsfw: bool,
+    state: AttachmentState,
+}
+
+/// Start the upload of the chosen files, one attachment row each.
+fn add_attachment_files(
+    files: Vec<web_sys::File>,
+    mut attachments: Signal<Vec<Attachment>>,
+    mut next_id: Signal<u64>,
+) {
+    let Some(board_key) = CURRENT_BOARD.read().owner_key else {
+        return;
+    };
+    let Some(board_data) = BOARDS.read().map.get(&board_key).cloned() else {
+        return;
+    };
+    let founding = board_data.owner_vk;
+    let current_owner = board_data.current_owner_key();
+    let self_sk = board_data.self_sk.clone();
+    let max_images = board_data
+        .board_state
+        .configuration
+        .configuration
+        .images_per_message() as usize;
+
+    for file in files {
+        if attachments.read().len() >= max_images {
+            break;
+        }
+        let id = *next_id.peek();
+        next_id.set(id + 1);
+        let name = file.name();
+        attachments.with_mut(|list| {
+            list.push(Attachment {
+                id,
+                name: name.clone(),
+                alt: name.clone(),
+                nsfw: false,
+                state: AttachmentState::Uploading,
+            })
+        });
+        let self_sk = self_sk.clone();
+        let name = name.clone();
+        let mut attachments = attachments;
+        spawn_local(async move {
+            let result = match prepare_image(&file, Some(DEFAULT_MAX_SIDE)).await {
+                Ok(prepared) => {
+                    let mime = prepared.mime.clone();
+                    let (width, height) = (prepared.width, prepared.height);
+                    upload_image(
+                        prepared.bytes,
+                        mime.clone(),
+                        width,
+                        height,
+                        &self_sk,
+                        founding,
+                        current_owner,
+                    )
+                    .await
+                    .map(|(instance, sha256, bytes)| ImageRef {
+                        instance,
+                        sha256,
+                        mime,
+                        width,
+                        height,
+                        bytes,
+                        alt: name.clone(),
+                        display: 0,
+                        sealed: false,
+                        animated: false,
+                        nsfw: false,
+                    })
+                }
+                Err(error) => Err(error),
+            };
+            attachments.with_mut(|list| {
+                if let Some(slot) = list.iter_mut().find(|attachment| attachment.id == id) {
+                    slot.state = match result {
+                        Ok(image) => AttachmentState::Ready(image),
+                        Err(error) => AttachmentState::Failed(error),
+                    };
+                }
+            });
+        });
+    }
+}
+
+/// Open the hidden file picker. Must run from a user gesture.
+fn open_image_picker() {
+    if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+        if let Some(element) = document.get_element_by_id("image-file-input") {
+            if let Ok(input) = element.dyn_into::<web_sys::HtmlInputElement>() {
+                input.click();
+            }
+        }
+    }
+}
+
+/// Files chosen in the hidden input, clearing it so the same file can be
+/// picked again.
+fn selected_files() -> Option<Vec<web_sys::File>> {
+    let document = web_sys::window()?.document()?;
+    let input = document
+        .get_element_by_id("image-file-input")?
+        .dyn_into::<web_sys::HtmlInputElement>()
+        .ok()?;
+    let files = input.files()?;
+    let list: Vec<web_sys::File> = (0..files.length())
+        .filter_map(|index| files.get(index))
+        .collect();
+    input.set_value("");
+    Some(list)
+}
 
 /// Post input component with a compose button that opens a modal.
 /// The modal contains fields for title and content.
@@ -14,6 +146,7 @@ pub fn PostInput(
         String,
         Option<ReplyContext>,
         Option<crate::util::messaging::PollDraft>,
+        Vec<ImageRef>,
     )>,
     replying_to: Signal<Option<ReplyContext>>,
     on_request_edit_last: EventHandler<()>,
@@ -46,6 +179,9 @@ pub fn PostInput(
     let mut poll_multiselect = use_signal(|| false);
     let mut poll_days = use_signal(String::new);
     let mut poll_error = use_signal(|| None::<String>);
+    let mut attachments = use_signal(Vec::<Attachment>::new);
+    let mut next_attachment_id = use_signal(|| 1u64);
+    let mut auto_send = use_signal(|| false);
 
     // Keep the draft in BoardData and write the delegate store. The compose
     // path uses this directly; typing waits for a pause so every keystroke
@@ -166,6 +302,17 @@ pub fn PostInput(
     };
 
     let mut send_message = move || {
+        // An image still uploading: queue the send, the effect below fires it
+        // once every blob is ready. The message never points at a missing blob.
+        if attachments
+            .read()
+            .iter()
+            .any(|attachment| matches!(attachment.state, AttachmentState::Uploading))
+        {
+            auto_send.set(true);
+            return;
+        }
+
         let title = title_text.peek().to_string();
         let content = message_text.peek().to_string();
         let reply_ctx = replying_to.peek().clone();
@@ -207,6 +354,24 @@ pub fn PostInput(
         };
 
         if !content.is_empty() || poll.is_some() {
+            let images: Vec<ImageRef> = attachments
+                .read()
+                .iter()
+                .filter_map(|attachment| match &attachment.state {
+                    AttachmentState::Ready(image) => {
+                        let mut image = image.clone();
+                        image.alt = if attachment.alt.trim().is_empty() {
+                            attachment.name.clone()
+                        } else {
+                            attachment.alt.trim().to_string()
+                        };
+                        image.nsfw = attachment.nsfw;
+                        Some(image)
+                    }
+                    _ => None,
+                })
+                .collect();
+
             title_text.set(String::new());
             message_text.set(String::new());
             replying_to.set(None);
@@ -216,11 +381,27 @@ pub fn PostInput(
             poll_days.set(String::new());
             poll_multiselect.set(false);
             poll_error.set(None);
+            attachments.set(Vec::new());
             crate::util::drafts::clear();
             crate::util::drafts::persist();
-            handle_send_message.call((title, content, reply_ctx, poll));
+            handle_send_message.call((title, content, reply_ctx, poll, images));
         }
     };
+
+    // Publish automatically when the queued send finds every upload complete.
+    let send_after_upload = send_message;
+    use_effect(move || {
+        let wanted = auto_send();
+        let uploading = attachments
+            .read()
+            .iter()
+            .any(|attachment| matches!(attachment.state, AttachmentState::Uploading));
+        if wanted && !uploading && show_modal() {
+            auto_send.set(false);
+            let mut send = send_after_upload;
+            send();
+        }
+    });
 
     // Handle emoji selection - insert at end of message
     let handle_emoji_select = move |emoji: String| {
@@ -602,6 +783,103 @@ pub fn PostInput(
                                 class: "prose prose-base dark:prose-invert max-w-none p-4 bg-surface border border-border rounded-lg",
                                 dangerous_inner_html: "{crate::util::markdown::text_to_html(&message_text.read())}",
                             }
+                        }
+                    }
+
+                    // Images: uploaded to their own contracts before sending.
+                    div { class: "px-6 py-3 border-t border-border space-y-2",
+                        div { class: "flex items-center justify-between",
+                            span { class: "text-sm font-medium text-text", "Images" }
+                            button {
+                                r#type: "button",
+                                class: "px-3 py-1.5 bg-surface hover:bg-surface-hover border border-border rounded-lg text-xs text-text transition-colors",
+                                onclick: move |_| open_image_picker(),
+                                "Attach image"
+                            }
+                        }
+                        input {
+                            id: "image-file-input",
+                            r#type: "file",
+                            accept: "image/png,image/jpeg,image/webp,image/gif",
+                            multiple: true,
+                            class: "hidden",
+                            onchange: move |_| {
+                                if let Some(files) = selected_files() {
+                                    add_attachment_files(files, attachments, next_attachment_id);
+                                }
+                            },
+                        }
+                        if attachments.read().is_empty() {
+                            p { class: "text-xs text-text-muted",
+                                "Up to 4 images. They are converted to WebP and their metadata is removed."
+                            }
+                        }
+                        for attachment in attachments.read().clone() {
+                            div { key: "{attachment.id}", class: "bg-surface rounded-lg p-2 space-y-1 text-xs",
+                                div { class: "flex items-center justify-between gap-2",
+                                    span { class: "text-text truncate", "{attachment.name}" }
+                                    {match &attachment.state {
+                                        AttachmentState::Uploading => rsx! {
+                                            span { class: "text-text-muted flex items-center gap-2",
+                                                div { class: "animate-spin w-3 h-3 border-2 border-text-muted border-t-transparent rounded-full" }
+                                                "Uploading..."
+                                            }
+                                        },
+                                        AttachmentState::Ready(image) => rsx! {
+                                            span { class: "text-text-muted",
+                                                "{image.width}x{image.height} · {image.bytes / 1024} KB"
+                                            }
+                                        },
+                                        AttachmentState::Failed(error) => rsx! {
+                                            span { class: "text-red-400 truncate", "{error}" }
+                                        },
+                                    }}
+                                    button {
+                                        r#type: "button",
+                                        class: "text-text-muted hover:text-red-400",
+                                        title: "Remove",
+                                        onclick: move |_| {
+                                            let id = attachment.id;
+                                            attachments.with_mut(|list| list.retain(|entry| entry.id != id));
+                                        },
+                                        "✕"
+                                    }
+                                }
+                                input {
+                                    r#type: "text",
+                                    class: "w-full px-2 py-1 bg-background border border-border rounded text-text placeholder-text-muted",
+                                    placeholder: "Describe the image (required)",
+                                    value: "{attachment.alt}",
+                                    oninput: move |event| {
+                                        let id = attachment.id;
+                                        let value = event.value();
+                                        attachments.with_mut(|list| {
+                                            if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
+                                                entry.alt = value;
+                                            }
+                                        });
+                                    },
+                                }
+                                label { class: "flex items-center gap-2 text-text-muted",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: attachment.nsfw,
+                                        onchange: move |event| {
+                                            let id = attachment.id;
+                                            let checked = event.checked();
+                                            attachments.with_mut(|list| {
+                                                if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
+                                                    entry.nsfw = checked;
+                                                }
+                                            });
+                                        },
+                                    }
+                                    "NSFW (labelled and hidden behind a click)"
+                                }
+                            }
+                        }
+                        if auto_send() {
+                            p { class: "text-xs text-accent", "Uploading, the post will be published automatically." }
                         }
                     }
 

@@ -97,11 +97,12 @@ pub fn TopBar() -> Element {
     });
 
     // Message sending handler
-    let handle_send_message = move |(title_text, message_text, reply_ctx, poll): (
+    let handle_send_message = move |(title_text, message_text, reply_ctx, poll, images): (
         String,
         String,
         Option<ReplyContext>,
         Option<PollDraft>,
+        Vec<plaza_core::board_state::images::ImageRef>,
     )| {
         if message_text.is_empty() {
             return;
@@ -173,6 +174,7 @@ pub fn TopBar() -> Element {
                     title_text,
                     message_text,
                     reply_ctx,
+                    images,
                     poll,
                 )
                 .await;
@@ -491,6 +493,7 @@ pub fn TopBar() -> Element {
                                         String,
                                         Option<ReplyContext>,
                                         Option<PollDraft>,
+                                        Vec<plaza_core::board_state::images::ImageRef>,
                                     )| { handle_send_message(msg) },
                                     replying_to: replying_to,
                                     on_request_edit_last: move |_| {},

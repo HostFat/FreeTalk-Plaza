@@ -740,6 +740,7 @@ pub async fn split_reply(
         ctx.self_sk.clone(),
         ctx.board_state.clone(),
         content,
+        Vec::new(),
         Some(category),
         Some(category),
     )

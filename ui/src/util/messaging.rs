@@ -67,6 +67,7 @@ pub async fn send_message(
     title_text: String,
     message_text: String,
     reply_ctx: Option<ReplyContext>,
+    images: Vec<plaza_core::board_state::images::ImageRef>,
     poll: Option<PollDraft>,
 ) {
     if message_text.is_empty() && poll.is_none() {
@@ -203,6 +204,7 @@ pub async fn send_message(
         self_sk,
         board_state_clone,
         content,
+        images,
         reply_target,
         category_id,
     )
@@ -281,6 +283,7 @@ pub(crate) async fn publish_message(
     self_sk: SigningKey,
     board_state_clone: ChatBoardStateV1,
     content: BoardMessageBody,
+    images: Vec<plaza_core::board_state::images::ImageRef>,
     reply_target: Option<MessageId>,
     category_id: Option<MessageId>,
 ) -> Option<MessageId> {
@@ -291,7 +294,7 @@ pub(crate) async fn publish_message(
         }
     }
     let message = MessageV1 {
-        images: Vec::new(),
+        images,
         board_owner: MemberId::from(current_board),
         author: MemberId::from(&self_sk.verifying_key()),
         content,
@@ -431,6 +434,7 @@ pub async fn send_poll_vote(
         self_sk,
         board_state_clone,
         content,
+        Vec::new(),
         None,
         category_id,
     )

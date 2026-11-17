@@ -7,11 +7,13 @@ use crate::util::member_id_to_color;
 use crate::util::messaging::{send_message, ReplyContext};
 use crate::util::{format_utc_as_full_datetime, format_utc_as_local_time};
 pub mod emoji_picker;
+mod image_attachment;
 mod message_actions;
 pub mod message_input;
 mod not_member_notification;
 pub mod poll_view;
 use self::emoji_picker::FREQUENT_EMOJIS;
+use self::image_attachment::ImageAttachment;
 use self::not_member_notification::NotMemberNotification;
 use crate::board_data::SendMessageError;
 use crate::components::conversation::message_input::PostInput;
@@ -127,6 +129,8 @@ pub struct MessageData {
     pub poll: Option<PollData>,
     /// Destination topic when this topic was merged
     pub merged_into: Option<MessageId>,
+    /// Images attached to this post.
+    pub images: Vec<plaza_core::board_state::images::ImageRef>,
 }
 
 /// A message with its nested replies
@@ -400,6 +404,7 @@ pub fn get_all_messages(
             is_announced: state.moderation.is_announced(&message_id),
             poll,
             merged_into,
+            images: message.message.images.clone(),
         });
     }
 
@@ -962,11 +967,12 @@ pub fn Conversation(
     // Message sending handler
     let handle_send_message = {
         let current_board_data = current_board_data.clone();
-        move |(title_text, message_text, reply_ctx, poll): (
+        move |(title_text, message_text, reply_ctx, poll, images): (
             String,
             String,
             Option<ReplyContext>,
             Option<crate::util::messaging::PollDraft>,
+            Vec<plaza_core::board_state::images::ImageRef>,
         )| {
             if let (Some(current_board), Some(current_board_data)) =
                 (CURRENT_BOARD.read().owner_key, current_board_data.clone())
@@ -1001,6 +1007,7 @@ pub fn Conversation(
                         title_text,
                         message_text,
                         reply_ctx,
+                        images,
                         poll,
                     )
                     .await;
@@ -1109,6 +1116,7 @@ pub fn Conversation(
                                                 String,
                                                 Option<ReplyContext>,
                                                 Option<crate::util::messaging::PollDraft>,
+                                                Vec<plaza_core::board_state::images::ImageRef>,
                                             )| {
                                                 let handle = handle_send_message.clone();
                                                 handle(msg)
@@ -1886,6 +1894,7 @@ pub fn MessageCard(
     let content_text = msg.content_text.clone();
     let edited = msg.edited;
     let reactions = msg.reactions.clone();
+    let images = msg.images.clone();
 
     // A light preview for the compact post list, where the body is hidden.
     let preview_tooltip = if hide_content && !content_text.trim().is_empty() {
@@ -1976,6 +1985,14 @@ pub fn MessageCard(
                                 edited: edited,
                                 size: size,
                                 expanded: false,
+                            }
+                        }
+
+                        if !images.is_empty() {
+                            div { class: "mt-1",
+                                for image in images.iter() {
+                                    ImageAttachment { image: image.clone() }
+                                }
                             }
                         }
 
@@ -2131,6 +2148,17 @@ pub fn MessageCard(
                                                 poll_id: msg_id,
                                                 self_member_id: self_member_id,
                                             }
+                                        }
+                                        if !images.is_empty() {
+                                            div { class: "mt-1",
+                                                for image in images.iter() {
+                                                    ImageAttachment { image: image.clone() }
+                                                }
+                                            }
+                                        }
+                                    } else if !images.is_empty() {
+                                        span { class: "ml-2 text-xs text-text-muted",
+                                            "📷 {images.len()}"
                                         }
                                     }
                                 }

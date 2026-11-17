@@ -203,6 +203,7 @@ mod tests {
             is_announced: false,
             poll: None,
             merged_into: None,
+            images: Vec::new(),
         }
     }
 
