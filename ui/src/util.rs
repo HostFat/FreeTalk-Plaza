@@ -4,6 +4,7 @@ pub mod access;
 pub mod avatar;
 pub mod drafts;
 pub mod ecies;
+pub mod image_meta;
 pub mod image_processing;
 pub mod images;
 pub mod markdown;

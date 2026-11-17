@@ -1055,6 +1055,7 @@ pub fn Conversation(
                                                             max_title_size: max_title_size,
                                                             max_message_size: max_message_size,
                                                             can_react: can_react,
+                                                            auto_load_images: *crate::util::images::AUTO_LOAD_IMAGES.read(),
                                                             on_react: move |(msg_id, emoji)| {
                                                                 handle_toggle_reaction(msg_id, emoji);
                                                             },
@@ -1862,6 +1863,9 @@ pub fn MessageCard(
     /// The viewer may react; readers of a demo board may not
     #[props(default = true)]
     can_react: bool,
+    /// Open attached images without a click (topic or profile preference).
+    #[props(default)]
+    auto_load_images: bool,
 ) -> Element {
     let msg = message.clone();
     let is_self = msg.is_self;
@@ -1991,7 +1995,7 @@ pub fn MessageCard(
                         if !images.is_empty() {
                             div { class: "mt-1",
                                 for image in images.iter() {
-                                    ImageAttachment { image: image.clone() }
+                                    ImageAttachment { image: image.clone(), auto_load: auto_load_images }
                                 }
                             }
                         }
@@ -2044,6 +2048,7 @@ pub fn MessageCard(
                                             depth: depth + 1,
                                             max_title_size: max_title_size,
                                             max_message_size: max_message_size,
+                                            auto_load_images: auto_load_images,
                                             on_react: on_react.clone(),
                                             on_request_delete: on_request_delete.clone(),
                                             on_edit: on_edit.clone(),
@@ -2152,7 +2157,7 @@ pub fn MessageCard(
                                         if !images.is_empty() {
                                             div { class: "mt-1",
                                                 for image in images.iter() {
-                                                    ImageAttachment { image: image.clone() }
+                                                    ImageAttachment { image: image.clone(), auto_load: auto_load_images }
                                                 }
                                             }
                                         }

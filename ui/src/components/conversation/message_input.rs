@@ -7,7 +7,7 @@ use wasm_bindgen_futures::spawn_local;
 use super::emoji_picker::EmojiPicker;
 use super::ReplyContext;
 use crate::components::app::{BOARDS, CURRENT_BOARD};
-use crate::util::image_processing::{prepare_image, DEFAULT_MAX_SIDE};
+use crate::util::image_processing::{prepare_image, ImageMode};
 use crate::util::images::upload_image;
 use plaza_core::board_state::images::ImageRef;
 
@@ -32,6 +32,7 @@ fn add_attachment_files(
     files: Vec<web_sys::File>,
     mut attachments: Signal<Vec<Attachment>>,
     mut next_id: Signal<u64>,
+    mode: ImageMode,
 ) {
     let Some(board_key) = CURRENT_BOARD.read().owner_key else {
         return;
@@ -47,6 +48,16 @@ fn add_attachment_files(
         .configuration
         .configuration
         .images_per_message() as usize;
+    let max_static_bytes = board_data
+        .board_state
+        .configuration
+        .configuration
+        .image_byte_limit();
+    let max_animated_bytes = board_data
+        .board_state
+        .configuration
+        .configuration
+        .animated_image_byte_limit();
 
     for file in files {
         if attachments.read().len() >= max_images {
@@ -68,33 +79,47 @@ fn add_attachment_files(
         let name = name.clone();
         let mut attachments = attachments;
         spawn_local(async move {
-            let result = match prepare_image(&file, Some(DEFAULT_MAX_SIDE)).await {
+            let result = match prepare_image(&file, mode).await {
                 Ok(prepared) => {
-                    let mime = prepared.mime.clone();
-                    let (width, height) = (prepared.width, prepared.height);
-                    upload_image(
-                        prepared.bytes,
-                        mime.clone(),
-                        width,
-                        height,
-                        &self_sk,
-                        founding,
-                        current_owner,
-                    )
-                    .await
-                    .map(|(instance, sha256, bytes)| ImageRef {
-                        instance,
-                        sha256,
-                        mime,
-                        width,
-                        height,
-                        bytes,
-                        alt: name.clone(),
-                        display: 0,
-                        sealed: false,
-                        animated: false,
-                        nsfw: false,
-                    })
+                    let limit = if prepared.animated {
+                        max_animated_bytes
+                    } else {
+                        max_static_bytes
+                    };
+                    if prepared.bytes.len() as u32 > limit {
+                        Err(format!(
+                            "Image is {} KB, the limit is {} KB",
+                            prepared.bytes.len() / 1024,
+                            limit / 1024
+                        ))
+                    } else {
+                        let mime = prepared.mime.clone();
+                        let (width, height) = (prepared.width, prepared.height);
+                        let animated = prepared.animated;
+                        upload_image(
+                            prepared.bytes,
+                            mime.clone(),
+                            width,
+                            height,
+                            &self_sk,
+                            founding,
+                            current_owner,
+                        )
+                        .await
+                        .map(|(instance, sha256, bytes)| ImageRef {
+                            instance,
+                            sha256,
+                            mime,
+                            width,
+                            height,
+                            bytes,
+                            alt: name.clone(),
+                            display: 0,
+                            sealed: false,
+                            animated,
+                            nsfw: false,
+                        })
+                    }
                 }
                 Err(error) => Err(error),
             };
@@ -182,6 +207,7 @@ pub fn PostInput(
     let mut attachments = use_signal(Vec::<Attachment>::new);
     let mut next_attachment_id = use_signal(|| 1u64);
     let mut auto_send = use_signal(|| false);
+    let mut image_mode = use_signal(|| ImageMode::StripMetadata);
 
     // Keep the draft in BoardData and write the delegate store. The compose
     // path uses this directly; typing waits for a pause so every keystroke
@@ -805,13 +831,46 @@ pub fn PostInput(
                             class: "hidden",
                             onchange: move |_| {
                                 if let Some(files) = selected_files() {
-                                    add_attachment_files(files, attachments, next_attachment_id);
+                                    add_attachment_files(
+                                        files,
+                                        attachments,
+                                        next_attachment_id,
+                                        *image_mode.peek(),
+                                    );
                                 }
                             },
                         }
+                        div { class: "flex items-center gap-2",
+                            label { class: "text-xs text-text-muted", "Format" }
+                            select {
+                                class: "px-2 py-1 bg-background border border-border rounded text-xs text-text",
+                                value: "{image_mode.read().label()}",
+                                onchange: move |event| {
+                                    let value = event.value();
+                                    let chosen = [
+                                        ImageMode::StripMetadata,
+                                        ImageMode::Webp2048,
+                                        ImageMode::Webp1280,
+                                        ImageMode::KeepOriginal,
+                                    ]
+                                    .into_iter()
+                                    .find(|candidate| candidate.label() == value)
+                                    .unwrap_or(ImageMode::StripMetadata);
+                                    image_mode.set(chosen);
+                                },
+                                for candidate in [
+                                    ImageMode::StripMetadata,
+                                    ImageMode::Webp2048,
+                                    ImageMode::Webp1280,
+                                    ImageMode::KeepOriginal,
+                                ] {
+                                    option { value: "{candidate.label()}", "{candidate.label()}" }
+                                }
+                            }
+                        }
                         if attachments.read().is_empty() {
                             p { class: "text-xs text-text-muted",
-                                "Up to 4 images. They are converted to WebP and their metadata is removed."
+                                "Up to 4 images. The default removes EXIF and the other metadata without re-encoding; GIFs keep their animation."
                             }
                         }
                         for attachment in attachments.read().clone() {

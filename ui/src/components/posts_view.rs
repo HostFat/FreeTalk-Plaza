@@ -1709,7 +1709,15 @@ pub fn SinglePostView(post_id: String) -> Element {
     let mut show_purge = use_signal(|| false);
     let hide_id = post_id.clone();
     let purge_post_id = post_id.clone();
-    let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
+    let post_id_for_auto = post_id.clone();
+    let post_id_for_toggle = post_id.clone();
+    let post_id_for_effect = post_id.clone();
+
+    // Resolve the topic preference once and let the attachments react to it.
+    use_effect(move || {
+        let enabled = crate::util::images::auto_load_for(&post_id_for_effect);
+        crate::util::images::AUTO_LOAD_CURRENT.with_mut(|value| *value = enabled);
+    });    let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
 
     // Get current board_id for navigation
     let current_board_id = use_memo(move || {
@@ -1921,6 +1929,22 @@ pub fn SinglePostView(post_id: String) -> Element {
                     },
                     "{back_label}"
                 }
+                label {
+                    class: "flex items-center gap-2 text-xs text-text-muted",
+                    title: "Open every image in this post without asking",
+                    input {
+                        r#type: "checkbox",
+                        checked: crate::util::images::auto_load_for(&post_id_for_auto),
+                        onchange: move |event| {
+                            let enabled = event.checked();
+                            let id = post_id_for_toggle.clone();
+                            crate::util::images::AUTO_LOAD_TOPICS.with_mut(|topics| {
+                                topics.insert(id, enabled);
+                            });
+                        },
+                    }
+                    "Load images"
+                }
                 if *can_hide.read() {
                     button {
                         r#type: "button",
@@ -2014,6 +2038,9 @@ pub fn SinglePostView(post_id: String) -> Element {
                                                 .unwrap_or(false);
                                             may_write
                                         },
+                                        auto_load_images: crate::util::images::auto_load_for(
+                                            &post_id_for_auto,
+                                        ),
                                     }
                                 }
                             }

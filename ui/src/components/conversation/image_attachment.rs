@@ -27,7 +27,7 @@ fn object_url(bytes: &[u8], mime: &str) -> Option<String> {
 }
 
 #[component]
-pub fn ImageAttachment(image: ImageRef) -> Element {
+pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> Element {
     let mut opened = use_signal(|| false);
     let mut url = use_signal(|| None::<String>);
     let instance = image.instance;
@@ -54,6 +54,15 @@ pub fn ImageAttachment(image: ImageRef) -> Element {
         Some(ImageStatus::Ready(bytes)) if opened() => Some(bytes.clone()),
         _ => None,
     };
+
+    use_effect(move || {
+        // NSFW images always need a click, even when auto-load is on.
+        let auto = *crate::util::images::AUTO_LOAD_CURRENT.read();
+        if auto && !nsfw && !opened() {
+            opened.set(true);
+            request_image(instance, expected);
+        }
+    });
 
     use_effect(move || {
         if let Some(bytes) = ready_bytes_for(&instance) {

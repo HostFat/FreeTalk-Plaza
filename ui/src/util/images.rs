@@ -36,6 +36,25 @@ pub struct ImageFetch {
 
 pub static IMAGES: GlobalSignal<HashMap<[u8; 32], ImageFetch>> = Global::new(HashMap::new);
 
+/// Profile preference: load images without asking in every discussion.
+pub static AUTO_LOAD_IMAGES: GlobalSignal<bool> = Global::new(|| false);
+
+/// Per-topic choice, which overrides the profile preference in both directions.
+pub static AUTO_LOAD_TOPICS: GlobalSignal<HashMap<String, bool>> = Global::new(HashMap::new);
+
+/// Resolved auto-load value for the topic currently on screen. Views set it;
+/// the attachments read it so a toggle reaches images already rendered.
+pub static AUTO_LOAD_CURRENT: GlobalSignal<bool> = Global::new(|| false);
+
+/// Whether the images of `topic` should open without a click.
+pub fn auto_load_for(topic: &str) -> bool {
+    AUTO_LOAD_TOPICS
+        .read()
+        .get(topic)
+        .copied()
+        .unwrap_or_else(|| *AUTO_LOAD_IMAGES.read())
+}
+
 pub fn image_sha256(bytes: &[u8]) -> [u8; 32] {
     plaza_blob_core::sha256(bytes)
 }
