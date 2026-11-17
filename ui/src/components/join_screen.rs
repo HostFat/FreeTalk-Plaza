@@ -11,18 +11,21 @@ pub fn JoinScreen(token: String) -> Element {
     let mut nickname = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut joining = use_signal(|| false);
+    let mut joined = use_signal(|| false);
     let mut timed_out = use_signal(|| false);
 
     let board_key = decoded_value.as_ref().ok().map(|link| link.board);
 
-    // Once the board state arrives, go to it.
+    // Once the invite is accepted and the board state is available, go to it.
+    // A board already present as a spectator must not skip the nickname step:
+    // the membership only exists after Join.
     let board_ready = use_memo(move || {
         board_key
             .map(|key| BOARDS.read().map.contains_key(&key))
             .unwrap_or(false)
     });
     use_effect(move || {
-        if *board_ready.read() {
+        if *joined.read() && *board_ready.read() {
             if let Some(key) = board_key {
                 let board_id = bs58::encode(key.as_bytes()).into_string();
                 navigator().push(Route::Posts { board_id });
@@ -71,6 +74,7 @@ pub fn JoinScreen(token: String) -> Element {
                                 match crate::util::access::join_with_token(&link, nickname.read().clone()) {
                                     Ok(()) => {
                                         joining.set(true);
+                                        joined.set(true);
                                         timed_out.set(false);
                                         error.set(None);
                                         if let Some(key) = board_key {

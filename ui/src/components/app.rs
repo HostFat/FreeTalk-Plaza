@@ -268,8 +268,12 @@ pub fn App() -> Element {
             // Check if URL already shows this board to avoid race conditions with regular navigation
             let url_matches = if let Some(window) = window() {
                 if let Ok(hash) = window.location().hash() {
-                    // URL hash is like "#/board/{board_id}" or "#/board/{board_id}/..."
-                    hash.contains(&format!("/board/{}", board_id))
+                    // Invite, join and spectator routes own the screen: a board
+                    // already loaded in the background must not replace them.
+                    let guest_route = hash.starts_with("#/join/")
+                        || hash.starts_with("#/view/")
+                        || hash.starts_with("#/invite/");
+                    guest_route || hash.contains(&format!("/board/{}", board_id))
                 } else {
                     false
                 }
