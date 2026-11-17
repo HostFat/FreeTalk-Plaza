@@ -2,6 +2,7 @@
 
 pub mod access;
 pub mod avatar;
+pub mod crop_math;
 pub mod drafts;
 pub mod ecies;
 pub mod image_meta;
@@ -19,6 +20,7 @@ pub mod owned_images;
 pub mod pending_uploads;
 pub mod pending_send;
 pub mod pq;
+pub mod retry;
 pub mod spectator;
 pub mod subscriptions;
 pub mod trash_actions;

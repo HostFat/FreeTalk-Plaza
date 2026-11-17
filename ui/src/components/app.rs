@@ -97,6 +97,9 @@ pub static BOARDS: GlobalSignal<Boards> = Global::new(initial_boards);
 pub static UPLOAD_PROGRESS: GlobalSignal<std::collections::HashMap<String, (usize, usize)>> =
     Global::new(std::collections::HashMap::new);
 
+/// True when the durable upload queue refused a file because of its cap.
+pub static PENDING_QUEUE_FULL: GlobalSignal<bool> = Global::new(|| false);
+
 /// Set once the boards stored in the delegate have been read (or the delegate
 /// answered that it has none). Until then `BOARDS` is empty only because the
 /// load has not finished, and persisting it would overwrite real data.
@@ -256,6 +259,14 @@ pub fn App() -> Element {
         if *BOARDS_LOADED.read() {
             crate::util::pending_send::resume_all();
             crate::util::owned_images::renew_if_due();
+            // Once the board state has settled, retire own uploads that no
+            // board references anymore.
+            crate::util::safe_spawn_local(async {
+                crate::util::sleep(std::time::Duration::from_secs(60)).await;
+                if CURRENT_BOARD.read().owner_key.is_some() {
+                    crate::util::owned_images::retire_unused();
+                }
+            });
         }
     });
 

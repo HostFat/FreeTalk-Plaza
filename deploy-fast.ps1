@@ -179,16 +179,16 @@ $buildProfile = if ($Production) { "release" } else { "release-fast" }
 # source. They use the same target dir as the UI build, which shares the
 # compiled dependencies.
 if (-not $SkipContractBuild) {
-    $contractDirs = @(
-        (Join-Path $repoRoot 'common\src'),
-        (Join-Path $repoRoot 'plaza-contract\src'),
-        (Join-Path $repoRoot 'plaza-delegate\src'),
-        (Join-Path $repoRoot 'plaza-blob-core\src'),
-        (Join-Path $repoRoot 'plaza-blob\src')
-    ) | Where-Object { Test-Path $_ }
-    $newestSource = Get-ChildItem $contractDirs -Recurse -Filter *.rs |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1
+    # Each artifact watches only the sources that change its own compiled
+    # bytes. The delegate store is keyed by its WASM, so rebuilding it for an
+    # unrelated `common` change would throw away the board list and the stored
+    # signing keys. Watch only the delegate crate and the request/response
+    # types it shares.
+    $artifactSources = @{
+        'plaza_contract.wasm' = @('common\src', 'plaza-contract\src')
+        'plaza_delegate.wasm' = @('plaza-delegate\src', 'common\src\chat_delegate.rs')
+        'plaza_blob.wasm' = @('plaza-blob-core\src', 'plaza-blob\src')
+    }
     $wasmProfile = if ($Production) { 'release' } else { 'release-fast' }
     $wasmArtifacts = @(
         @{ File = 'plaza_contract.wasm'; Dest = 'plaza_contract.wasm'; Package = 'plaza-contract' },
@@ -197,6 +197,12 @@ if (-not $SkipContractBuild) {
     )
     foreach ($artifact in $wasmArtifacts) {
         $wasmPath = Join-Path $repoRoot "ui\public\contracts\$($artifact.Dest)"
+        $sources = $artifactSources[$artifact.File] |
+            ForEach-Object { Join-Path $repoRoot $_ } |
+            Where-Object { Test-Path $_ }
+        $newestSource = Get-ChildItem $sources -Recurse -Filter *.rs |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
         if ((Test-Path $wasmPath) -and $newestSource -and
             (Get-Item $wasmPath).LastWriteTime -ge $newestSource.LastWriteTime) {
             Write-Host "Contract $($artifact.Dest) is up to date."

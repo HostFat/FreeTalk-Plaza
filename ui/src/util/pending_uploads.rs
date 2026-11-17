@@ -39,8 +39,10 @@ pub fn insert(record: PendingUpload) {
             .sum();
         if total + record.bytes.len() <= MAX_PENDING_BYTES {
             board.pending_uploads.push(record);
+            crate::components::app::PENDING_QUEUE_FULL.with_mut(|full| *full = false);
         } else {
             warn!("Pending image kept in memory only: the delegate queue is full");
+            crate::components::app::PENDING_QUEUE_FULL.with_mut(|full| *full = true);
         }
     });
 }

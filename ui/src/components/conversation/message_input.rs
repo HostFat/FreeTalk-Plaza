@@ -415,6 +415,10 @@ pub fn PostInput(
     let mut crop_y = use_signal(|| 0.0f64);
     let mut crop_w = use_signal(|| 100.0f64);
     let mut crop_h = use_signal(|| 100.0f64);
+    let mut crop_drag_start = use_signal(|| None::<(f64, f64)>);
+    let mut crop_ratio = use_signal(|| 0.0f64);
+    let mut crop_render = use_signal(|| (0.0f64, 0.0f64));
+    let mut crop_natural = use_signal(|| (0u32, 0u32));
 
     // Image permission: owner, admins and roles with can_attach_images may
     // attach, and the section rule always wins over the role.
@@ -1196,6 +1200,11 @@ pub fn PostInput(
                         div { class: "mt-2 border border-dashed border-border rounded-lg px-3 py-2 text-center text-xs text-text-muted",
                             "Drag images here, or paste them with Ctrl+V."
                         }
+                        if *crate::components::app::PENDING_QUEUE_FULL.read() {
+                            p { class: "mt-1 text-xs text-red-400",
+                                "The durable queue is full (24 MiB): this image will not survive a reload."
+                            }
+                        }
                         {
                             let owned = crate::util::owned_images::list();
                             if !owned.is_empty() {
@@ -1487,6 +1496,13 @@ pub fn PostInput(
                                                                 crop_y.set(0.0);
                                                                 crop_w.set(100.0);
                                                                 crop_h.set(100.0);
+                                                                crop_ratio.set(0.0);
+                                                                crop_drag_start.set(None);
+                                                                crop_render.set((0.0, 0.0));
+                                                                crop_natural.set((
+                                                                    record.width,
+                                                                    record.height,
+                                                                ));
                                                             }
                                                         }
                                                     }
@@ -1631,9 +1647,59 @@ pub fn PostInput(
                                     div { class: "relative inline-block max-w-full",
                                         if let Some(url) = crop_url.read().clone() {
                                             img {
+                                                id: "crop-preview-image",
                                                 src: "{url}",
-                                                class: "block max-h-[55vh] w-auto mx-auto select-none",
+                                                class: "block max-h-[55vh] w-auto mx-auto select-none cursor-crosshair",
                                                 alt: "",
+                                                onload: move |_| {
+                                                    if let Some(window) = web_sys::window() {
+                                                        if let Some(element) = window
+                                                            .document()
+                                                            .and_then(|document| document.get_element_by_id("crop-preview-image"))
+                                                        {
+                                                            let rect = element.get_bounding_client_rect();
+                                                            crop_render.set((rect.width(), rect.height()));
+                                                        }
+                                                    }
+                                                },
+                                                onmousedown: move |event: Event<dioxus::html::MouseData>| {
+                                                    let (render_w, render_h) = *crop_render.read();
+                                                    if render_w <= 0.0 || render_h <= 0.0 {
+                                                        return;
+                                                    }
+                                                    let coordinates = event.element_coordinates();
+                                                    let x = (coordinates.x / render_w * 100.0).clamp(0.0, 100.0);
+                                                    let y = (coordinates.y / render_h * 100.0).clamp(0.0, 100.0);
+                                                    crop_drag_start.set(Some((x, y)));
+                                                    crop_x.set(x);
+                                                    crop_y.set(y);
+                                                    crop_w.set(1.0);
+                                                    crop_h.set(1.0);
+                                                },
+                                                onmousemove: move |event: Event<dioxus::html::MouseData>| {
+                                                    let Some((start_x, start_y)) = *crop_drag_start.read() else {
+                                                        return;
+                                                    };
+                                                    let (render_w, render_h) = *crop_render.read();
+                                                    if render_w <= 0.0 || render_h <= 0.0 {
+                                                        return;
+                                                    }
+                                                    let coordinates = event.element_coordinates();
+                                                    let (left, top, width, height) =
+                                                        crate::util::crop_math::drag_rect(
+                                                            (start_x, start_y),
+                                                            (coordinates.x, coordinates.y),
+                                                            (render_w, render_h),
+                                                            *crop_ratio.read(),
+                                                            *crop_natural.read(),
+                                                        );
+                                                    crop_x.set(left);
+                                                    crop_y.set(top);
+                                                    crop_w.set(width);
+                                                    crop_h.set(height);
+                                                },
+                                                onmouseup: move |_| crop_drag_start.set(None),
+                                                onmouseleave: move |_| crop_drag_start.set(None),
                                             }
                                         }
                                         div {
@@ -1641,58 +1707,66 @@ pub fn PostInput(
                                             style: "left: {crop_x}%; top: {crop_y}%; width: {crop_w}%; height: {crop_h}%;",
                                         }
                                     }
-                                    div { class: "grid grid-cols-2 gap-3 mt-3",
-                                        label { class: "text-xs text-text-muted",
-                                            {format!("Left {:.0}%", *crop_x.read())}
-                                            input {
-                                                r#type: "range",
-                                                min: "0",
-                                                max: "90",
-                                                value: "{crop_x}",
-                                                class: "w-full accent-accent",
-                                                oninput: move |event| {
-                                                    crop_x.set(event.value().parse().unwrap_or(0.0));
-                                                },
-                                            }
+                                    p { class: "text-xs text-text-muted mt-2",
+                                        "Drag on the image to choose the area."
+                                    }
+                                    div { class: "flex flex-wrap gap-2 mt-2",
+                                        button {
+                                            r#type: "button",
+                                            class: if *crop_ratio.read() == 0.0 { "px-2 py-1 text-xs rounded bg-accent text-white" } else { "px-2 py-1 text-xs rounded border border-border text-text" },
+                                            onclick: move |_| crop_ratio.set(0.0),
+                                            "Free"
                                         }
-                                        label { class: "text-xs text-text-muted",
-                                            {format!("Top {:.0}%", *crop_y.read())}
-                                            input {
-                                                r#type: "range",
-                                                min: "0",
-                                                max: "90",
-                                                value: "{crop_y}",
-                                                class: "w-full accent-accent",
-                                                oninput: move |event| {
-                                                    crop_y.set(event.value().parse().unwrap_or(0.0));
-                                                },
-                                            }
+                                        button {
+                                            r#type: "button",
+                                            class: if (*crop_ratio.read() - 1.0).abs() < 0.01 { "px-2 py-1 text-xs rounded bg-accent text-white" } else { "px-2 py-1 text-xs rounded border border-border text-text" },
+                                            onclick: move |_| {
+                                                crop_ratio.set(1.0);
+                                                let (nw, nh) = *crop_natural.read();
+                                                if nw > 0 && nh > 0 {
+                                                    let width = *crop_w.read();
+                                                    let mut height = width * nw as f64 / nh as f64;
+                                                    if *crop_y.read() + height > 100.0 {
+                                                        height = 100.0 - *crop_y.read();
+                                                    }
+                                                    crop_h.set(height.max(1.0));
+                                                }
+                                            },
+                                            "1:1"
                                         }
-                                        label { class: "text-xs text-text-muted",
-                                            {format!("Width {:.0}%", *crop_w.read())}
-                                            input {
-                                                r#type: "range",
-                                                min: "5",
-                                                max: "100",
-                                                value: "{crop_w}",
-                                                class: "w-full accent-accent",
-                                                oninput: move |event| {
-                                                    crop_w.set(event.value().parse().unwrap_or(100.0));
-                                                },
-                                            }
+                                        button {
+                                            r#type: "button",
+                                            class: if (*crop_ratio.read() - 16.0 / 9.0).abs() < 0.01 { "px-2 py-1 text-xs rounded bg-accent text-white" } else { "px-2 py-1 text-xs rounded border border-border text-text" },
+                                            onclick: move |_| {
+                                                crop_ratio.set(16.0 / 9.0);
+                                                let (nw, nh) = *crop_natural.read();
+                                                if nw > 0 && nh > 0 {
+                                                    let width = *crop_w.read();
+                                                    let mut height = width * nw as f64 / (16.0 / 9.0 * nh as f64);
+                                                    if *crop_y.read() + height > 100.0 {
+                                                        height = 100.0 - *crop_y.read();
+                                                    }
+                                                    crop_h.set(height.max(1.0));
+                                                }
+                                            },
+                                            "16:9"
                                         }
-                                        label { class: "text-xs text-text-muted",
-                                            {format!("Height {:.0}%", *crop_h.read())}
-                                            input {
-                                                r#type: "range",
-                                                min: "5",
-                                                max: "100",
-                                                value: "{crop_h}",
-                                                class: "w-full accent-accent",
-                                                oninput: move |event| {
-                                                    crop_h.set(event.value().parse().unwrap_or(100.0));
-                                                },
-                                            }
+                                        button {
+                                            r#type: "button",
+                                            class: if (*crop_ratio.read() - 4.0 / 3.0).abs() < 0.01 { "px-2 py-1 text-xs rounded bg-accent text-white" } else { "px-2 py-1 text-xs rounded border border-border text-text" },
+                                            onclick: move |_| {
+                                                crop_ratio.set(4.0 / 3.0);
+                                                let (nw, nh) = *crop_natural.read();
+                                                if nw > 0 && nh > 0 {
+                                                    let width = *crop_w.read();
+                                                    let mut height = width * nw as f64 / (4.0 / 3.0 * nh as f64);
+                                                    if *crop_y.read() + height > 100.0 {
+                                                        height = 100.0 - *crop_y.read();
+                                                    }
+                                                    crop_h.set(height.max(1.0));
+                                                }
+                                            },
+                                            "4:3"
                                         }
                                     }
                                     div { class: "flex justify-end gap-2 mt-4",
