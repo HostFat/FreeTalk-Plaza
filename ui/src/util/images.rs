@@ -4,8 +4,9 @@
 //! then records only the instance id and the hash in the message. Downloads
 //! are on demand and verified against the hash in the message.
 
-use crate::components::app::WEB_API;
+use crate::components::app::{BOARDS, CURRENT_BOARD, WEB_API};
 use crate::constants::BLOB_CONTRACT_WASM;
+use crate::util::ecies::{decrypt_with_symmetric_key, encrypt_with_symmetric_key};
 use crate::util::to_cbor_vec;
 use dioxus::logger::tracing::{info, warn};
 use dioxus::prelude::*;
@@ -17,7 +18,9 @@ use freenet_stdlib::prelude::{
 };
 use futures::channel::oneshot;
 use futures::future::{select, Either};
-use plaza_blob_core::{BlobParametersV1, BlobStateV1};
+use plaza_blob_core::{
+    manifest_sha256, BlobParametersV1, BlobStateV1, ChunkRef, CHUNK_BYTES, MAX_CHUNKS,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -68,6 +71,10 @@ pub fn image_sha256(bytes: &[u8]) -> [u8; 32] {
 static PENDING_BLOB_PUTS: LazyLock<Mutex<HashMap<[u8; 32], oneshot::Sender<()>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Blob states a chunk assembler is waiting for.
+static PENDING_BLOB_GETS: LazyLock<Mutex<HashMap<[u8; 32], oneshot::Sender<Vec<u8>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Complete a waiting upload when the node acknowledges its PUT. Returns true
 /// when the contract belonged to an image upload.
 pub fn complete_blob_put(instance: &[u8; 32]) -> bool {
@@ -106,7 +113,9 @@ pub fn blob_contract_key(parameters: &BlobParametersV1) -> ContractKey {
 /// Upload one image and return its contract instance id and hash.
 ///
 /// The caller stores the returned id in the message; the bytes stay in their
-/// own contract.
+/// own contract. A payload larger than one chunk is split and the returned id
+/// points to its manifest. With `secret`, the payload is sealed with the board
+/// or section key before it leaves the client.
 pub async fn upload_image(
     bytes: Vec<u8>,
     mime: String,
@@ -115,13 +124,84 @@ pub async fn upload_image(
     uploader: &SigningKey,
     owner_founding: VerifyingKey,
     owner_current: VerifyingKey,
+    secret: Option<([u8; 32], u32)>,
 ) -> Result<([u8; 32], [u8; 32], u32), String> {
-    let sha256 = image_sha256(&bytes);
+    let plaintext_sha = image_sha256(&bytes);
     let size = bytes.len() as u32;
-    let parameters = blob_parameters(sha256, uploader, owner_founding, owner_current);
-    let state = BlobStateV1::live(&parameters, mime, width, height, bytes);
+    let (stored, nonce, secret_version) = match secret {
+        Some((key, version)) => {
+            let (ciphertext, nonce) = encrypt_with_symmetric_key(&key, &bytes, version);
+            (ciphertext, Some(nonce), Some(version))
+        }
+        None => (bytes, None, None),
+    };
+
+    if stored.len() <= CHUNK_BYTES {
+        let parameters = blob_parameters(
+            image_sha256(&stored),
+            uploader,
+            owner_founding,
+            owner_current,
+        );
+        let mut state = BlobStateV1::live(&parameters, mime, width, height, stored);
+        if let (Some(nonce), Some(version)) = (nonce, secret_version) {
+            state = state.sealed(nonce, version);
+        }
+        state.validate(&parameters)?;
+        let instance = put_blob(&parameters, &state).await?;
+        return Ok((instance, plaintext_sha, size));
+    }
+
+    let pieces: Vec<&[u8]> = stored.chunks(CHUNK_BYTES).collect();
+    if pieces.len() > MAX_CHUNKS {
+        return Err(format!(
+            "The image needs {} chunks, the limit is {}",
+            pieces.len(),
+            MAX_CHUNKS
+        ));
+    }
+    let mut chunks = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        let chunk_sha = image_sha256(piece);
+        let parameters =
+            blob_parameters(chunk_sha, uploader, owner_founding, owner_current);
+        let state = BlobStateV1::live(
+            &parameters,
+            mime.clone(),
+            width,
+            height,
+            piece.to_vec(),
+        );
+        state.validate(&parameters)?;
+        let instance = put_blob(&parameters, &state).await?;
+        chunks.push(ChunkRef {
+            instance,
+            sha256: chunk_sha,
+            bytes: piece.len() as u32,
+        });
+    }
+
+    let parameters = blob_parameters(
+        manifest_sha256(&chunks),
+        uploader,
+        owner_founding,
+        owner_current,
+    );
+    let mut state = BlobStateV1::manifest(&parameters, mime, width, height, chunks);
+    if let (Some(nonce), Some(version)) = (nonce, secret_version) {
+        state = state.sealed(nonce, version);
+    }
     state.validate(&parameters)?;
-    let key = blob_contract_key(&parameters);
+    let instance = put_blob(&parameters, &state).await?;
+    Ok((instance, plaintext_sha, size))
+}
+
+/// PUT one blob state and wait for the node to acknowledge it.
+async fn put_blob(
+    parameters: &BlobParametersV1,
+    state: &BlobStateV1,
+) -> Result<[u8; 32], String> {
+    let key = blob_contract_key(parameters);
     let instance: [u8; 32] = key
         .id()
         .as_bytes()
@@ -130,11 +210,11 @@ pub async fn upload_image(
 
     let contract = ContractContainer::from(ContractWasmAPIVersion::V1(WrappedContract::new(
         Arc::new(ContractCode::from(BLOB_CONTRACT_WASM)),
-        Parameters::from(to_cbor_vec(&parameters)),
+        Parameters::from(to_cbor_vec(parameters)),
     )));
     let request = ContractRequest::Put {
         contract,
-        state: WrappedState::new(to_cbor_vec(&state)),
+        state: WrappedState::new(to_cbor_vec(state)),
         related_contracts: Default::default(),
         subscribe: false,
         blocking_subscribe: false,
@@ -159,7 +239,9 @@ pub async fn upload_image(
         }
     }
 
-    let timeout = Box::pin(crate::util::sleep(Duration::from_secs(30)));
+    // A busy node can take a while to compile and store a new contract; the
+    // queue keeps the upload if this window passes.
+    let timeout = Box::pin(crate::util::sleep(Duration::from_secs(60)));
     match select(wait_for_node, timeout).await {
         Either::Left((Ok(()), _)) => {}
         Either::Left((Err(_), _)) => {
@@ -175,8 +257,11 @@ pub async fn upload_image(
         }
     }
 
-    info!("Uploaded image blob {instance:?} ({} bytes)", size);
-    Ok((instance, sha256, size))
+    info!(
+        "Uploaded image blob {instance:?} ({} bytes)",
+        state.stored_len()
+    );
+    Ok(instance)
 }
 
 fn forget_blob_put(instance: &[u8; 32]) {
@@ -223,18 +308,19 @@ pub fn request_image(instance: [u8; 32], expected_sha256: [u8; 32]) {
     });
 }
 
-fn fail_image(instance: [u8; 32], reason: String) {
-    warn!("Image {instance:?} unavailable: {reason}");
-    IMAGES.with_mut(|images| {
-        if let Some(entry) = images.get_mut(&instance) {
-            entry.status = ImageStatus::Failed(reason);
-        }
-    });
-}
-
 /// Called from the GET response handler for every response whose instance id
 /// is a pending image.
 pub fn handle_image_response(instance: [u8; 32], state: &[u8]) -> bool {
+    // A chunk or manifest fetched by the assembler: hand the raw state over.
+    if let Some(sender) = PENDING_BLOB_GETS
+        .lock()
+        .ok()
+        .and_then(|mut waiting| waiting.remove(&instance))
+    {
+        let _ = sender.send(state.to_vec());
+        return true;
+    }
+
     let expected = {
         let images = IMAGES.read();
         match images.get(&instance) {
@@ -243,21 +329,170 @@ pub fn handle_image_response(instance: [u8; 32], state: &[u8]) -> bool {
         }
     };
 
-    let status = match ciborium::de::from_reader::<BlobStateV1, &[u8]>(state) {
-        Ok(blob) if blob.retired => ImageStatus::Failed("retired".to_string()),
-        Ok(blob) if blob.data.is_empty() => ImageStatus::Failed("empty".to_string()),
-        Ok(blob) if plaza_blob_core::sha256(&blob.data) != expected => {
-            ImageStatus::Failed("hash mismatch".to_string())
+    let blob = match ciborium::de::from_reader::<BlobStateV1, &[u8]>(state) {
+        Ok(blob) => blob,
+        Err(error) => {
+            fail_image(instance, error.to_string());
+            return true;
         }
-        Ok(blob) => ImageStatus::Ready(blob.data),
-        Err(error) => ImageStatus::Failed(error.to_string()),
     };
+    if blob.retired {
+        fail_image(instance, "retired".to_string());
+        return true;
+    }
+    if blob.is_manifest() {
+        start_chunk_load(instance, expected, blob);
+        return true;
+    }
+    let status = payload_status(blob.data, blob.nonce, blob.secret_version, expected);
+    set_image_status(instance, status);
+    true
+}
+
+fn set_image_status(instance: [u8; 32], status: ImageStatus) {
     IMAGES.with_mut(|images| {
         if let Some(entry) = images.get_mut(&instance) {
             entry.status = status;
         }
     });
-    true
+}
+
+/// Decrypt when sealed, then verify the hash of the plaintext.
+fn payload_status(
+    mut data: Vec<u8>,
+    nonce: Option<[u8; 12]>,
+    version: Option<u32>,
+    expected: [u8; 32],
+) -> ImageStatus {
+    if let Some(nonce) = nonce {
+        match unlock(&data, &nonce, version) {
+            Ok(plain) => data = plain,
+            Err(error) => return ImageStatus::Failed(error),
+        }
+    }
+    if image_sha256(&data) != expected {
+        return ImageStatus::Failed("hash mismatch".to_string());
+    }
+    ImageStatus::Ready(data)
+}
+
+/// Try the board and section secrets the client holds; the hash check in the
+/// caller confirms the right one.
+fn unlock(data: &[u8], nonce: &[u8; 12], version: Option<u32>) -> Result<Vec<u8>, String> {
+    let candidates = candidate_secrets();
+    if let Some(version) = version {
+        for (key, _) in &candidates {
+            if let Ok(plain) = decrypt_with_symmetric_key(key, data, nonce, version) {
+                return Ok(plain);
+            }
+        }
+    }
+    for (key, candidate_version) in candidates {
+        if let Ok(plain) = decrypt_with_symmetric_key(&key, data, nonce, candidate_version) {
+            return Ok(plain);
+        }
+    }
+    Err("the key for this private image is not available".to_string())
+}
+
+fn candidate_secrets() -> Vec<([u8; 32], u32)> {
+    let Some(key) = CURRENT_BOARD.read().owner_key else {
+        return Vec::new();
+    };
+    BOARDS
+        .read()
+        .map
+        .get(&key)
+        .map(|board| board.image_secret_candidates())
+        .unwrap_or_default()
+}
+
+/// Fetch the manifest's chunks one by one, verify each piece, then reassemble,
+/// decrypt and verify the whole image.
+fn start_chunk_load(instance: [u8; 32], expected: [u8; 32], manifest: BlobStateV1) {
+    crate::util::safe_spawn_local(async move {
+        let mut all = Vec::new();
+        for chunk in &manifest.chunks {
+            let state = match fetch_blob_state(chunk.instance).await {
+                Ok(state) => state,
+                Err(error) => {
+                    fail_image(instance, error);
+                    return;
+                }
+            };
+            match ciborium::de::from_reader::<BlobStateV1, &[u8]>(&state[..]) {
+                Ok(blob) if blob.retired => {
+                    fail_image(instance, "a chunk was retired".to_string());
+                    return;
+                }
+                Ok(blob)
+                    if blob.data.len() as u32 != chunk.bytes
+                        || image_sha256(&blob.data) != chunk.sha256 =>
+                {
+                    fail_image(instance, "a chunk does not match its hash".to_string());
+                    return;
+                }
+                Ok(blob) => all.extend(blob.data),
+                Err(error) => {
+                    fail_image(instance, error.to_string());
+                    return;
+                }
+            }
+        }
+        let status = payload_status(all, manifest.nonce, manifest.secret_version, expected);
+        set_image_status(instance, status);
+    });
+}
+
+/// GET one blob state and wait for its response.
+async fn fetch_blob_state(instance: [u8; 32]) -> Result<Vec<u8>, String> {
+    let (sender, receiver) = oneshot::channel();
+    if let Ok(mut waiting) = PENDING_BLOB_GETS.lock() {
+        waiting.insert(instance, sender);
+    }
+
+    {
+        let request = ContractRequest::Get {
+            key: ContractInstanceId::new(instance),
+            return_contract_code: false,
+            subscribe: false,
+            blocking_subscribe: false,
+        };
+        let mut web_api = WEB_API.write();
+        let Some(web_api) = web_api.as_mut() else {
+            forget_get(instance);
+            return Err("Not connected to a Freenet node".to_string());
+        };
+        if let Err(error) = web_api.send(ClientRequest::ContractOp(request)).await {
+            forget_get(instance);
+            return Err(error.to_string());
+        }
+    }
+
+    let timeout = Box::pin(crate::util::sleep(Duration::from_secs(20)));
+    match select(receiver, timeout).await {
+        Either::Left((Ok(state), _)) => Ok(state),
+        Either::Left((Err(_), _)) => Err("The download was cancelled".to_string()),
+        Either::Right((_, _)) => {
+            forget_get(instance);
+            Err("The node did not answer the chunk request".to_string())
+        }
+    }
+}
+
+fn forget_get(instance: [u8; 32]) {
+    if let Ok(mut waiting) = PENDING_BLOB_GETS.lock() {
+        waiting.remove(&instance);
+    }
+}
+
+fn fail_image(instance: [u8; 32], reason: String) {
+    warn!("Image {instance:?} unavailable: {reason}");
+    IMAGES.with_mut(|images| {
+        if let Some(entry) = images.get_mut(&instance) {
+            entry.status = ImageStatus::Failed(reason);
+        }
+    });
 }
 
 #[cfg(test)]

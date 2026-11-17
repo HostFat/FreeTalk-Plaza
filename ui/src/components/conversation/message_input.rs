@@ -11,6 +11,7 @@ use crate::board_data::PendingUpload;
 use crate::util::image_processing::{prepare_image, ImageMode};
 use crate::util::images::upload_image;
 use plaza_core::board_state::images::ImageRef;
+use plaza_core::board_state::message::MessageId;
 
 #[derive(Clone, Debug, PartialEq)]
 enum AttachmentState {
@@ -61,6 +62,7 @@ async fn upload_record(
             &board_data.self_sk,
             board_data.owner_vk,
             board_data.current_owner_key(),
+            record.secret,
         )
         .await
         .map(|(instance, sha256, bytes)| ImageRef {
@@ -72,7 +74,7 @@ async fn upload_record(
             bytes,
             alt: record.alt.clone(),
             display: 0,
-            sealed: false,
+            sealed: record.secret.is_some(),
             animated: record.animated,
             nsfw: record.nsfw,
         })
@@ -92,12 +94,13 @@ async fn upload_record(
 }
 
 /// Start the upload of the chosen files, one attachment row each. The prepared
-/// bytes are written to IndexedDB first so a reload does not lose them.
+/// bytes are written to the delegate queue first so a reload keeps them.
 fn add_attachment_files(
     files: Vec<web_sys::File>,
     mut attachments: Signal<Vec<Attachment>>,
     mut next_id: Signal<u64>,
     mode: ImageMode,
+    reply_target: Option<MessageId>,
 ) {
     let Some(board_key) = CURRENT_BOARD.read().owner_key else {
         return;
@@ -110,6 +113,9 @@ fn add_attachment_files(
         .configuration
         .configuration
         .images_per_message() as usize;
+    // A restricted section seals its images, and so does a private board.
+    let section = CURRENT_CATEGORY.read().category_id.clone();
+    let secret = board_data.image_upload_secret(section.as_ref(), reply_target.as_ref());
     let now = crate::util::get_current_system_time()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis())
@@ -148,6 +154,7 @@ fn add_attachment_files(
                         height: prepared.height,
                         animated: prepared.animated,
                         bytes: prepared.bytes,
+                        secret,
                     };
                     crate::util::pending_uploads::queue(record.clone()).await;
                     upload_record(record, attachments, id).await;
@@ -937,11 +944,16 @@ pub fn PostInput(
                             class: "hidden",
                             onchange: move |_| {
                                 if let Some(files) = selected_files() {
+                                    let reply_target = replying_to
+                                        .read()
+                                        .as_ref()
+                                        .map(|reply| reply.message_id.clone());
                                     add_attachment_files(
                                         files,
                                         attachments,
                                         next_attachment_id,
                                         *image_mode.peek(),
+                                        reply_target,
                                     );
                                 }
                             },

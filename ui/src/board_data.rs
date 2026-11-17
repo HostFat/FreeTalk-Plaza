@@ -125,6 +125,10 @@ pub struct PendingUpload {
     pub animated: bool,
     #[serde(default)]
     pub bytes: Vec<u8>,
+    /// Board or section key that sealed the payload, kept so a reload resumes
+    /// the same upload with the same bytes.
+    #[serde(default)]
+    pub secret: Option<([u8; 32], u32)>,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -1517,6 +1521,45 @@ impl BoardData {
         self.board_state
             .recent_messages
             .section_allows_images(&self.board_state, &parameters, section)
+    }
+
+    /// Every secret that could have sealed an image this client may read: the
+    /// board secret and each restricted section key.
+    pub fn image_secret_candidates(&self) -> Vec<([u8; 32], u32)> {
+        let mut out = Vec::new();
+        if let (Some(version), Some(key)) =
+            (self.current_secret_version, self.current_secret())
+        {
+            out.push((*key, version));
+        }
+        for (version, key) in self.category_secrets.values() {
+            if !out.iter().any(|(existing, _)| existing == key) {
+                out.push((*key, *version));
+            }
+        }
+        out
+    }
+
+    /// Key to seal an image attached in `section`, or to a reply of `target`.
+    /// The section key comes first, then the board secret of a private board.
+    pub fn image_upload_secret(
+        &self,
+        section: Option<&MessageId>,
+        target: Option<&MessageId>,
+    ) -> Option<([u8; 32], u32)> {
+        if let Some(target) = target {
+            if let Some((_, key, version)) = self.posting_secret_for(target) {
+                return Some((key, version));
+            }
+        }
+        if let Some(section) = section {
+            if let Some((version, key)) = self.category_secret(section) {
+                return Some((key, version));
+            }
+        }
+        self.current_secret()
+            .copied()
+            .map(|key| (key, self.current_secret_version.unwrap_or(0)))
     }
 
     /// Whether this identity may attach images in `section`. The section rule
