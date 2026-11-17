@@ -41,6 +41,7 @@ pub fn open_spectator_board(owner_vk: VerifyingKey) -> Result<(), String> {
         last_visit: 0,
         read_categories: HashMap::new(),
         draft: None,
+        pending_uploads: Vec::new(),
         subscribed_categories: Vec::new(),
         current_secret_version: None,
         last_secret_rotation: None,

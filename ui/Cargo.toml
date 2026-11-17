@@ -61,6 +61,14 @@ web-sys = { workspace = true, features = [
     "HtmlCanvasElement",
     "CanvasRenderingContext2d",
     "HtmlImageElement",
+    "IdbFactory",
+    "IdbOpenDbRequest",
+    "IdbDatabase",
+    "IdbObjectStore",
+    "IdbTransaction",
+    "IdbTransactionMode",
+    "IdbRequest",
+    "DomStringList",
     "Url"
 ] }
 wasm-bindgen.workspace = true

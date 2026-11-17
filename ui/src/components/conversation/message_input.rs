@@ -7,6 +7,7 @@ use wasm_bindgen_futures::spawn_local;
 use super::emoji_picker::EmojiPicker;
 use super::ReplyContext;
 use crate::components::app::{BOARDS, CURRENT_BOARD};
+use crate::board_data::PendingUpload;
 use crate::util::image_processing::{prepare_image, ImageMode};
 use crate::util::images::upload_image;
 use plaza_core::board_state::images::ImageRef;
@@ -20,14 +21,78 @@ enum AttachmentState {
 
 #[derive(Clone, Debug, PartialEq)]
 struct Attachment {
-    id: u64,
+    id: String,
     name: String,
     alt: String,
     nsfw: bool,
     state: AttachmentState,
 }
 
-/// Start the upload of the chosen files, one attachment row each.
+/// Upload one prepared record, then drop it from the durable queue.
+async fn upload_record(
+    record: PendingUpload,
+    mut attachments: Signal<Vec<Attachment>>,
+    id: String,
+) {
+    let Some(board_key) = CURRENT_BOARD.read().owner_key else {
+        return;
+    };
+    let Some(board_data) = BOARDS.read().map.get(&board_key).cloned() else {
+        return;
+    };
+    let configuration = &board_data.board_state.configuration.configuration;
+    let limit = if record.animated {
+        configuration.animated_image_byte_limit()
+    } else {
+        configuration.image_byte_limit()
+    };
+    let result = if record.bytes.len() as u32 > limit {
+        Err(format!(
+            "Image is {} KB, the limit is {} KB",
+            record.bytes.len() / 1024,
+            limit / 1024
+        ))
+    } else {
+        upload_image(
+            record.bytes.clone(),
+            record.mime.clone(),
+            record.width,
+            record.height,
+            &board_data.self_sk,
+            board_data.owner_vk,
+            board_data.current_owner_key(),
+        )
+        .await
+        .map(|(instance, sha256, bytes)| ImageRef {
+            instance,
+            sha256,
+            mime: record.mime.clone(),
+            width: record.width,
+            height: record.height,
+            bytes,
+            alt: record.alt.clone(),
+            display: 0,
+            sealed: false,
+            animated: record.animated,
+            nsfw: record.nsfw,
+        })
+    };
+
+    attachments.with_mut(|list| {
+        if let Some(slot) = list.iter_mut().find(|attachment| attachment.id == id) {
+            slot.state = match &result {
+                Ok(image) => AttachmentState::Ready(image.clone()),
+                Err(error) => AttachmentState::Failed(error.clone()),
+            };
+        }
+    });
+    if result.is_ok() {
+        crate::util::pending_uploads::remove(&id);
+    }
+}
+
+/// Start the upload of the chosen files, one attachment row each. The prepared
+/// bytes are written to IndexedDB first so a reload does not lose them.
 fn add_attachment_files(
     files: Vec<web_sys::File>,
     mut attachments: Signal<Vec<Attachment>>,
@@ -40,99 +105,112 @@ fn add_attachment_files(
     let Some(board_data) = BOARDS.read().map.get(&board_key).cloned() else {
         return;
     };
-    let founding = board_data.owner_vk;
-    let current_owner = board_data.current_owner_key();
-    let self_sk = board_data.self_sk.clone();
     let max_images = board_data
         .board_state
         .configuration
         .configuration
         .images_per_message() as usize;
-    let max_static_bytes = board_data
-        .board_state
-        .configuration
-        .configuration
-        .image_byte_limit();
-    let max_animated_bytes = board_data
-        .board_state
-        .configuration
-        .configuration
-        .animated_image_byte_limit();
+    let now = crate::util::get_current_system_time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
 
     for file in files {
         if attachments.read().len() >= max_images {
             break;
         }
-        let id = *next_id.peek();
-        next_id.set(id + 1);
+        let counter = *next_id.peek();
+        let id = format!("{now}-{counter}");
+        next_id.set(counter + 1);
         let name = file.name();
         attachments.with_mut(|list| {
             list.push(Attachment {
-                id,
+                id: id.clone(),
                 name: name.clone(),
                 alt: name.clone(),
                 nsfw: false,
                 state: AttachmentState::Uploading,
             })
         });
-        let self_sk = self_sk.clone();
+        let id = id.clone();
         let name = name.clone();
         let mut attachments = attachments;
         spawn_local(async move {
-            let result = match prepare_image(&file, mode).await {
+            match prepare_image(&file, mode).await {
                 Ok(prepared) => {
-                    let limit = if prepared.animated {
-                        max_animated_bytes
-                    } else {
-                        max_static_bytes
+                    let record = PendingUpload {
+                        id: id.clone(),
+                        name: name.clone(),
+                        alt: name.clone(),
+                        nsfw: false,
+                        mime: prepared.mime,
+                        width: prepared.width,
+                        height: prepared.height,
+                        animated: prepared.animated,
+                        bytes: prepared.bytes,
                     };
-                    if prepared.bytes.len() as u32 > limit {
-                        Err(format!(
-                            "Image is {} KB, the limit is {} KB",
-                            prepared.bytes.len() / 1024,
-                            limit / 1024
-                        ))
-                    } else {
-                        let mime = prepared.mime.clone();
-                        let (width, height) = (prepared.width, prepared.height);
-                        let animated = prepared.animated;
-                        upload_image(
-                            prepared.bytes,
-                            mime.clone(),
-                            width,
-                            height,
-                            &self_sk,
-                            founding,
-                            current_owner,
-                        )
-                        .await
-                        .map(|(instance, sha256, bytes)| ImageRef {
-                            instance,
-                            sha256,
-                            mime,
-                            width,
-                            height,
-                            bytes,
-                            alt: name.clone(),
-                            display: 0,
-                            sealed: false,
-                            animated,
-                            nsfw: false,
-                        })
-                    }
+                    crate::util::pending_uploads::queue(record.clone());
+                    upload_record(record, attachments, id).await;
                 }
-                Err(error) => Err(error),
-            };
-            attachments.with_mut(|list| {
-                if let Some(slot) = list.iter_mut().find(|attachment| attachment.id == id) {
-                    slot.state = match result {
-                        Ok(image) => AttachmentState::Ready(image),
-                        Err(error) => AttachmentState::Failed(error),
-                    };
+                Err(error) => {
+                    attachments.with_mut(|list| {
+                        if let Some(slot) = list.iter_mut().find(|attachment| attachment.id == id)
+                        {
+                            slot.state = AttachmentState::Failed(error);
+                        }
+                    });
                 }
-            });
+            }
         });
     }
+}
+
+/// Re-add the uploads left over from a previous session and retry them.
+fn restore_pending_uploads(mut attachments: Signal<Vec<Attachment>>) {
+    let Some(board_key) = CURRENT_BOARD.read().owner_key else {
+        return;
+    };
+    let max_images = BOARDS
+        .read()
+        .map
+        .get(&board_key)
+        .map(|board| {
+            board
+                .board_state
+                .configuration
+                .configuration
+                .images_per_message() as usize
+        })
+        .unwrap_or(4);
+    spawn_local(async move {
+        let records = crate::util::pending_uploads::list();
+        for record in records {
+            if attachments.read().len() >= max_images {
+                break;
+            }
+            if attachments
+                .read()
+                .iter()
+                .any(|attachment| attachment.id == record.id)
+            {
+                continue;
+            }
+            let id = record.id.clone();
+            let name = record.name.clone();
+            let alt = record.alt.clone();
+            let nsfw = record.nsfw;
+            attachments.with_mut(|list| {
+                list.push(Attachment {
+                    id: id.clone(),
+                    name,
+                    alt,
+                    nsfw,
+                    state: AttachmentState::Uploading,
+                })
+            });
+            upload_record(record, attachments, id).await;
+        }
+    });
 }
 
 /// Open the hidden file picker. Must run from a user gesture.
@@ -323,6 +401,7 @@ pub fn PostInput(
                 }
             }
             restore_draft();
+            restore_pending_uploads(attachments);
             show_modal.set(true);
         }
     };
@@ -897,9 +976,11 @@ pub fn PostInput(
                                         r#type: "button",
                                         class: "text-text-muted hover:text-red-400",
                                         title: "Remove",
-                                        onclick: move |_| {
-                                            let id = attachment.id;
-                                            attachments.with_mut(|list| list.retain(|entry| entry.id != id));
+                                        onclick: {
+                                            let id = attachment.id.clone();
+                                            move |_| {
+                                                attachments.with_mut(|list| list.retain(|entry| entry.id != id));
+                                            }
                                         },
                                         "✕"
                                     }
@@ -909,28 +990,32 @@ pub fn PostInput(
                                     class: "w-full px-2 py-1 bg-background border border-border rounded text-text placeholder-text-muted",
                                     placeholder: "Describe the image (required)",
                                     value: "{attachment.alt}",
-                                    oninput: move |event| {
-                                        let id = attachment.id;
-                                        let value = event.value();
-                                        attachments.with_mut(|list| {
-                                            if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
-                                                entry.alt = value;
-                                            }
-                                        });
+                                    oninput: {
+                                        let id = attachment.id.clone();
+                                        move |event| {
+                                            let value = event.value();
+                                            attachments.with_mut(|list| {
+                                                if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
+                                                    entry.alt = value;
+                                                }
+                                            });
+                                        }
                                     },
                                 }
                                 label { class: "flex items-center gap-2 text-text-muted",
                                     input {
                                         r#type: "checkbox",
                                         checked: attachment.nsfw,
-                                        onchange: move |event| {
-                                            let id = attachment.id;
-                                            let checked = event.checked();
-                                            attachments.with_mut(|list| {
-                                                if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
-                                                    entry.nsfw = checked;
-                                                }
-                                            });
+                                        onchange: {
+                                            let id = attachment.id.clone();
+                                            move |event| {
+                                                let checked = event.checked();
+                                                attachments.with_mut(|list| {
+                                                    if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
+                                                        entry.nsfw = checked;
+                                                    }
+                                                });
+                                            }
                                         },
                                     }
                                     "NSFW (labelled and hidden behind a click)"

@@ -153,6 +153,7 @@ pub async fn handle_get_response(
             last_visit: 0,
             read_categories: std::collections::HashMap::new(),
                         draft: None,
+        pending_uploads: Vec::new(),
                         subscribed_categories: Vec::new(),
                         current_secret_version: None,
                         last_secret_rotation: None,

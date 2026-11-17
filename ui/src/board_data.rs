@@ -111,6 +111,22 @@ pub struct ComposerDraft {
     pub updated_at: i64,
 }
 
+/// An image prepared for upload that is not published yet. It rides with the
+/// board in the delegate store, so a reload can resume it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PendingUpload {
+    pub id: String,
+    pub name: String,
+    pub alt: String,
+    pub nsfw: bool,
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    pub animated: bool,
+    #[serde(default)]
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardData {
     pub owner_vk: VerifyingKey,
@@ -142,6 +158,10 @@ pub struct BoardData {
     /// The composer's unsent post. Local UI state, never shared with the board.
     #[serde(default)]
     pub draft: Option<ComposerDraft>,
+    /// Image uploads prepared but not yet published, kept with the board so a
+    /// reload resumes them (drafts and this survive in the delegate store).
+    #[serde(default)]
+    pub pending_uploads: Vec<PendingUpload>,
 
     /// Sections the user follows. New topics in these sections show up in the
     /// notifications list. Local preference, persisted in the delegate.
@@ -2137,6 +2157,7 @@ impl Boards {
             last_visit: 0,
             read_categories: HashMap::new(),
             draft: None,
+            pending_uploads: Vec::new(),
             subscribed_categories: Vec::new(),
         };
 
@@ -3013,6 +3034,7 @@ mod tests {
             last_visit: 0,
             read_categories: HashMap::new(),
             draft: None,
+            pending_uploads: Vec::new(),
             subscribed_categories: Vec::new(),
             current_secret_version: None,
             last_secret_rotation: None,
@@ -3094,6 +3116,7 @@ mod tests {
             last_visit: 0,
             read_categories: HashMap::new(),
             draft: None,
+            pending_uploads: Vec::new(),
             subscribed_categories: Vec::new(),
             current_secret_version: None,
             last_secret_rotation: None,
@@ -3167,6 +3190,7 @@ mod tests {
                 last_visit: 0,
                 read_categories: HashMap::new(),
                 draft: None,
+                pending_uploads: Vec::new(),
                 subscribed_categories: Vec::new(),
                 current_secret_version: None,
                 last_secret_rotation: None,

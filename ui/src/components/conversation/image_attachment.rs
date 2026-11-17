@@ -50,7 +50,7 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
         .read()
         .get(&instance)
         .map(|entry| entry.status.clone());
-    let ready_bytes = match &status {
+    let _ready_bytes = match &status {
         Some(ImageStatus::Ready(bytes)) if opened() => Some(bytes.clone()),
         _ => None,
     };
