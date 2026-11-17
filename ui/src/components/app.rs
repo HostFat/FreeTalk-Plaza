@@ -251,6 +251,7 @@ pub fn App() -> Element {
     use_effect(move || {
         if *BOARDS_LOADED.read() {
             crate::util::pending_send::resume_all();
+            crate::util::owned_images::renew_if_due();
         }
     });
 
@@ -736,6 +737,7 @@ fn initial_boards() -> Boards {
         removed: Vec::new(),
         migrated_boards: Vec::new(),
         blocked_image_hashes: Vec::new(),
+        owned_images: Vec::new(),
     }
 }
 

@@ -154,6 +154,28 @@ pub struct PendingSend {
     pub queued_at: i64,
 }
 
+/// Raw copies of one uploaded blob, kept so it can be put back on the
+/// network after nodes drop it.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct OwnedChunkCopy {
+    pub parameters: Vec<u8>,
+    pub state: Vec<u8>,
+}
+
+/// One image this device uploaded, with what is needed to renew it and to
+/// attach it again without uploading.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct OwnedImage {
+    pub image: plaza_core::board_state::images::ImageRef,
+    pub parameters: Vec<u8>,
+    pub state: Vec<u8>,
+    #[serde(default)]
+    pub chunks: Vec<OwnedChunkCopy>,
+    pub uploaded_at: i64,
+    #[serde(default)]
+    pub renewed_at: i64,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardData {
     pub owner_vk: VerifyingKey,
@@ -2054,6 +2076,9 @@ pub struct Boards {
     /// any board.
     #[serde(default)]
     pub blocked_image_hashes: Vec<[u8; 32]>,
+    /// Images this device uploaded, used for renewal and reuse.
+    #[serde(default)]
+    pub owned_images: Vec<OwnedImage>,
 }
 
 impl PartialEq for Boards {
@@ -2061,6 +2086,7 @@ impl PartialEq for Boards {
         self.map == other.map
             && self.removed == other.removed
             && self.blocked_image_hashes == other.blocked_image_hashes
+            && self.owned_images == other.owned_images
     }
 }
 
@@ -2083,6 +2109,7 @@ impl Boards {
             removed: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
+            owned_images: Vec::new(),
         };
         let mut dropped = 0usize;
         for (key, value) in entries {
@@ -2317,6 +2344,22 @@ impl Boards {
                 self.blocked_image_hashes.push(hash);
             }
         }
+        // Own uploads follow the union rule too; keep the fresher copy when
+        // both sides know the same blob.
+        for entry in other.owned_images {
+            match self
+                .owned_images
+                .iter_mut()
+                .find(|existing| existing.image.instance == entry.image.instance)
+            {
+                Some(existing) => {
+                    if entry.renewed_at > existing.renewed_at {
+                        *existing = entry;
+                    }
+                }
+                None => self.owned_images.push(entry),
+            }
+        }
         for (vk, mut board_data) in other.map {
             if self.removed.contains(&vk) {
                 continue;
@@ -2497,6 +2540,7 @@ mod tests {
             removed: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
+            owned_images: Vec::new(),
         };
         let key = boards.create_new_board_with_name(
             owner_sk,
@@ -2540,6 +2584,7 @@ mod tests {
                 removed: Vec::new(),
                 migrated_boards: vec![],
                 blocked_image_hashes: Vec::new(),
+                owned_images: Vec::new(),
             };
             let key = boards.create_new_board_with_name(
                 owner_sk.clone(),
@@ -2582,6 +2627,7 @@ mod tests {
             removed: Vec::new(),
             migrated_boards: vec![],
             blocked_image_hashes: Vec::new(),
+            owned_images: Vec::new(),
         };
 
         let key = boards.create_new_board_with_name(
@@ -2801,6 +2847,7 @@ mod tests {
             removed: Vec::new(),
             migrated_boards: vec![],
             blocked_image_hashes: Vec::new(),
+            owned_images: Vec::new(),
         };
         let key = boards.create_new_board_with_name(
             owner_sk.clone(),

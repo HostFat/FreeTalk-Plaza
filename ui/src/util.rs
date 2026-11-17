@@ -15,6 +15,7 @@ pub mod message_actions;
 pub mod messaging;
 pub mod moderation_queue;
 pub mod notifications;
+pub mod owned_images;
 pub mod pending_uploads;
 pub mod pending_send;
 pub mod pq;

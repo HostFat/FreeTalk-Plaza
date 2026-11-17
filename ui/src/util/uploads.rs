@@ -8,7 +8,7 @@ use plaza_core::board_state::images::ImageRef;
 pub async fn upload_pending(
     board: &BoardData,
     record: &PendingUpload,
-) -> Result<ImageRef, String> {
+) -> Result<(ImageRef, Option<crate::util::images::BlobCopy>), String> {
     let configuration = &board.board_state.configuration.configuration;
     let limit = if record.animated {
         configuration.animated_image_byte_limit()
@@ -23,7 +23,7 @@ pub async fn upload_pending(
         ));
     }
 
-    let (instance, sha256, bytes) = upload_image(
+    let (instance, sha256, bytes, copy) = upload_image(
         record.bytes.clone(),
         record.mime.clone(),
         record.width,
@@ -35,17 +35,20 @@ pub async fn upload_pending(
     )
     .await?;
 
-    Ok(ImageRef {
-        instance,
-        sha256,
-        mime: record.mime.clone(),
-        width: record.width,
-        height: record.height,
-        bytes,
-        alt: record.alt.clone(),
-        display: 0,
-        sealed: record.secret.is_some(),
-        animated: record.animated,
-        nsfw: record.nsfw,
-    })
+    Ok((
+        ImageRef {
+            instance,
+            sha256,
+            mime: record.mime.clone(),
+            width: record.width,
+            height: record.height,
+            bytes,
+            alt: record.alt.clone(),
+            display: 0,
+            sealed: record.secret.is_some(),
+            animated: record.animated,
+            nsfw: record.nsfw,
+        },
+        copy,
+    ))
 }

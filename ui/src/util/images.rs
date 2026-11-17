@@ -116,6 +116,15 @@ pub fn blob_contract_key(parameters: &BlobParametersV1) -> ContractKey {
     ContractKey::from_params_and_code(params, &ContractCode::from(BLOB_CONTRACT_WASM))
 }
 
+/// One uploaded blob's bytes, kept by the caller for renewal.
+#[derive(Clone)]
+pub struct BlobCopy {
+    pub parameters: Vec<u8>,
+    pub state: Vec<u8>,
+    /// Chunk copies of a manifest.
+    pub chunks: Vec<BlobCopy>,
+}
+
 /// Upload one image and return its contract instance id and hash.
 ///
 /// The caller stores the returned id in the message; the bytes stay in their
@@ -131,7 +140,7 @@ pub async fn upload_image(
     owner_founding: VerifyingKey,
     owner_current: VerifyingKey,
     secret: Option<([u8; 32], u32)>,
-) -> Result<([u8; 32], [u8; 32], u32), String> {
+) -> Result<([u8; 32], [u8; 32], u32, Option<BlobCopy>), String> {
     let plaintext_sha = image_sha256(&bytes);
     let size = bytes.len() as u32;
     // The same file attached twice reuses the contract from this session.
@@ -141,7 +150,7 @@ pub async fn upload_image(
             .ok()
             .and_then(|uploaded| uploaded.get(&plaintext_sha).copied())
         {
-            return Ok((instance, plaintext_sha, size));
+            return Ok((instance, plaintext_sha, size, None));
         }
     }
     let (stored, nonce, secret_version) = match secret {
@@ -164,10 +173,15 @@ pub async fn upload_image(
             state = state.sealed(nonce, version);
         }
         state.validate(&parameters)?;
+        let copy = BlobCopy {
+            parameters: to_cbor_vec(&parameters),
+            state: to_cbor_vec(&state),
+            chunks: Vec::new(),
+        };
         let instance = put_blob_with_retry(&parameters, &state).await?;
         info!("Uploaded image blob {instance:?} ({} bytes)", state.stored_len());
         remember_upload(secret, plaintext_sha, instance, size);
-        return Ok((instance, plaintext_sha, size));
+        return Ok((instance, plaintext_sha, size, Some(copy)));
     }
 
     let pieces: Vec<&[u8]> = stored.chunks(CHUNK_BYTES).collect();
@@ -215,7 +229,7 @@ pub async fn upload_image(
         if let Ok(state) = fetch_blob_state(manifest_instance).await {
             if let Ok(blob) = ciborium::de::from_reader::<BlobStateV1, &[u8]>(&state[..]) {
                 if blob.is_manifest() && blob.chunks == refs {
-                    return Ok((manifest_instance, plaintext_sha, size));
+                    return Ok((manifest_instance, plaintext_sha, size, None));
                 }
             }
         }
@@ -223,6 +237,7 @@ pub async fn upload_image(
     // Three PUTs in flight at a time: the socket write is serialized, the
     // confirmation waits overlap. Order inside each batch is preserved.
     let mut chunks = Vec::with_capacity(pieces.len());
+    let mut chunk_copies = Vec::with_capacity(pieces.len());
     for batch in pieces.chunks(3) {
         let mut in_flight = Vec::new();
         for piece in batch {
@@ -246,15 +261,21 @@ pub async fn upload_image(
                     bytes: piece.len() as u32,
                 },
                 receiver,
+                BlobCopy {
+                    parameters: to_cbor_vec(&parameters),
+                    state: to_cbor_vec(&state),
+                    chunks: Vec::new(),
+                },
             ));
         }
-        for (chunk, receiver) in in_flight {
+        for (chunk, receiver, copy) in in_flight {
             await_blob_ack(chunk.instance, receiver).await?;
             info!(
                 "Uploaded image blob {:?} ({} bytes)",
                 chunk.instance, chunk.bytes
             );
             chunks.push(chunk);
+            chunk_copies.push(copy);
         }
     }
 
@@ -269,10 +290,15 @@ pub async fn upload_image(
         state = state.sealed(nonce, version);
     }
     state.validate(&parameters)?;
+    let copy = BlobCopy {
+        parameters: to_cbor_vec(&parameters),
+        state: to_cbor_vec(&state),
+        chunks: chunk_copies,
+    };
     let instance = put_blob_with_retry(&parameters, &state).await?;
     info!("Uploaded image manifest {instance:?}");
     remember_upload(secret, plaintext_sha, instance, size);
-    Ok((instance, plaintext_sha, size))
+    Ok((instance, plaintext_sha, size, Some(copy)))
 }
 
 fn remember_upload(
@@ -319,6 +345,46 @@ async fn send_blob_with_retry(
         }
     }
     Err(last)
+}
+
+/// PUT a stored blob exactly as it was uploaded, used by the renewal task.
+pub async fn put_raw_blob(parameters: &[u8], state: &[u8]) -> Result<(), String> {
+    let params = Parameters::from(parameters.to_vec());
+    let code = ContractCode::from(BLOB_CONTRACT_WASM);
+    let key = ContractKey::from_params_and_code(params.clone(), &code);
+    let instance: [u8; 32] = key
+        .id()
+        .as_bytes()
+        .try_into()
+        .map_err(|_| "Unexpected contract id length".to_string())?;
+    let contract = ContractContainer::from(ContractWasmAPIVersion::V1(WrappedContract::new(
+        Arc::new(code),
+        params,
+    )));
+    let request = ContractRequest::Put {
+        contract,
+        state: WrappedState::new(state.to_vec()),
+        related_contracts: Default::default(),
+        subscribe: false,
+        blocking_subscribe: false,
+    };
+
+    let (acknowledged, wait_for_node) = oneshot::channel();
+    if let Ok(mut waiting) = PENDING_BLOB_PUTS.lock() {
+        waiting.insert(instance, acknowledged);
+    }
+    {
+        let mut web_api = WEB_API.write();
+        let Some(web_api) = web_api.as_mut() else {
+            forget_blob_put(&instance);
+            return Err("Not connected to a Freenet node".to_string());
+        };
+        if let Err(error) = web_api.send(ClientRequest::ContractOp(request)).await {
+            forget_blob_put(&instance);
+            return Err(error.to_string());
+        }
+    }
+    await_blob_ack(instance, wait_for_node).await
 }
 
 /// PUT one blob state and wait for the node to acknowledge it.

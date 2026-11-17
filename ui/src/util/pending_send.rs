@@ -144,8 +144,11 @@ async fn resume_one(board_key: VerifyingKey, board: BoardData, mut draft: Pendin
             return;
         } else {
             match crate::util::uploads::upload_pending(&board, &record).await {
-                Ok(image) => {
+                Ok((image, copy)) => {
                     crate::util::pending_uploads::set_image_for(&board_key, &id, &image);
+                    if let Some(copy) = copy {
+                        crate::util::owned_images::record(&image, copy);
+                    }
                     image
                 }
                 Err(error) => {

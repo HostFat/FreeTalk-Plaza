@@ -53,17 +53,20 @@ async fn upload_record(
     attachments.with_mut(|list| {
         if let Some(slot) = list.iter_mut().find(|attachment| attachment.id == id) {
             slot.state = match &result {
-                Ok(image) => AttachmentState::Ready(image.clone()),
+                Ok((image, _)) => AttachmentState::Ready(image.clone()),
                 Err(error) => AttachmentState::Failed(error.clone()),
             };
         }
     });
-    if let Ok(image) = &result {
+    if let Ok((image, copy)) = &result {
         // Keep the queued record with its blob until the post is published:
         // a reload that lands between the upload and the publish still has the
         // reference. The send path removes it.
         crate::util::pending_uploads::set_image(&id, image);
         crate::util::pending_send::image_uploaded(board_key, &id, image);
+        if let Some(copy) = copy {
+            crate::util::owned_images::record(image, copy.clone());
+        }
     }
 }
 
@@ -1014,6 +1017,66 @@ pub fn PostInput(
                                     );
                                 }
                             },
+                        }
+                        {
+                            let owned = crate::util::owned_images::list();
+                            if !owned.is_empty() {
+                                rsx! {
+                                    div { class: "mt-2",
+                                        p { class: "text-xs text-text-muted mb-1", "Your images" }
+                                        div { class: "flex flex-wrap gap-2",
+                                            for entry in owned.iter().take(8) {
+                                                {
+                                                    let image = entry.image.clone();
+                                                    let instance = image.instance;
+                                                    rsx! {
+                                                        div {
+                                                            key: "{instance:?}",
+                                                            class: "flex items-center gap-1 border border-border rounded px-2 py-1",
+                                                            button {
+                                                                r#type: "button",
+                                                                class: "text-xs text-text max-w-40 truncate",
+                                                                title: "Attach this image again",
+                                                                onclick: {
+                                                                    let image = image.clone();
+                                                                    move |_| {
+                                                                        if attachments.read().iter().any(|attachment| {
+                                                                            matches!(&attachment.state, AttachmentState::Ready(existing) if existing.instance == image.instance)
+                                                                        }) {
+                                                                            return;
+                                                                        }
+                                                                        let counter = *next_attachment_id.peek();
+                                                                        next_attachment_id.set(counter + 1);
+                                                                        attachments.with_mut(|list| {
+                                                                            list.push(Attachment {
+                                                                                id: format!("reuse-{counter}"),
+                                                                                name: image.alt.clone(),
+                                                                                alt: image.alt.clone(),
+                                                                                nsfw: image.nsfw,
+                                                                                state: AttachmentState::Ready(image.clone()),
+                                                                            });
+                                                                        });
+                                                                    }
+                                                                },
+                                                                "{image.alt}"
+                                                            }
+                                                            button {
+                                                                r#type: "button",
+                                                                class: "text-[10px] text-text-muted hover:text-accent",
+                                                                title: "Put it back on the network now",
+                                                                onclick: move |_| crate::util::owned_images::renew_now(instance),
+                                                                "Renew"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                rsx! {}
+                            }
                         }
                         div { class: "flex items-center gap-2",
                             label { class: "text-xs text-text-muted", "Format" }
