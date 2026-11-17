@@ -42,22 +42,22 @@ pub struct PreparedImage {
 /// Prepare one file for upload according to the chosen mode.
 pub async fn prepare_image(file: &web_sys::File, mode: ImageMode) -> Result<PreparedImage, String> {
     let declared = file.type_();
-    let animated_gif = declared == "image/gif";
+    let bytes = read_file_bytes(file).await?;
+    let animated_gif = declared == "image/gif" || bytes.starts_with(b"GIF");
+    let animated = animated_gif || is_apng(&bytes) || is_animated_webp(&bytes);
 
-    if animated_gif || mode == ImageMode::KeepOriginal || mode == ImageMode::StripMetadata {
-        let mut bytes = read_file_bytes(file).await?;
+    if animated || mode == ImageMode::KeepOriginal || mode == ImageMode::StripMetadata {
         let (width, height) = image_dimensions(file).await?;
-        let animated = animated_gif || is_apng(&bytes);
         let mime = if declared.is_empty() {
             guess_mime(&bytes).to_string()
         } else {
             declared
         };
-        if mode == ImageMode::StripMetadata {
-            if let Some(stripped) = crate::util::image_meta::strip_metadata(&bytes) {
-                bytes = stripped;
-            }
-        }
+        let bytes = if mode == ImageMode::StripMetadata {
+            crate::util::image_meta::strip_metadata(&bytes).unwrap_or(bytes)
+        } else {
+            bytes
+        };
         return Ok(PreparedImage {
             bytes,
             mime,
@@ -183,6 +183,27 @@ pub async fn image_dimensions(file: &web_sys::File) -> Result<(u32, u32), String
 
 fn is_apng(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0x89, b'P', b'N', b'G']) && bytes.windows(4).any(|window| window == b"acTL")
+}
+
+/// WebP animation: an ANIM chunk, or the animation flag in a VP8X header.
+fn is_animated_webp(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return false;
+    }
+    let mut i = 12;
+    while i + 8 <= bytes.len() {
+        let kind = &bytes[i..i + 4];
+        if kind == b"ANIM" {
+            return true;
+        }
+        if kind == b"VP8X" && i + 8 < bytes.len() {
+            return bytes[i + 8] & 0x02 != 0;
+        }
+        let size = u32::from_le_bytes([bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7]])
+            as usize;
+        i += 8 + size + (size & 1);
+    }
+    false
 }
 
 fn guess_mime(bytes: &[u8]) -> &'static str {

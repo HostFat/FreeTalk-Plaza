@@ -252,6 +252,29 @@ pub fn MemberInfoModal() -> Element {
                             member_info: member_info.clone()
                         }
 
+                        if member_id == self_member_id.unwrap() {
+                            div { class: "mb-4",
+                                label { class: "flex items-start gap-3 text-sm text-text cursor-pointer",
+                                    input {
+                                        r#type: "checkbox",
+                                        class: "mt-1",
+                                        checked: *crate::util::images::AUTO_LOAD_IMAGES.read(),
+                                        onchange: move |event| {
+                                            let enabled = event.checked();
+                                            crate::util::images::AUTO_LOAD_IMAGES
+                                                .with_mut(|value| *value = enabled);
+                                        },
+                                    }
+                                    div {
+                                        span { class: "block font-medium", "Load images automatically" }
+                                        span { class: "block text-xs text-text-muted",
+                                            "Every discussion shows its images without a click. Off by default; NSFW images always need one."
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         div {
                             class: "mb-4",
                             label { class: "block text-sm font-medium text-text-muted mb-2", "Member ID" }
