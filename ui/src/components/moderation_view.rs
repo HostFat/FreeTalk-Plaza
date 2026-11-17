@@ -2,7 +2,9 @@
 
 use crate::board_data::BoardData;
 use crate::components::app::{BOARDS, CURRENT_BOARD};
+use crate::components::conversation::image_attachment::ImageAttachment;
 use crate::components::conversation::{get_all_messages, MessageData};
+use crate::components::members::member_info_modal::ban_button::BanButton;
 use crate::util::ecies::unseal_bytes_with_secrets;
 use crate::util::format_utc_as_local_time;
 use crate::util::message_actions::ActionContext;
@@ -286,6 +288,14 @@ pub fn ModerationView() -> Element {
                                     .get(&target)
                                     .map(|message| post_label(message))
                                     .unwrap_or_else(|| "Deleted post".to_string());
+                                let target_message = by_id.get(&target).cloned();
+                                let target_images = target_message
+                                    .as_ref()
+                                    .map(|message| message.images.clone())
+                                    .unwrap_or_default();
+                                let target_author = target_message
+                                    .as_ref()
+                                    .map(|message| (message.author_id, message.author_name.clone()));
                                 let reporter = nickname(&board, report.report.reporter);
                                 let time = format_utc_as_local_time(report.report.created_at);
                                 let status_class = match status {
@@ -311,6 +321,13 @@ pub fn ModerationView() -> Element {
                                         }
                                         p { class: "text-xs text-text-muted mt-1",
                                             "reported by {reporter} · {time}"
+                                        }
+                                        if !target_images.is_empty() {
+                                            div { class: "mt-2 space-y-1",
+                                                for image in target_images.iter() {
+                                                    ImageAttachment { image: image.clone(), auto_load: false }
+                                                }
+                                            }
                                         }
                                         div { class: "flex gap-2 mt-2",
                                             if status != ReportStatus::Resolved {
@@ -365,6 +382,14 @@ pub fn ModerationView() -> Element {
                                                         }
                                                     },
                                                     "Reopen"
+                                                }
+                                            }
+                                            if let Some((author_id, author_name)) = target_author.clone() {
+                                                if author_id != MemberId::from(&board.self_sk.verifying_key()) {
+                                                    BanButton {
+                                                        member_to_ban: author_id,
+                                                        nickname: author_name,
+                                                    }
                                                 }
                                             }
                                         }

@@ -66,6 +66,11 @@ pub fn image_sha256(bytes: &[u8]) -> [u8; 32] {
     plaza_blob_core::sha256(bytes)
 }
 
+/// Prepared images already uploaded in this page session, keyed by the
+/// plaintext hash. Reusing one avoids a second set of PUTs.
+static UPLOADED_IMAGES: LazyLock<Mutex<HashMap<[u8; 32], ([u8; 32], u32)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Blob contracts whose PUT the node has not acknowledged yet. The upload is
 /// only removed from the pending queue once the node answers, so a node that
 /// dies between the send and the store still leaves a resumable entry.
@@ -129,6 +134,16 @@ pub async fn upload_image(
 ) -> Result<([u8; 32], [u8; 32], u32), String> {
     let plaintext_sha = image_sha256(&bytes);
     let size = bytes.len() as u32;
+    // The same file attached twice reuses the contract from this session.
+    if secret.is_none() {
+        if let Some((instance, size)) = UPLOADED_IMAGES
+            .lock()
+            .ok()
+            .and_then(|uploaded| uploaded.get(&plaintext_sha).copied())
+        {
+            return Ok((instance, plaintext_sha, size));
+        }
+    }
     let (stored, nonce, secret_version) = match secret {
         Some((key, version)) => {
             let (ciphertext, nonce) = encrypt_with_symmetric_key(&key, &bytes, version);
@@ -149,7 +164,9 @@ pub async fn upload_image(
             state = state.sealed(nonce, version);
         }
         state.validate(&parameters)?;
-        let instance = put_blob(&parameters, &state).await?;
+        let instance = put_blob_with_retry(&parameters, &state).await?;
+        info!("Uploaded image blob {instance:?} ({} bytes)", state.stored_len());
+        remember_upload(secret, plaintext_sha, instance, size);
         return Ok((instance, plaintext_sha, size));
     }
 
@@ -161,25 +178,42 @@ pub async fn upload_image(
             MAX_CHUNKS
         ));
     }
+    // Three PUTs in flight at a time: the socket write is serialized, the
+    // confirmation waits overlap. Order inside each batch is preserved.
     let mut chunks = Vec::with_capacity(pieces.len());
-    for piece in pieces {
-        let chunk_sha = image_sha256(piece);
-        let parameters =
-            blob_parameters(chunk_sha, uploader, owner_founding, owner_current);
-        let state = BlobStateV1::live(
-            &parameters,
-            mime.clone(),
-            width,
-            height,
-            piece.to_vec(),
-        );
-        state.validate(&parameters)?;
-        let instance = put_blob(&parameters, &state).await?;
-        chunks.push(ChunkRef {
-            instance,
-            sha256: chunk_sha,
-            bytes: piece.len() as u32,
-        });
+    for batch in pieces.chunks(3) {
+        let mut in_flight = Vec::new();
+        for piece in batch {
+            let piece = *piece;
+            let chunk_sha = image_sha256(piece);
+            let parameters =
+                blob_parameters(chunk_sha, uploader, owner_founding, owner_current);
+            let state = BlobStateV1::live(
+                &parameters,
+                mime.clone(),
+                width,
+                height,
+                piece.to_vec(),
+            );
+            state.validate(&parameters)?;
+            let (instance, receiver) = send_blob_with_retry(&parameters, &state).await?;
+            in_flight.push((
+                ChunkRef {
+                    instance,
+                    sha256: chunk_sha,
+                    bytes: piece.len() as u32,
+                },
+                receiver,
+            ));
+        }
+        for (chunk, receiver) in in_flight {
+            await_blob_ack(chunk.instance, receiver).await?;
+            info!(
+                "Uploaded image blob {:?} ({} bytes)",
+                chunk.instance, chunk.bytes
+            );
+            chunks.push(chunk);
+        }
     }
 
     let parameters = blob_parameters(
@@ -193,8 +227,56 @@ pub async fn upload_image(
         state = state.sealed(nonce, version);
     }
     state.validate(&parameters)?;
-    let instance = put_blob(&parameters, &state).await?;
+    let instance = put_blob_with_retry(&parameters, &state).await?;
+    info!("Uploaded image manifest {instance:?}");
+    remember_upload(secret, plaintext_sha, instance, size);
     Ok((instance, plaintext_sha, size))
+}
+
+fn remember_upload(
+    secret: Option<([u8; 32], u32)>,
+    plaintext_sha: [u8; 32],
+    instance: [u8; 32],
+    size: u32,
+) {
+    if secret.is_some() {
+        return;
+    }
+    if let Ok(mut uploaded) = UPLOADED_IMAGES.lock() {
+        uploaded.insert(plaintext_sha, (instance, size));
+    }
+}
+
+/// PUT with two retries and a short backoff. A transient rejection or a lost
+/// response costs a few seconds instead of the whole upload.
+async fn put_blob_with_retry(
+    parameters: &BlobParametersV1,
+    state: &BlobStateV1,
+) -> Result<[u8; 32], String> {
+    let (instance, receiver) = send_blob_with_retry(parameters, state).await?;
+    await_blob_ack(instance, receiver).await?;
+    Ok(instance)
+}
+
+async fn send_blob_with_retry(
+    parameters: &BlobParametersV1,
+    state: &BlobStateV1,
+) -> Result<([u8; 32], oneshot::Receiver<()>), String> {
+    let mut delay = Duration::from_secs(1);
+    let mut last = String::new();
+    for attempt in 0..3 {
+        match send_blob(parameters, state).await {
+            Ok(sent) => return Ok(sent),
+            Err(error) => {
+                last = error;
+                if attempt < 2 {
+                    crate::util::sleep(delay).await;
+                    delay = delay * 2;
+                }
+            }
+        }
+    }
+    Err(last)
 }
 
 /// PUT one blob state and wait for the node to acknowledge it.
@@ -202,6 +284,17 @@ async fn put_blob(
     parameters: &BlobParametersV1,
     state: &BlobStateV1,
 ) -> Result<[u8; 32], String> {
+    let (instance, receiver) = send_blob(parameters, state).await?;
+    await_blob_ack(instance, receiver).await?;
+    Ok(instance)
+}
+
+/// Send the PUT but do not wait for the node. The lock is held only for the
+/// socket write, so several chunks can be in flight at once.
+async fn send_blob(
+    parameters: &BlobParametersV1,
+    state: &BlobStateV1,
+) -> Result<([u8; 32], oneshot::Receiver<()>), String> {
     let key = blob_contract_key(parameters);
     let instance: [u8; 32] = key
         .id()
@@ -227,8 +320,6 @@ async fn put_blob(
     }
 
     {
-        // Release the lock before waiting for the node: the response handler
-        // runs on the same task and must not block on it.
         let mut web_api = WEB_API.write();
         let Some(web_api) = web_api.as_mut() else {
             forget_blob_put(&instance);
@@ -239,30 +330,30 @@ async fn put_blob(
             return Err(error.to_string());
         }
     }
+    Ok((instance, wait_for_node))
+}
 
+async fn await_blob_ack(
+    instance: [u8; 32],
+    wait_for_node: oneshot::Receiver<()>,
+) -> Result<(), String> {
     // A busy node can take a while to compile and store a new contract; the
     // queue keeps the upload if this window passes.
     let timeout = Box::pin(crate::util::sleep(Duration::from_secs(60)));
     match select(wait_for_node, timeout).await {
-        Either::Left((Ok(()), _)) => {}
+        Either::Left((Ok(()), _)) => Ok(()),
         Either::Left((Err(_), _)) => {
             forget_blob_put(&instance);
-            return Err("The upload was cancelled".to_string());
+            Err("The upload was cancelled".to_string())
         }
         Either::Right((_, _)) => {
             forget_blob_put(&instance);
-            return Err(
+            Err(
                 "The node did not confirm the image; it stays in the queue for the next try"
                     .to_string(),
-            );
+            )
         }
     }
-
-    info!(
-        "Uploaded image blob {instance:?} ({} bytes)",
-        state.stored_len()
-    );
-    Ok(instance)
 }
 
 fn forget_blob_put(instance: &[u8; 32]) {

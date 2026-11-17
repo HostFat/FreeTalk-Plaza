@@ -16,10 +16,12 @@ pub mod messaging;
 pub mod moderation_queue;
 pub mod notifications;
 pub mod pending_uploads;
+pub mod pending_send;
 pub mod pq;
 pub mod spectator;
 pub mod subscriptions;
 pub mod trash_actions;
+pub mod uploads;
 
 use ed25519_dalek::VerifyingKey;
 use freenet_stdlib::prelude::{ContractCode, ContractKey, Parameters};

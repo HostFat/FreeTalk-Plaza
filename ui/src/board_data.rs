@@ -129,6 +129,29 @@ pub struct PendingUpload {
     /// the same upload with the same bytes.
     #[serde(default)]
     pub secret: Option<([u8; 32], u32)>,
+    /// Set once the blob is on the node, so a reload does not upload it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<plaza_core::board_state::images::ImageRef>,
+}
+
+/// A post waiting for its images. The composer writes it when the user sends
+/// during an upload; the background resume finishes uploads and publishes it.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PendingSend {
+    pub title: String,
+    pub text: String,
+    pub reply_to: Option<MessageId>,
+    pub reply_author: Option<String>,
+    pub reply_preview: Option<String>,
+    pub category_id: Option<MessageId>,
+    /// Attachments still uploading when the post was queued.
+    #[serde(default)]
+    pub attachment_ids: Vec<String>,
+    /// Attachments already uploaded, kept so a crash mid-resume loses nothing.
+    #[serde(default)]
+    pub images: Vec<plaza_core::board_state::images::ImageRef>,
+    #[serde(default)]
+    pub queued_at: i64,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -166,6 +189,11 @@ pub struct BoardData {
     /// reload resumes them (drafts and this survive in the delegate store).
     #[serde(default)]
     pub pending_uploads: Vec<PendingUpload>,
+
+    /// A post the user asked to publish whose images were still uploading.
+    /// Persisted so a reload finishes the upload and sends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_send: Option<PendingSend>,
 
     /// Sections the user follows. New topics in these sections show up in the
     /// notifications list. Local preference, persisted in the delegate.
@@ -2257,6 +2285,7 @@ impl Boards {
             read_categories: HashMap::new(),
             draft: None,
             pending_uploads: Vec::new(),
+            pending_send: None,
             subscribed_categories: Vec::new(),
         };
 
@@ -3149,6 +3178,7 @@ mod tests {
             read_categories: HashMap::new(),
             draft: None,
             pending_uploads: Vec::new(),
+            pending_send: None,
             subscribed_categories: Vec::new(),
             current_secret_version: None,
             last_secret_rotation: None,
@@ -3231,6 +3261,7 @@ mod tests {
             read_categories: HashMap::new(),
             draft: None,
             pending_uploads: Vec::new(),
+            pending_send: None,
             subscribed_categories: Vec::new(),
             current_secret_version: None,
             last_secret_rotation: None,
@@ -3305,6 +3336,7 @@ mod tests {
                 read_categories: HashMap::new(),
                 draft: None,
                 pending_uploads: Vec::new(),
+                pending_send: None,
                 subscribed_categories: Vec::new(),
                 current_secret_version: None,
                 last_secret_rotation: None,

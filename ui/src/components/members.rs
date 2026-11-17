@@ -560,6 +560,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     read_categories: HashMap::new(),
                     draft: None,
         pending_uploads: Vec::new(),
+        pending_send: None,
                     subscribed_categories: Vec::new(),
                     current_secret_version: None,
                     last_secret_rotation: None,

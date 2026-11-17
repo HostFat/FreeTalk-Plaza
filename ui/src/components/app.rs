@@ -247,6 +247,13 @@ pub fn App() -> Element {
         synchronizer.start().await;
     });
 
+    // Finish posts whose images were still uploading when the page closed.
+    use_effect(move || {
+        if *BOARDS_LOADED.read() {
+            crate::util::pending_send::resume_all();
+        }
+    });
+
     // Watch CURRENT_BOARD and navigate if URL doesn't match
     // This handles a board chosen from the list (and sync setting the current board):
     // CURRENT_BOARD changes, and the URL follows. The startup restore from the

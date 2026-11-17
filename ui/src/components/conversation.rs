@@ -7,7 +7,7 @@ use crate::util::member_id_to_color;
 use crate::util::messaging::{send_message, ReplyContext};
 use crate::util::{format_utc_as_full_datetime, format_utc_as_local_time};
 pub mod emoji_picker;
-mod image_attachment;
+pub mod image_attachment;
 mod message_actions;
 pub mod message_input;
 mod not_member_notification;

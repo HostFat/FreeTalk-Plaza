@@ -7,9 +7,8 @@ use wasm_bindgen_futures::spawn_local;
 use super::emoji_picker::EmojiPicker;
 use super::ReplyContext;
 use crate::components::app::{BOARDS, CURRENT_BOARD, CURRENT_CATEGORY};
-use crate::board_data::PendingUpload;
+use crate::board_data::{PendingSend, PendingUpload};
 use crate::util::image_processing::{prepare_image, ImageMode};
-use crate::util::images::upload_image;
 use plaza_core::board_state::images::ImageRef;
 use plaza_core::board_state::message::MessageId;
 
@@ -41,44 +40,7 @@ async fn upload_record(
     let Some(board_data) = BOARDS.read().map.get(&board_key).cloned() else {
         return;
     };
-    let configuration = &board_data.board_state.configuration.configuration;
-    let limit = if record.animated {
-        configuration.animated_image_byte_limit()
-    } else {
-        configuration.image_byte_limit()
-    };
-    let result = if record.bytes.len() as u32 > limit {
-        Err(format!(
-            "Image is {} KB, the limit is {} KB",
-            record.bytes.len() / 1024,
-            limit / 1024
-        ))
-    } else {
-        upload_image(
-            record.bytes.clone(),
-            record.mime.clone(),
-            record.width,
-            record.height,
-            &board_data.self_sk,
-            board_data.owner_vk,
-            board_data.current_owner_key(),
-            record.secret,
-        )
-        .await
-        .map(|(instance, sha256, bytes)| ImageRef {
-            instance,
-            sha256,
-            mime: record.mime.clone(),
-            width: record.width,
-            height: record.height,
-            bytes,
-            alt: record.alt.clone(),
-            display: 0,
-            sealed: record.secret.is_some(),
-            animated: record.animated,
-            nsfw: record.nsfw,
-        })
-    };
+    let result = crate::util::uploads::upload_pending(&board_data, &record).await;
 
     attachments.with_mut(|list| {
         if let Some(slot) = list.iter_mut().find(|attachment| attachment.id == id) {
@@ -88,8 +50,12 @@ async fn upload_record(
             };
         }
     });
-    if result.is_ok() {
-        crate::util::pending_uploads::remove(&id);
+    if let Ok(image) = &result {
+        // Keep the queued record with its blob until the post is published:
+        // a reload that lands between the upload and the publish still has the
+        // reference. The send path removes it.
+        crate::util::pending_uploads::set_image(&id, image);
+        crate::util::pending_send::image_uploaded(board_key, &id, image);
     }
 }
 
@@ -155,6 +121,7 @@ fn add_attachment_files(
                         animated: prepared.animated,
                         bytes: prepared.bytes,
                         secret,
+                        image: None,
                     };
                     crate::util::pending_uploads::queue(record.clone()).await;
                     upload_record(record, attachments, id).await;
@@ -206,16 +173,22 @@ fn restore_pending_uploads(mut attachments: Signal<Vec<Attachment>>) {
             let name = record.name.clone();
             let alt = record.alt.clone();
             let nsfw = record.nsfw;
+            let ready = record.image.clone();
             attachments.with_mut(|list| {
                 list.push(Attachment {
                     id: id.clone(),
                     name,
                     alt,
                     nsfw,
-                    state: AttachmentState::Uploading,
+                    state: match ready {
+                        Some(image) => AttachmentState::Ready(image),
+                        None => AttachmentState::Uploading,
+                    },
                 })
             });
-            upload_record(record, attachments, id).await;
+            if record.image.is_none() {
+                upload_record(record, attachments, id).await;
+            }
         }
     });
 }
@@ -447,6 +420,47 @@ pub fn PostInput(
             .iter()
             .any(|attachment| matches!(attachment.state, AttachmentState::Uploading))
         {
+            // Persist the intent so a reload finishes the upload and sends it.
+            // A poll keeps its in-memory behaviour: polls carry no images.
+            if !*poll_enabled.peek() {
+                if let Some(board_key) = CURRENT_BOARD.read().owner_key {
+                    let reply = replying_to.peek().clone();
+                    let mut images = Vec::new();
+                    let mut attachment_ids = Vec::new();
+                    for attachment in attachments.read().iter() {
+                        match &attachment.state {
+                            AttachmentState::Ready(image) => {
+                                let mut image = image.clone();
+                                image.alt = if attachment.alt.trim().is_empty() {
+                                    attachment.name.clone()
+                                } else {
+                                    attachment.alt.trim().to_string()
+                                };
+                                image.nsfw = attachment.nsfw;
+                                images.push(image);
+                            }
+                            AttachmentState::Uploading => {
+                                attachment_ids.push(attachment.id.clone());
+                            }
+                            AttachmentState::Failed(_) => {}
+                        }
+                    }
+                    let draft = PendingSend {
+                        title: title_text.peek().to_string(),
+                        text: message_text.peek().to_string(),
+                        reply_to: reply.as_ref().map(|reply| reply.message_id.clone()),
+                        reply_author: reply.as_ref().map(|reply| reply.author_name.clone()),
+                        reply_preview: reply
+                            .as_ref()
+                            .map(|reply| reply.content_preview.clone()),
+                        category_id: CURRENT_CATEGORY.read().category_id.clone(),
+                        attachment_ids,
+                        images,
+                        queued_at: chrono::Utc::now().timestamp_millis(),
+                    };
+                    crate::util::pending_send::queue(board_key, draft);
+                }
+            }
             auto_send.set(true);
             return;
         }
@@ -519,7 +533,16 @@ pub fn PostInput(
             poll_days.set(String::new());
             poll_multiselect.set(false);
             poll_error.set(None);
+            let published_ids: Vec<String> = attachments
+                .read()
+                .iter()
+                .map(|attachment| attachment.id.clone())
+                .collect();
             attachments.set(Vec::new());
+            crate::util::pending_uploads::remove_many(&published_ids);
+            if let Some(board_key) = CURRENT_BOARD.read().owner_key {
+                crate::util::pending_send::clear(board_key);
+            }
             crate::util::drafts::clear();
             crate::util::drafts::persist();
             handle_send_message.call((title, content, reply_ctx, poll, images));
@@ -1009,6 +1032,31 @@ pub fn PostInput(
                                         },
                                         AttachmentState::Failed(error) => rsx! {
                                             span { class: "text-red-400 truncate", "{error}" }
+                                            button {
+                                                r#type: "button",
+                                                class: "text-xs text-accent hover:underline",
+                                                onclick: {
+                                                    let id = attachment.id.clone();
+                                                    move |_| {
+                                                        let Some(record) = crate::util::pending_uploads::list()
+                                                            .into_iter()
+                                                            .find(|record| record.id == id)
+                                                        else {
+                                                            return;
+                                                        };
+                                                        attachments.with_mut(|list| {
+                                                            if let Some(slot) = list.iter_mut().find(|entry| entry.id == id) {
+                                                                slot.state = AttachmentState::Uploading;
+                                                            }
+                                                        });
+                                                        let id = id.clone();
+                                                        spawn_local(async move {
+                                                            upload_record(record, attachments, id).await;
+                                                        });
+                                                    }
+                                                },
+                                                "Retry"
+                                            }
                                         },
                                     }}
                                     button {

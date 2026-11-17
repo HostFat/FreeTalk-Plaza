@@ -59,6 +59,47 @@ pub fn remove(id: &str) {
     persist();
 }
 
+/// Drop several queued uploads after their post is published.
+pub fn remove_many(ids: &[String]) {
+    let Some(key) = CURRENT_BOARD.read().owner_key else {
+        return;
+    };
+    BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.map.get_mut(&key) {
+            board
+                .pending_uploads
+                .retain(|pending| !ids.iter().any(|id| id == &pending.id));
+        }
+    });
+    persist();
+}
+
+/// Drop one queued upload of a board that is not necessarily current, used by
+/// the background resume.
+pub fn remove_for(key: &ed25519_dalek::VerifyingKey, id: &str) {
+    BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.map.get_mut(key) {
+            board.pending_uploads.retain(|pending| pending.id != id);
+        }
+    });
+    persist();
+}
+
+/// Remember the blob of a queued upload so a reload does not PUT it again.
+pub fn set_image(id: &str, image: &plaza_core::board_state::images::ImageRef) {
+    let Some(key) = CURRENT_BOARD.read().owner_key else {
+        return;
+    };
+    BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.map.get_mut(&key) {
+            if let Some(pending) = board.pending_uploads.iter_mut().find(|pending| pending.id == id) {
+                pending.image = Some(image.clone());
+            }
+        }
+    });
+    persist();
+}
+
 pub fn list() -> Vec<PendingUpload> {
     let Some(key) = CURRENT_BOARD.read().owner_key else {
         return Vec::new();
