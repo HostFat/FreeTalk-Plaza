@@ -147,6 +147,10 @@ pub struct PendingSend {
     /// Attachments still uploading when the post was queued.
     #[serde(default)]
     pub attachment_ids: Vec<String>,
+    /// Full prepared uploads, moved out of `pending_uploads` when the post is
+    /// queued so the send does not depend on that queue surviving a reload.
+    #[serde(default)]
+    pub uploads: Vec<PendingUpload>,
     /// Attachments already uploaded, kept so a crash mid-resume loses nothing.
     #[serde(default)]
     pub images: Vec<plaza_core::board_state::images::ImageRef>,

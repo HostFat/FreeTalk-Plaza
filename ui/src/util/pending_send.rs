@@ -13,13 +13,52 @@ use dioxus::prelude::ReadableExt;
 use ed25519_dalek::VerifyingKey;
 use plaza_core::board_state::privacy::PrivacyMode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use wasm_bindgen_futures::spawn_local;
+
+/// The queue is merged into the board state shortly after load; the resume can
+/// start before that. Wait for the record instead of giving up on the first
+/// look.
+async fn wait_for_upload(board_key: &VerifyingKey, id: &str) -> Option<crate::board_data::PendingUpload> {
+    for _ in 0..30 {
+        let found = BOARDS
+            .read()
+            .map
+            .get(board_key)
+            .and_then(|board| {
+                board
+                    .pending_uploads
+                    .iter()
+                    .find(|record| record.id == id)
+                    .cloned()
+            });
+        if found.is_some() {
+            return found;
+        }
+        crate::util::sleep(Duration::from_secs(1)).await;
+    }
+    None
+}
 
 static RESUME_STARTED: AtomicBool = AtomicBool::new(false);
 
-/// Store the intent to publish and persist it.
-pub fn queue(board_key: VerifyingKey, draft: PendingSend) {
-    store(board_key, &draft);
+/// Store the intent to publish and persist it. The prepared uploads move out
+/// of the regular queue and into the draft, so the send is self-contained.
+pub fn queue(board_key: VerifyingKey, mut draft: PendingSend) {
+    // The moved uploads are handled by the `uploads` list; keep only legacy
+    // ids that still point at the regular queue.
+    draft
+        .attachment_ids
+        .retain(|id| !draft.uploads.iter().any(|upload| &upload.id == id));
+    BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.map.get_mut(&board_key) {
+            board
+                .pending_uploads
+                .retain(|record| !draft.uploads.iter().any(|upload| upload.id == record.id));
+            board.pending_send = Some(draft.clone());
+        }
+    });
+    persist();
 }
 
 /// Drop the intent, for example once the post is published.
@@ -64,6 +103,9 @@ pub fn image_uploaded(
             return;
         };
         pending.attachment_ids.retain(|attachment| attachment != id);
+        if let Some(upload) = pending.uploads.iter_mut().find(|upload| upload.id == id) {
+            upload.image = Some(image.clone());
+        }
         if !pending
             .images
             .iter()
@@ -99,16 +141,15 @@ pub fn resume_all() {
 }
 
 async fn resume_one(board_key: VerifyingKey, board: BoardData, mut draft: PendingSend) {
-    let all_ids = draft.attachment_ids.clone();
+    let mut all_ids = draft.attachment_ids.clone();
+    all_ids.extend(draft.uploads.iter().map(|upload| upload.id.clone()));
     // Upload what is still queued, saving after each success so a second
     // interruption does not lose the images already stored.
     for id in draft.attachment_ids.clone() {
-        let Some(record) = board
-            .pending_uploads
-            .iter()
-            .find(|record| record.id == id)
-            .cloned()
-        else {
+        if draft.uploads.iter().any(|upload| upload.id == id) {
+            continue;
+        }
+        let Some(record) = wait_for_upload(&board_key, &id).await else {
             // Never publish a post whose image is gone: keep the draft so the
             // author can see it and decide.
             warn!("Pending post: queued image {id} is missing; keeping the draft");
@@ -127,6 +168,31 @@ async fn resume_one(board_key: VerifyingKey, board: BoardData, mut draft: Pendin
         };
         draft.attachment_ids.retain(|pending| pending != &id);
         draft.images.push(image);
+        store(board_key, &draft);
+    }
+
+    // Uploads moved into the draft: self-contained, no queue lookup.
+    for upload in draft.uploads.clone() {
+        let image = match upload.image.clone() {
+            Some(image) => image,
+            None => match crate::util::uploads::upload_pending(&board, &upload).await {
+                Ok(image) => image,
+                Err(error) => {
+                    warn!("Pending post is waiting for an image: {error}");
+                    return;
+                }
+            },
+        };
+        if !draft
+            .images
+            .iter()
+            .any(|existing| existing.instance == image.instance)
+        {
+            draft.images.push(image.clone());
+        }
+        if let Some(entry) = draft.uploads.iter_mut().find(|entry| entry.id == upload.id) {
+            entry.image = Some(image);
+        }
         store(board_key, &draft);
     }
 

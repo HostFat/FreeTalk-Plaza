@@ -445,6 +445,11 @@ pub fn PostInput(
                             AttachmentState::Failed(_) => {}
                         }
                     }
+                    let records = crate::util::pending_uploads::list();
+                    let uploads: Vec<crate::board_data::PendingUpload> = attachment_ids
+                        .iter()
+                        .filter_map(|id| records.iter().find(|record| &record.id == id).cloned())
+                        .collect();
                     let draft = PendingSend {
                         title: title_text.peek().to_string(),
                         text: message_text.peek().to_string(),
@@ -455,6 +460,7 @@ pub fn PostInput(
                             .map(|reply| reply.content_preview.clone()),
                         category_id: CURRENT_CATEGORY.read().category_id.clone(),
                         attachment_ids,
+                        uploads,
                         images,
                         queued_at: chrono::Utc::now().timestamp_millis(),
                     };
