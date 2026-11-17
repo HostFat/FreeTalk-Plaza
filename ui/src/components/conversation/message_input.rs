@@ -230,6 +230,26 @@ fn restore_pending_uploads(mut attachments: Signal<Vec<Attachment>>) {
     });
 }
 
+/// Turn a browser file from a drag or paste event into a `File` the rest of
+/// the pipeline already understands.
+async fn file_from_data(data: &dioxus::html::FileData) -> Option<web_sys::File> {
+    let bytes = data.read_bytes().await.ok()?;
+    let mime = data.content_type().unwrap_or_default();
+    let array = js_sys::Uint8Array::from(bytes.as_ref());
+    let parts = js_sys::Array::new();
+    parts.push(&array.buffer());
+    let blob_options = web_sys::BlobPropertyBag::new();
+    blob_options.set_type(&mime);
+    let blob =
+        web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &blob_options).ok()?;
+    let blobs = js_sys::Array::new();
+    blobs.push(&blob);
+    let file_options = web_sys::FilePropertyBag::new();
+    file_options.set_type(&mime);
+    web_sys::File::new_with_blob_sequence_and_options(&blobs.into(), &data.name(), &file_options)
+        .ok()
+}
+
 /// Open the hidden file picker. Must run from a user gesture.
 fn open_image_picker() {
     if let Some(document) = web_sys::window().and_then(|window| window.document()) {
@@ -658,6 +678,33 @@ pub fn PostInput(
                 div {
                     class: "bg-panel rounded-xl shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col",
                     onclick: move |e| e.stop_propagation(),
+                    ondragover: move |event: Event<dioxus::html::DragData>| {
+                        event.prevent_default();
+                    },
+                    ondrop: move |event: Event<dioxus::html::DragData>| {
+                        use dioxus::html::HasFileData;
+                        event.prevent_default();
+                        let files = event.files();
+                        if files.is_empty() {
+                            return;
+                        }
+                        let reply_target = replying_to
+                            .read()
+                            .as_ref()
+                            .map(|reply| reply.message_id.clone());
+                        let mode = *image_mode.peek();
+                        let attachments = attachments;
+                        let next_id = next_attachment_id;
+                        spawn_local(async move {
+                            let mut converted = Vec::new();
+                            for data in files {
+                                if let Some(file) = file_from_data(&data).await {
+                                    converted.push(file);
+                                }
+                            }
+                            add_attachment_files(converted, attachments, next_id, mode, reply_target);
+                        });
+                    },
 
                     // Modal header
                     div { class: "flex items-center justify-between px-6 py-4 border-b border-border",
@@ -878,6 +925,42 @@ pub fn PostInput(
                                         oninput: move |evt| {
                                             message_text.set(evt.value().to_string());
                                             schedule_save();
+                                        },
+                                        onpaste: move |event: Event<dioxus::html::ClipboardData>| {
+                                            use dioxus_web::WebEventExt;
+                                            let Some(web_event) = event.try_as_web_event() else {
+                                                return;
+                                            };
+                                            let Ok(clipboard) = web_event
+                                                .dyn_into::<web_sys::ClipboardEvent>()
+                                            else {
+                                                return;
+                                            };
+                                            let Some(data) = clipboard.clipboard_data() else {
+                                                return;
+                                            };
+                                            let Some(files) = data.files() else {
+                                                return;
+                                            };
+                                            let images: Vec<web_sys::File> = (0..files.length())
+                                                .filter_map(|index| files.get(index))
+                                                .filter(|file| file.type_().starts_with("image/"))
+                                                .collect();
+                                            if images.is_empty() {
+                                                return;
+                                            }
+                                            event.prevent_default();
+                                            let reply_target = replying_to
+                                                .read()
+                                                .as_ref()
+                                                .map(|reply| reply.message_id.clone());
+                                            add_attachment_files(
+                                                images,
+                                                attachments,
+                                                next_attachment_id,
+                                                *image_mode.peek(),
+                                                reply_target,
+                                            );
                                         },
                                         onkeydown: move |evt| {
                                             // Ctrl/Cmd+Enter sends the message
@@ -1125,6 +1208,30 @@ pub fn PostInput(
                                         AttachmentState::Ready(image) => rsx! {
                                             span { class: "text-text-muted",
                                                 "{image.width}x{image.height} · {image.bytes / 1024} KB"
+                                            }
+                                            select {
+                                                class: "px-1 py-0.5 bg-background border border-border rounded text-xs text-text",
+                                                title: "Width in the post",
+                                                value: "{image.display}",
+                                                onchange: {
+                                                    let id = attachment.id.clone();
+                                                    move |event| {
+                                                        let value = event.value().parse::<u16>().unwrap_or(0);
+                                                        let value = if value == 0 { 0 } else { value.clamp(25, 100) };
+                                                        attachments.with_mut(|list| {
+                                                            if let Some(slot) = list.iter_mut().find(|entry| entry.id == id) {
+                                                                if let AttachmentState::Ready(image) = &mut slot.state {
+                                                                    image.display = value;
+                                                                }
+                                                            }
+                                                        });
+                                                    }
+                                                },
+                                                option { value: "0", "Full" }
+                                                option { value: "25", "25%" }
+                                                option { value: "50", "50%" }
+                                                option { value: "75", "75%" }
+                                                option { value: "100", "100%" }
                                             }
                                         },
                                         AttachmentState::Failed(error) => rsx! {

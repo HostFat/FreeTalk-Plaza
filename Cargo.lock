@@ -5396,6 +5396,7 @@ dependencies = [
  "curve25519-dalek 4.1.3",
  "dioxus",
  "dioxus-free-icons",
+ "dioxus-web",
  "ed25519-dalek",
  "freenet-scaffold",
  "freenet-stdlib 0.12.1",

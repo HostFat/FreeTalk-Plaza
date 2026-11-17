@@ -42,6 +42,17 @@ pub struct PreparedImage {
 /// Prepare one file for upload according to the chosen mode.
 pub async fn prepare_image(file: &web_sys::File, mode: ImageMode) -> Result<PreparedImage, String> {
     let declared = file.type_();
+    let lower_name = file.name().to_lowercase();
+    if declared == "image/heic"
+        || declared == "image/heif"
+        || lower_name.ends_with(".heic")
+        || lower_name.ends_with(".heif")
+    {
+        return Err(
+            "HEIC/HEIF is not supported here. Export the photo as JPEG or WebP first."
+                .to_string(),
+        );
+    }
     let bytes = read_file_bytes(file).await?;
     let animated_gif = declared == "image/gif" || bytes.starts_with(b"GIF");
     let animated = animated_gif || is_apng(&bytes) || is_animated_webp(&bytes);
