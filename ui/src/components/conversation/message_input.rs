@@ -6,6 +6,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use super::emoji_picker::EmojiPicker;
 use super::ReplyContext;
+use crate::components::conversation::TopicThumb;
 use crate::components::app::{BOARDS, CURRENT_BOARD, CURRENT_CATEGORY};
 use crate::board_data::{PendingSend, PendingUpload};
 use crate::util::image_processing::{prepare_image, ImageMode};
@@ -264,33 +265,69 @@ fn preview_url(bytes: &[u8], mime: &str) -> Option<String> {
     web_sys::Url::create_object_url_with_blob(&blob).ok()
 }
 
+/// Bytes and metadata behind an attachment row: either a queued upload or a
+/// previous upload reused from "Your images".
+#[derive(Clone)]
+struct EditSource {
+    name: String,
+    bytes: Vec<u8>,
+    mime: String,
+    width: u32,
+    height: u32,
+    retire: Option<[u8; 32]>,
+}
+
+fn attachment_source(id: &str, state: &AttachmentState) -> Option<EditSource> {
+    if let Some(record) = crate::util::pending_uploads::list()
+        .into_iter()
+        .find(|record| record.id == id)
+    {
+        return Some(EditSource {
+            name: record.name,
+            bytes: record.bytes,
+            mime: record.mime,
+            width: record.width,
+            height: record.height,
+            retire: record.image.map(|image| image.instance),
+        });
+    }
+    if let AttachmentState::Ready(image) = state {
+        if let Some((bytes, mime)) =
+            crate::util::owned_images::plaintext_for(&image.instance)
+        {
+            return Some(EditSource {
+                name: image.alt.clone(),
+                bytes,
+                mime,
+                width: image.width,
+                height: image.height,
+                retire: Some(image.instance),
+            });
+        }
+    }
+    None
+}
+
 /// Rotate or crop an attachment, then upload the edited image again.
 fn edit_attachment(
     id: String,
+    source: EditSource,
     edit: crate::util::image_processing::Transform,
     mut attachments: Signal<Vec<Attachment>>,
     next_id: Signal<u64>,
     reply_target: Option<MessageId>,
 ) {
-    let Some(record) = crate::util::pending_uploads::list()
-        .into_iter()
-        .find(|record| record.id == id)
-    else {
-        return;
-    };
     spawn_local(async move {
-        match crate::util::image_processing::transform(&record.bytes, &record.mime, edit).await {
+        match crate::util::image_processing::transform(&source.bytes, &source.mime, edit).await {
             Ok(prepared) => {
-                let Some(file) = file_from_bytes(&record.name, &prepared.bytes, &prepared.mime)
+                let Some(file) = file_from_bytes(&source.name, &prepared.bytes, &prepared.mime)
                 else {
                     return;
                 };
-                // The edited image replaces the old blob; retire it so nodes
-                // drop the bytes they no longer need to serve.
-                if let Some(old) = record.image.clone() {
+                if let Some(old) = source.retire {
                     spawn_local(async move {
                         if let Err(error) =
-                            crate::util::images::retire_in_contract(old.instance).await
+                            crate::util::images::retire_in_contract(old).await
                         {
                             dioxus::logger::tracing::warn!(
                                 "Could not retire the replaced image: {error}"
@@ -299,7 +336,7 @@ fn edit_attachment(
                     });
                 }
                 attachments.with_mut(|list| list.retain(|attachment| attachment.id != id));
-                crate::util::pending_uploads::remove(&id);
+                let _ = crate::util::pending_uploads::remove(&id);
                 add_attachment_files(
                     vec![file],
                     attachments,
@@ -313,6 +350,26 @@ fn edit_attachment(
             }
         }
     });
+}
+
+fn edit_attachment_from_row(
+    id: String,
+    state: AttachmentState,
+    edit: crate::util::image_processing::Transform,
+    attachments: Signal<Vec<Attachment>>,
+    next_id: Signal<u64>,
+    reply_target: Option<MessageId>,
+) {
+    match attachment_source(&id, &state) {
+        Some(source) => edit_attachment(id, source, edit, attachments, next_id, reply_target),
+        None => {
+            if let Some(window) = web_sys::window() {
+                let _ = window.alert_with_message(
+                    "The original bytes of this image are not on this device. Re-upload the file to edit it.",
+                );
+            }
+        }
+    }
 }
 
 /// Turn a browser file from a drag or paste event into a `File` the rest of
@@ -419,6 +476,7 @@ pub fn PostInput(
     let mut crop_ratio = use_signal(|| 0.0f64);
     let mut crop_render = use_signal(|| (0.0f64, 0.0f64));
     let mut crop_natural = use_signal(|| (0u32, 0u32));
+    let mut crop_source = use_signal(|| None::<EditSource>);
 
     // Image permission: owner, admins and roles with can_attach_images may
     // attach, and the section rule always wins over the role.
@@ -1220,6 +1278,7 @@ pub fn PostInput(
                                                         div {
                                                             key: "{instance:?}",
                                                             class: "flex items-center gap-1 border border-border rounded px-2 py-1",
+                                                            TopicThumb { image: image.clone() }
                                                             button {
                                                                 r#type: "button",
                                                                 class: "text-xs text-text max-w-40 truncate",
@@ -1364,13 +1423,15 @@ pub fn PostInput(
                                                 title: "Rotate right",
                                                 onclick: {
                                                     let id = attachment.id.clone();
+                                                    let state = attachment.state.clone();
                                                     let target = replying_to
                                                         .read()
                                                         .as_ref()
                                                         .map(|reply| reply.message_id.clone());
                                                     move |_| {
-                                                        edit_attachment(
+                                                        edit_attachment_from_row(
                                                             id.clone(),
+                                                            state.clone(),
                                                             crate::util::image_processing::Transform::RotateRight,
                                                             attachments,
                                                             next_attachment_id,
@@ -1386,13 +1447,15 @@ pub fn PostInput(
                                                 title: "Rotate left",
                                                 onclick: {
                                                     let id = attachment.id.clone();
+                                                    let state = attachment.state.clone();
                                                     let target = replying_to
                                                         .read()
                                                         .as_ref()
                                                         .map(|reply| reply.message_id.clone());
                                                     move |_| {
-                                                        edit_attachment(
+                                                        edit_attachment_from_row(
                                                             id.clone(),
+                                                            state.clone(),
                                                             crate::util::image_processing::Transform::RotateLeft,
                                                             attachments,
                                                             next_attachment_id,
@@ -1408,13 +1471,15 @@ pub fn PostInput(
                                                 title: "Crop to a square",
                                                 onclick: {
                                                     let id = attachment.id.clone();
+                                                    let state = attachment.state.clone();
                                                     let target = replying_to
                                                         .read()
                                                         .as_ref()
                                                         .map(|reply| reply.message_id.clone());
                                                     move |_| {
-                                                        edit_attachment(
+                                                        edit_attachment_from_row(
                                                             id.clone(),
+                                                            state.clone(),
                                                             crate::util::image_processing::Transform::CropSquare,
                                                             attachments,
                                                             next_attachment_id,
@@ -1430,13 +1495,15 @@ pub fn PostInput(
                                                 title: "Crop to 16:9",
                                                 onclick: {
                                                     let id = attachment.id.clone();
+                                                    let state = attachment.state.clone();
                                                     let target = replying_to
                                                         .read()
                                                         .as_ref()
                                                         .map(|reply| reply.message_id.clone());
                                                     move |_| {
-                                                        edit_attachment(
+                                                        edit_attachment_from_row(
                                                             id.clone(),
+                                                            state.clone(),
                                                             crate::util::image_processing::Transform::CropWide,
                                                             attachments,
                                                             next_attachment_id,
@@ -1452,13 +1519,15 @@ pub fn PostInput(
                                                 title: "Crop to 4:3",
                                                 onclick: {
                                                     let id = attachment.id.clone();
+                                                    let state = attachment.state.clone();
                                                     let target = replying_to
                                                         .read()
                                                         .as_ref()
                                                         .map(|reply| reply.message_id.clone());
                                                     move |_| {
-                                                        edit_attachment(
+                                                        edit_attachment_from_row(
                                                             id.clone(),
+                                                            state.clone(),
                                                             crate::util::image_processing::Transform::CropClassic,
                                                             attachments,
                                                             next_attachment_id,
@@ -1471,27 +1540,23 @@ pub fn PostInput(
                                             button {
                                                 r#type: "button",
                                                 class: "px-1 text-xs text-text-muted hover:text-accent",
-                                                title: "Free crop: asks left, top, width and height in percent",
+                                                title: "Free crop: drag on the image",
                                                 onclick: {
                                                     let id = attachment.id.clone();
+                                                    let state = attachment.state.clone();
                                                     let target = replying_to
                                                         .read()
                                                         .as_ref()
                                                         .map(|reply| reply.message_id.clone());
                                                     move |_| {
-                                                        if let Some(record) = crate::util::pending_uploads::list()
-                                                            .into_iter()
-                                                            .find(|record| record.id == id)
-                                                        {
-                                                            if let Some(url) = preview_url(
-                                                                &record.bytes,
-                                                                &record.mime,
-                                                            ) {
+                                                        if let Some(source) = attachment_source(&id, &state) {
+                                                            if let Some(url) = preview_url(&source.bytes, &source.mime) {
                                                                 if let Some(old) = crop_url.read().clone() {
                                                                     let _ = web_sys::Url::revoke_object_url(&old);
                                                                 }
                                                                 crop_url.set(Some(url));
                                                                 crop_target.set(Some(id.clone()));
+                                                                crop_source.set(Some(source.clone()));
                                                                 crop_x.set(0.0);
                                                                 crop_y.set(0.0);
                                                                 crop_w.set(100.0);
@@ -1500,10 +1565,14 @@ pub fn PostInput(
                                                                 crop_drag_start.set(None);
                                                                 crop_render.set((0.0, 0.0));
                                                                 crop_natural.set((
-                                                                    record.width,
-                                                                    record.height,
+                                                                    source.width,
+                                                                    source.height,
                                                                 ));
                                                             }
+                                                        } else if let Some(window) = web_sys::window() {
+                                                            let _ = window.alert_with_message(
+                                                                "The original bytes of this image are not on this device. Re-upload the file to edit it.",
+                                                            );
                                                         }
                                                     }
                                                 },
@@ -1792,23 +1861,27 @@ pub fn PostInput(
                                                         .read()
                                                         .as_ref()
                                                         .map(|reply| reply.message_id.clone());
-                                                    edit_attachment(
-                                                        target.clone(),
-                                                        crate::util::image_processing::Transform::CropRect {
-                                                            x: *crop_x.read() as u16,
-                                                            y: *crop_y.read() as u16,
-                                                            width: (*crop_w.read() as u16).clamp(1, 100),
-                                                            height: (*crop_h.read() as u16).clamp(1, 100),
-                                                        },
-                                                        attachments,
-                                                        next_attachment_id,
-                                                        reply_target,
-                                                    );
+                                                    if let Some(source) = crop_source.read().clone() {
+                                                        edit_attachment(
+                                                            target.clone(),
+                                                            source,
+                                                            crate::util::image_processing::Transform::CropRect {
+                                                                x: *crop_x.read() as u16,
+                                                                y: *crop_y.read() as u16,
+                                                                width: (*crop_w.read() as u16).clamp(1, 100),
+                                                                height: (*crop_h.read() as u16).clamp(1, 100),
+                                                            },
+                                                            attachments,
+                                                            next_attachment_id,
+                                                            reply_target,
+                                                        );
+                                                    }
                                                     if let Some(url) = crop_url.read().clone() {
                                                         let _ = web_sys::Url::revoke_object_url(&url);
                                                     }
                                                     crop_target.set(None);
                                                     crop_url.set(None);
+                                                    crop_source.set(None);
                                                 }
                                             },
                                             "Apply crop"
@@ -1823,4 +1896,6 @@ pub fn PostInput(
         }
     }
 }
+
+
 

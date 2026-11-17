@@ -81,6 +81,42 @@ pub fn list() -> Vec<OwnedImage> {
     owned
 }
 
+/// Plain bytes of a single-contract upload this device made, for editing a
+/// reused image. Sealed payloads are decrypted with any board/secret key the
+/// client holds. Manifests return `None` (their chunks are not kept locally).
+pub fn plaintext_for(instance: &[u8; 32]) -> Option<(Vec<u8>, String)> {
+    let owned = BOARDS
+        .read()
+        .owned_images
+        .iter()
+        .find(|entry| entry.image.instance == *instance)?
+        .clone();
+    let state: plaza_blob_core::BlobStateV1 =
+        ciborium::from_reader(&owned.state[..]).ok()?;
+    if !state.chunks.is_empty() || state.data.is_empty() {
+        return None;
+    }
+    let mut data = state.data.clone();
+    if let Some(nonce) = state.nonce {
+        let mut candidates = Vec::new();
+        for board in BOARDS.read().map.values() {
+            candidates.extend(board.image_secret_candidates());
+        }
+        let mut unlocked = None;
+        for (key, version) in candidates {
+            let version = state.secret_version.unwrap_or(version);
+            if let Ok(plain) =
+                crate::util::ecies::decrypt_with_symmetric_key(&key, &data, &nonce, version)
+            {
+                unlocked = Some(plain);
+                break;
+            }
+        }
+        data = unlocked?;
+    }
+    Some((data, owned.image.mime.clone()))
+}
+
 /// Own uploads no board refers to anymore, older than `min_age_ms`.
 pub fn unreferenced(min_age_ms: i64) -> Vec<OwnedImage> {
     let mut referenced = std::collections::HashSet::new();
