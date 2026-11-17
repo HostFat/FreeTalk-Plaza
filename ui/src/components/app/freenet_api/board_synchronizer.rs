@@ -508,54 +508,6 @@ impl BoardSynchronizer {
             }
         }
 
-        // Read-only visitors never put a state: fetch it with a GET instead.
-        if web_api_available {
-            let spectator_fetches: Vec<(VerifyingKey, ContractKey)> = {
-                let boards = BOARDS.read();
-                let sync_info = SYNC_INFO.read();
-                boards
-                    .map
-                    .iter()
-                    .filter(|(_, board)| board.spectator)
-                    .filter(|(key, _)| {
-                        sync_info
-                            .sync_status_of(key)
-                            .map(|status| status == BoardSyncStatus::Disconnected)
-                            .unwrap_or(true)
-                    })
-                    .map(|(key, board)| (*key, board.contract_key))
-                    .collect()
-            };
-            for (owner_vk, contract_key) in spectator_fetches {
-                let request = ContractRequest::Get {
-                    key: *contract_key.id(),
-                    return_contract_code: true,
-                    subscribe: true,
-                    blocking_subscribe: true,
-                };
-                if let Some(web_api) = WEB_API.write().as_mut() {
-                    match web_api.send(ClientRequest::ContractOp(request)).await {
-                        Ok(_) => {
-                            info!(
-                                "Requesting state for read-only board {:?}",
-                                MemberId::from(&owner_vk)
-                            );
-                            SYNC_INFO.with_mut(|sync_info| {
-                                sync_info
-                                    .update_sync_status(&owner_vk, BoardSyncStatus::Subscribing);
-                            });
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Could not request the state for read-only board {:?}: {e}",
-                                MemberId::from(&owner_vk)
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
         // Send upgrade pointers for migrated boards (owner only)
         if web_api_available {
             let migrated_BOARDS: Vec<(VerifyingKey, freenet_stdlib::prelude::ContractKey)> =

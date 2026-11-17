@@ -468,6 +468,19 @@ pub async fn handle_get_response(
                         // Clone current state to avoid borrow issues during merge
                         let current_state = board_data.board_state.clone();
 
+                        // A read-only visitor starts from a placeholder state that
+                        // has no owner: merging would trip the owner check. Take the
+                        // fetched state as it is, the visitor never writes.
+                        if board_data.spectator {
+                            board_data.board_state = retrieved_state.clone();
+                            info!(
+                                "Loaded the state of read-only board {:?}",
+                                MemberId::from(owner_vk)
+                            );
+                            board_data.capture_self_membership_data(&params);
+                            board_data.decrypt_category_secrets();
+                            board_data.rebuild_actions_with_local_secrets(&params);
+                        } else {
                         // Merge the retrieved state into the existing state
                         match board_data.board_state.merge(
                             &current_state,
@@ -500,6 +513,7 @@ pub async fn handle_get_response(
                                     e
                                 );
                             }
+                        }
                         }
                     }
                 });
