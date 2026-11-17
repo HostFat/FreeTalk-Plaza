@@ -212,6 +212,9 @@ fn ReplySplitRow(
                         )
                         .await
                         {
+                            crate::components::app::toasts::show_error(format!(
+                                "Could not split the reply: {e}"
+                            ));
                             error.set(Some(e));
                         }
                     });

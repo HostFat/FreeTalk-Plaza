@@ -423,13 +423,16 @@ fn selected_files() -> Option<Vec<web_sys::File>> {
 /// The modal contains fields for title and content.
 #[component]
 pub fn PostInput(
-    handle_send_message: EventHandler<(
-        String,
-        String,
-        Option<ReplyContext>,
-        Option<crate::util::messaging::PollDraft>,
-        Vec<ImageRef>,
-    )>,
+    handle_send_message: Callback<
+        (
+            String,
+            String,
+            Option<ReplyContext>,
+            Option<crate::util::messaging::PollDraft>,
+            Vec<ImageRef>,
+        ),
+        Result<(), String>,
+    >,
     replying_to: Signal<Option<ReplyContext>>,
     on_request_edit_last: EventHandler<()>,
     /// Default reply context - applied when modal opens if replying_to is None
@@ -735,6 +738,14 @@ pub fn PostInput(
                 })
                 .collect();
 
+            // The handler rejects a send that cannot be prepared (not a
+            // member, cooldown, size limit): keep the text so nothing is lost.
+            if let Err(error) =
+                handle_send_message.call((title, content, reply_ctx, poll, images))
+            {
+                crate::components::app::toasts::show_error(format!("Could not send: {error}"));
+                return;
+            }
             title_text.set(String::new());
             message_text.set(String::new());
             replying_to.set(None);
@@ -756,10 +767,6 @@ pub fn PostInput(
             }
             crate::util::drafts::clear();
             crate::util::drafts::persist();
-            handle_send_message.call((title, content, reply_ctx, poll, images));
-            crate::components::app::toasts::show(
-                "Published. Syncing with the network…",
-            );
         }
     };
 

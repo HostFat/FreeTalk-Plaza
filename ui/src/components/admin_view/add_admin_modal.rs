@@ -98,6 +98,9 @@ pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
             let mut admin_bytes = Vec::new();
             if let Err(e) = ciborium::ser::into_writer(&admin, &mut admin_bytes) {
                 error!("Failed to serialize admin for signing: {:?}", e);
+                crate::components::app::toasts::show_error(
+                    "Could not add the admin: the record could not be built",
+                );
                 return;
             }
 
@@ -122,8 +125,14 @@ pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
                         &Some(delta),
                     ) {
                         error!("Failed to apply admin delta: {:?}", e);
+                        crate::components::app::toasts::show_error(format!(
+                            "Could not add the admin: {e}"
+                        ));
                     } else {
                         info!("Successfully added admin {:?}", member_id);
+                        crate::components::app::toasts::show(
+                            "Admin added. Syncing with the network…",
+                        );
                     }
                 }
             });

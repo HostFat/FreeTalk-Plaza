@@ -246,7 +246,13 @@ pub async fn toggle_reaction(ctx: ActionContext, target_message_id: MessageId, e
         actions.push(ActionContentV1::reaction(target_message_id.clone(), emoji));
     }
 
-    send_actions(ctx, actions, None).await;
+    send_actions(
+        ctx,
+        actions,
+        None,
+        "Could not update the reaction",
+    )
+    .await;
 }
 
 /// Owner-only, after a key rotation: publish an edit that re-seals the real
@@ -304,19 +310,38 @@ pub async fn reseal_category_name(category_id: MessageId) {
         category.allowed_roles.clone(),
         category.hidden,
     );
-    send_actions(ctx, vec![action], Some("Section updated")).await;
+    send_actions(
+        ctx,
+        vec![action],
+        Some("Section updated"),
+        "Could not update the section",
+    )
+    .await;
 }
 
 /// Turn images on or off for one section. The action is signed by the owner or
 /// an admin and the section rule wins over every role.
 pub async fn set_section_images(ctx: ActionContext, target: MessageId, allowed: bool) {
     let action = ActionContentV1::set_section_images(target, allowed);
-    send_actions(ctx, vec![action], Some("Section images updated")).await;
+    send_actions(
+        ctx,
+        vec![action],
+        Some("Section images updated"),
+        "Could not update the section images",
+    )
+    .await;
 }
 
 /// Delete a message
-pub async fn delete_message(ctx: ActionContext, target_message_id: MessageId) {    let action = ActionContentV1::delete(target_message_id.clone());
-    send_actions(ctx, vec![action], Some("Message deleted")).await;
+pub async fn delete_message(ctx: ActionContext, target_message_id: MessageId) {
+    let action = ActionContentV1::delete(target_message_id.clone());
+    send_actions(
+        ctx,
+        vec![action],
+        Some("Message deleted"),
+        "Could not delete the message",
+    )
+    .await;
 }
 
 /// Edit a message
@@ -331,7 +356,13 @@ pub async fn edit_message(
     }
 
     let action = ActionContentV1::edit(target_message_id.clone(), new_title, new_text);
-    send_actions(ctx, vec![action], Some("Message edited")).await;
+    send_actions(
+        ctx,
+        vec![action],
+        Some("Message edited"),
+        "Could not edit the message",
+    )
+    .await;
 }
 
 /// Edit a category
@@ -407,7 +438,13 @@ pub async fn edit_category(
         }
     };
 
-    send_action_messages(ctx, vec![content], None).await;
+    send_action_messages(
+        ctx,
+        vec![content],
+        Some("Section updated"),
+        "Could not update the section",
+    )
+    .await;
 }
 
 fn self_member_id(ctx: &ActionContext) -> MemberId {
@@ -805,7 +842,13 @@ pub async fn delete_group(
     let body = seal_action(&ctx, delete, &group_id).ok_or("Could not seal the group deletion")?;
     contents.push(body);
 
-    send_action_messages(ctx, contents, Some("Section deleted")).await;
+    send_action_messages(
+        ctx,
+        contents,
+        Some("Section deleted"),
+        "Could not delete the section",
+    )
+    .await;
     Ok(())
 }
 
@@ -835,6 +878,7 @@ async fn send_actions(
     ctx: ActionContext,
     actions: Vec<ActionContentV1>,
     label: Option<&'static str>,
+    failure_label: &'static str,
 ) {
     let self_id = plaza_core::board_state::member::MemberId::from(&ctx.self_sk.verifying_key());
     if ctx
@@ -844,6 +888,9 @@ async fn send_actions(
         .is_some()
     {
         dioxus::logger::tracing::warn!("Suspended members cannot edit or react");
+        crate::components::app::toasts::show_error(
+            "You are suspended and cannot post right now",
+        );
         return;
     }
     let mut contents = Vec::new();
@@ -853,6 +900,9 @@ async fn send_actions(
             seal_bytes(&encoded, &key, version)
         } else if ctx.is_private {
             let Some((key, version)) = ctx.secret_opt else {
+                crate::components::app::toasts::show_error(format!(
+                    "{failure_label}: the board key is missing"
+                ));
                 return;
             };
             seal_bytes(&encoded, &key, version)
@@ -866,7 +916,7 @@ async fn send_actions(
             envelope.encode(),
         ));
     }
-    send_action_messages(ctx, contents, label).await;
+    send_action_messages(ctx, contents, label, failure_label).await;
 }
 
 // Send action messages and apply delta
@@ -874,6 +924,7 @@ async fn send_action_messages(
     ctx: ActionContext,
     contents: Vec<BoardMessageBody>,
     label: Option<&'static str>,
+    failure_label: &'static str,
 ) {
     if contents.is_empty() {
         return;
@@ -891,6 +942,9 @@ async fn send_action_messages(
 
         let mut message_bytes = Vec::new();
         if ciborium::ser::into_writer(&message, &mut message_bytes).is_err() {
+            crate::components::app::toasts::show_error(format!(
+                "{failure_label}: the action could not be built"
+            ));
             return;
         }
 
@@ -928,16 +982,16 @@ async fn send_action_messages(
                 }
             }
         });
-        if let Some(label) = label {
-            if applied {
+        if applied {
+            if let Some(label) = label {
                 crate::components::app::toasts::show(format!(
                     "{label}. Syncing with the network…"
                 ));
-            } else {
-                crate::components::app::toasts::show_error(format!(
-                    "{label}: the action could not be applied"
-                ));
             }
+        } else {
+            crate::components::app::toasts::show_error(format!(
+                "{failure_label}: the action could not be applied"
+            ));
         }
     }
 }

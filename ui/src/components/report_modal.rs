@@ -26,8 +26,12 @@ pub fn ReportModal() -> Element {
             Ok(()) => {
                 REPORT_TARGET.with_mut(|target| *target = None);
                 error.set(None);
+                crate::components::app::toasts::show("Report sent to the moderators.");
             }
-            Err(e) => error.set(Some(e)),
+            Err(e) => {
+                crate::components::app::toasts::show_error(format!("Could not report: {e}"));
+                error.set(Some(e));
+            }
         }
     };
 

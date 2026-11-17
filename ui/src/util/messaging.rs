@@ -50,6 +50,22 @@ pub struct PollDraft {
     pub multiselect: bool,
 }
 
+/// A message that passed every local check, sealed and ready to publish.
+///
+/// Splitting preparation from publishing lets the composer keep the text when
+/// the send is rejected before anything is written, while the publish itself
+/// still reports its own outcome.
+pub struct PreparedMessage {
+    current_board: VerifyingKey,
+    board_key: BoardKey,
+    self_sk: SigningKey,
+    board_state: ChatBoardStateV1,
+    content: BoardMessageBody,
+    images: Vec<plaza_core::board_state::images::ImageRef>,
+    reply_target: Option<MessageId>,
+    category_id: Option<MessageId>,
+}
+
 /// Send a message to a board.
 ///
 /// This handles both regular text messages and replies, as well as
@@ -69,16 +85,69 @@ pub async fn send_message(
     reply_ctx: Option<ReplyContext>,
     images: Vec<plaza_core::board_state::images::ImageRef>,
     poll: Option<PollDraft>,
-) {
+) -> Result<(), String> {
+    let prepared = prepare_message(
+        current_board,
+        board_key,
+        self_sk,
+        board_state_clone,
+        is_private,
+        secret_opt,
+        category_secret,
+        category_id,
+        title_text,
+        message_text,
+        reply_ctx,
+        images,
+        poll,
+    )?;
+    publish_prepared(prepared).await
+}
+
+/// Publish a message built by [`prepare_message`].
+pub async fn publish_prepared(prepared: PreparedMessage) -> Result<(), String> {
+    publish_message(
+        prepared.current_board,
+        prepared.board_key,
+        prepared.self_sk,
+        prepared.board_state,
+        prepared.content,
+        prepared.images,
+        prepared.reply_target,
+        prepared.category_id,
+    )
+    .await
+    .map(|_| ())
+    .ok_or_else(|| "The post could not be applied locally".to_string())
+}
+
+/// Run every local check and seal the message. Nothing is written yet.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_message(
+    current_board: VerifyingKey,
+    board_key: BoardKey,
+    self_sk: SigningKey,
+    board_state_clone: ChatBoardStateV1,
+    is_private: bool,
+    secret_opt: Option<([u8; 32], u32)>,
+    // Set when posting inside a restricted category: (category, key, version)
+    category_secret: Option<(MessageId, [u8; 32], u32)>,
+    category_id: Option<MessageId>,
+    title_text: String,
+    message_text: String,
+    reply_ctx: Option<ReplyContext>,
+    images: Vec<plaza_core::board_state::images::ImageRef>,
+    poll: Option<PollDraft>,
+) -> Result<PreparedMessage, String> {
     if message_text.is_empty() && poll.is_none() {
         warn!("Message is empty");
-        return;
+        return Err("The message is empty".to_string());
     }
 
     if let Some(board_data) = BOARDS.read().map.get(&current_board) {
         if let Err(error) = board_data.ensure_can_write() {
             warn!("{error}");
-            return;
+            return Err(error);
         }
     }
 
@@ -108,7 +177,7 @@ pub async fn send_message(
     let now_ms = chrono::Utc::now().timestamp_millis();
     if now_ms - LAST_SEND_MS.with(Cell::get) < MIN_SEND_INTERVAL_MS {
         warn!("Ignoring a second send inside the cooldown window");
-        return;
+        return Err("Wait a moment before sending again".to_string());
     }
     LAST_SEND_MS.with(|last| last.set(now_ms));
 
@@ -132,7 +201,7 @@ pub async fn send_message(
     if let Some(poll) = &poll_content {
         if let Err(error) = poll.validate() {
             warn!("Invalid poll: {}", error);
-            return;
+            return Err(format!("Invalid poll: {error}"));
         }
     }
     let (content_type, content_version, content_bytes) = if let Some(poll) = &poll_content {
@@ -197,20 +266,21 @@ pub async fn send_message(
             "Message too long: {} encoded bytes, max {} bytes",
             content_size, max_message_size
         );
-        return;
+        return Err(format!(
+            "The message is {content_size} bytes; the limit is {max_message_size}"
+        ));
     }
 
-    publish_message(
+    Ok(PreparedMessage {
         current_board,
         board_key,
         self_sk,
-        board_state_clone,
+        board_state: board_state_clone,
         content,
         images,
         reply_target,
         category_id,
-    )
-    .await;
+    })
 }
 
 /// Membership and member-info records that put this client back on the board
@@ -408,7 +478,7 @@ pub async fn send_poll_vote(
     category_secret: Option<(MessageId, [u8; 32], u32)>,
     category_id: Option<MessageId>,
     vote: PollVoteV1,
-) {
+) -> Result<(), String> {
     let content_bytes = vote.encode();
     let content = if let Some((category_id, secret, version)) = category_secret {
         let (ciphertext, nonce) = encrypt_with_symmetric_key(&secret, &content_bytes, version);
@@ -456,7 +526,9 @@ pub async fn send_poll_vote(
         None,
         category_id,
     )
-    .await;
+    .await
+    .map(|_| ())
+    .ok_or_else(|| "The vote could not be applied locally".to_string())
 }
 
 /// Remove an admin's rights.

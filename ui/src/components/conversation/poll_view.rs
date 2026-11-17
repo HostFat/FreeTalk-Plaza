@@ -61,7 +61,7 @@ pub fn PollView(poll: PollData, poll_id: MessageId, self_member_id: MemberId) ->
         };
         busy.set(true);
         spawn_local(async move {
-            send_poll_vote(
+            match send_poll_vote(
                 board_data.owner_vk,
                 board_data.board_key(),
                 board_data.self_sk.clone(),
@@ -74,9 +74,22 @@ pub fn PollView(poll: PollData, poll_id: MessageId, self_member_id: MemberId) ->
                 category_id,
                 vote,
             )
-            .await;
+            .await
+            {
+                Ok(()) => {
+                    error.set(None);
+                    crate::components::app::toasts::show(
+                        "Vote recorded. Syncing with the network…",
+                    );
+                }
+                Err(message) => {
+                    crate::components::app::toasts::show_error(format!(
+                        "Could not record the vote: {message}"
+                    ));
+                    error.set(Some(message));
+                }
+            }
             busy.set(false);
-            error.set(None);
         });
     };
 

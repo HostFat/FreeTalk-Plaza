@@ -57,6 +57,7 @@ pub fn CreateBoardModal() -> Element {
         info!("🔵 Marking board for synchronization...");
         mark_needs_sync(new_board_key);
         info!("🔵 Board marked for sync");
+        crate::components::app::toasts::show("Board created. Publishing it now…");
 
         // Reset and close modal
         info!("🔵 Resetting form fields...");

@@ -45,9 +45,13 @@ fn remove_board_from_device(board_key: ed25519_dalek::VerifyingKey) {
     if was_current {
         CURRENT_BOARD.write().owner_key = None;
     }
+    crate::components::app::toasts::show("Board removed from this device.");
     wasm_bindgen_futures::spawn_local(async {
         if let Err(error) = save_boards_to_delegate().await {
             error!("Failed to save boards after removing one: {error}");
+            crate::components::app::toasts::show_error(format!(
+                "The removal was not saved: {error}"
+            ));
         }
     });
     if was_current {
@@ -234,6 +238,9 @@ pub fn BoardList() -> Element {
                                                 spawn(async move {
                                                     if let Err(e) = save_boards_to_delegate().await {
                                                         error!("Failed to save current board selection: {}", e);
+                                                        crate::components::app::toasts::show_error(format!(
+                                                            "The board selection was not saved: {e}"
+                                                        ));
                                                     }
                                                 });
                                             },

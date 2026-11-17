@@ -377,6 +377,7 @@ fn accept_invitation(inv: Invitation, nickname: String) {
     match result {
         Ok(_) => {
             info!("Successfully requested board state for invitation");
+            crate::components::app::toasts::show("Invitation accepted. Joining the board…");
         }
         Err(e) => {
             // Log detailed error information
@@ -385,6 +386,9 @@ fn accept_invitation(inv: Invitation, nickname: String) {
                 "Error details: invitation for board with owner key: {:?}",
                 MemberId::from(board_owner)
             );
+            crate::components::app::toasts::show_error(format!(
+                "Could not accept the invitation: {e}"
+            ));
         }
     }
 }

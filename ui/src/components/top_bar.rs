@@ -8,7 +8,7 @@ use crate::components::app::{
 use crate::components::conversation::message_input::PostInput;
 use crate::util::avatar::get_avatar;
 use crate::util::ecies::unseal_bytes_with_secrets;
-use crate::util::messaging::{send_message, PollDraft, ReplyContext};
+use crate::util::messaging::{prepare_message, publish_prepared, PollDraft, ReplyContext};
 use dioxus::prelude::*;
 use dioxus_free_icons::{icons::fa_solid_icons::FaBars, Icon};
 use plaza_core::board_state::member::MemberId;
@@ -96,16 +96,18 @@ pub fn TopBar() -> Element {
         })
     });
 
-    // Message sending handler
+    // Message sending handler. The result covers the local checks, so the
+    // composer can keep the text; the publish outcome is reported from the
+    // spawned task.
     let handle_send_message = move |(title_text, message_text, reply_ctx, poll, images): (
         String,
         String,
         Option<ReplyContext>,
         Option<PollDraft>,
         Vec<plaza_core::board_state::images::ImageRef>,
-    )| {
-        if message_text.is_empty() {
-            return;
+    )| -> Result<(), String> {
+        if message_text.is_empty() && poll.is_none() {
+            return Err("The message is empty".to_string());
         }
 
         // Get board data for sending
@@ -146,7 +148,7 @@ pub fn TopBar() -> Element {
             }
         };
 
-        if let Some((
+        let Some((
             current_board,
             board_key,
             self_sk,
@@ -155,31 +157,42 @@ pub fn TopBar() -> Element {
             secret_opt,
             snapshot,
         )) = board_info
-        {
-            // A composer opened inside a restricted category carries its id.
-            let category_secret = reply_ctx
-                .as_ref()
-                .and_then(|reply| snapshot.posting_secret_for(&reply.message_id));
-            let category_id = CURRENT_CATEGORY.read().category_id.clone();
-            spawn(async move {
-                send_message(
-                    current_board,
-                    board_key,
-                    self_sk,
-                    board_state_clone,
-                    is_private,
-                    secret_opt,
-                    category_secret,
-                    category_id,
-                    title_text,
-                    message_text,
-                    reply_ctx,
-                    images,
-                    poll,
-                )
-                .await;
-            });
-        }
+        else {
+            return Err("No board selected".to_string());
+        };
+        // A composer opened inside a restricted category carries its id.
+        let category_secret = reply_ctx
+            .as_ref()
+            .and_then(|reply| snapshot.posting_secret_for(&reply.message_id));
+        let category_id = CURRENT_CATEGORY.read().category_id.clone();
+        let prepared = prepare_message(
+            current_board,
+            board_key,
+            self_sk,
+            board_state_clone,
+            is_private,
+            secret_opt,
+            category_secret,
+            category_id,
+            title_text,
+            message_text,
+            reply_ctx,
+            images,
+            poll,
+        )?;
+        spawn(async move {
+            match publish_prepared(prepared).await {
+                Ok(()) => crate::components::app::toasts::show(
+                    "Published. Syncing with the network…",
+                ),
+                Err(error) => {
+                    crate::components::app::toasts::show_error(format!(
+                        "Could not publish: {error}"
+                    ));
+                }
+            }
+        });
+        Ok(())
     };
 
     // Don't render if no board is selected

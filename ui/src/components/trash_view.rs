@@ -218,10 +218,20 @@ pub fn TrashView() -> Element {
                                                     )
                                                     .await
                                                     {
-                                                        Ok(()) => grant_notice.set(Some(
-                                                            "Removed from the trash key list.".to_string(),
-                                                        )),
-                                                        Err(message) => error.set(Some(message)),
+                                                        Ok(()) => {
+                                                            grant_notice.set(Some(
+                                                                "Removed from the trash key list.".to_string(),
+                                                            ));
+                                                            crate::components::app::toasts::show(
+                                                                "Trash key rotated. Syncing with the network…",
+                                                            );
+                                                        }
+                                                        Err(message) => {
+                                                            crate::components::app::toasts::show_error(format!(
+                                                                "Could not rotate the trash key: {message}"
+                                                            ));
+                                                            error.set(Some(message));
+                                                        }
                                                     }
                                                 });
                                             },
@@ -292,9 +302,20 @@ pub fn TrashView() -> Element {
                                             )
                                             .await
                                             {
-                                                Ok(()) => grant_notice
-                                                    .set(Some("Trash key granted.".to_string())),
-                                                Err(message) => error.set(Some(message)),
+                                                Ok(()) => {
+                                                    grant_notice.set(Some(
+                                                        "Trash key granted.".to_string(),
+                                                    ));
+                                                    crate::components::app::toasts::show(
+                                                        "Trash key shared. Syncing with the network…",
+                                                    );
+                                                }
+                                                Err(message) => {
+                                                    crate::components::app::toasts::show_error(format!(
+                                                        "Could not share the trash key: {message}"
+                                                    ));
+                                                    error.set(Some(message));
+                                                }
                                             }
                                         });
                                     }
@@ -320,10 +341,20 @@ pub fn TrashView() -> Element {
                                 grant_notice.set(None);
                                 error.set(None);
                                 match crate::util::trash_actions::grant_missing_trash_access(&ctx) {
-                                    Ok(count) => grant_notice.set(Some(format!(
-                                        "Trash key shared with {count} moderators."
-                                    ))),
-                                    Err(message) => error.set(Some(message)),
+                                    Ok(count) => {
+                                        grant_notice.set(Some(format!(
+                                            "Trash key shared with {count} moderators."
+                                        )));
+                                        crate::components::app::toasts::show(format!(
+                                            "Trash key shared with {count} moderators. Syncing with the network…"
+                                        ));
+                                    }
+                                    Err(message) => {
+                                        crate::components::app::toasts::show_error(format!(
+                                            "Could not share the trash key: {message}"
+                                        ));
+                                        error.set(Some(message));
+                                    }
                                 }
                             },
                             "Share the key with all moderators"
@@ -464,15 +495,27 @@ pub fn TrashView() -> Element {
                                             return;
                                         }
                                         wasm_bindgen_futures::spawn_local(async move {
-                                            if let Err(message) =
-                                                crate::util::trash_actions::restore_item(&ctx, &item, destination)
-                                                    .await
+                                            match crate::util::trash_actions::restore_item(
+                                                &ctx, &item, destination,
+                                            )
+                                            .await
                                             {
-                                                if is_stale(&message) {
+                                                Ok(()) => {
                                                     handled.write().insert(item.item.id);
-                                                    error.set(Some("This item was already handled. The list was refreshed.".to_string()));
-                                                } else {
-                                                    error.set(Some(message));
+                                                    crate::components::app::toasts::show(
+                                                        "Topic restored. Syncing with the network…",
+                                                    );
+                                                }
+                                                Err(message) => {
+                                                    crate::components::app::toasts::show_error(format!(
+                                                        "Could not restore: {message}"
+                                                    ));
+                                                    if is_stale(&message) {
+                                                        handled.write().insert(item.item.id);
+                                                        error.set(Some("This item was already handled. The list was refreshed.".to_string()));
+                                                    } else {
+                                                        error.set(Some(message));
+                                                    }
                                                 }
                                             }
                                         });
@@ -502,13 +545,22 @@ pub fn TrashView() -> Element {
                                             };
                                             let item = item.clone();
                                             wasm_bindgen_futures::spawn_local(async move {
-                                                if let Err(message) =
-                                                    crate::util::trash_actions::purge_item(
-                                                        &ctx, &item, &reason, code,
-                                                    )
-                                                    .await
+                                                match crate::util::trash_actions::purge_item(
+                                                    &ctx, &item, &reason, code,
+                                                )
+                                                .await
                                                 {
-                                                    error.set(Some(message));
+                                                    Ok(()) => {
+                                                        crate::components::app::toasts::show(
+                                                            "Item purged. Syncing with the network…",
+                                                        );
+                                                    }
+                                                    Err(message) => {
+                                                        crate::components::app::toasts::show_error(format!(
+                                                            "Could not purge: {message}"
+                                                        ));
+                                                        error.set(Some(message));
+                                                    }
                                                 }
                                             });
                                         }

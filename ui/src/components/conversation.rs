@@ -5,7 +5,7 @@ use crate::util::ecies::unseal_bytes_with_secrets;
 use crate::util::images::{request_image, ImageStatus, IMAGES};
 use crate::util::markdown::text_to_html;
 use crate::util::member_id_to_color;
-use crate::util::messaging::{send_message, ReplyContext};
+use crate::util::messaging::{prepare_message, publish_prepared, ReplyContext};
 use crate::util::{format_utc_as_full_datetime, format_utc_as_local_time};
 pub mod emoji_picker;
 pub mod image_attachment;
@@ -966,7 +966,9 @@ pub fn Conversation(
             }
         };
 
-    // Message sending handler
+    // Message sending handler. The result covers the local checks, so the
+    // composer can keep the text; the publish outcome is reported from the
+    // spawned task.
     let handle_send_message = {
         let current_board_data = current_board_data.clone();
         move |(title_text, message_text, reply_ctx, poll, images): (
@@ -975,46 +977,57 @@ pub fn Conversation(
             Option<ReplyContext>,
             Option<crate::util::messaging::PollDraft>,
             Vec<plaza_core::board_state::images::ImageRef>,
-        )| {
-            if let (Some(current_board), Some(current_board_data)) =
+        )| -> Result<(), String> {
+            let (Some(current_board), Some(current_board_data)) =
                 (CURRENT_BOARD.read().owner_key, current_board_data.clone())
-            {
-                let board_key = current_board_data.board_key();
-                let self_sk = current_board_data.self_sk.clone();
-                let board_state_clone = current_board_data.board_state.clone();
-                let is_private = current_board_data.is_private();
-                let secret_opt: Option<([u8; 32], u32)> = current_board_data
-                    .get_secret()
-                    .map(|(secret, version)| (*secret, version));
-                // Replies to a restricted category, or to a post inside one,
-                // are sealed with that category's key.
-                let category_secret = reply_ctx
-                    .as_ref()
-                    .and_then(|reply| current_board_data.posting_secret_for(&reply.message_id));
+            else {
+                return Err("No board selected".to_string());
+            };
+            let board_key = current_board_data.board_key();
+            let self_sk = current_board_data.self_sk.clone();
+            let board_state_clone = current_board_data.board_state.clone();
+            let is_private = current_board_data.is_private();
+            let secret_opt: Option<([u8; 32], u32)> = current_board_data
+                .get_secret()
+                .map(|(secret, version)| (*secret, version));
+            // Replies to a restricted category, or to a post inside one,
+            // are sealed with that category's key.
+            let category_secret = reply_ctx
+                .as_ref()
+                .and_then(|reply| current_board_data.posting_secret_for(&reply.message_id));
 
-                let category_id = crate::components::app::CURRENT_CATEGORY
-                    .read()
-                    .category_id
-                    .clone();
-                spawn_local(async move {
-                    send_message(
-                        current_board,
-                        board_key,
-                        self_sk,
-                        board_state_clone,
-                        is_private,
-                        secret_opt,
-                        category_secret,
-                        category_id,
-                        title_text,
-                        message_text,
-                        reply_ctx,
-                        images,
-                        poll,
-                    )
-                    .await;
-                });
-            }
+            let category_id = crate::components::app::CURRENT_CATEGORY
+                .read()
+                .category_id
+                .clone();
+            let prepared = prepare_message(
+                current_board,
+                board_key,
+                self_sk,
+                board_state_clone,
+                is_private,
+                secret_opt,
+                category_secret,
+                category_id,
+                title_text,
+                message_text,
+                reply_ctx,
+                images,
+                poll,
+            )?;
+            spawn_local(async move {
+                match publish_prepared(prepared).await {
+                    Ok(()) => crate::components::app::toasts::show(
+                        "Published. Syncing with the network…",
+                    ),
+                    Err(error) => {
+                        crate::components::app::toasts::show_error(format!(
+                            "Could not publish: {error}"
+                        ));
+                    }
+                }
+            });
+            Ok(())
         }
     };
 

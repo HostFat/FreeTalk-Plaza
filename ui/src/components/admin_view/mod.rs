@@ -374,12 +374,23 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                                         class: "px-3 py-1.5 text-xs text-red-400 hover:bg-red-500/10 rounded-lg transition-colors",
                                         onclick: move |_| {
                                             spawn_local(async move {
-                                                if let Err(e) =
-                                                    crate::util::messaging::revoke_admin(member_id).await
+                                                match crate::util::messaging::revoke_admin(
+                                                    member_id,
+                                                )
+                                                .await
                                                 {
-                                                    admin_error.set(Some(e));
-                                                } else {
-                                                    admin_error.set(None);
+                                                    Ok(()) => {
+                                                        admin_error.set(None);
+                                                        crate::components::app::toasts::show(
+                                                            "Admin removed. Syncing with the network…",
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        crate::components::app::toasts::show_error(
+                                                            format!("Could not remove the admin: {e}"),
+                                                        );
+                                                        admin_error.set(Some(e));
+                                                    }
                                                 }
                                             });
                                         },
@@ -516,8 +527,18 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                                                     r#type: "button",
                                                     class: "px-3 py-1.5 bg-panel hover:bg-surface-hover text-text text-xs rounded-lg",
                                                     onclick: move |_| {
-                                                        if let Err(e) = lift_ban(ban_id.clone(), banned_user) {
-                                                            error!("Failed to lift ban: {}", e);
+                                                        match lift_ban(ban_id.clone(), banned_user) {
+                                                            Ok(()) => {
+                                                                crate::components::app::toasts::show(
+                                                                    "Ban lifted. Syncing with the network…",
+                                                                );
+                                                            }
+                                                            Err(e) => {
+                                                                error!("Failed to lift ban: {}", e);
+                                                                crate::components::app::toasts::show_error(format!(
+                                                                    "Could not lift the ban: {e}"
+                                                                ));
+                                                            }
                                                         }
                                                     },
                                                     "Lift"

@@ -77,6 +77,9 @@ pub fn BoardNameField(config: Configuration, is_owner: bool) -> Element {
                 let mut config_bytes = Vec::new();
                 if let Err(e) = ciborium::ser::into_writer(&new_config, &mut config_bytes) {
                     error!("Failed to serialize config for signing: {:?}", e);
+                    crate::components::app::toasts::show_error(
+                        "Board name: the update could not be built",
+                    );
                     return;
                 }
 
@@ -106,14 +109,23 @@ pub fn BoardNameField(config: Configuration, is_owner: bool) -> Element {
                                 info!("Delta applied successfully");
                                 // Mark board as needing sync after name change (deferred)
                                 mark_needs_sync(owner_key);
+                                crate::components::app::toasts::show(
+                                    "Board name saved. Syncing with the network…",
+                                );
                             }
-                            Err(e) => error!("Failed to apply delta: {:?}", e),
+                            Err(e) => {
+                                error!("Failed to apply delta: {:?}", e);
+                                crate::components::app::toasts::show_error(format!(
+                                    "Board name: {e}"
+                                ));
+                            }
                         }
                     }
                 });
             });
         } else {
             error!("Board name is empty");
+            crate::components::app::toasts::show_error("A board name is required");
         }
     };
 

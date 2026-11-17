@@ -758,6 +758,9 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
             spawn_local(async move {
                 if let Err(e) = message_actions::delete_group(ctx, group_id, children).await {
                     dioxus::logger::tracing::error!("Failed to delete group: {}", e);
+                    crate::components::app::toasts::show_error(format!(
+                        "Could not delete the section: {e}"
+                    ));
                 }
             });
         }

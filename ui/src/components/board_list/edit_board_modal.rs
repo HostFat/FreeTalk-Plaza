@@ -204,12 +204,23 @@ pub fn EditBoardModal() -> Element {
                                                                                             &Some(delta),
                                                                                         ) {
                                                                                             error!("Failed to apply rotation delta: {}", e);
+                                                                                            crate::components::app::toasts::show_error(format!(
+                                                                                                "Could not rotate the secret: {e}"
+                                                                                            ));
                                                                                         } else {
                                                                                             board_data.generate_missing_pq_secrets();
                                                                                             mark_needs_sync(current_board);
+                                                                                            crate::components::app::toasts::show(
+                                                                                                "Secret rotated. Syncing with the network…",
+                                                                                            );
                                                                                         }
                                                                                     }
-                                                                                    Err(e) => error!("Failed to rotate secret: {}", e),
+                                                                                    Err(e) => {
+                                                                                        error!("Failed to rotate secret: {}", e);
+                                                                                        crate::components::app::toasts::show_error(format!(
+                                                                                            "Could not rotate the secret: {e}"
+                                                                                        ));
+                                                                                    }
                                                                                 }
                                                                             }
                                                                         });
@@ -272,9 +283,15 @@ pub fn EditBoardModal() -> Element {
 
                                                 // Save updated boards to delegate storage
                                                 info!("Board removed, saving to delegate");
+                                                crate::components::app::toasts::show(
+                                                    "Board removed from this device.",
+                                                );
                                                 spawn(async move {
                                                     if let Err(e) = save_boards_to_delegate().await {
                                                         error!("Failed to save boards after removal: {}", e);
+                                                        crate::components::app::toasts::show_error(format!(
+                                                            "The removal was not saved: {e}"
+                                                        ));
                                                     }
                                                 });
                                             }

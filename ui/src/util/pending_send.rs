@@ -135,6 +135,9 @@ async fn resume_one(board_key: VerifyingKey, board: BoardData, mut draft: Pendin
             // Never publish a post whose image is gone: keep the draft so the
             // author can see it and decide.
             warn!("Pending post: queued image {id} is missing; keeping the draft");
+            crate::components::app::toasts::show_error(
+                "Queued post: an attached image is missing. The draft is kept.",
+            );
             return;
         };
         let image = if let Some(image) = record.image.clone() {
@@ -153,6 +156,9 @@ async fn resume_one(board_key: VerifyingKey, board: BoardData, mut draft: Pendin
                 }
                 Err(error) => {
                     warn!("Pending post is waiting for an image: {error}");
+                    crate::components::app::toasts::show_error(format!(
+                        "Queued post: the image upload failed ({error}). It retries on the next reload."
+                    ));
                     return;
                 }
             }
@@ -188,7 +194,7 @@ async fn resume_one(board_key: VerifyingKey, board: BoardData, mut draft: Pendin
         content_preview: draft.reply_preview.clone().unwrap_or_default(),
     });
 
-    send_message(
+    match send_message(
         board.owner_vk,
         board.board_key(),
         board.self_sk.clone(),
@@ -203,9 +209,22 @@ async fn resume_one(board_key: VerifyingKey, board: BoardData, mut draft: Pendin
         draft.images.clone(),
         None,
     )
-    .await;
-    for id in all_ids {
-        crate::util::pending_uploads::remove_for(&board_key, &id);
+    .await
+    {
+        Ok(()) => {
+            for id in all_ids {
+                crate::util::pending_uploads::remove_for(&board_key, &id);
+            }
+            clear(board_key);
+            crate::components::app::toasts::show("Queued post published.");
+        }
+        Err(error) => {
+            // Keep the draft: the text and the uploaded images are still here,
+            // and the next load tries again.
+            warn!("Pending post could not be published: {error}");
+            crate::components::app::toasts::show_error(format!(
+                "Queued post not published: {error}. The draft is kept."
+            ));
+        }
     }
-    clear(board_key);
 }
