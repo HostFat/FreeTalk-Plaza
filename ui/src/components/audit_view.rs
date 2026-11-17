@@ -9,6 +9,7 @@ use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
 use std::collections::HashMap;
 use std::time::UNIX_EPOCH;
+use wasm_bindgen_futures::spawn_local;
 
 fn millis(time: std::time::SystemTime) -> i64 {
     time.duration_since(UNIX_EPOCH)
@@ -207,10 +208,19 @@ pub fn AuditView() -> Element {
             .take(4)
             .map(|byte| format!("{byte:02x}"))
             .collect();
+        let signer = retirement
+            .signer
+            .map(|id| {
+                names
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{:?}", id))
+            })
+            .unwrap_or_else(|| "the owner".to_string());
         entries.push((
             retirement.retirement.created_at,
             format!(
-                "Retired image {instance} (hash {hash}) · {}",
+                "Retired image {instance} (hash {hash}) · {} · by {signer}",
                 retirement.retirement.reason
             ),
         ));
@@ -226,6 +236,15 @@ pub fn AuditView() -> Element {
     }
 
     let mut purge_filter = use_signal(String::new);
+    let blocked_hashes = BOARDS.read().blocked_image_hashes.clone();
+    let unblock = move |hash: [u8; 32]| {
+        BOARDS.with_mut(|boards| {
+            boards.blocked_image_hashes.retain(|blocked| blocked != &hash);
+        });
+        spawn_local(async {
+            let _ = crate::components::app::chat_delegate::save_boards_to_delegate().await;
+        });
+    };
     let mut purges: Vec<(i64, String, String)> = board
         .board_state
         .moderation
@@ -307,6 +326,42 @@ pub fn AuditView() -> Element {
                                 }
                             }
                             span { class: "text-text", "{text}" }
+                        }
+                    }
+                }
+            }
+        }
+
+        div { class: "bg-surface rounded-lg p-4 mt-4",
+            h2 { class: "text-lg font-semibold text-text mb-3", "Blocked images on this device" }
+            p { class: "text-text-muted text-xs mb-3",
+                "Hashes this device refuses to download or show, independent of any board."
+            }
+            if blocked_hashes.is_empty() {
+                p { class: "text-text-muted text-sm", "No blocked images." }
+            } else {
+                div { class: "space-y-1",
+                    for hash in blocked_hashes.iter() {
+                        div {
+                            key: "{hash:?}",
+                            class: "flex items-center justify-between gap-3 text-xs border-b border-border/50 py-1 last:border-0",
+                            span { class: "font-mono text-text-muted",
+                                {
+                                    hash.iter()
+                                        .take(8)
+                                        .map(|byte| format!("{byte:02x}"))
+                                        .collect::<String>()
+                                }
+                            }
+                            button {
+                                r#type: "button",
+                                class: "px-2 py-1 bg-surface hover:bg-surface-hover border border-border rounded text-text",
+                                onclick: {
+                                    let hash = *hash;
+                                    move |_| unblock(hash)
+                                },
+                                "Unblock"
+                            }
                         }
                     }
                 }

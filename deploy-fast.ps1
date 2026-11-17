@@ -25,6 +25,10 @@ param(
     [switch]$Production,
     # Do nothing when no source is newer than the last built bundle.
     [switch]$SkipIfUnchanged,
+    # Replace the bundled blob contract even when its bytes changed. The blob
+    # contract key follows the wasm, so a new build re-keys every image; keep
+    # the old bundle unless this is deliberate.
+    [switch]$AcceptBlobRekey,
     [string]$StateDir = (Join-Path $env:APPDATA 'freetalk'),
     [string]$TargetDir = (Join-Path $PSScriptRoot 'target\dx-fast')
 )
@@ -178,25 +182,43 @@ if (-not $SkipContractBuild) {
     $contractDirs = @(
         (Join-Path $repoRoot 'common\src'),
         (Join-Path $repoRoot 'plaza-contract\src'),
-        (Join-Path $repoRoot 'plaza-delegate\src')
+        (Join-Path $repoRoot 'plaza-delegate\src'),
+        (Join-Path $repoRoot 'plaza-blob-core\src'),
+        (Join-Path $repoRoot 'plaza-blob\src')
     ) | Where-Object { Test-Path $_ }
     $newestSource = Get-ChildItem $contractDirs -Recurse -Filter *.rs |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
     $wasmProfile = if ($Production) { 'release' } else { 'release-fast' }
-    foreach ($wasmName in @('plaza_contract.wasm', 'plaza_delegate.wasm')) {
-        $wasmPath = Join-Path $repoRoot "ui\public\contracts\$wasmName"
+    $wasmArtifacts = @(
+        @{ File = 'plaza_contract.wasm'; Dest = 'plaza_contract.wasm'; Package = 'plaza-contract' },
+        @{ File = 'plaza_delegate.wasm'; Dest = 'plaza_delegate.wasm'; Package = 'plaza-delegate' },
+        @{ File = 'plaza_blob.wasm'; Dest = 'blob_contract.wasm'; Package = 'plaza-blob' }
+    )
+    foreach ($artifact in $wasmArtifacts) {
+        $wasmPath = Join-Path $repoRoot "ui\public\contracts\$($artifact.Dest)"
         if ((Test-Path $wasmPath) -and $newestSource -and
             (Get-Item $wasmPath).LastWriteTime -ge $newestSource.LastWriteTime) {
-            Write-Host "Contract $wasmName is up to date."
+            Write-Host "Contract $($artifact.Dest) is up to date."
             continue
         }
-        $package = if ($wasmName -eq 'plaza_contract.wasm') { 'plaza-contract' } else { 'plaza-delegate' }
-        Write-Host "Building $wasmName with profile $wasmProfile..."
-        & cargo build --locked --profile $wasmProfile --target wasm32-unknown-unknown `
-            -p $package --target-dir $TargetDir
-        if ($LASTEXITCODE -ne 0) { throw "cargo build failed for $package." }
-        Copy-Item (Join-Path $TargetDir "wasm32-unknown-unknown\$wasmProfile\$wasmName") $wasmPath -Force
+        # The blob contract was published with the release profile; keep that
+        # profile so its key does not change with a deploy.
+        $artifactProfile = if ($artifact.File -eq 'plaza_blob.wasm') { 'release' } else { $wasmProfile }
+        Write-Host "Building $($artifact.File) with profile $artifactProfile..."
+        & cargo build --locked --profile $artifactProfile --target wasm32-unknown-unknown `
+            -p $artifact.Package --target-dir $TargetDir
+        if ($LASTEXITCODE -ne 0) { throw "cargo build failed for $($artifact.Package)." }
+        $builtPath = Join-Path $TargetDir "wasm32-unknown-unknown\$artifactProfile\$($artifact.File)"
+        if ($artifact.File -eq 'plaza_blob.wasm' -and (Test-Path $wasmPath)) {
+            $oldHash = (Get-FileHash $wasmPath -Algorithm SHA256).Hash
+            $newHash = (Get-FileHash $builtPath -Algorithm SHA256).Hash
+            if ($oldHash -ne $newHash -and -not $AcceptBlobRekey) {
+                Write-Warning "The blob contract changed; keeping the bundled one (it would re-key every image). Re-run with -AcceptBlobRekey to replace it."
+                continue
+            }
+        }
+        Copy-Item $builtPath $wasmPath -Force
     }
 }
 

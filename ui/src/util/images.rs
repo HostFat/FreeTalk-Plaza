@@ -178,6 +178,48 @@ pub async fn upload_image(
             MAX_CHUNKS
         ));
     }
+
+    // A repeat upload of the same unsealed file has the same manifest key.
+    // Read the small manifest first: when it is already there, every chunk is
+    // there too, and nothing is uploaded again.
+    if secret.is_none() {
+        let refs: Vec<ChunkRef> = pieces
+            .iter()
+            .map(|piece| {
+                let chunk_sha = image_sha256(piece);
+                let parameters =
+                    blob_parameters(chunk_sha, uploader, owner_founding, owner_current);
+                let instance: [u8; 32] = blob_contract_key(&parameters)
+                    .id()
+                    .as_bytes()
+                    .try_into()
+                    .expect("32-byte contract id");
+                ChunkRef {
+                    instance,
+                    sha256: chunk_sha,
+                    bytes: piece.len() as u32,
+                }
+            })
+            .collect();
+        let manifest_parameters = blob_parameters(
+            manifest_sha256(&refs),
+            uploader,
+            owner_founding,
+            owner_current,
+        );
+        let manifest_instance: [u8; 32] = blob_contract_key(&manifest_parameters)
+            .id()
+            .as_bytes()
+            .try_into()
+            .expect("32-byte contract id");
+        if let Ok(state) = fetch_blob_state(manifest_instance).await {
+            if let Ok(blob) = ciborium::de::from_reader::<BlobStateV1, &[u8]>(&state[..]) {
+                if blob.is_manifest() && blob.chunks == refs {
+                    return Ok((manifest_instance, plaintext_sha, size));
+                }
+            }
+        }
+    }
     // Three PUTs in flight at a time: the socket write is serialized, the
     // confirmation waits overlap. Order inside each batch is preserved.
     let mut chunks = Vec::with_capacity(pieces.len());
@@ -684,27 +726,57 @@ pub async fn retire_in_contract(instance: [u8; 32]) -> Result<(), String> {
     };
 
     let retired = BlobStateV1::retired_by(&state, content, &board.self_sk, role);
+    send_retirement(instance, &retired).await?;
+
+    // A manifest leaves its chunks reachable by key; the same owner keys are
+    // in every chunk's parameters, so retire them too.
+    if state.is_manifest() {
+        for chunk in &state.chunks {
+            let Ok(chunk_bytes) = fetch_blob_state(chunk.instance).await else {
+                continue;
+            };
+            let Ok(chunk_state) = ciborium::de::from_reader::<BlobStateV1, &[u8]>(&chunk_bytes[..])
+            else {
+                continue;
+            };
+            if chunk_state.retired {
+                continue;
+            }
+            let chunk_content = image_sha256(&chunk_state.data);
+            let retired = BlobStateV1::retired_by(
+                &chunk_state,
+                chunk_content,
+                &board.self_sk,
+                role,
+            );
+            if let Err(error) = send_retirement(chunk.instance, &retired).await {
+                warn!("Could not retire chunk {:?}: {error}", chunk.instance);
+            }
+        }
+    }
+
+    fail_image(instance, "retired".to_string());
+    info!("Sent contract retirement for image {instance:?}");
+    Ok(())
+}
+
+async fn send_retirement(instance: [u8; 32], retired: &BlobStateV1) -> Result<(), String> {
     let key = ContractKey::from_id_and_code(
         ContractInstanceId::new(instance),
         CodeHash::from_code(BLOB_CONTRACT_WASM),
     );
     let request = ContractRequest::Update {
         key,
-        data: UpdateData::State(to_cbor_vec(&retired).into()),
+        data: UpdateData::State(to_cbor_vec(retired).into()),
     };
-    {
-        let mut web_api = WEB_API.write();
-        let Some(web_api) = web_api.as_mut() else {
-            return Err("Not connected to a Freenet node".to_string());
-        };
-        web_api
-            .send(ClientRequest::ContractOp(request))
-            .await
-            .map_err(|error| error.to_string())?;
-    }
-    fail_image(instance, "retired".to_string());
-    info!("Sent contract retirement for image {instance:?}");
-    Ok(())
+    let mut web_api = WEB_API.write();
+    let Some(web_api) = web_api.as_mut() else {
+        return Err("Not connected to a Freenet node".to_string());
+    };
+    web_api
+        .send(ClientRequest::ContractOp(request))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 pub(crate) mod board_name_field;
 pub(crate) mod create_board_modal;
 pub(crate) mod edit_board_modal;
+pub(crate) mod image_limits_field;
 pub(crate) mod read_only_field;
 pub(crate) mod receive_invitation_modal;
 

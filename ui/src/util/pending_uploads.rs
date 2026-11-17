@@ -13,7 +13,7 @@ use wasm_bindgen_futures::spawn_local;
 
 /// Bytes we keep in the delegate for pending uploads. Larger uploads stay in
 /// memory only, to keep the board entry small.
-pub const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_PENDING_BYTES: usize = 24 * 1024 * 1024;
 
 /// Insert the placeholder for a new attachment immediately, before the file is
 /// prepared, so a Send during preparation still has a record to point at.

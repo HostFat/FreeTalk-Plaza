@@ -75,6 +75,11 @@ pub fn EditBoardModal() -> Element {
                             is_owner: *user_is_owner.read()
                         }
 
+                        super::image_limits_field::ImageLimitsField {
+                            config: config.clone(),
+                            is_owner: *user_is_owner.read()
+                        }
+
                         // Read-only board info
                         if let Some(board_data) = editing_board.read().as_ref() {
                             // Board Public Key
