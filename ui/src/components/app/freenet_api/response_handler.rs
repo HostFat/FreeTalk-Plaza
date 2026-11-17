@@ -652,7 +652,7 @@ async fn republish_board(
         contract,
         state: WrappedState::new(crate::util::to_cbor_vec(state)),
         related_contracts: Default::default(),
-        subscribe: true,
+        subscribe: false,
         blocking_subscribe: false,
     };
     let mut web_api = crate::components::app::WEB_API.write();
