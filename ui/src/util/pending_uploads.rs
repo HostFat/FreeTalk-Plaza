@@ -7,7 +7,7 @@
 use crate::board_data::PendingUpload;
 use crate::components::app::chat_delegate::save_boards_to_delegate;
 use crate::components::app::{BOARDS, CURRENT_BOARD};
-use dioxus::logger::tracing::{info, warn};
+use dioxus::logger::tracing::warn;
 use dioxus::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -15,18 +15,23 @@ use wasm_bindgen_futures::spawn_local;
 /// memory only, to keep the board entry small.
 pub const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
 
-/// Queue one upload and wait until the board, with the pending image, is in the
-/// delegate. The caller starts the PUT afterwards, so a crash cannot leave an
-/// upload that no reload can resume.
-pub async fn queue(record: PendingUpload) {
+/// Insert the placeholder for a new attachment immediately, before the file is
+/// prepared, so a Send during preparation still has a record to point at.
+pub fn insert(record: PendingUpload) {
     let Some(key) = CURRENT_BOARD.read().owner_key else {
         return;
     };
-    let mut stored = false;
     BOARDS.with_mut(|boards| {
         let Some(board) = boards.map.get_mut(&key) else {
             return;
         };
+        if board
+            .pending_uploads
+            .iter()
+            .any(|pending| pending.id == record.id)
+        {
+            return;
+        }
         let total: usize = board
             .pending_uploads
             .iter()
@@ -34,17 +39,29 @@ pub async fn queue(record: PendingUpload) {
             .sum();
         if total + record.bytes.len() <= MAX_PENDING_BYTES {
             board.pending_uploads.push(record);
-            stored = true;
+        } else {
+            warn!("Pending image kept in memory only: the delegate queue is full");
         }
     });
-    if !stored {
-        warn!("Pending image kept in memory only: the delegate queue is full");
+}
+
+/// Fill in the prepared bytes of a placeholder.
+pub fn update(id: &str, change: impl FnOnce(&mut PendingUpload)) {
+    let Some(key) = CURRENT_BOARD.read().owner_key else {
         return;
-    }
-    match save_boards_to_delegate().await {
-        Ok(()) => info!("Pending image saved to the delegate queue"),
-        Err(error) => warn!("Could not persist the pending image: {error}"),
-    }
+    };
+    BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.map.get_mut(&key) {
+            if let Some(pending) = board.pending_uploads.iter_mut().find(|pending| pending.id == id) {
+                change(pending);
+            }
+        }
+    });
+}
+
+/// Write the current board, including the pending uploads, to the delegate.
+pub async fn persist_now() -> Result<(), String> {
+    save_boards_to_delegate().await
 }
 
 pub fn remove(id: &str) {
@@ -80,6 +97,22 @@ pub fn remove_for(key: &ed25519_dalek::VerifyingKey, id: &str) {
     BOARDS.with_mut(|boards| {
         if let Some(board) = boards.map.get_mut(key) {
             board.pending_uploads.retain(|pending| pending.id != id);
+        }
+    });
+    persist();
+}
+
+/// Remember the blob of a queued upload of any board, used by the resume.
+pub fn set_image_for(
+    key: &ed25519_dalek::VerifyingKey,
+    id: &str,
+    image: &plaza_core::board_state::images::ImageRef,
+) {
+    BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.map.get_mut(key) {
+            if let Some(pending) = board.pending_uploads.iter_mut().find(|pending| pending.id == id) {
+                pending.image = Some(image.clone());
+            }
         }
     });
     persist();

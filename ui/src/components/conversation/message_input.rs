@@ -40,6 +40,14 @@ async fn upload_record(
     let Some(board_data) = BOARDS.read().map.get(&board_key).cloned() else {
         return;
     };
+    if record.bytes.is_empty() {
+        attachments.with_mut(|list| {
+            if let Some(slot) = list.iter_mut().find(|attachment| attachment.id == id) {
+                slot.state = AttachmentState::Failed("The image was not prepared".to_string());
+            }
+        });
+        return;
+    }
     let result = crate::util::uploads::upload_pending(&board_data, &record).await;
 
     attachments.with_mut(|list| {
@@ -106,6 +114,20 @@ fn add_attachment_files(
         });
         let id = id.clone();
         let name = name.clone();
+        // Placeholder first: a Send during preparation must find a record.
+        crate::util::pending_uploads::insert(PendingUpload {
+            id: id.clone(),
+            name: name.clone(),
+            alt: name.clone(),
+            nsfw: false,
+            mime: "image/webp".to_string(),
+            width: 0,
+            height: 0,
+            animated: false,
+            bytes: Vec::new(),
+            secret,
+            image: None,
+        });
         let mut attachments = attachments;
         spawn_local(async move {
             match prepare_image(&file, mode).await {
@@ -123,10 +145,16 @@ fn add_attachment_files(
                         secret,
                         image: None,
                     };
-                    crate::util::pending_uploads::queue(record.clone()).await;
+                    crate::util::pending_uploads::update(&id, |stored| {
+                        *stored = record.clone();
+                    });
+                    if let Err(error) = crate::util::pending_uploads::persist_now().await {
+                        warn!("Could not persist the pending image: {error}");
+                    }
                     upload_record(record, attachments, id).await;
                 }
                 Err(error) => {
+                    crate::util::pending_uploads::remove(&id);
                     attachments.with_mut(|list| {
                         if let Some(slot) = list.iter_mut().find(|attachment| attachment.id == id)
                         {
@@ -161,6 +189,12 @@ fn restore_pending_uploads(mut attachments: Signal<Vec<Attachment>>) {
         for record in records {
             if attachments.read().len() >= max_images {
                 break;
+            }
+            if record.bytes.is_empty() {
+                // A placeholder whose preparation never finished: nothing to
+                // upload.
+                crate::util::pending_uploads::remove(&record.id);
+                continue;
             }
             if attachments
                 .read()
@@ -445,11 +479,6 @@ pub fn PostInput(
                             AttachmentState::Failed(_) => {}
                         }
                     }
-                    let records = crate::util::pending_uploads::list();
-                    let uploads: Vec<crate::board_data::PendingUpload> = attachment_ids
-                        .iter()
-                        .filter_map(|id| records.iter().find(|record| &record.id == id).cloned())
-                        .collect();
                     let draft = PendingSend {
                         title: title_text.peek().to_string(),
                         text: message_text.peek().to_string(),
@@ -460,7 +489,6 @@ pub fn PostInput(
                             .map(|reply| reply.content_preview.clone()),
                         category_id: CURRENT_CATEGORY.read().category_id.clone(),
                         attachment_ids,
-                        uploads,
                         images,
                         queued_at: chrono::Utc::now().timestamp_millis(),
                     };
