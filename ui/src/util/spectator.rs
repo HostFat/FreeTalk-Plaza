@@ -98,7 +98,16 @@ pub async fn fetch_pending_spectator_boards() {
             })
             .filter(|(key, _)| {
                 let (last, count) = attempts.get(*key).copied().unwrap_or((0.0, 0));
-                count < 20 && now - last > 15_000.0
+                // A contract that no neighbour has seen yet can take minutes to
+                // route. Back off instead of giving up after a few tries.
+                let delay = match count {
+                    0 => 5_000.0,
+                    1 => 10_000.0,
+                    2 => 20_000.0,
+                    3 => 30_000.0,
+                    _ => 60_000.0,
+                };
+                count < 20 && now - last > delay
             })
             .map(|(key, _)| *key)
             .collect()
@@ -109,7 +118,8 @@ pub async fn fetch_pending_spectator_boards() {
             key: *contract_key.id(),
             return_contract_code: true,
             subscribe: true,
-            blocking_subscribe: true,
+            // Do not hold the request loop while a cold contract is routed.
+            blocking_subscribe: false,
         };
         let mut api = WEB_API.write();
         let Some(api) = api.as_mut() else {

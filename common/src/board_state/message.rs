@@ -20,18 +20,20 @@ use crate::board_state::content::{
 };
 
 /// Whether the author may attach images at all: owner, admin, or a role with
-/// `can_attach_images`. The section rule is checked separately and wins.
+/// `can_attach_images` that covers `section`. The section rule is checked
+/// separately and wins.
 pub fn author_may_attach_images(
     state: &ChatBoardStateV1,
     parameters: &ChatBoardParametersV1,
     author: &MemberId,
+    section: Option<&MessageId>,
 ) -> bool {
     if *author == state.ownership.current_owner(parameters)
         || crate::board_state::roles::is_board_admin(state, author)
     {
         return true;
     }
-    state.roles.can_attach_images(author)
+    state.roles.can_attach_images(author, section)
 }
 
 /// Section recorded in a message body, when the contract can read it. Private
@@ -818,10 +820,16 @@ impl MessagesV1 {
         if message.message.images.is_empty() {
             return Ok(());
         }
-        if !author_may_attach_images(state, parameters, &message.message.author) {
+        let section = self.section_of_message(state, message);
+        if !author_may_attach_images(
+            state,
+            parameters,
+            &message.message.author,
+            section.as_ref(),
+        ) {
             return Err("This member may not attach images".to_string());
         }
-        if let Some(section) = self.section_of_message(state, message) {
+        if let Some(section) = section {
             if !self.section_allows_images(state, parameters, &section) {
                 return Err("This section does not allow images".to_string());
             }
@@ -1806,6 +1814,53 @@ mod tests {
             },
             signer,
         )
+    }
+
+    #[test]
+    fn a_role_scoped_to_a_section_allows_images_only_there() {
+        use std::time::Duration;
+
+        let (owner, member, state, parameters, owner_id, member_id) = board_with_one_member();
+        let (cat_a, id_a) = category_message(&owner, owner_id, true, SystemTime::UNIX_EPOCH);
+        let (cat_b, id_b) = category_message(
+            &owner,
+            owner_id,
+            true,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+        );
+
+        let mut with_role = state.clone();
+        grant_role(&mut with_role, &owner, member_id, |role| {
+            role.can_attach_images = true;
+            role.scope = vec![id_a.clone()];
+        });
+
+        let mut inside = MessagesV1::default();
+        inside.messages.push(cat_a);
+        inside.messages.push(cat_b);
+        inside.messages.push(post_with_image(
+            &member,
+            member_id,
+            owner_id,
+            Some(id_a),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        ));
+        inside
+            .verify(&with_role, &parameters)
+            .expect("the scoped role covers section A");
+
+        let mut outside = MessagesV1::default();
+        outside.messages.push(post_with_image(
+            &member,
+            member_id,
+            owner_id,
+            Some(id_b),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        ));
+        let refused = outside
+            .verify(&with_role, &parameters)
+            .expect_err("the scoped role does not cover section B");
+        assert!(refused.contains("may not attach images"), "{refused}");
     }
 
     #[test]

@@ -190,7 +190,7 @@ pub async fn upload_image(
                     {
                         info!("Image blob {instance:?} already on the node");
                         if let Some(progress) = progress {
-                            progress(1, 1);
+                            progress(size as usize, size as usize);
                         }
                         remember_upload(secret, plaintext_sha, instance, size);
                         return Ok((instance, plaintext_sha, size, None));
@@ -204,11 +204,11 @@ pub async fn upload_image(
             chunks: Vec::new(),
         };
         if let Some(progress) = progress {
-            progress(0, 1);
+            progress(0, size as usize);
         }
         let instance = put_blob_with_retry(&parameters, &state).await?;
         if let Some(progress) = progress {
-            progress(1, 1);
+            progress(size as usize, size as usize);
         }
         info!("Uploaded image blob {instance:?} ({} bytes)", state.stored_len());
         remember_upload(secret, plaintext_sha, instance, size);
@@ -269,8 +269,8 @@ pub async fn upload_image(
     // confirmation waits overlap. Order inside each batch is preserved.
     let mut chunks = Vec::with_capacity(pieces.len());
     let mut chunk_copies = Vec::with_capacity(pieces.len());
-    let total_steps = pieces.len() + 1;
     let mut confirmed = 0usize;
+    let total_bytes = stored.len();
     for batch in pieces.chunks(3) {
         let mut in_flight = Vec::new();
         for piece in batch {
@@ -307,9 +307,9 @@ pub async fn upload_image(
                 "Uploaded image blob {:?} ({} bytes)",
                 chunk.instance, chunk.bytes
             );
-            confirmed += 1;
+            confirmed += chunk.bytes as usize;
             if let Some(progress) = progress {
-                progress(confirmed, total_steps);
+                progress(confirmed.min(total_bytes), total_bytes);
             }
             chunks.push(chunk);
             chunk_copies.push(copy);
@@ -334,7 +334,7 @@ pub async fn upload_image(
     };
     let instance = put_blob_with_retry(&parameters, &state).await?;
     if let Some(progress) = progress {
-        progress(total_steps, total_steps);
+        progress(total_bytes, total_bytes);
     }
     info!("Uploaded image manifest {instance:?}");
     remember_upload(secret, plaintext_sha, instance, size);

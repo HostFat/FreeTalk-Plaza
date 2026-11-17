@@ -649,5 +649,29 @@ mod tests {
         );
         assert!(wrong_role.validate(&parameters).is_err());
     }
+    #[test]
+    fn a_manifest_chunk_can_be_retired_by_an_owner() {
+        let (uploader, founding, current, _) = keys();
+        let chunk_data = vec![7u8; 1024];
+        let parameters = BlobParametersV1::new(
+            sha256(&chunk_data),
+            uploader.verifying_key(),
+            founding.verifying_key(),
+            current.verifying_key(),
+        );
+        let state = BlobStateV1::live(
+            &parameters,
+            "image/webp".to_string(),
+            10,
+            10,
+            chunk_data,
+        );
+        let retired = state.retire(&parameters, &current).expect("retire the chunk");
+        retired
+            .validate(&parameters)
+            .expect("a retired chunk verifies");
+        assert!(retired.retired);
+        assert!(retired.data.is_empty());
+    }
 }
 

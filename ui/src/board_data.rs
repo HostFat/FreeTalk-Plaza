@@ -1625,6 +1625,7 @@ impl BoardData {
             &self.board_state,
             &parameters,
             &self_id,
+            section,
         ) {
             return false;
         }

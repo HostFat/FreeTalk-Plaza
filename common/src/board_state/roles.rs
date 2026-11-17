@@ -1101,12 +1101,22 @@ impl RolesV1 {
             .any(|role| role.can_manage_trash)
     }
 
-    /// Whether the member's roles allow attaching images. The section rule is
-    /// checked separately and always wins over this.
-    pub fn can_attach_images(&self, member_id: &MemberId) -> bool {
-        self.active_roles_of(member_id)
-            .iter()
-            .any(|role| role.can_attach_images)
+    /// Whether the member's roles allow attaching images in `section`. A role
+    /// with no scope applies to the whole board; a scoped role only to the
+    /// listed sections and their subsections. The section rule is checked
+    /// separately and always wins over this.
+    pub fn can_attach_images(
+        &self,
+        member_id: &MemberId,
+        section: Option<&MessageId>,
+    ) -> bool {
+        self.active_roles_of(member_id).iter().any(|role| {
+            role.can_attach_images
+                && (role.scope.is_empty()
+                    || section
+                        .map(|section| role.scope.contains(section))
+                        .unwrap_or(false))
+        })
     }
 
     /// Whether the member may retire images for the board.

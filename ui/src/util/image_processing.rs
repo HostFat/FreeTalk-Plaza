@@ -47,7 +47,16 @@ pub async fn prepare_image(file: &web_sys::File, mode: ImageMode) -> Result<Prep
         || declared == "image/heif"
         || lower_name.ends_with(".heic")
         || lower_name.ends_with(".heif");
+    let is_avif = declared == "image/avif" || lower_name.ends_with(".avif");
     let bytes = read_file_bytes(file).await?;
+    if is_avif {
+        // The browser decodes AVIF; convert it to WebP so the contract stores
+        // an allowed type.
+        return reencode_webp(file, DEFAULT_MAX_SIDE).await.map_err(|_| {
+            "This browser cannot decode AVIF. Export the image as WebP or JPEG."
+                .to_string()
+        });
+    }
     if is_heic {
         // HEIC only works where the platform gives the browser a codec.
         return reencode_webp(file, DEFAULT_MAX_SIDE).await.map_err(|_| {

@@ -253,31 +253,15 @@ fn file_from_bytes(name: &str, bytes: &[u8], mime: &str) -> Option<web_sys::File
     web_sys::File::new_with_blob_sequence_and_options(&blobs.into(), name, &file_options).ok()
 }
 
-fn ask_crop_rect() -> (u16, u16, u16, u16) {
-    let values = web_sys::window()
-        .and_then(|window| {
-            window
-                .prompt_with_message(
-                    "Crop as left,top,width,height in percent (for example 10,10,80,80)",
-                )
-                .ok()
-                .flatten()
-        })
-        .unwrap_or_default();
-    let parts: Vec<u16> = values
-        .split(',')
-        .filter_map(|value| value.trim().parse::<u16>().ok())
-        .collect();
-    if parts.len() == 4 {
-        (
-            parts[0].min(100),
-            parts[1].min(100),
-            parts[2].clamp(1, 100),
-            parts[3].clamp(1, 100),
-        )
-    } else {
-        (0, 0, 100, 100)
-    }
+fn preview_url(bytes: &[u8], mime: &str) -> Option<String> {
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::new();
+    parts.push(&array.buffer());
+    let options = web_sys::BlobPropertyBag::new();
+    options.set_type(mime);
+    let blob =
+        web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &options).ok()?;
+    web_sys::Url::create_object_url_with_blob(&blob).ok()
 }
 
 /// Rotate or crop an attachment, then upload the edited image again.
@@ -424,6 +408,13 @@ pub fn PostInput(
     let mut next_attachment_id = use_signal(|| 1u64);
     let mut auto_send = use_signal(|| false);
     let mut image_mode = use_signal(|| ImageMode::StripMetadata);
+    // Graphical crop: preview URL and the selection in percent.
+    let mut crop_target = use_signal(|| None::<String>);
+    let mut crop_url = use_signal(|| None::<String>);
+    let mut crop_x = use_signal(|| 0.0f64);
+    let mut crop_y = use_signal(|| 0.0f64);
+    let mut crop_w = use_signal(|| 100.0f64);
+    let mut crop_h = use_signal(|| 100.0f64);
 
     // Image permission: owner, admins and roles with can_attach_images may
     // attach, and the section rule always wins over the role.
@@ -1183,7 +1174,7 @@ pub fn PostInput(
                         input {
                             id: "image-file-input",
                             r#type: "file",
-                            accept: "image/png,image/jpeg,image/webp,image/gif",
+                            accept: "image/png,image/jpeg,image/webp,image/gif,image/heic,image/heif,image/avif",
                             multiple: true,
                             class: "hidden",
                             onchange: move |_| {
@@ -1316,7 +1307,14 @@ pub fn PostInput(
                                                     .get(&attachment.id)
                                                     .copied()
                                                 {
-                                                    "Uploading {done}/{total}..."
+                                                    if total > 0 {
+                                                        {format!(
+                                                            "Uploading {}%...",
+                                                            (done * 100 / total).min(100)
+                                                        )}
+                                                    } else {
+                                                        "Uploading..."
+                                                    }
                                                 } else {
                                                     "Uploading..."
                                                 }
@@ -1472,19 +1470,25 @@ pub fn PostInput(
                                                         .as_ref()
                                                         .map(|reply| reply.message_id.clone());
                                                     move |_| {
-                                                        let (x, y, width, height) = ask_crop_rect();
-                                                        edit_attachment(
-                                                            id.clone(),
-                                                            crate::util::image_processing::Transform::CropRect {
-                                                                x,
-                                                                y,
-                                                                width,
-                                                                height,
-                                                            },
-                                                            attachments,
-                                                            next_attachment_id,
-                                                            target.clone(),
-                                                        )
+                                                        if let Some(record) = crate::util::pending_uploads::list()
+                                                            .into_iter()
+                                                            .find(|record| record.id == id)
+                                                        {
+                                                            if let Some(url) = preview_url(
+                                                                &record.bytes,
+                                                                &record.mime,
+                                                            ) {
+                                                                if let Some(old) = crop_url.read().clone() {
+                                                                    let _ = web_sys::Url::revoke_object_url(&old);
+                                                                }
+                                                                crop_url.set(Some(url));
+                                                                crop_target.set(Some(id.clone()));
+                                                                crop_x.set(0.0);
+                                                                crop_y.set(0.0);
+                                                                crop_w.set(100.0);
+                                                                crop_h.set(100.0);
+                                                            }
+                                                        }
                                                     }
                                                 },
                                                 "✂"
@@ -1522,7 +1526,11 @@ pub fn PostInput(
                                     button {
                                         r#type: "button",
                                         class: "text-text-muted hover:text-red-400",
-                                        title: "Remove",
+                                        title: if matches!(attachment.state, AttachmentState::Uploading) {
+                                            "Cancel upload"
+                                        } else {
+                                            "Remove"
+                                        },
                                         onclick: {
                                             let id = attachment.id.clone();
                                             move |_| {
@@ -1613,9 +1621,132 @@ pub fn PostInput(
                                 if replying_to.read().is_some() { "Send Reply" } else { "Send Topic" }
                             }
                         }
+                        if let Some(target) = crop_target.read().clone() {
+                            div { class: "fixed inset-0 z-[70] bg-black/75 flex items-center justify-center p-4",
+                                div { class: "bg-panel rounded-xl p-4 w-full max-w-3xl",
+                                    h3 { class: "text-lg font-semibold text-text mb-2", "Crop image" }
+                                    p { class: "text-xs text-text-muted mb-2",
+                                        "Adjust the rectangle, then apply."
+                                    }
+                                    div { class: "relative inline-block max-w-full",
+                                        if let Some(url) = crop_url.read().clone() {
+                                            img {
+                                                src: "{url}",
+                                                class: "block max-h-[55vh] w-auto mx-auto select-none",
+                                                alt: "",
+                                            }
+                                        }
+                                        div {
+                                            class: "absolute border-2 border-accent bg-accent/25 pointer-events-none",
+                                            style: "left: {crop_x}%; top: {crop_y}%; width: {crop_w}%; height: {crop_h}%;",
+                                        }
+                                    }
+                                    div { class: "grid grid-cols-2 gap-3 mt-3",
+                                        label { class: "text-xs text-text-muted",
+                                            {format!("Left {:.0}%", *crop_x.read())}
+                                            input {
+                                                r#type: "range",
+                                                min: "0",
+                                                max: "90",
+                                                value: "{crop_x}",
+                                                class: "w-full accent-accent",
+                                                oninput: move |event| {
+                                                    crop_x.set(event.value().parse().unwrap_or(0.0));
+                                                },
+                                            }
+                                        }
+                                        label { class: "text-xs text-text-muted",
+                                            {format!("Top {:.0}%", *crop_y.read())}
+                                            input {
+                                                r#type: "range",
+                                                min: "0",
+                                                max: "90",
+                                                value: "{crop_y}",
+                                                class: "w-full accent-accent",
+                                                oninput: move |event| {
+                                                    crop_y.set(event.value().parse().unwrap_or(0.0));
+                                                },
+                                            }
+                                        }
+                                        label { class: "text-xs text-text-muted",
+                                            {format!("Width {:.0}%", *crop_w.read())}
+                                            input {
+                                                r#type: "range",
+                                                min: "5",
+                                                max: "100",
+                                                value: "{crop_w}",
+                                                class: "w-full accent-accent",
+                                                oninput: move |event| {
+                                                    crop_w.set(event.value().parse().unwrap_or(100.0));
+                                                },
+                                            }
+                                        }
+                                        label { class: "text-xs text-text-muted",
+                                            {format!("Height {:.0}%", *crop_h.read())}
+                                            input {
+                                                r#type: "range",
+                                                min: "5",
+                                                max: "100",
+                                                value: "{crop_h}",
+                                                class: "w-full accent-accent",
+                                                oninput: move |event| {
+                                                    crop_h.set(event.value().parse().unwrap_or(100.0));
+                                                },
+                                            }
+                                        }
+                                    }
+                                    div { class: "flex justify-end gap-2 mt-4",
+                                        button {
+                                            r#type: "button",
+                                            class: "px-3 py-1.5 bg-surface hover:bg-surface-hover border border-border rounded-lg text-sm text-text",
+                                            onclick: move |_| {
+                                                if let Some(url) = crop_url.read().clone() {
+                                                    let _ = web_sys::Url::revoke_object_url(&url);
+                                                }
+                                                crop_target.set(None);
+                                                crop_url.set(None);
+                                            },
+                                            "Cancel"
+                                        }
+                                        button {
+                                            r#type: "button",
+                                            class: "px-3 py-1.5 bg-accent hover:bg-accent-hover text-white rounded-lg text-sm",
+                                            onclick: {
+                                                let target = target.clone();
+                                                move |_| {
+                                                    let reply_target = replying_to
+                                                        .read()
+                                                        .as_ref()
+                                                        .map(|reply| reply.message_id.clone());
+                                                    edit_attachment(
+                                                        target.clone(),
+                                                        crate::util::image_processing::Transform::CropRect {
+                                                            x: *crop_x.read() as u16,
+                                                            y: *crop_y.read() as u16,
+                                                            width: (*crop_w.read() as u16).clamp(1, 100),
+                                                            height: (*crop_h.read() as u16).clamp(1, 100),
+                                                        },
+                                                        attachments,
+                                                        next_attachment_id,
+                                                        reply_target,
+                                                    );
+                                                    if let Some(url) = crop_url.read().clone() {
+                                                        let _ = web_sys::Url::revoke_object_url(&url);
+                                                    }
+                                                    crop_target.set(None);
+                                                    crop_url.set(None);
+                                                }
+                                            },
+                                            "Apply crop"
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
 }
+
