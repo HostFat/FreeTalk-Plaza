@@ -367,5 +367,29 @@ pub fn AuditView() -> Element {
                 }
             }
         }
+        div { class: "bg-surface rounded-lg p-4 mt-4",
+            h2 { class: "text-lg font-semibold text-text mb-3", "Your uploaded images" }
+            {
+                let unused = crate::util::owned_images::unreferenced(60 * 60 * 1000).len();
+                rsx! {
+                    p { class: "text-text-muted text-xs mb-3",
+                        "Images this device uploaded that no board references anymore."
+                    }
+                    if unused == 0 {
+                        p { class: "text-text-muted text-sm", "Nothing to clean up." }
+                    } else {
+                        div { class: "flex items-center justify-between gap-3",
+                            span { class: "text-sm text-text", "{unused} unused" }
+                            button {
+                                r#type: "button",
+                                class: "px-3 py-1.5 bg-surface hover:bg-surface-hover border border-border rounded-lg text-xs text-red-300",
+                                onclick: move |_| crate::util::owned_images::retire_unused(),
+                                "Retire unused"
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -15,6 +15,4 @@ public/*
 !public/contracts/
 !public/contracts/board_contract.wasm
 !public/contracts/freetalk_delegate.wasm
-!public/vendor/
-!public/vendor/**
 node_modules/

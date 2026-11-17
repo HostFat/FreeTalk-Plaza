@@ -1,10 +1,9 @@
 //! Client-side image preparation: strip metadata, downscale, or keep as is.
 
 use base64::Engine;
-use wasm_bindgen::closure::Closure;
-use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{HtmlCanvasElement, HtmlImageElement, HtmlScriptElement};
+use web_sys::{HtmlCanvasElement, HtmlImageElement};
 
 pub const DEFAULT_MAX_SIDE: u32 = 2048;
 
@@ -50,22 +49,7 @@ pub async fn prepare_image(file: &web_sys::File, mode: ImageMode) -> Result<Prep
         || lower_name.ends_with(".heif");
     let bytes = read_file_bytes(file).await?;
     if is_heic {
-        // The bundled libheif decodes HEIC everywhere; the browser codec is a
-        // fallback for platforms that have one. A stuck decoder must not leave
-        // the attachment uploading forever.
-        let decode = Box::pin(decode_heic_with_libheif(&bytes));
-        let timeout = Box::pin(crate::util::sleep(std::time::Duration::from_secs(20)));
-        if let futures::future::Either::Left((Some((webp, width, height)), _)) =
-            futures::future::select(decode, timeout).await
-        {
-            return Ok(PreparedImage {
-                bytes: webp,
-                mime: "image/webp".to_string(),
-                width,
-                height,
-                animated: false,
-            });
-        }
+        // HEIC only works where the platform gives the browser a codec.
         return reencode_webp(file, DEFAULT_MAX_SIDE).await.map_err(|_| {
             "HEIC/HEIF is not supported here. Export the photo as JPEG or WebP first."
                 .to_string()
@@ -260,88 +244,6 @@ async fn transform_from_url(url: &str, edit: Transform) -> Result<PreparedImage,
         animated: false,
     })
 }
-
-/// Load the bundled libheif script once, on first use.
-async fn ensure_libheif() -> Result<(), String> {
-    let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
-    let existing = js_sys::Reflect::get(&window, &JsValue::from_str("libheif"))
-        .map_err(|_| "libheif lookup failed".to_string())?;
-    if !existing.is_undefined() && !existing.is_null() {
-        return Ok(());
-    }
-    let document = window.document().ok_or_else(|| "no document".to_string())?;
-    let script: HtmlScriptElement = document
-        .create_element("script")
-        .map_err(|_| "script element".to_string())?
-        .dyn_into()
-        .map_err(|_| "script cast".to_string())?;
-    script.set_src("vendor/libheif-bundle.js");
-    let promise = js_sys::Promise::new(&mut |resolve, reject| {
-        let onload = Closure::once_into_js(move || {
-            let _ = resolve.call0(&JsValue::NULL);
-        });
-        let onerror = Closure::once_into_js(move || {
-            let _ = reject.call1(&JsValue::NULL, &JsValue::from_str("libheif load failed"));
-        });
-        script.set_onload(Some(onload.unchecked_ref()));
-        script.set_onerror(Some(onerror.unchecked_ref()));
-        if let Some(head) = document.head() {
-            let _ = head.append_child(&script);
-        }
-    });
-    JsFuture::from(promise)
-        .await
-        .map_err(|_| "libheif did not load".to_string())?;
-    Ok(())
-}
-
-/// Decode a HEIC/HEIF file with the bundled libheif and return WebP bytes.
-async fn decode_heic_with_libheif(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
-    ensure_libheif().await.ok()?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    let function = js_sys::Function::new_with_args("b64", HEIC_DECODE_JS);
-    let promise = function
-        .call1(&JsValue::NULL, &JsValue::from_str(&encoded))
-        .ok()?;
-    let promise: js_sys::Promise = promise.dyn_into().ok()?;
-    let value = JsFuture::from(promise).await.ok()?;
-    let array = js_sys::Array::from(&value);
-    let data_url = array.get(0).as_string()?;
-    let width = array.get(1).as_f64()? as u32;
-    let height = array.get(2).as_f64()? as u32;
-    let payload = data_url.split_once(',')?.1;
-    let webp = base64::engine::general_purpose::STANDARD
-        .decode(payload)
-        .ok()?;
-    Some((webp, width, height))
-}
-
-const HEIC_DECODE_JS: &str = r#"
-return (async () => {
-  const bin = atob(b64);
-  const data = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i);
-  const libheif = window.libheif;
-  if (!libheif) throw new Error('libheif missing');
-  const lib = typeof libheif === 'function' ? await libheif() : libheif;
-  if (!lib || !lib.HeifDecoder) throw new Error('libheif decoder missing');
-  const decoder = new lib.HeifDecoder();
-  const images = decoder.decode(data);
-  if (!images || !images.length) throw new Error('no image');
-  const image = images[0];
-  const w = image.get_width();
-  const h = image.get_height();
-  const output = new Uint8ClampedArray(w * h * 4);
-  await new Promise((resolve, reject) => {
-    image.display(output, (out) => out ? resolve() : reject(new Error('display failed')));
-  });
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-  canvas.getContext('2d').putImageData(new ImageData(output, w, h), 0, 0);
-  return [canvas.toDataURL('image/webp'), w, h];
-})();
-"#;
 
 async fn reencode_webp(file: &web_sys::Blob, max_side: u32) -> Result<PreparedImage, String> {
     let url = web_sys::Url::create_object_url_with_blob(file)

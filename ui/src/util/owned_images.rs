@@ -81,6 +81,70 @@ pub fn list() -> Vec<OwnedImage> {
     owned
 }
 
+/// Own uploads no board refers to anymore, older than `min_age_ms`.
+pub fn unreferenced(min_age_ms: i64) -> Vec<OwnedImage> {
+    let mut referenced = std::collections::HashSet::new();
+    for board in BOARDS.read().map.values() {
+        for message in &board.board_state.recent_messages.messages {
+            for image in &message.message.images {
+                referenced.insert(image.instance);
+                if let Some(thumb) = image.thumb.as_ref() {
+                    referenced.insert(thumb.instance);
+                }
+            }
+        }
+        for pending in &board.pending_uploads {
+            if let Some(image) = pending.image.as_ref() {
+                referenced.insert(image.instance);
+            }
+        }
+        if let Some(draft) = board.pending_send.as_ref() {
+            for image in &draft.images {
+                referenced.insert(image.instance);
+            }
+        }
+    }
+    let now = now_ms();
+    BOARDS
+        .read()
+        .owned_images
+        .iter()
+        .filter(|entry| {
+            !referenced.contains(&entry.image.instance)
+                && now - entry.uploaded_at >= min_age_ms
+        })
+        .cloned()
+        .collect()
+}
+
+/// Retire own uploads no board refers to and drop them from the index.
+pub fn retire_unused() {
+    let entries = unreferenced(60 * 60 * 1000);
+    if entries.is_empty() {
+        return;
+    }
+    spawn_local(async move {
+        for entry in entries {
+            match crate::util::images::retire_in_contract(entry.image.instance).await {
+                Ok(()) => {
+                    BOARDS.with_mut(|boards| {
+                        boards
+                            .owned_images
+                            .retain(|owned| owned.image.instance != entry.image.instance);
+                    });
+                }
+                Err(error) => {
+                    warn!(
+                        "Could not retire unused image {:?}: {error}",
+                        entry.image.instance
+                    );
+                }
+            }
+        }
+        persist();
+    });
+}
+
 /// Renew the uploads that have not been touched for a week. Runs once per load.
 pub fn renew_if_due() {
     if RENEW_STARTED.swap(true, Ordering::SeqCst) {
