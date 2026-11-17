@@ -1023,6 +1023,10 @@ pub fn Conversation(
                                     let member_names = member_names.clone();
                                     let max_title_size = *max_title_size;
                                     let max_message_size = *max_message_size;
+                                    let can_react = current_board_data
+                                        .as_ref()
+                                        .map(|board| board.may_write_content())
+                                        .unwrap_or(false);
                                     Some(rsx! {
                                         div { class: "space-y-2",
                                             {tree.into_iter().map({
@@ -1043,6 +1047,7 @@ pub fn Conversation(
                                                             depth: 0,
                                                             max_title_size: max_title_size,
                                                             max_message_size: max_message_size,
+                                                            can_react: can_react,
                                                             on_react: move |(msg_id, emoji)| {
                                                                 handle_toggle_reaction(msg_id, emoji);
                                                             },
@@ -1846,9 +1851,15 @@ pub fn MessageCard(
     /// The viewer has moderation powers over this post
     #[props(default)]
     can_moderate: bool,
+    /// The viewer may react; readers of a demo board may not
+    #[props(default = true)]
+    can_react: bool,
 ) -> Element {
     let msg = message.clone();
     let is_self = msg.is_self;
+
+    // A reader of a demo board sees existing reactions but cannot add one.
+    let on_react = if can_react { on_react } else { None };
 
     let timestamp_ms = msg.time.timestamp_millis();
     let time_str = format_utc_as_local_time(timestamp_ms);

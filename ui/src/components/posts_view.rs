@@ -244,6 +244,8 @@ fn PostRow(
     #[props(default)] can_pin: bool,
     #[props(default)] can_close: bool,
     #[props(default)] can_announce: bool,
+    /// Quote and report need a composer; hide them for readers.
+    #[props(default = true)] can_interact: bool,
     #[props(default)] on_pin: Option<EventHandler<bool>>,
     #[props(default)] on_close: Option<EventHandler<bool>>,
     #[props(default)] on_announce: Option<EventHandler<bool>>,
@@ -309,7 +311,8 @@ fn PostRow(
                     }
                 }
                 div { class: "flex items-center gap-1 flex-shrink-0",
-                    button {
+                    if can_interact {
+                        button {
                         r#type: "button",
                         class: if quoted {
                             "px-1.5 py-1 text-xs rounded bg-accent/20 text-accent"
@@ -340,6 +343,7 @@ fn PostRow(
                         },
                         "❝"
                     }
+                    }
                     button {
                         r#type: "button",
                         class: "px-1.5 py-1 text-xs rounded hover:bg-surface",
@@ -362,19 +366,21 @@ fn PostRow(
                         },
                         "🔗"
                     }
-                    button {
-                        r#type: "button",
-                        class: "px-1.5 py-1 text-xs rounded hover:bg-surface",
-                        title: "Report post",
-                        onclick: {
-                            let target = post.message_id;
-                            move |evt| {
-                                evt.stop_propagation();
-                                crate::components::app::REPORT_TARGET
-                                    .with_mut(|current| *current = Some(target));
-                            }
-                        },
-                        "🚩"
+                    if can_interact {
+                        button {
+                            r#type: "button",
+                            class: "px-1.5 py-1 text-xs rounded hover:bg-surface",
+                            title: "Report post",
+                            onclick: {
+                                let target = post.message_id;
+                                move |evt| {
+                                    evt.stop_propagation();
+                                    crate::components::app::REPORT_TARGET
+                                        .with_mut(|current| *current = Some(target));
+                                }
+                            },
+                            "🚩"
+                        }
                     }
                 }
                 if can_pin || can_close || can_announce {
@@ -1536,6 +1542,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                 can_pin: can_pin,
                                                                 can_close: can_close,
                                                                 can_announce: can_announce,
+                                                                can_interact: can_write,
                                                                 on_announce: move |value| {
                                                                     let target = announce_target.clone();
                                                                     if let Some(ctx) = ActionContext::from_current_board() {
@@ -1993,6 +2000,20 @@ pub fn SinglePostView(post_id: String) -> Element {
                                             handle_edit_message(msg_id, new_title, new_text);
                                         },
                                         can_moderate: *can_moderate,
+                                        can_react: {
+                                            let may_write = CURRENT_BOARD
+                                                .read()
+                                                .owner_key
+                                                .and_then(|key| {
+                                                    BOARDS
+                                                        .read()
+                                                        .map
+                                                        .get(&key)
+                                                        .map(|board| board.may_write_content())
+                                                })
+                                                .unwrap_or(false);
+                                            may_write
+                                        },
                                     }
                                 }
                             }
