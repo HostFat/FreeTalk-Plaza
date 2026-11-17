@@ -1,0 +1,346 @@
+//! Shared types and rules for the image blob contract.
+//!
+//! One blob = one immutable payload addressed by its SHA-256. The parameters
+//! name the content hash and the keys allowed to retire it; the state carries
+//! the bytes, or the retirement proof once they are gone.
+
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Hard safety bound enforced by the contract itself, independent of the board
+/// limits: an image, or one chunk of a larger one, never exceeds this.
+pub const MAX_BLOB_BYTES: usize = 8 * 1024 * 1024;
+
+pub const MAX_DIMENSION: u32 = 20_000;
+
+/// Mime types the client renders without plugins.
+pub const ALLOWED_MIME_TYPES: [&str; 4] =
+    ["image/jpeg", "image/png", "image/webp", "image/gif"];
+
+/// Contract parameters: the content hash and the keys allowed to retire it.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct BlobParametersV1 {
+    pub sha256: [u8; 32],
+    pub uploader: VerifyingKey,
+    /// Founding owner of the board the image was uploaded to. A permanent
+    /// emergency key, even after an ownership transfer.
+    pub owner_founding: VerifyingKey,
+    /// Owner of the board at the time of the upload.
+    pub owner_current: VerifyingKey,
+}
+
+/// Contract state: the bytes, or the proof that they were retired.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct BlobStateV1 {
+    pub uploader: VerifyingKey,
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retirement: Option<RetirementProof>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Signed statement that the uploader or a board owner retired the blob.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct RetirementProof {
+    pub signer: VerifyingKey,
+    pub signature: Signature,
+    /// Who the signer was: `uploader`, `owner-founding` or `owner-current`.
+    pub role: RetirementRole,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RetirementRole {
+    Uploader,
+    OwnerFounding,
+    OwnerCurrent,
+}
+
+/// Payload covered by the retirement signature.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct RetirementV1 {
+    pub sha256: [u8; 32],
+}
+
+/// Digest of an image payload.
+pub fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn sign_struct<T: Serialize>(value: &T, signer: &SigningKey) -> Signature {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes).expect("serializes");
+    signer.sign(&bytes)
+}
+
+fn verify_struct<T: Serialize>(
+    value: &T,
+    signature: &Signature,
+    key: &VerifyingKey,
+) -> Result<(), String> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes).map_err(|e| e.to_string())?;
+    key.verify(&bytes, signature).map_err(|e| e.to_string())
+}
+
+impl BlobParametersV1 {
+    pub fn new(
+        sha256: [u8; 32],
+        uploader: VerifyingKey,
+        owner_founding: VerifyingKey,
+        owner_current: VerifyingKey,
+    ) -> Self {
+        Self {
+            sha256,
+            uploader,
+            owner_founding,
+            owner_current,
+        }
+    }
+
+    /// Which role, if any, this key holds for the blob.
+    pub fn role_of(&self, key: &VerifyingKey) -> Option<RetirementRole> {
+        if *key == self.uploader {
+            Some(RetirementRole::Uploader)
+        } else if *key == self.owner_founding {
+            Some(RetirementRole::OwnerFounding)
+        } else if *key == self.owner_current {
+            Some(RetirementRole::OwnerCurrent)
+        } else {
+            None
+        }
+    }
+}
+
+impl BlobStateV1 {
+    pub fn live(
+        parameters: &BlobParametersV1,
+        mime: String,
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    ) -> Self {
+        Self {
+            uploader: parameters.uploader,
+            mime,
+            width,
+            height,
+            data,
+            retired: false,
+            retirement: None,
+        }
+    }
+
+    pub fn validate(&self, parameters: &BlobParametersV1) -> Result<(), String> {
+        if self.uploader != parameters.uploader {
+            return Err("Blob uploader does not match the contract parameters".to_string());
+        }
+        if self.retired {
+            let Some(proof) = self.retirement.as_ref() else {
+                return Err("Retired blob has no retirement proof".to_string());
+            };
+            if !self.data.is_empty() {
+                return Err("Retired blob still carries data".to_string());
+            }
+            let expected_role = parameters
+                .role_of(&proof.signer)
+                .ok_or("Retirement signer is not authorized for this blob")?;
+            if proof.role != expected_role {
+                return Err("Retirement role does not match the signer".to_string());
+            }
+            let payload = RetirementV1 {
+                sha256: parameters.sha256,
+            };
+            verify_struct(&payload, &proof.signature, &proof.signer)?;
+            return Ok(());
+        }
+
+        if self.retirement.is_some() {
+            return Err("A live blob cannot carry a retirement proof".to_string());
+        }
+        if !ALLOWED_MIME_TYPES.contains(&self.mime.as_str()) {
+            return Err(format!("Blob mime type not allowed: {}", self.mime));
+        }
+        if self.data.is_empty() {
+            return Err("Blob payload is empty".to_string());
+        }
+        if self.data.len() > MAX_BLOB_BYTES {
+            return Err(format!(
+                "Blob payload {} exceeds the {} bytes limit",
+                self.data.len(),
+                MAX_BLOB_BYTES
+            ));
+        }
+        if sha256(&self.data) != parameters.sha256 {
+            return Err("Blob payload does not match the parameter hash".to_string());
+        }
+        if self.width == 0
+            || self.height == 0
+            || self.width > MAX_DIMENSION
+            || self.height > MAX_DIMENSION
+        {
+            return Err(format!(
+                "Blob dimensions {}x{} are not valid",
+                self.width, self.height
+            ));
+        }
+        Ok(())
+    }
+
+    /// Build the retired state, signed by `signer`. Fails when the key is not
+    /// allowed to retire this blob.
+    pub fn retire(
+        &self,
+        parameters: &BlobParametersV1,
+        signer: &SigningKey,
+    ) -> Result<Self, String> {
+        let key = signer.verifying_key();
+        let role = parameters
+            .role_of(&key)
+            .ok_or("This key is not allowed to retire the blob")?;
+        let payload = RetirementV1 {
+            sha256: parameters.sha256,
+        };
+        Ok(Self {
+            uploader: self.uploader,
+            mime: self.mime.clone(),
+            width: self.width,
+            height: self.height,
+            data: Vec::new(),
+            retired: true,
+            retirement: Some(RetirementProof {
+                signer: key,
+                signature: sign_struct(&payload, signer),
+                role,
+            }),
+        })
+    }
+}
+
+/// Merge an update into the current state. Retirement wins and is final: a
+/// retired blob can never come back with content.
+pub fn merge_states(
+    current: &BlobStateV1,
+    incoming: &BlobStateV1,
+    parameters: &BlobParametersV1,
+) -> Result<BlobStateV1, String> {
+    current.validate(parameters)?;
+    incoming.validate(parameters)?;
+    if current.retired {
+        return Ok(current.clone());
+    }
+    if incoming.retired {
+        return Ok(incoming.clone());
+    }
+    // Both live: the hash in the parameters fixes the content, so keep the
+    // state we already have.
+    Ok(current.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys() -> (SigningKey, SigningKey, SigningKey, SigningKey) {
+        (
+            SigningKey::from_bytes(&[1u8; 32]),
+            SigningKey::from_bytes(&[2u8; 32]),
+            SigningKey::from_bytes(&[3u8; 32]),
+            SigningKey::from_bytes(&[4u8; 32]),
+        )
+    }
+
+    fn setup() -> (BlobParametersV1, BlobStateV1, [SigningKey; 3]) {
+        let (uploader, founding, current, _stranger) = keys();
+        let data = b"fake image bytes".to_vec();
+        let parameters = BlobParametersV1::new(
+            sha256(&data),
+            uploader.verifying_key(),
+            founding.verifying_key(),
+            current.verifying_key(),
+        );
+        let state = BlobStateV1::live(
+            &parameters,
+            "image/webp".to_string(),
+            800,
+            600,
+            data,
+        );
+        (parameters, state, [uploader, founding, current])
+    }
+
+    #[test]
+    fn a_live_blob_validates_and_a_wrong_hash_does_not() {
+        let (parameters, state, _) = setup();
+        state.validate(&parameters).expect("valid blob");
+
+        let mut tampered = state.clone();
+        tampered.data = b"other bytes".to_vec();
+        assert!(tampered.validate(&parameters).is_err());
+
+        let mut empty = state.clone();
+        empty.data.clear();
+        assert!(empty.validate(&parameters).is_err());
+    }
+
+    #[test]
+    fn the_uploader_and_both_owners_can_retire_the_blob() {
+        let (parameters, state, signers) = setup();
+        for signer in signers {
+            let retired = state.retire(&parameters, &signer).expect("retire");
+            retired.validate(&parameters).expect("retired state verifies");
+            assert!(retired.retired);
+            assert!(retired.data.is_empty());
+        }
+
+        let (_, _, _, stranger) = keys();
+        assert!(state.retire(&parameters, &stranger).is_err());
+    }
+
+    #[test]
+    fn a_retirement_cannot_be_forged() {
+        let (parameters, state, signers) = setup();
+        let mut retired = state.retire(&parameters, &signers[0]).expect("retire");
+        let proof = retired.retirement.as_mut().expect("proof");
+        // Claim another role with the uploader's signature.
+        proof.role = RetirementRole::OwnerFounding;
+        assert!(retired.validate(&parameters).is_err());
+
+        let mut restored = state.retire(&parameters, &signers[0]).expect("retire");
+        restored.retirement = None;
+        assert!(restored.validate(&parameters).is_err());
+        restored.retirement = Some(RetirementProof {
+            signer: signers[0].verifying_key(),
+            signature: sign_struct(&RetirementV1 { sha256: [9u8; 32] }, &signers[0]),
+            role: RetirementRole::Uploader,
+        });
+        assert!(restored.validate(&parameters).is_err());
+    }
+
+    #[test]
+    fn retirement_wins_and_cannot_be_undone() {
+        let (parameters, state, signers) = setup();
+        let retired = state.retire(&parameters, &signers[0]).expect("retire");
+
+        let merged = merge_states(&retired, &state, &parameters).expect("merge");
+        assert!(merged.retired);
+        assert!(merged.data.is_empty());
+
+        let merged = merge_states(&state, &retired, &parameters).expect("merge");
+        assert!(merged.retired);
+
+        // A peer cannot bring a retired blob back to life.
+        let mut revived = retired.clone();
+        revived.retired = false;
+        revived.data = state.data.clone();
+        assert!(revived.validate(&parameters).is_err());
+    }
+}

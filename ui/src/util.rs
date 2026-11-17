@@ -4,6 +4,7 @@ pub mod access;
 pub mod avatar;
 pub mod drafts;
 pub mod ecies;
+pub mod images;
 pub mod markdown;
 pub mod member_moderation;
 pub mod membership;

@@ -31,6 +31,14 @@ pub async fn handle_get_response(
 ) -> Result<(), SynchronizerError> {
     info!("Received get response for key {key}");
 
+    // Image blobs are matched by instance id: they have no board owner and no
+    // sync info entry.
+    if let Ok(instance) = <[u8; 32]>::try_from(key.id().as_bytes()) {
+        if crate::util::images::handle_image_response(instance, &state) {
+            return Ok(());
+        }
+    }
+
     // First try to find the owner_vk from SYNC_INFO
     let owner_vk = SYNC_INFO.read().get_owner_vk_for_instance_id(key.id());
 

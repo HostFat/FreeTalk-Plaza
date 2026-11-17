@@ -1,0 +1,24 @@
+[package]
+name = "plaza-blob"
+version = "0.1.3"
+edition = "2021"
+license = "LGPL-3.0"
+
+[dependencies]
+ciborium.workspace = true
+serde.workspace = true
+freenet-stdlib.workspace = true
+plaza-blob-core = { path = "../plaza-blob-core" }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The contract macro exports the wasm entry points only under this feature.
+default = ["freenet-main-contract"]
+freenet-main-contract = []
+contract = ["freenet-stdlib/contract"]
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+serde.workspace = true
