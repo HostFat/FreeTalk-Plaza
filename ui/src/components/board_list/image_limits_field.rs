@@ -73,10 +73,16 @@ pub fn ImageLimitsField(config: Configuration, is_owner: bool) -> Element {
             match result {
                 Ok(()) => {
                     info!("Image limits updated");
+                    crate::components::app::toasts::show(
+                        "Image limits saved. Syncing with the network…",
+                    );
                     mark_needs_sync(owner_key);
                 }
                 Err(error) => {
                     error!("Failed to change the image limits: {error}");
+                    crate::components::app::toasts::show_error(format!(
+                        "Image limits: {error}"
+                    ));
                     error_message.set(Some(error));
                 }
             }

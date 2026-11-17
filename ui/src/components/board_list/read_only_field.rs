@@ -63,9 +63,17 @@ pub fn ReadOnlyField(config: Configuration, is_owner: bool) -> Element {
             match result {
                 Ok(()) => {
                     info!("Read-only mode toggled");
+                    crate::components::app::toasts::show(
+                        "Board mode saved. Syncing with the network…",
+                    );
                     mark_needs_sync(owner_key);
                 }
-                Err(error) => error!("Failed to change read-only mode: {error}"),
+                Err(error) => {
+                    error!("Failed to change read-only mode: {error}");
+                    crate::components::app::toasts::show_error(format!(
+                        "Board mode: {error}"
+                    ));
+                }
             }
             busy.set(false);
         });

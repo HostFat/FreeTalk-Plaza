@@ -110,17 +110,28 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
             return;
         }
         spawn_local(async move {
-            if let Err(error) = crate::util::images::retire_in_contract(instance).await {
-                if let Some(window) = web_sys::window() {
-                    let _ = window.alert_with_message(&format!(
+            match crate::util::images::retire_in_contract(instance).await {
+                Ok(()) => {
+                    crate::components::app::toasts::show(
+                        "Contract retirement sent to the network.",
+                    );
+                }
+                Err(error) => {
+                    crate::components::app::toasts::show_error(format!(
                         "Could not retire the contract: {error}"
                     ));
+                    if let Some(window) = web_sys::window() {
+                        let _ = window.alert_with_message(&format!(
+                            "Could not retire the contract: {error}"
+                        ));
+                    }
                 }
             }
         });
     };
     let block = move |_| {
         crate::util::images::block_image(instance, expected);
+        crate::components::app::toasts::show("Image blocked on this device.");
     };
     let retire = move |_| {
         let Some(ctx) = crate::util::message_actions::ActionContext::from_current_board() else {
@@ -144,6 +155,13 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
                 crate::util::image_retire::retire_image(&ctx, instance, expected, reason)
             {
                 dioxus::logger::tracing::warn!("Could not retire the image: {error}");
+                crate::components::app::toasts::show_error(format!(
+                    "Could not retire the image: {error}"
+                ));
+            } else {
+                crate::components::app::toasts::show(
+                    "Image retired. Syncing with the network…",
+                );
             }
         });
     };

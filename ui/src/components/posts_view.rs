@@ -1577,37 +1577,37 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                                                 on_announce: move |value| {
                                                                     let target = announce_target.clone();
                                                                     if let Some(ctx) = ActionContext::from_current_board() {
-                                                                        let _ = message_actions::set_post_flag(
+                                                                        crate::util::feedback::submit(message_actions::set_post_flag(
                                                                             ctx,
                                                                             target,
                                                                             None,
                                                                             None,
                                                                             Some(value),
-                                                                        );
+                                                                        ), "Post updated");
                                                                     }
                                                                 },
                                                                 on_pin: move |value| {
                                                                     let target = pin_target.clone();
                                                                     if let Some(ctx) = ActionContext::from_current_board() {
-                                                                        let _ = message_actions::set_post_flag(
+                                                                        crate::util::feedback::submit(message_actions::set_post_flag(
                                                                             ctx,
                                                                             target,
                                                                             Some(value),
                                                                             None,
                                                                             None,
-                                                                        );
+                                                                        ), "Post updated");
                                                                     }
                                                                 },
                                                                 on_close: move |value| {
                                                                     let target = close_target.clone();
                                                                     if let Some(ctx) = ActionContext::from_current_board() {
-                                                                        let _ = message_actions::set_post_flag(
+                                                                        crate::util::feedback::submit(message_actions::set_post_flag(
                                                                             ctx,
                                                                             target,
                                                                             None,
                                                                             Some(value),
                                                                             None,
-                                                                        );
+                                                                        ), "Post updated");
                                                                     }
                                                                 },
                                                                 on_click: move |_| {
@@ -2136,3 +2136,4 @@ pub fn SinglePostView(post_id: String) -> Element {
         }
     }
 }
+

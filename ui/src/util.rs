@@ -4,6 +4,7 @@ pub mod access;
 pub mod avatar;
 pub mod crop_math;
 pub mod drafts;
+pub mod feedback;
 pub mod ecies;
 pub mod image_meta;
 pub mod image_processing;
@@ -367,4 +368,5 @@ pub fn member_id_to_color(member_id: &MemberId) -> String {
     // Use moderate saturation and lightness for visibility
     format!("hsl({}, 65%, 55%)", hue)
 }
+
 

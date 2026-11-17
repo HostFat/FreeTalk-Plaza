@@ -246,7 +246,7 @@ pub async fn toggle_reaction(ctx: ActionContext, target_message_id: MessageId, e
         actions.push(ActionContentV1::reaction(target_message_id.clone(), emoji));
     }
 
-    send_actions(ctx, actions).await;
+    send_actions(ctx, actions, None).await;
 }
 
 /// Owner-only, after a key rotation: publish an edit that re-seals the real
@@ -304,19 +304,19 @@ pub async fn reseal_category_name(category_id: MessageId) {
         category.allowed_roles.clone(),
         category.hidden,
     );
-    send_actions(ctx, vec![action]).await;
+    send_actions(ctx, vec![action], Some("Section updated")).await;
 }
 
 /// Turn images on or off for one section. The action is signed by the owner or
 /// an admin and the section rule wins over every role.
 pub async fn set_section_images(ctx: ActionContext, target: MessageId, allowed: bool) {
     let action = ActionContentV1::set_section_images(target, allowed);
-    send_actions(ctx, vec![action]).await;
+    send_actions(ctx, vec![action], Some("Section images updated")).await;
 }
 
 /// Delete a message
 pub async fn delete_message(ctx: ActionContext, target_message_id: MessageId) {    let action = ActionContentV1::delete(target_message_id.clone());
-    send_actions(ctx, vec![action]).await;
+    send_actions(ctx, vec![action], Some("Message deleted")).await;
 }
 
 /// Edit a message
@@ -331,7 +331,7 @@ pub async fn edit_message(
     }
 
     let action = ActionContentV1::edit(target_message_id.clone(), new_title, new_text);
-    send_actions(ctx, vec![action]).await;
+    send_actions(ctx, vec![action], Some("Message edited")).await;
 }
 
 /// Edit a category
@@ -407,7 +407,7 @@ pub async fn edit_category(
         }
     };
 
-    send_action_messages(ctx, vec![content]).await;
+    send_action_messages(ctx, vec![content], None).await;
 }
 
 fn self_member_id(ctx: &ActionContext) -> MemberId {
@@ -805,7 +805,7 @@ pub async fn delete_group(
     let body = seal_action(&ctx, delete, &group_id).ok_or("Could not seal the group deletion")?;
     contents.push(body);
 
-    send_action_messages(ctx, contents).await;
+    send_action_messages(ctx, contents, Some("Section deleted")).await;
     Ok(())
 }
 
@@ -831,7 +831,11 @@ fn build_add_reaction_content(
 
 /// Wrap each action in the public moderation envelope. The contract reads the
 /// type and target; the payload stays sealed on private boards.
-async fn send_actions(ctx: ActionContext, actions: Vec<ActionContentV1>) {
+async fn send_actions(
+    ctx: ActionContext,
+    actions: Vec<ActionContentV1>,
+    label: Option<&'static str>,
+) {
     let self_id = plaza_core::board_state::member::MemberId::from(&ctx.self_sk.verifying_key());
     if ctx
         .board_state
@@ -862,11 +866,15 @@ async fn send_actions(ctx: ActionContext, actions: Vec<ActionContentV1>) {
             envelope.encode(),
         ));
     }
-    send_action_messages(ctx, contents).await;
+    send_action_messages(ctx, contents, label).await;
 }
 
 // Send action messages and apply delta
-async fn send_action_messages(ctx: ActionContext, contents: Vec<BoardMessageBody>) {
+async fn send_action_messages(
+    ctx: ActionContext,
+    contents: Vec<BoardMessageBody>,
+    label: Option<&'static str>,
+) {
     if contents.is_empty() {
         return;
     }
@@ -902,6 +910,7 @@ async fn send_action_messages(ctx: ActionContext, contents: Vec<BoardMessageBody
         let board_state_clone = ctx.board_state.clone();
         let current_board = ctx.current_board;
 
+        let mut applied = false;
         BOARDS.with_mut(|boards| {
             if let Some(board_data) = boards.map.get_mut(&current_board) {
                 let params = ChatBoardParametersV1 {
@@ -915,9 +924,21 @@ async fn send_action_messages(ctx: ActionContext, contents: Vec<BoardMessageBody
                     // The action itself is sealed; apply it locally too.
                     board_data.rebuild_actions_with_local_secrets(&params);
                     mark_needs_sync(current_board);
+                    applied = true;
                 }
             }
         });
+        if let Some(label) = label {
+            if applied {
+                crate::components::app::toasts::show(format!(
+                    "{label}. Syncing with the network…"
+                ));
+            } else {
+                crate::components::app::toasts::show_error(format!(
+                    "{label}: the action could not be applied"
+                ));
+            }
+        }
     }
 }
 

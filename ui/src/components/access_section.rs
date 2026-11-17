@@ -362,10 +362,10 @@ pub fn RolesSection() -> Element {
                                                                     let close = if idx == 2 { evt.checked() } else { can_close_posts };
                                                                     let pin = if idx == 3 { evt.checked() } else { can_pin_posts };
                                                                     let move_posts = if idx == 4 { evt.checked() } else { can_move_posts };
-                                                                    let _ = access::update_role_moderation(
+                                                                    crate::util::feedback::submit(access::update_role_moderation(
                                                                         role_id, edit, delete, close, pin,
                                                                         move_posts, scope.clone(),
-                                                                    );
+                                                                    ), "Role updated");
                                                                 },
                                                             }
                                                             "{label}"
@@ -384,10 +384,10 @@ pub fn RolesSection() -> Element {
                                                     r#type: "checkbox",
                                                     checked: distributes,
                                                     onchange: move |evt| {
-                                                        let _ = access::set_role_can_distribute_keys(
+                                                        crate::util::feedback::submit(access::set_role_can_distribute_keys(
                                                             role_id,
                                                             evt.checked(),
-                                                        );
+                                                        ), "Role updated");
                                                     },
                                                 }
                                                 "keys"
@@ -402,10 +402,10 @@ pub fn RolesSection() -> Element {
                                                     r#type: "checkbox",
                                                     checked: role.role.can_manage_trash,
                                                     onchange: move |evt| {
-                                                        let _ = access::set_role_can_manage_trash(
+                                                        crate::util::feedback::submit(access::set_role_can_manage_trash(
                                                             role_id,
                                                             evt.checked(),
-                                                        );
+                                                        ), "Role updated");
                                                     },
                                                 }
                                                 "trash"
@@ -420,10 +420,10 @@ pub fn RolesSection() -> Element {
                                                     r#type: "checkbox",
                                                     checked: role.role.can_attach_images,
                                                     onchange: move |evt| {
-                                                        let _ = access::set_role_can_attach_images(
+                                                        crate::util::feedback::submit(access::set_role_can_attach_images(
                                                             role_id,
                                                             evt.checked(),
-                                                        );
+                                                        ), "Role updated");
                                                     },
                                                 }
                                                 "images"
@@ -438,10 +438,10 @@ pub fn RolesSection() -> Element {
                                                     r#type: "checkbox",
                                                     checked: role.role.can_retire_images,
                                                     onchange: move |evt| {
-                                                        let _ = access::set_role_can_retire_images(
+                                                        crate::util::feedback::submit(access::set_role_can_retire_images(
                                                             role_id,
                                                             evt.checked(),
-                                                        );
+                                                        ), "Role updated");
                                                     },
                                                 }
                                                 "retire"
@@ -454,7 +454,7 @@ pub fn RolesSection() -> Element {
                                             r#type: "button",
                                             class: "text-xs text-red-400 hover:bg-red-500/10 rounded px-2 py-1",
                                             onclick: move |_| {
-                                                let _ = access::remove_role(role_id);
+                                                crate::util::feedback::submit(access::remove_role(role_id), "Role removed");
                                             },
                                             "Delete role"
                                         }
@@ -470,7 +470,7 @@ pub fn RolesSection() -> Element {
                                                     button {
                                                         r#type: "button",
                                                         class: "text-red-400",
-                                                        onclick: move |_| { let _ = access::set_role_member(role_id, mid, false); },
+                                                        onclick: move |_| { crate::util::feedback::submit(access::set_role_member(role_id, mid, false), "Member updated"); },
                                                         "×"
                                                     }
                                                 }
@@ -501,7 +501,7 @@ pub fn RolesSection() -> Element {
                                                                         } else {
                                                                             selected.retain(|entry| *entry != id);
                                                                         }
-                                                                        let _ = access::update_role_moderation(
+                                                                        crate::util::feedback::submit(access::update_role_moderation(
                                                                             role_id,
                                                                             can_edit_posts,
                                                                             can_delete_posts,
@@ -509,7 +509,7 @@ pub fn RolesSection() -> Element {
                                                                             can_pin_posts,
                                                                             can_move_posts,
                                                                             selected,
-                                                                        );
+                                                                        ), "Role updated");
                                                                     },
                                                                 }
                                                                 "{scope_name}"
@@ -772,10 +772,10 @@ pub fn InviteLinksSection() -> Element {
                                                     r#type: "button",
                                                     class: "px-2 py-1 bg-accent hover:bg-accent/80 text-white text-xs rounded",
                                                     onclick: move |_| {
-                                                        let _ = access::rename_invite_link(
+                                                        crate::util::feedback::submit(access::rename_invite_link(
                                                             token_id,
                                                             label_edit.read().clone(),
-                                                        );
+                                                        ), "Invite link renamed");
                                                         editing_label.set(None);
                                                     },
                                                     "Save"
@@ -803,7 +803,7 @@ pub fn InviteLinksSection() -> Element {
                                             r#type: "button",
                                             class: "text-xs text-red-400 hover:bg-red-500/10 rounded px-2 py-1",
                                             onclick: move |_| {
-                                                let _ = access::revoke_invite_link(token_id);
+                                                crate::util::feedback::submit(access::revoke_invite_link(token_id), "Invite link revoked");
                                             },
                                             "Revoke"
                                         }
@@ -817,3 +817,4 @@ pub fn InviteLinksSection() -> Element {
         }
     }
 }
+

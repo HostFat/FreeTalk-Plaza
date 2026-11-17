@@ -190,8 +190,16 @@ fn start_transfer(
             Ok(()) => {
                 error.set(None);
                 confirmed_signal.set(false);
+                crate::components::app::toasts::show(
+                    "Ownership transferred. Syncing with the network…",
+                );
             }
-            Err(e) => error.set(Some(format!("Transfer failed: {e}"))),
+            Err(e) => {
+                crate::components::app::toasts::show_error(format!(
+                    "Transfer failed: {e}"
+                ));
+                error.set(Some(format!("Transfer failed: {e}")));
+            }
         }
         busy.set(false);
     });
