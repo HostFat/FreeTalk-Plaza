@@ -98,6 +98,7 @@ fn public_action(content: &BoardMessageBody) -> Option<crate::board_state::conte
 pub fn validate_message_images(
     message: &MessageV1,
     configuration: &crate::board_state::configuration::Configuration,
+    enforce_limits: bool,
 ) -> Result<(), String> {
     if message.images.is_empty() {
         return Ok(());
@@ -105,19 +106,27 @@ pub fn validate_message_images(
     if message.content.is_action() || message.content.is_category() {
         return Err("Only posts and replies can carry images".to_string());
     }
-    let max_images = configuration.images_per_message() as usize;
-    if message.images.len() > max_images {
-        return Err(format!(
-            "Too many images in one message: {} > {}",
-            message.images.len(),
-            max_images
-        ));
+    // Limits are a posting rule. Messages already in the accepted state stay
+    // valid when the owner lowers a limit; only new messages are checked.
+    if enforce_limits {
+        let max_images = configuration.images_per_message() as usize;
+        if message.images.len() > max_images {
+            return Err(format!(
+                "Too many images in one message: {} > {}",
+                message.images.len(),
+                max_images
+            ));
+        }
     }
     for image in &message.images {
-        image.validate(
-            configuration.image_byte_limit(),
-            configuration.animated_image_byte_limit(),
-        )?;
+        if enforce_limits {
+            image.validate(
+                configuration.image_byte_limit(),
+                configuration.animated_image_byte_limit(),
+            )?;
+        } else {
+            image.validate(u32::MAX, u32::MAX)?;
+        }
     }
     Ok(())
 }
@@ -797,7 +806,15 @@ impl MessagesV1 {
         parameters: &ChatBoardParametersV1,
         message: &AuthorizedMessageV1,
     ) -> Result<(), String> {
-        validate_message_images(&message.message, &state.configuration.configuration)?;
+        let is_new = !self
+            .messages
+            .iter()
+            .any(|existing| existing.id() == message.id());
+        validate_message_images(
+            &message.message,
+            &state.configuration.configuration,
+            is_new,
+        )?;
         if message.message.images.is_empty() {
             return Ok(());
         }
@@ -1588,15 +1605,28 @@ mod tests {
             messages.messages.push(message(images));
             messages.verify(&state, &parameters)
         };
+        // Limits apply when a new message arrives, not to the accepted state.
+        let apply = |images: Vec<ImageRef>| {
+            let mut messages = MessagesV1::default();
+            let delta = vec![message(images)];
+            messages.apply_delta(&state, &parameters, &Some(delta))
+        };
 
         verify(vec![image(1024, false)]).expect("a valid image passes");
-        verify(vec![image(7 * 1024 * 1024, true)]).expect("an animated image up to 8 MiB passes");
+        apply(vec![image(1024, false)]).expect("a valid image applies");
+        apply(vec![image(7 * 1024 * 1024, true)])
+            .expect("an animated image up to 8 MiB passes");
 
-        let too_many = verify(vec![image(1024, false); 5]).unwrap_err();
+        let too_many = apply(vec![image(1024, false); 5]).unwrap_err();
         assert!(too_many.contains("Too many images"), "{too_many}");
 
-        let oversized = verify(vec![image(5 * 1024 * 1024, false)]).unwrap_err();
+        let oversized = apply(vec![image(5 * 1024 * 1024, false)]).unwrap_err();
         assert!(oversized.contains("outside the allowed range"), "{oversized}");
+
+        // A message already in the state keeps verifying after the owner
+        // lowers a limit.
+        verify(vec![image(5 * 1024 * 1024, false)])
+            .expect("existing oversized images stay valid");
 
         let mut bad_mime = image(1024, false);
         bad_mime.mime = "image/svg+xml".to_string();

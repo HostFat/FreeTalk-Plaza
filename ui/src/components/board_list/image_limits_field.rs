@@ -41,6 +41,7 @@ pub fn ImageLimitsField(config: Configuration, is_owner: bool) -> Element {
         new_config.max_image_bytes = *static_mib.read() * 1024 * 1024;
         new_config.max_animated_image_bytes = *animated_mib.read() * 1024 * 1024;
         new_config.configuration_version += 1;
+        new_config.updated_at = crate::util::get_current_system_time();
         busy.set(true);
         error_message.set(None);
 

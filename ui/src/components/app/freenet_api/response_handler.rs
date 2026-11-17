@@ -274,6 +274,18 @@ impl ResponseHandler {
                                                                 )
                                                             })
                                                             .collect();
+                                                        // Keep the states so each one can be put back on
+                                                        // the node after a contract re-key.
+                                                        let states_for_put: Vec<(
+                                                            ed25519_dalek::VerifyingKey,
+                                                            plaza_core::ChatBoardStateV1,
+                                                        )> = loaded_boards
+                                                            .map
+                                                            .iter()
+                                                            .map(|(key, board_data)| {
+                                                                (*key, board_data.board_state.clone())
+                                                            })
+                                                            .collect();
 
                                                         // Merge the loaded boards with the current boards
                                                         crate::util::defer(move || {
@@ -429,6 +441,28 @@ impl ResponseHandler {
                                                                     BoardSyncStatus::Subscribing,
                                                                 );
                                                             });
+
+                                                            // A board loaded from the delegate may have
+                                                            // been created with an older contract build.
+                                                            // Put the state back first: the node must
+                                                            // cache the WASM and parameters before a
+                                                            // subscribe can succeed.
+                                                            if let Some((_, state)) = states_for_put
+                                                                .iter()
+                                                                .find(|(key, _)| key == &board_key)
+                                                            {
+                                                                match republish_board(board_key, state).await {
+                                                                    Ok(()) => info!(
+                                                                        "Re-published board state for {:?}",
+                                                                        owner_vk_to_contract_key(&board_key).id()
+                                                                    ),
+                                                                    Err(e) => error!(
+                                                                        "Failed to re-publish board {:?}: {}",
+                                                                        owner_vk_to_contract_key(&board_key).id(),
+                                                                        e
+                                                                    ),
+                                                                }
+                                                            }
 
                                                             // Get contract key and subscribe
                                                             let contract_key =
@@ -595,4 +629,38 @@ impl ResponseHandler {
     pub fn get_board_synchronizer(&self) -> &BoardSynchronizer {
         &self.board_synchronizer
     }
+}
+
+/// Put a board state to the node with the bundled contract. Used after a
+/// contract re-key so a board loaded from the delegate has a contract the
+/// node can update.
+async fn republish_board(
+    owner: ed25519_dalek::VerifyingKey,
+    state: &plaza_core::ChatBoardStateV1,
+) -> Result<(), String> {
+    use freenet_stdlib::client_api::{ClientRequest, ContractRequest};
+    use freenet_stdlib::prelude::{
+        ContractCode, ContractContainer, ContractWasmAPIVersion, Parameters, WrappedContract,
+        WrappedState,
+    };
+    let parameters = ChatBoardParametersV1 { owner };
+    let contract = ContractContainer::from(ContractWasmAPIVersion::V1(WrappedContract::new(
+        std::sync::Arc::new(ContractCode::from(crate::constants::BOARD_CONTRACT_WASM)),
+        Parameters::from(crate::util::to_cbor_vec(&parameters)),
+    )));
+    let request = ContractRequest::Put {
+        contract,
+        state: WrappedState::new(crate::util::to_cbor_vec(state)),
+        related_contracts: Default::default(),
+        subscribe: true,
+        blocking_subscribe: false,
+    };
+    let mut web_api = crate::components::app::WEB_API.write();
+    let Some(web_api) = web_api.as_mut() else {
+        return Err("WebAPI not available".to_string());
+    };
+    web_api
+        .send(ClientRequest::ContractOp(request))
+        .await
+        .map_err(|error| error.to_string())
 }

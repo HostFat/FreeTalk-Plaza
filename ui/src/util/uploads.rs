@@ -37,9 +37,15 @@ pub async fn upload_pending(
 
     // A small WebP preview for the topic list, sealed with the same key.
     let mut thumb = None;
-    if let Some(preview) =
-        crate::util::image_processing::thumbnail(&record.bytes, &record.mime).await
-    {
+    let preview = crate::util::image_processing::thumbnail(&record.bytes, &record.mime).await;
+    if preview.is_none() {
+        dioxus::logger::tracing::warn!(
+            "Thumbnail encoding failed for {} ({} bytes)",
+            record.mime,
+            record.bytes.len()
+        );
+    }
+    if let Some(preview) = preview {
         match upload_image(
             preview.bytes,
             "image/webp".to_string(),
@@ -53,6 +59,9 @@ pub async fn upload_pending(
         .await
         {
             Ok((thumb_instance, thumb_sha, _, _)) => {
+                dioxus::logger::tracing::info!(
+                    "Uploaded thumbnail {thumb_instance:?} for image {instance:?}"
+                );
                 thumb = Some(ImageThumbnail {
                     instance: thumb_instance,
                     sha256: thumb_sha,
