@@ -80,6 +80,48 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
             .map(|board| board.may_retire_images())
             .unwrap_or(false)
     });
+    // The device denylist wins over any cached or fetched copy.
+    let blocked = use_memo(move || crate::util::images::is_hash_blocked(&expected));
+    // The contract kill switch belongs to the uploader and the board owners.
+    let is_board_owner = use_memo(move || {        let Some(key) = CURRENT_BOARD.read().owner_key else {
+            return false;
+        };
+        BOARDS
+            .read()
+            .map
+            .get(&key)
+            .map(|board| {
+                let self_vk = board.self_sk.verifying_key();
+                self_vk == board.owner_vk || self_vk == board.current_owner_key()
+            })
+            .unwrap_or(false)
+    });
+    let retire_contract = move |_| {
+        let confirmed = web_sys::window()
+            .and_then(|window| {
+                window
+                    .confirm_with_message(
+                        "Retire this image contract? Nodes that apply the update drop the bytes. Copies already on other nodes can persist.",
+                    )
+                    .ok()
+            })
+            .unwrap_or(false);
+        if !confirmed {
+            return;
+        }
+        spawn_local(async move {
+            if let Err(error) = crate::util::images::retire_in_contract(instance).await {
+                if let Some(window) = web_sys::window() {
+                    let _ = window.alert_with_message(&format!(
+                        "Could not retire the contract: {error}"
+                    ));
+                }
+            }
+        });
+    };
+    let block = move |_| {
+        crate::util::images::block_image(instance, expected);
+    };
     let retire = move |_| {
         let Some(ctx) = crate::util::message_actions::ActionContext::from_current_board() else {
             return;
@@ -138,9 +180,24 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
 
     rsx! {
         figure { class: "my-2 rounded-lg border border-border bg-background p-3",
-            if retired() {
+            if blocked() {
                 div { class: "flex items-center justify-between gap-3 text-xs text-text-muted",
-                    span { "Image retired by moderation" }
+                    div {
+                        div { "Blocked on this device" }
+                        div { class: "text-[10px] text-text-muted/80",
+                            "This device will not download or show this image."
+                        }
+                    }
+                    span { class: "text-text-muted", "{width}x{height} · {kilobytes(bytes)}" }
+                }
+            } else if retired() {
+                div { class: "flex items-center justify-between gap-3 text-xs text-text-muted",
+                    div {
+                        div { "Image retired by moderation" }
+                        div { class: "text-[10px] text-text-muted/80",
+                            "This forum stops serving it. Copies already on other nodes can persist."
+                        }
+                    }
                     span { class: "text-text-muted", "{width}x{height} · {kilobytes(bytes)}" }
                 }
             } else {
@@ -203,6 +260,22 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
                                 onclick: retire,
                                 "Retire"
                             }
+                        }
+                        if is_board_owner() {
+                            button {
+                                r#type: "button",
+                                class: "px-2 py-1.5 text-xs text-red-400 hover:bg-red-500/10 border border-border rounded-lg",
+                                title: "Empty the image contract itself (uploader and board owners)",
+                                onclick: retire_contract,
+                                "Retire blob"
+                            }
+                        }
+                        button {
+                            r#type: "button",
+                            class: "px-2 py-1.5 text-xs text-text-muted hover:bg-surface-hover border border-border rounded-lg",
+                            title: "Never download or show this hash on this device",
+                            onclick: block,
+                            "Block"
                         }
                     }
                 },

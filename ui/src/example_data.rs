@@ -43,6 +43,7 @@ pub fn create_example_boards() -> Boards {
         current_board_key: None,
         removed: Vec::new(),
         migrated_boards: Vec::new(),
+        blocked_image_hashes: Vec::new(),
     }
 }
 

@@ -13,13 +13,14 @@ use dioxus::prelude::*;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_stdlib::client_api::{ClientRequest, ContractRequest};
 use freenet_stdlib::prelude::{
-    ContractCode, ContractContainer, ContractInstanceId, ContractKey, ContractWasmAPIVersion,
-    Parameters, WrappedContract, WrappedState,
+    CodeHash, ContractCode, ContractContainer, ContractInstanceId, ContractKey,
+    ContractWasmAPIVersion, Parameters, UpdateData, WrappedContract, WrappedState,
 };
 use futures::channel::oneshot;
 use futures::future::{select, Either};
 use plaza_blob_core::{
-    manifest_sha256, BlobParametersV1, BlobStateV1, ChunkRef, CHUNK_BYTES, MAX_CHUNKS,
+    manifest_sha256, BlobParametersV1, BlobStateV1, ChunkRef, RetirementRole, CHUNK_BYTES,
+    MAX_CHUNKS,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -270,8 +271,50 @@ fn forget_blob_put(instance: &[u8; 32]) {
     }
 }
 
+/// Whether this device refuses an image hash. The list lives in the board
+/// store, so it does not depend on any board adopting the same rule.
+pub fn is_hash_blocked(hash: &[u8; 32]) -> bool {
+    BOARDS
+        .read()
+        .blocked_image_hashes
+        .iter()
+        .any(|blocked| blocked == hash)
+}
+
+/// Add a hash to the device denylist and persist it.
+pub fn block_hash(hash: [u8; 32]) {
+    let already = is_hash_blocked(&hash);
+    if !already {
+        BOARDS.with_mut(|boards| boards.blocked_image_hashes.push(hash));
+    }
+    crate::util::safe_spawn_local(async {
+        if let Err(error) = crate::components::app::chat_delegate::save_boards_to_delegate().await
+        {
+            warn!("Could not persist the blocked image hash: {error}");
+        }
+    });
+}
+
+/// Add a hash to the device denylist and hide that image now.
+pub fn block_image(instance: [u8; 32], hash: [u8; 32]) {
+    block_hash(hash);
+    IMAGES.with_mut(|images| {
+        images.insert(
+            instance,
+            ImageFetch {
+                expected: hash,
+                status: ImageStatus::Failed("blocked on this device".to_string()),
+            },
+        );
+    });
+}
+
 /// Ask for an image, unless it is already cached or being fetched.
 pub fn request_image(instance: [u8; 32], expected_sha256: [u8; 32]) {
+    if is_hash_blocked(&expected_sha256) {
+        fail_image(instance, "blocked on this device".to_string());
+        return;
+    }
     {
         let images = IMAGES.read();
         if let Some(existing) = images.get(&instance) {
@@ -372,6 +415,9 @@ fn payload_status(
     }
     if image_sha256(&data) != expected {
         return ImageStatus::Failed("hash mismatch".to_string());
+    }
+    if is_hash_blocked(&expected) {
+        return ImageStatus::Failed("blocked on this device".to_string());
     }
     ImageStatus::Ready(data)
 }
@@ -490,9 +536,84 @@ fn fail_image(instance: [u8; 32], reason: String) {
     warn!("Image {instance:?} unavailable: {reason}");
     IMAGES.with_mut(|images| {
         if let Some(entry) = images.get_mut(&instance) {
-            entry.status = ImageStatus::Failed(reason);
+            entry.status = ImageStatus::Failed(reason.clone());
+        } else {
+            // The image was never fetched in this session: keep a failed entry
+            // so the placeholder shows the reason right away.
+            images.insert(
+                instance,
+                ImageFetch {
+                    expected: [0u8; 32],
+                    status: ImageStatus::Failed(reason.clone()),
+                },
+            );
         }
     });
+}
+
+/// Retire the blob itself, for its uploader or a board owner. The contract
+/// verifies the signer against its parameters; the board record is a separate
+/// lever that follows the live admin list.
+pub async fn retire_in_contract(instance: [u8; 32]) -> Result<(), String> {
+    let state_bytes = fetch_blob_state(instance).await?;
+    let state = ciborium::de::from_reader::<BlobStateV1, &[u8]>(&state_bytes[..])
+        .map_err(|error| error.to_string())?;
+    if state.retired {
+        fail_image(instance, "retired".to_string());
+        return Ok(());
+    }
+    let content = if state.is_manifest() {
+        manifest_sha256(&state.chunks)
+    } else {
+        image_sha256(&state.data)
+    };
+
+    let Some(board_key) = CURRENT_BOARD.read().owner_key else {
+        return Err("No board selected".to_string());
+    };
+    let Some(board) = BOARDS.read().map.get(&board_key).cloned() else {
+        return Err("Board data is not loaded".to_string());
+    };
+    let self_vk = board.self_sk.verifying_key();
+    let parameters = plaza_core::board_state::ChatBoardParametersV1 {
+        owner: board.owner_vk,
+    };
+    let role = if state.uploader == self_vk {
+        RetirementRole::Uploader
+    } else if self_vk == board.owner_vk {
+        RetirementRole::OwnerFounding
+    } else if plaza_core::board_state::member::MemberId::from(&self_vk)
+        == board.board_state.ownership.current_owner(&parameters)
+    {
+        RetirementRole::OwnerCurrent
+    } else {
+        return Err(
+            "Only the uploader or a board owner can retire the contract itself".to_string(),
+        );
+    };
+
+    let retired = BlobStateV1::retired_by(&state, content, &board.self_sk, role);
+    let key = ContractKey::from_id_and_code(
+        ContractInstanceId::new(instance),
+        CodeHash::from_code(BLOB_CONTRACT_WASM),
+    );
+    let request = ContractRequest::Update {
+        key,
+        data: UpdateData::State(to_cbor_vec(&retired).into()),
+    };
+    {
+        let mut web_api = WEB_API.write();
+        let Some(web_api) = web_api.as_mut() else {
+            return Err("Not connected to a Freenet node".to_string());
+        };
+        web_api
+            .send(ClientRequest::ContractOp(request))
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    fail_image(instance, "retired".to_string());
+    info!("Sent contract retirement for image {instance:?}");
+    Ok(())
 }
 
 #[cfg(test)]

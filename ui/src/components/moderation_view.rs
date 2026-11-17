@@ -10,7 +10,7 @@ use crate::util::moderation_queue;
 use dioxus::prelude::*;
 use plaza_core::board_state::approvals::message_scope;
 use plaza_core::board_state::member::MemberId;
-use plaza_core::board_state::reports::ReportStatus;
+use plaza_core::board_state::reports::{ReportReason, ReportStatus};
 use std::collections::HashMap;
 use wasm_bindgen_futures::spawn_local;
 
@@ -75,8 +75,10 @@ pub fn ModerationView() -> Element {
     let mut reports: Vec<_> = board.board_state.reports.reports.iter().collect();
     reports.sort_by_key(|report| {
         let open = board.board_state.reports.status_of(&report.id()) == ReportStatus::Open;
+        let illegal = report.report.reason == ReportReason::Illegal;
         (
             std::cmp::Reverse(open),
+            std::cmp::Reverse(illegal),
             std::cmp::Reverse(report.report.created_at),
         )
     });
@@ -298,6 +300,11 @@ pub fn ModerationView() -> Element {
                                         div { class: "flex flex-wrap items-center gap-2",
                                             span { class: "text-xs uppercase tracking-wide text-accent",
                                                 "{report.report.reason.label()}"
+                                            }
+                                            if report.report.reason == ReportReason::Illegal {
+                                                span { class: "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-red-500/20 text-red-300",
+                                                    "priority"
+                                                }
                                             }
                                             span { class: "text-text font-medium flex-1 min-w-40 truncate", "{target_title}" }
                                             span { class: "text-xs {status_class}", "{status.label()}" }

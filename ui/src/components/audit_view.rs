@@ -192,6 +192,29 @@ pub fn AuditView() -> Element {
             ),
         ));
     }
+    for retirement in &board.board_state.image_retirements.retirements {
+        let instance: String = retirement
+            .retirement
+            .instance
+            .iter()
+            .take(4)
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let hash: String = retirement
+            .retirement
+            .sha256
+            .iter()
+            .take(4)
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        entries.push((
+            retirement.retirement.created_at,
+            format!(
+                "Retired image {instance} (hash {hash}) · {}",
+                retirement.retirement.reason
+            ),
+        ));
+    }
     for role in board
         .board_state
         .roles

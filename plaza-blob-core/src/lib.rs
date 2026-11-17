@@ -332,6 +332,37 @@ impl BlobStateV1 {
         Ok(())
     }
 
+    /// Build the retired state given the content hash and a signer whose role
+    /// the caller knows. The contract verifies the role against its
+    /// parameters; this is what lets a client retire a blob it did not upload
+    /// without knowing the full parameter set.
+    pub fn retired_by(
+        template: &BlobStateV1,
+        content_sha256: [u8; 32],
+        signer: &SigningKey,
+        role: RetirementRole,
+    ) -> BlobStateV1 {
+        let payload = RetirementV1 {
+            sha256: content_sha256,
+        };
+        BlobStateV1 {
+            uploader: template.uploader,
+            mime: template.mime.clone(),
+            width: template.width,
+            height: template.height,
+            data: Vec::new(),
+            chunks: Vec::new(),
+            nonce: None,
+            secret_version: None,
+            retired: true,
+            retirement: Some(RetirementProof {
+                signer: signer.verifying_key(),
+                signature: sign_struct(&payload, signer),
+                role,
+            }),
+        }
+    }
+
     /// Build the retired state, signed by `signer`. Fails when the key is not
     /// allowed to retire this blob.
     pub fn retire(
@@ -596,6 +627,27 @@ mod tests {
         retired.validate(&parameters).expect("retired manifest verifies");
         assert!(retired.chunks.is_empty());
         assert!(retired.nonce.is_none());
+    }
+    #[test]
+    fn a_client_built_retirement_matches_the_contract_rules() {
+        let (parameters, state, signers) = setup();
+        let retired = BlobStateV1::retired_by(
+            &state,
+            parameters.sha256,
+            &signers[0],
+            RetirementRole::Uploader,
+        );
+        retired.validate(&parameters).expect("a valid retirement");
+        assert!(retired.retired);
+        assert!(retired.data.is_empty());
+
+        let wrong_role = BlobStateV1::retired_by(
+            &state,
+            parameters.sha256,
+            &signers[0],
+            RetirementRole::OwnerCurrent,
+        );
+        assert!(wrong_role.validate(&parameters).is_err());
     }
 }
 

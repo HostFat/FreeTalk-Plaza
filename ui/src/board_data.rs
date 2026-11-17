@@ -2022,11 +2022,17 @@ pub struct Boards {
     /// should send an upgrade pointer to the old contract.
     #[serde(skip)]
     pub migrated_boards: Vec<(VerifyingKey, ContractKey)>,
+    /// Image hashes this device refuses to download or show, independent of
+    /// any board.
+    #[serde(default)]
+    pub blocked_image_hashes: Vec<[u8; 32]>,
 }
 
 impl PartialEq for Boards {
     fn eq(&self, other: &Self) -> bool {
-        self.map == other.map && self.removed == other.removed
+        self.map == other.map
+            && self.removed == other.removed
+            && self.blocked_image_hashes == other.blocked_image_hashes
     }
 }
 
@@ -2048,6 +2054,7 @@ impl Boards {
             current_board_key: None,
             removed: Vec::new(),
             migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
         };
         let mut dropped = 0usize;
         for (key, value) in entries {
@@ -2274,6 +2281,13 @@ impl Boards {
                 self.removed.push(key);
             }
         }
+        // The device denylist follows the union rule: a hash blocked on
+        // another tab or in an older snapshot stays blocked here.
+        for hash in other.blocked_image_hashes {
+            if !self.blocked_image_hashes.contains(&hash) {
+                self.blocked_image_hashes.push(hash);
+            }
+        }
         for (vk, mut board_data) in other.map {
             if self.removed.contains(&vk) {
                 continue;
@@ -2453,6 +2467,7 @@ mod tests {
             current_board_key: None,
             removed: Vec::new(),
             migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
         };
         let key = boards.create_new_board_with_name(
             owner_sk,
@@ -2495,6 +2510,7 @@ mod tests {
                 current_board_key: None,
                 removed: Vec::new(),
                 migrated_boards: vec![],
+                blocked_image_hashes: Vec::new(),
             };
             let key = boards.create_new_board_with_name(
                 owner_sk.clone(),
@@ -2536,6 +2552,7 @@ mod tests {
             current_board_key: None,
             removed: Vec::new(),
             migrated_boards: vec![],
+            blocked_image_hashes: Vec::new(),
         };
 
         let key = boards.create_new_board_with_name(
@@ -2754,6 +2771,7 @@ mod tests {
             current_board_key: None,
             removed: Vec::new(),
             migrated_boards: vec![],
+            blocked_image_hashes: Vec::new(),
         };
         let key = boards.create_new_board_with_name(
             owner_sk.clone(),
