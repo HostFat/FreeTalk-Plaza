@@ -72,6 +72,14 @@ pub struct Role {
     /// See the trash and restore items. Permanent purge stays with owner/admins.
     #[serde(default, skip_serializing_if = "is_false")]
     pub can_manage_trash: bool,
+    /// May attach images to posts and replies. Owner and admins always may;
+    /// sections can still forbid images.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub can_attach_images: bool,
+    /// May retire an image for the whole board, including images uploaded by
+    /// others. The record goes to the image denylist.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub can_retire_images: bool,
     /// Sections where the moderation powers apply, including their
     /// subsections. Empty means the whole board.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -361,6 +369,87 @@ pub fn verify_moderation_authority(
         MAX_AUTHORITY_DEPTH,
         &|role| role_grants_power(role, power, scope_chain),
     )
+}
+
+/// Verify that the signer may retire an image for the board: the owner, an
+/// admin, a current holder of `can_retire_images`, or a signer whose stored
+/// proof shows the role at the time.
+pub fn verify_image_retire_authority(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    signer: &MemberId,
+    proof: Option<&AuthorityProof>,
+    at: SystemTime,
+) -> Result<(), String> {
+    if state.roles.can_retire_images(signer) {
+        return Ok(());
+    }
+    verify_admin_authority(state, parameters, signer, proof, MAX_AUTHORITY_DEPTH, at).or_else(|_| {
+        verify_role_grant(
+            state,
+            parameters,
+            signer,
+            proof,
+            MAX_AUTHORITY_DEPTH,
+            &|role| role.can_retire_images,
+        )
+    })
+}
+
+/// Proof for a signer who may attach images through a role.
+pub fn image_attach_authority_proof(
+    state: &ChatBoardStateV1,
+    signer: &MemberId,
+) -> Option<AuthorityProof> {
+    let assignment = state.roles.assignments.iter().find(|entry| {
+        entry.assignment.member_id == *signer
+            && !entry.assignment.revoked
+            && state.roles.roles.iter().any(|role| {
+                role.role.id == entry.assignment.role_id
+                    && role.role.can_attach_images
+                    && !role.role.deleted
+            })
+    })?;
+    let role = state
+        .roles
+        .roles
+        .iter()
+        .find(|role| role.role.id == assignment.assignment.role_id)?;
+    Some(AuthorityProof {
+        admin: None,
+        grant: Some(Box::new(RoleGrantProof {
+            role: role.clone(),
+            assignment: assignment.clone(),
+        })),
+    })
+}
+
+/// Proof for a signer who may retire images through a role.
+pub fn image_retire_authority_proof(
+    state: &ChatBoardStateV1,
+    signer: &MemberId,
+) -> Option<AuthorityProof> {
+    let assignment = state.roles.assignments.iter().find(|entry| {
+        entry.assignment.member_id == *signer
+            && !entry.assignment.revoked
+            && state.roles.roles.iter().any(|role| {
+                role.role.id == entry.assignment.role_id
+                    && role.role.can_retire_images
+                    && !role.role.deleted
+            })
+    })?;
+    let role = state
+        .roles
+        .roles
+        .iter()
+        .find(|role| role.role.id == assignment.assignment.role_id)?;
+    Some(AuthorityProof {
+        admin: None,
+        grant: Some(Box::new(RoleGrantProof {
+            role: role.clone(),
+            assignment: assignment.clone(),
+        })),
+    })
 }
 
 /// Verify that the signer held the category key-distribution permission.
@@ -1012,6 +1101,21 @@ impl RolesV1 {
             .any(|role| role.can_manage_trash)
     }
 
+    /// Whether the member's roles allow attaching images. The section rule is
+    /// checked separately and always wins over this.
+    pub fn can_attach_images(&self, member_id: &MemberId) -> bool {
+        self.active_roles_of(member_id)
+            .iter()
+            .any(|role| role.can_attach_images)
+    }
+
+    /// Whether the member may retire images for the board.
+    pub fn can_retire_images(&self, member_id: &MemberId) -> bool {
+        self.active_roles_of(member_id)
+            .iter()
+            .any(|role| role.can_retire_images)
+    }
+
     /// Whether a moderation power applies to a target whose category chain is
     /// `scope_chain` (the target section and its ancestors). An empty role
     /// scope means the whole board.
@@ -1142,6 +1246,8 @@ mod delegation_tests {
                 can_pin_posts: false,
                 can_move_posts: false,
                 can_manage_trash: false,
+                can_attach_images: false,
+                can_retire_images: false,
                 scope: Vec::new(),
                 deleted: false,
                 signed_at: std::time::SystemTime::UNIX_EPOCH,
@@ -1253,6 +1359,8 @@ mod delegation_tests {
             can_pin_posts: false,
             can_move_posts: false,
             can_manage_trash: false,
+            can_attach_images: false,
+            can_retire_images: false,
             scope: Vec::new(),
             deleted: false,
             signed_at: std::time::SystemTime::UNIX_EPOCH,
@@ -1311,6 +1419,8 @@ mod delegation_tests {
             can_pin_posts: false,
             can_move_posts: false,
             can_manage_trash: false,
+            can_attach_images: false,
+            can_retire_images: false,
             scope: Vec::new(),
             deleted: false,
             signed_at: std::time::SystemTime::UNIX_EPOCH,
@@ -1350,6 +1460,8 @@ mod delegation_tests {
             can_pin_posts: false,
             can_move_posts: false,
             can_manage_trash: false,
+            can_attach_images: false,
+            can_retire_images: false,
             scope: Vec::new(),
             deleted: false,
             signed_at: std::time::SystemTime::UNIX_EPOCH,
@@ -1517,6 +1629,8 @@ mod delegation_tests {
             can_pin_posts: false,
             can_move_posts: false,
             can_manage_trash: false,
+            can_attach_images: false,
+            can_retire_images: false,
             scope: Vec::new(),
             deleted: false,
             signed_at: std::time::SystemTime::UNIX_EPOCH,

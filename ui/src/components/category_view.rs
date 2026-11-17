@@ -78,6 +78,12 @@ pub fn CategoryCard(
     /// Edit handler with full category data
     #[props(default)]
     on_edit: Option<EventHandler<CategoryEditData>>,
+    /// Whether this section allows images
+    #[props(default = true)]
+    images_allowed: bool,
+    /// Owner/admin switch for the section image rule
+    #[props(default)]
+    on_set_images: Option<EventHandler<bool>>,
     /// Delete handler
     #[props(default)]
     on_request_delete: Option<EventHandler<MessageId>>,
@@ -205,6 +211,13 @@ pub fn CategoryCard(
                                         if category.category_locked { "🔒 Locked" } else { "🔒 Restricted" }
                                     }
                                 }
+                                if !images_allowed {
+                                    span {
+                                        class: "flex-shrink-0 text-xs px-2 py-0.5 rounded-full bg-surface border border-border text-text-muted",
+                                        title: "Images are disabled in this section",
+                                        "no images"
+                                    }
+                                }
                                 if unread_count > 0 {
                                     span {
                                         class: "flex-shrink-0 text-xs px-2 py-0.5 rounded-full bg-accent/20 text-accent",
@@ -322,6 +335,27 @@ pub fn CategoryCard(
                                     option { value: "{group_id}", "{group_name}" }
                                 }
                             }
+                        }
+                    }
+
+                    // Images switch for the whole section
+                    if let Some(handler) = on_set_images.as_ref() {
+                        label {
+                            class: "flex items-center gap-2 mb-2 text-xs text-text-muted",
+                            title: "A section that forbids images wins over every role, including the owner.",
+                            input {
+                                r#type: "checkbox",
+                                checked: images_allowed,
+                                onclick: move |e| e.stop_propagation(),
+                                onchange: {
+                                    let handler = handler.clone();
+                                    move |evt| {
+                                        evt.stop_propagation();
+                                        handler.call(evt.checked());
+                                    }
+                                },
+                            }
+                            "Images allowed in this section"
                         }
                     }
 

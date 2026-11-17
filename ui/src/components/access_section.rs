@@ -330,6 +330,8 @@ pub fn RolesSection() -> Element {
                                         (can_pin_posts, "pin"),
                                         (can_move_posts, "move"),
                                         (role.role.can_manage_trash, "trash"),
+                                        (role.role.can_attach_images, "images"),
+                                        (role.role.can_retire_images, "retire"),
                                     ] {
                                         if enabled {
                                             span { class: "text-xs text-accent", "{label}" }
@@ -410,6 +412,42 @@ pub fn RolesSection() -> Element {
                                             }
                                             InfoHint {
                                                 text: "Members with this role can see and restore trashed items. Permanent purge stays with the owner and admins.".to_string(),
+                                            }
+                                            label {
+                                                class: "flex items-center gap-1 text-xs text-text-muted",
+                                                title: "Members with this role can attach images to posts. A section that forbids images still wins.",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: role.role.can_attach_images,
+                                                    onchange: move |evt| {
+                                                        let _ = access::set_role_can_attach_images(
+                                                            role_id,
+                                                            evt.checked(),
+                                                        );
+                                                    },
+                                                }
+                                                "images"
+                                            }
+                                            InfoHint {
+                                                text: "Members with this role can attach images to posts. A section that forbids images still wins.".to_string(),
+                                            }
+                                            label {
+                                                class: "flex items-center gap-1 text-xs text-text-muted",
+                                                title: "Members with this role can retire an image for the whole board, including images uploaded by others.",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: role.role.can_retire_images,
+                                                    onchange: move |evt| {
+                                                        let _ = access::set_role_can_retire_images(
+                                                            role_id,
+                                                            evt.checked(),
+                                                        );
+                                                    },
+                                                }
+                                                "retire"
+                                            }
+                                            InfoHint {
+                                                text: "Members with this role can retire an image for the whole board, including images uploaded by others.".to_string(),
                                             }
                                         }
                                         button {

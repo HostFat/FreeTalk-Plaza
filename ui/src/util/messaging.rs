@@ -154,7 +154,9 @@ pub async fn send_message(
         (
             CONTENT_TYPE_TEXT,
             TEXT_CONTENT_VERSION,
-            TextContentV1::new(title_text.clone(), message_text.clone()).encode(),
+            TextContentV1::new(title_text.clone(), message_text.clone())
+                .with_category(category_id.clone())
+                .encode(),
         )
     };
 

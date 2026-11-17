@@ -4,9 +4,11 @@
 //! type, the size and the NSFW and animated labels, and the click starts the
 //! download. The bytes are verified against the hash before being shown.
 
+use crate::components::app::{BOARDS, CURRENT_BOARD};
 use crate::util::images::{request_image, ImageStatus, IMAGES};
 use dioxus::prelude::*;
 use plaza_core::board_state::images::ImageRef;
+use wasm_bindgen_futures::spawn_local;
 
 fn kilobytes(bytes: u32) -> String {
     if bytes >= 1024 * 1024 {
@@ -50,6 +52,59 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
         .read()
         .get(&instance)
         .map(|entry| entry.status.clone());
+
+    // A board-level retirement hides the image even if its contract still has
+    // the bytes; the hash entry also blocks the same file under another key.
+    let retired = use_memo(move || {
+        let Some(key) = CURRENT_BOARD.read().owner_key else {
+            return false;
+        };
+        BOARDS
+            .read()
+            .map
+            .get(&key)
+            .map(|board| {
+                board.board_state.image_retirements.is_retired(&instance)
+                    || board.board_state.image_retirements.is_hash_denied(&expected)
+            })
+            .unwrap_or(false)
+    });
+    let can_retire = use_memo(move || {
+        let Some(key) = CURRENT_BOARD.read().owner_key else {
+            return false;
+        };
+        BOARDS
+            .read()
+            .map
+            .get(&key)
+            .map(|board| board.may_retire_images())
+            .unwrap_or(false)
+    });
+    let retire = move |_| {
+        let Some(ctx) = crate::util::message_actions::ActionContext::from_current_board() else {
+            return;
+        };
+        let reason = web_sys::window()
+            .and_then(|window| {
+                window
+                    .prompt_with_message("Reason for retiring this image")
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or_default();
+        let reason = if reason.trim().is_empty() {
+            "Retired by a moderator".to_string()
+        } else {
+            reason
+        };
+        spawn_local(async move {
+            if let Err(error) =
+                crate::util::image_retire::retire_image(&ctx, instance, expected, reason)
+            {
+                dioxus::logger::tracing::warn!("Could not retire the image: {error}");
+            }
+        });
+    };
     let _ready_bytes = match &status {
         Some(ImageStatus::Ready(bytes)) if opened() => Some(bytes.clone()),
         _ => None,
@@ -83,6 +138,12 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
 
     rsx! {
         figure { class: "my-2 rounded-lg border border-border bg-background p-3",
+            if retired() {
+                div { class: "flex items-center justify-between gap-3 text-xs text-text-muted",
+                    span { "Image retired by moderation" }
+                    span { class: "text-text-muted", "{width}x{height} · {kilobytes(bytes)}" }
+                }
+            } else {
             {match status {
                 Some(ImageStatus::Ready(_)) if opened() => rsx! {
                     if let Some(created) = current_url.clone() {
@@ -134,9 +195,19 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
                             },
                             if nsfw { "Show NSFW image" } else { "Open image" }
                         }
+                        if can_retire() {
+                            button {
+                                r#type: "button",
+                                class: "px-2 py-1.5 text-xs text-red-400 hover:bg-red-500/10 border border-border rounded-lg",
+                                title: "Hide this image for everyone on the board and block its hash",
+                                onclick: retire,
+                                "Retire"
+                            }
+                        }
                     }
                 },
             }}
+            }
         }
     }
 }

@@ -207,6 +207,8 @@ pub fn create_role(
             can_pin_posts,
             can_move_posts,
             can_manage_trash: false,
+            can_attach_images: false,
+            can_retire_images: false,
             scope,
             deleted: false,
             signed_at: crate::util::get_current_system_time(),
@@ -318,6 +320,63 @@ pub fn set_role_can_manage_trash(role_id: RoleId, value: bool) -> Result<(), Str
         let role = Role {
             generation: current.generation + 1,
             can_manage_trash: value,
+            signed_at: crate::util::get_current_system_time(),
+            ..current
+        };
+        let delta = ChatBoardStateV1Delta {
+            roles: Some(RolesDelta {
+                roles: vec![AuthorizedRole::new(role, &owner_sk)],
+                assignments: vec![],
+            }),
+            ..Default::default()
+        };
+        apply_and_sync(board_key, &data.board_state.clone(), delta)
+    })
+}
+
+/// Owner-only: allow or stop a role from attaching images. A section that
+/// forbids images still wins over this.
+pub fn set_role_can_attach_images(role_id: RoleId, value: bool) -> Result<(), String> {
+    with_owner_board(|data, owner_sk, board_key| {
+        let current = data
+            .board_state
+            .roles
+            .roles
+            .iter()
+            .find(|r| r.role.id == role_id)
+            .map(|r| r.role.clone())
+            .ok_or("Role not found")?;
+        let role = Role {
+            generation: current.generation + 1,
+            can_attach_images: value,
+            signed_at: crate::util::get_current_system_time(),
+            ..current
+        };
+        let delta = ChatBoardStateV1Delta {
+            roles: Some(RolesDelta {
+                roles: vec![AuthorizedRole::new(role, &owner_sk)],
+                assignments: vec![],
+            }),
+            ..Default::default()
+        };
+        apply_and_sync(board_key, &data.board_state.clone(), delta)
+    })
+}
+
+/// Owner-only: allow or stop a role from retiring images for the board.
+pub fn set_role_can_retire_images(role_id: RoleId, value: bool) -> Result<(), String> {
+    with_owner_board(|data, owner_sk, board_key| {
+        let current = data
+            .board_state
+            .roles
+            .roles
+            .iter()
+            .find(|r| r.role.id == role_id)
+            .map(|r| r.role.clone())
+            .ok_or("Role not found")?;
+        let role = Role {
+            generation: current.generation + 1,
+            can_retire_images: value,
             signed_at: crate::util::get_current_system_time(),
             ..current
         };

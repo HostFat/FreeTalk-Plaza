@@ -6,6 +6,7 @@ pub mod configuration;
 pub mod content;
 pub mod id;
 pub mod identity;
+pub mod image_retirements;
 pub mod images;
 pub mod invites;
 pub mod member;
@@ -131,6 +132,11 @@ pub struct ChatBoardStateV1 {
     /// Temporary suspensions addressed to members.
     #[serde(default)]
     pub suspensions: crate::board_state::member_moderation::SuspensionsV1,
+
+    /// Signed retirements of images, including images uploaded by others, and
+    /// the hash denylist derived from them.
+    #[serde(default)]
+    pub image_retirements: crate::board_state::image_retirements::ImageRetirementsV1,
 
     /// If this contract has been replaced by a new contract this will contain the new contract address.
     /// This can only be set by the owner.
@@ -450,6 +456,10 @@ impl ChatBoardStateV1 {
         let mut suspensions = std::mem::take(&mut self.suspensions);
         suspensions.cleanup(self, parameters);
         self.suspensions = suspensions;
+
+        let mut retirements = std::mem::take(&mut self.image_retirements);
+        retirements.cleanup(self, parameters);
+        self.image_retirements = retirements;
 
         // 5g. Invite-cap removal happens before the message cleanup. Re-run
         // the members/messages fixpoint so removed invitees do not leave

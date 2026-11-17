@@ -6,6 +6,7 @@ pub mod drafts;
 pub mod ecies;
 pub mod image_meta;
 pub mod image_processing;
+pub mod image_retire;
 pub mod images;
 pub mod markdown;
 pub mod member_moderation;

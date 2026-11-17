@@ -462,6 +462,28 @@ fn SectionRow(
     let nav = navigator();
     let nav_board = board_id.clone();
     let nav_category = category_id.clone();
+    let section_for_images = category.message_id.clone();
+    let images_allowed = use_memo(move || {
+        let Some(key) = CURRENT_BOARD.read().owner_key else {
+            return true;
+        };
+        BOARDS
+            .read()
+            .map
+            .get(&key)
+            .map(|board| board.section_images_allowed(&section_for_images))
+            .unwrap_or(true)
+    });
+    let section_for_switch = category.message_id.clone();
+    let can_switch_images = is_owner || is_admin;
+    let set_section_images = move |allowed: bool| {
+        let section = section_for_switch.clone();
+        if let Some(ctx) = ActionContext::from_current_board() {
+            spawn_local(async move {
+                message_actions::set_section_images(ctx, section, allowed).await;
+            });
+        }
+    };
     let child_nav = navigator();
     let child_board = board_id.clone();
     let on_child_click = EventHandler::new(move |child_id: MessageId| {
@@ -491,6 +513,12 @@ fn SectionRow(
                 });
             },
             on_edit: move |data| on_edit.call(data),
+            images_allowed: *images_allowed.read(),
+            on_set_images: if can_switch_images {
+                Some(EventHandler::new(set_section_images))
+            } else {
+                None
+            },
             on_request_delete: move |id| on_delete.call(id),
             child_boards: child_boards,
             on_child_click: Some(on_child_click),

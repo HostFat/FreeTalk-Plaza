@@ -1511,6 +1511,55 @@ impl BoardData {
         self.can_participate().is_ok()
     }
 
+    /// Whether a section allows images, following the signed on/off actions.
+    pub fn section_images_allowed(&self, section: &MessageId) -> bool {
+        let parameters = self.board_parameters();
+        self.board_state
+            .recent_messages
+            .section_allows_images(&self.board_state, &parameters, section)
+    }
+
+    /// Whether this identity may attach images in `section`. The section rule
+    /// wins over the role, and a read-only board only lets owner and admins
+    /// write at all.
+    pub fn may_attach_images(&self, section: Option<&MessageId>) -> bool {
+        if !self.may_write_content() {
+            return false;
+        }
+        let parameters = self.board_parameters();
+        let self_id = MemberId::from(&self.self_sk.verifying_key());
+        if !plaza_core::board_state::message::author_may_attach_images(
+            &self.board_state,
+            &parameters,
+            &self_id,
+        ) {
+            return false;
+        }
+        match section {
+            Some(section) => self.board_state.recent_messages.section_allows_images(
+                &self.board_state,
+                &parameters,
+                section,
+            ),
+            None => true,
+        }
+    }
+
+    /// Whether this identity may retire an image for the whole board.
+    pub fn may_retire_images(&self) -> bool {
+        if !self.may_write_content() {
+            return false;
+        }
+        let parameters = self.board_parameters();
+        let self_id = MemberId::from(&self.self_sk.verifying_key());
+        if self.board_state.ownership.current_owner(&parameters) == self_id
+            || plaza_core::board_state::roles::is_board_admin(&self.board_state, &self_id)
+        {
+            return true;
+        }
+        self.board_state.roles.can_retire_images(&self_id)
+    }
+
     /// Check if the user can participate in the board (send messages, edit profile).
     /// Returns Ok if user is not banned AND (is owner OR has self_authorized_member OR is in members list).
     pub fn can_participate(&self) -> Result<(), SendMessageError> {
@@ -2288,6 +2337,8 @@ mod tests {
                 can_pin_posts: true,
                 can_move_posts: false,
                 can_manage_trash: true,
+                can_attach_images: false,
+                can_retire_images: false,
                 scope: Vec::new(),
                 deleted: false,
                 signed_at: get_current_system_time(),
@@ -2708,6 +2759,8 @@ mod tests {
                                 can_pin_posts: false,
                                 can_move_posts: false,
                                 can_manage_trash: false,
+                                can_attach_images: false,
+                                can_retire_images: false,
                                 scope: Vec::new(),
                                 deleted: false,
                                 signed_at: get_current_system_time(),

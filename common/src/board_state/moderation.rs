@@ -1638,6 +1638,8 @@ mod tests {
                 can_pin_posts: true,
                 can_move_posts: false,
                 can_manage_trash: false,
+                can_attach_images: false,
+                can_retire_images: false,
                 scope: Vec::new(),
                 deleted: false,
                 signed_at: std::time::SystemTime::UNIX_EPOCH,

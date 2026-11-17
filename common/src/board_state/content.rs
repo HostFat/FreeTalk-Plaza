@@ -55,6 +55,9 @@ pub const ACTION_TYPE_DELETE: u32 = 2;
 pub const ACTION_TYPE_REACTION: u32 = 3;
 pub const ACTION_TYPE_REMOVE_REACTION: u32 = 4;
 pub const ACTION_TYPE_EDIT_CATEGORY: u32 = 5;
+/// Turn images on or off for one section. The payload is
+/// `SectionImagesV1 { allowed }`.
+pub const ACTION_TYPE_SET_SECTION_IMAGES: u32 = 6;
 // Future: ACTION_TYPE_PIN = 6, ACTION_TYPE_REPLY = 7, etc.
 
 /// Text message content (content_type = 1)
@@ -62,11 +65,28 @@ pub const ACTION_TYPE_EDIT_CATEGORY: u32 = 5;
 pub struct TextContentV1 {
     pub title: String,
     pub content: String,
+    /// Section this post belongs to. `None` is the board root and is omitted
+    /// so posts written before sections existed keep verifying byte for byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<MessageId>,
 }
 
 impl TextContentV1 {
     pub fn new(title: String, content: String) -> Self {
-        Self { title, content }
+        Self {
+            title,
+            content,
+            category_id: None,
+        }
+    }
+
+    pub fn with_category(mut self, category_id: Option<MessageId>) -> Self {
+        self.category_id = category_id;
+        self
+    }
+
+    pub fn category_id(&self) -> Option<MessageId> {
+        self.category_id.clone()
     }
 
     /// Encode to CBOR bytes
@@ -446,6 +466,26 @@ impl ActionContentV1 {
             None
         }
     }
+
+    /// Build an action that turns images on or off for one section.
+    pub fn set_section_images(target: MessageId, allowed: bool) -> Self {
+        let mut bytes = Vec::new();
+        let _ = ciborium::ser::into_writer(&SectionImagesV1 { allowed }, &mut bytes);
+        Self {
+            action_type: ACTION_TYPE_SET_SECTION_IMAGES,
+            target,
+            payload: bytes,
+        }
+    }
+
+    /// Get the section images setting if this is a set_section_images action.
+    pub fn section_images_payload(&self) -> Option<SectionImagesV1> {
+        if self.action_type == ACTION_TYPE_SET_SECTION_IMAGES {
+            ciborium::from_reader(&self.payload[..]).ok()
+        } else {
+            None
+        }
+    }
 }
 
 /// Payload for edit actions
@@ -488,9 +528,23 @@ pub struct CategoryEditPayload {
     pub new_parent: Option<MessageId>,
 }
 
+/// Payload for `ACTION_TYPE_SET_SECTION_IMAGES`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct SectionImagesV1 {
+    pub allowed: bool,
+}
+
 /// Keeps new default fields out of the bytes that signatures cover.
 pub(crate) fn is_false(value: &bool) -> bool {
     !*value
+}
+
+pub(crate) fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl CategoryEditPayload {
@@ -579,6 +633,10 @@ pub struct CategoryContentV1 {
     /// no posts. Omitted at false so old categories keep their bytes.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_group: bool,
+    /// Whether posts in this section may carry images. True unless the owner
+    /// disables it; omitted at true so old categories keep their bytes.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub images_allowed: bool,
 }
 
 impl CategoryContentV1 {
@@ -594,7 +652,14 @@ impl CategoryContentV1 {
             sealed_name: None,
             hidden: false,
             is_group: false,
+            images_allowed: true,
         }
+    }
+
+    /// Turn image attachments on or off for this section.
+    pub fn with_images_allowed(mut self, allowed: bool) -> Self {
+        self.images_allowed = allowed;
+        self
     }
 
     /// Turn this category into a homepage group. Groups are never restricted

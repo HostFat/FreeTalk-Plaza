@@ -14,6 +14,85 @@ use std::fmt;
 use std::time::SystemTime;
 
 use crate::board_state::content::CategoryEditPayload;
+use crate::board_state::content::{
+    ReplyContentV1, TextContentV1, ACTION_TYPE_SET_SECTION_IMAGES, CONTENT_TYPE_REPLY,
+    CONTENT_TYPE_TEXT,
+};
+
+/// Whether the author may attach images at all: owner, admin, or a role with
+/// `can_attach_images`. The section rule is checked separately and wins.
+pub fn author_may_attach_images(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    author: &MemberId,
+) -> bool {
+    if *author == state.ownership.current_owner(parameters)
+        || crate::board_state::roles::is_board_admin(state, author)
+    {
+        return true;
+    }
+    state.roles.can_attach_images(author)
+}
+
+/// Section recorded in a message body, when the contract can read it. Private
+/// posts in a restricted section carry the section in the secret scope.
+fn body_section(content: &BoardMessageBody) -> Option<MessageId> {
+    match content {
+        BoardMessageBody::Public {
+            content_type, data, ..
+        } if *content_type == CONTENT_TYPE_TEXT => {
+            TextContentV1::decode(data).ok().and_then(|text| text.category_id)
+        }
+        BoardMessageBody::Private { secret_scope, .. } => match secret_scope {
+            crate::board_state::message::SecretScope::Category(id) => Some(id.clone()),
+            crate::board_state::message::SecretScope::Board => None,
+        },
+        _ => None,
+    }
+}
+
+fn body_reply_target(content: &BoardMessageBody) -> Option<MessageId> {
+    match content {
+        BoardMessageBody::Public {
+            content_type, data, ..
+        } if *content_type == CONTENT_TYPE_REPLY => {
+            ReplyContentV1::decode(data).ok().map(|reply| reply.target_message_id)
+        }
+        _ => None,
+    }
+}
+
+/// Public action carried by a message, whether it travels bare or inside the
+/// moderation envelope. Sealed payloads need a client key and are skipped.
+fn public_action(content: &BoardMessageBody) -> Option<crate::board_state::content::ActionContentV1> {
+    use crate::board_state::content::{
+        ActionContentV1, CONTENT_TYPE_MODERATION_ACTION,
+    };
+    use crate::board_state::privacy::SealedBytes;
+    match content {
+        BoardMessageBody::Public {
+            content_type, data, ..
+        } => {
+            if *content_type == CONTENT_TYPE_MODERATION_ACTION {
+                let envelope =
+                    crate::board_state::content::ModerationActionV1::decode(data).ok()?;
+                match envelope.payload {
+                    SealedBytes::Public { value } => ActionContentV1::decode(&value).ok(),
+                    SealedBytes::Private { .. } => None,
+                }
+            } else {
+                match content.decode_content() {
+                    Some(crate::board_state::content::DecodedContent::Action(action)) => {
+                        Some(action)
+                    }
+                    _ => None,
+                }
+            }
+        }
+        BoardMessageBody::Private { .. } => None,
+    }
+}
+
 
 /// Validate the image references of one message against the board limits.
 pub fn validate_message_images(
@@ -159,10 +238,7 @@ impl ComposableState for MessagesV1 {
                 return Err(format!("Invalid message signature: id:{:?}", message.id()));
             }
 
-            validate_message_images(
-                &message.message,
-                &parent_state.configuration.configuration,
-            )?;
+            self.validate_images(parent_state, parameters, message)?;
         }
 
         // A member may not hold more posts than the window allows. The check
@@ -231,10 +307,7 @@ impl ComposableState for MessagesV1 {
                         msg.message.author
                     ));
                 }
-                validate_message_images(
-                    &msg.message,
-                    &parent_state.configuration.configuration,
-                )?;
+                self.validate_images(parent_state, parameters, msg)?;
                 let content = &msg.message.content;
 
                 // Validate title constraints (for public text/reply messages)
@@ -618,6 +691,125 @@ impl MessagesV1 {
         self.messages.iter().filter(|m| {
             !m.message.content.is_action() && !self.actions_state.deleted.contains(&m.id())
         })
+    }
+
+    /// Section a message belongs to. The signed route is authoritative; the
+    /// message body is the fallback for records written before routes.
+    pub fn section_of(
+        &self,
+        state: &ChatBoardStateV1,
+        id: &MessageId,
+    ) -> Option<MessageId> {
+        let routes = state.moderation.routes_map();
+        let mut current = id.clone();
+        for _ in 0..64 {
+            if let Some(route) = routes.get(&current) {
+                if route.is_category {
+                    return None;
+                }
+                if let Some(category) = route.category_id {
+                    return Some(category);
+                }
+            }
+            let message = self.messages.iter().find(|m| m.id() == current)?;
+            if let Some(section) = body_section(&message.message.content) {
+                return Some(section);
+            }
+            match body_reply_target(&message.message.content) {
+                Some(target) => current = target,
+                None => return None,
+            }
+        }
+        None
+    }
+
+    fn section_of_message(
+        &self,
+        state: &ChatBoardStateV1,
+        message: &AuthorizedMessageV1,
+    ) -> Option<MessageId> {
+        self.section_of(state, &message.id())
+    }
+
+    /// Category record of a section, when the contract can read it.
+    pub fn category_content(
+        &self,
+        section: &MessageId,
+    ) -> Option<crate::board_state::content::CategoryContentV1> {
+        let message = self.messages.iter().find(|m| m.id() == *section)?;
+        match message.message.content.decode_content() {
+            Some(crate::board_state::content::DecodedContent::Category(category)) => {
+                Some(category)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a section allows images. The last on/off action signed by the
+    /// owner or an admin wins; without one the category record decides.
+    pub fn section_allows_images(
+        &self,
+        state: &ChatBoardStateV1,
+        parameters: &ChatBoardParametersV1,
+        section: &MessageId,
+    ) -> bool {
+        let mut last: Option<(SystemTime, MessageId, bool)> = None;
+        for message in &self.messages {
+            let Some(action) = public_action(&message.message.content) else {
+                continue;
+            };
+            if action.action_type != ACTION_TYPE_SET_SECTION_IMAGES
+                || action.target != *section
+            {
+                continue;
+            }
+            let author = message.message.author;
+            if author != state.ownership.current_owner(parameters)
+                && !crate::board_state::roles::is_board_admin(state, &author)
+            {
+                continue;
+            }
+            let Some(setting) = action.section_images_payload() else {
+                continue;
+            };
+            let key = (message.message.time, message.id());
+            if last
+                .as_ref()
+                .map(|(time, id, _)| (message.message.time, message.id()) > (*time, *id))
+                .unwrap_or(true)
+            {
+                last = Some((key.0, key.1, setting.allowed));
+            }
+        }
+        match last {
+            Some((_, _, allowed)) => allowed,
+            None => self
+                .category_content(section)
+                .map(|category| category.images_allowed)
+                .unwrap_or(true),
+        }
+    }
+
+    /// Limits, author permission and section rule for one message's images.
+    fn validate_images(
+        &self,
+        state: &ChatBoardStateV1,
+        parameters: &ChatBoardParametersV1,
+        message: &AuthorizedMessageV1,
+    ) -> Result<(), String> {
+        validate_message_images(&message.message, &state.configuration.configuration)?;
+        if message.message.images.is_empty() {
+            return Ok(());
+        }
+        if !author_may_attach_images(state, parameters, &message.message.author) {
+            return Err("This member may not attach images".to_string());
+        }
+        if let Some(section) = self.section_of_message(state, message) {
+            if !self.section_allows_images(state, parameters, &section) {
+                return Err("This section does not allow images".to_string());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1433,6 +1625,292 @@ mod tests {
         messages.messages.push(action);
         let on_action = messages.verify(&state, &parameters).unwrap_err();
         assert!(on_action.contains("Only posts"), "{on_action}");
+    }
+
+    fn board_with_one_member() -> (
+        SigningKey,
+        SigningKey,
+        ChatBoardStateV1,
+        ChatBoardParametersV1,
+        MemberId,
+        MemberId,
+    ) {
+        let owner = SigningKey::from_bytes(&[21u8; 32]);
+        let member = SigningKey::from_bytes(&[22u8; 32]);
+        let owner_id = MemberId::from(&owner.verifying_key());
+        let member_id = MemberId::from(&member.verifying_key());
+        let mut state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner),
+            ..Default::default()
+        };
+        state.members.members.push(AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk: member.verifying_key(),
+                join_proof: None,
+            },
+            &owner,
+        ));
+        let parameters = ChatBoardParametersV1 {
+            owner: owner.verifying_key(),
+        };
+        (owner, member, state, parameters, owner_id, member_id)
+    }
+
+    fn grant_role(
+        state: &mut ChatBoardStateV1,
+        owner: &SigningKey,
+        member: MemberId,
+        edit: impl FnOnce(&mut crate::board_state::roles::Role),
+    ) {
+        use crate::board_state::roles::{
+            AuthorizedRole, AuthorizedRoleAssignment, Role, RoleAssignment,
+        };
+        let mut role = Role {
+            id: [31u8; 16],
+            name: "images".to_string(),
+            generation: 1,
+            can_manage_access: false,
+            can_distribute_keys: false,
+            can_edit_posts: false,
+            can_delete_posts: false,
+            can_close_posts: false,
+            can_pin_posts: false,
+            can_move_posts: false,
+            can_manage_trash: false,
+            can_attach_images: false,
+            can_retire_images: false,
+            scope: Vec::new(),
+            deleted: false,
+            signed_at: SystemTime::UNIX_EPOCH,
+        };
+        edit(&mut role);
+        state.roles.roles.push(AuthorizedRole::new(role, owner));
+        state
+            .roles
+            .assignments
+            .push(AuthorizedRoleAssignment::new(
+                RoleAssignment {
+                    role_id: [31u8; 16],
+                    member_id: member,
+                    generation: 1,
+                    revoked: false,
+                    signed_at: SystemTime::UNIX_EPOCH,
+                },
+                owner,
+            ));
+    }
+
+    fn sample_image() -> crate::board_state::images::ImageRef {
+        crate::board_state::images::ImageRef {
+            instance: [41u8; 32],
+            sha256: [42u8; 32],
+            mime: "image/webp".to_string(),
+            width: 400,
+            height: 300,
+            bytes: 2048,
+            alt: "a screenshot".to_string(),
+            display: 0,
+            sealed: false,
+            animated: false,
+            nsfw: false,
+        }
+    }
+
+    fn category_message(
+        owner: &SigningKey,
+        owner_id: MemberId,
+        allowed: bool,
+        time: SystemTime,
+    ) -> (AuthorizedMessageV1, MessageId) {
+        use crate::board_state::content::{
+            CategoryContentV1, CATEGORY_CONTENT_VERSION, CONTENT_TYPE_CATEGORY,
+        };
+        let category = CategoryContentV1::new(
+            "Photos".to_string(),
+            None,
+            crate::board_state::content::DEFAULT_CATEGORY_COLOR.to_string(),
+        )
+        .with_images_allowed(allowed);
+        let message = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author: owner_id,
+                time,
+                content: BoardMessageBody::public_raw(
+                    CONTENT_TYPE_CATEGORY,
+                    CATEGORY_CONTENT_VERSION,
+                    category.encode(),
+                ),
+                images: Vec::new(),
+            },
+            owner,
+        );
+        let id = message.id();
+        (message, id)
+    }
+
+    fn post_with_image(
+        signer: &SigningKey,
+        author: MemberId,
+        owner_id: MemberId,
+        section: Option<MessageId>,
+        time: SystemTime,
+    ) -> AuthorizedMessageV1 {
+        use crate::board_state::content::{TextContentV1, TEXT_CONTENT_VERSION, CONTENT_TYPE_TEXT};
+        let text = TextContentV1::new("t".to_string(), "b".to_string()).with_category(section);
+        AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author,
+                time,
+                content: BoardMessageBody::public_raw(
+                    CONTENT_TYPE_TEXT,
+                    TEXT_CONTENT_VERSION,
+                    text.encode(),
+                ),
+                images: vec![sample_image()],
+            },
+            signer,
+        )
+    }
+
+    #[test]
+    fn a_member_needs_the_role_to_attach_images() {
+        let (owner, member, state, parameters, owner_id, member_id) = board_with_one_member();
+
+        let post = post_with_image(
+            &member,
+            member_id,
+            owner_id,
+            None,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        );
+        let mut messages = MessagesV1::default();
+        messages.messages.push(post.clone());
+        let refused = messages
+            .verify(&state, &parameters)
+            .expect_err("a plain member cannot attach images");
+        assert!(refused.contains("may not attach images"), "{refused}");
+
+        let mut with_role = state.clone();
+        grant_role(&mut with_role, &owner, member_id, |role| {
+            role.can_attach_images = true
+        });
+        messages
+            .verify(&with_role, &parameters)
+            .expect("the role allows images");
+
+        // The owner always may, and an admin does too.
+        let owner_post = post_with_image(
+            &owner,
+            owner_id,
+            owner_id,
+            None,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        );
+        let mut owner_messages = MessagesV1::default();
+        owner_messages.messages.push(owner_post);
+        owner_messages
+            .verify(&state, &parameters)
+            .expect("the owner may attach images");
+    }
+
+    #[test]
+    fn a_section_can_forbid_images_and_the_section_wins_over_the_role() {
+        use crate::board_state::content::{
+            ActionContentV1, ACTION_CONTENT_VERSION, CONTENT_TYPE_ACTION,
+        };
+
+        let (owner, member, state, parameters, owner_id, member_id) = board_with_one_member();
+        let (category, category_id) =
+            category_message(&owner, owner_id, false, SystemTime::UNIX_EPOCH);
+        let mut messages = MessagesV1::default();
+        messages.messages.push(category);
+        messages.messages.push(post_with_image(
+            &owner,
+            owner_id,
+            owner_id,
+            Some(category_id.clone()),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        ));
+        let refused = messages
+            .verify(&state, &parameters)
+            .expect_err("the owner cannot attach images in a section that forbids them");
+        assert!(refused.contains("section does not allow images"), "{refused}");
+
+        // A role with can_attach_images does not override the section.
+        let mut with_role = state.clone();
+        grant_role(&mut with_role, &owner, member_id, |role| {
+            role.can_attach_images = true
+        });
+        messages.messages[1] = post_with_image(
+            &member,
+            member_id,
+            owner_id,
+            Some(category_id),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        );
+        let refused = messages
+            .verify(&with_role, &parameters)
+            .expect_err("the section still wins");
+        assert!(refused.contains("section does not allow images"), "{refused}");
+
+        // The section setting is a signed action, and a plain member cannot
+        // turn images back on.
+        let (allowed_category, allowed_id) =
+            category_message(&owner, owner_id, true, SystemTime::UNIX_EPOCH);
+        let action = |signer: &SigningKey, author: MemberId, allowed: bool| {
+            AuthorizedMessageV1::new(
+                MessageV1 {
+                    board_owner: owner_id,
+                    author,
+                    time: SystemTime::UNIX_EPOCH + Duration::from_secs(5),
+                    content: BoardMessageBody::public_raw(
+                        CONTENT_TYPE_ACTION,
+                        ACTION_CONTENT_VERSION,
+                        ActionContentV1::set_section_images(allowed_id.clone(), allowed).encode(),
+                    ),
+                    images: Vec::new(),
+                },
+                signer,
+            )
+        };
+        let mut closed = MessagesV1::default();
+        closed.messages.push(allowed_category.clone());
+        closed
+            .messages
+            .push(action(&owner, owner_id, false));
+        closed.messages.push(post_with_image(
+            &owner,
+            owner_id,
+            owner_id,
+            Some(allowed_id.clone()),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(6),
+        ));
+        let refused = closed
+            .verify(&state, &parameters)
+            .expect_err("the owner's action closes the section");
+        assert!(refused.contains("section does not allow images"), "{refused}");
+
+        let mut ignored = MessagesV1::default();
+        ignored.messages.push(allowed_category);
+        ignored.messages.push(action(&member, member_id, false));
+        ignored.messages.push(post_with_image(
+            &member,
+            member_id,
+            owner_id,
+            Some(allowed_id),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(6),
+        ));
+        let mut with_role = state.clone();
+        grant_role(&mut with_role, &owner, member_id, |role| {
+            role.can_attach_images = true
+        });
+        ignored
+            .verify(&with_role, &parameters)
+            .expect("a member cannot close a section for everyone");
     }
 
     #[test]

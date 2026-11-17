@@ -6,7 +6,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use super::emoji_picker::EmojiPicker;
 use super::ReplyContext;
-use crate::components::app::{BOARDS, CURRENT_BOARD};
+use crate::components::app::{BOARDS, CURRENT_BOARD, CURRENT_CATEGORY};
 use crate::board_data::PendingUpload;
 use crate::util::image_processing::{prepare_image, ImageMode};
 use crate::util::images::upload_image;
@@ -286,6 +286,32 @@ pub fn PostInput(
     let mut next_attachment_id = use_signal(|| 1u64);
     let mut auto_send = use_signal(|| false);
     let mut image_mode = use_signal(|| ImageMode::StripMetadata);
+
+    // Image permission: owner, admins and roles with can_attach_images may
+    // attach, and the section rule always wins over the role.
+    let can_write = use_memo(move || {
+        let Some(key) = CURRENT_BOARD.read().owner_key else {
+            return false;
+        };
+        BOARDS
+            .read()
+            .map
+            .get(&key)
+            .map(|board| board.may_write_content())
+            .unwrap_or(false)
+    });
+    let may_attach_images = use_memo(move || {
+        let Some(key) = CURRENT_BOARD.read().owner_key else {
+            return false;
+        };
+        let section = CURRENT_CATEGORY.read().category_id.clone();
+        BOARDS
+            .read()
+            .map
+            .get(&key)
+            .map(|board| board.may_attach_images(section.as_ref()))
+            .unwrap_or(false)
+    });
 
     // Keep the draft in BoardData and write the delegate store. The compose
     // path uses this directly; typing waits for a pause so every keystroke
@@ -892,6 +918,7 @@ pub fn PostInput(
                     }
 
                     // Images: uploaded to their own contracts before sending.
+                    if *may_attach_images.read() {
                     div { class: "px-6 py-3 border-t border-border space-y-2",
                         div { class: "flex items-center justify-between",
                             span { class: "text-sm font-medium text-text", "Images" }
@@ -1027,6 +1054,11 @@ pub fn PostInput(
                         }
                         if auto_send() {
                             p { class: "text-xs text-accent", "Uploading, the post will be published automatically." }
+                        }
+                    }
+                    } else if *can_write.read() {
+                        p { class: "px-6 py-3 border-t border-border text-xs text-text-muted",
+                            "Images are disabled in this section or for your role."
                         }
                     }
 

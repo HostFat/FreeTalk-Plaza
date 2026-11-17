@@ -307,9 +307,15 @@ pub async fn reseal_category_name(category_id: MessageId) {
     send_actions(ctx, vec![action]).await;
 }
 
+/// Turn images on or off for one section. The action is signed by the owner or
+/// an admin and the section rule wins over every role.
+pub async fn set_section_images(ctx: ActionContext, target: MessageId, allowed: bool) {
+    let action = ActionContentV1::set_section_images(target, allowed);
+    send_actions(ctx, vec![action]).await;
+}
+
 /// Delete a message
-pub async fn delete_message(ctx: ActionContext, target_message_id: MessageId) {
-    let action = ActionContentV1::delete(target_message_id.clone());
+pub async fn delete_message(ctx: ActionContext, target_message_id: MessageId) {    let action = ActionContentV1::delete(target_message_id.clone());
     send_actions(ctx, vec![action]).await;
 }
 
