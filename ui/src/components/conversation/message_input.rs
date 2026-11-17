@@ -266,6 +266,19 @@ fn edit_attachment(
                 else {
                     return;
                 };
+                // The edited image replaces the old blob; retire it so nodes
+                // drop the bytes they no longer need to serve.
+                if let Some(old) = record.image.clone() {
+                    spawn_local(async move {
+                        if let Err(error) =
+                            crate::util::images::retire_in_contract(old.instance).await
+                        {
+                            dioxus::logger::tracing::warn!(
+                                "Could not retire the replaced image: {error}"
+                            );
+                        }
+                    });
+                }
                 attachments.with_mut(|list| list.retain(|attachment| attachment.id != id));
                 crate::util::pending_uploads::remove(&id);
                 add_attachment_files(
@@ -1351,6 +1364,50 @@ pub fn PostInput(
                                                     }
                                                 },
                                                 "⧉"
+                                            }
+                                            button {
+                                                r#type: "button",
+                                                class: "px-1 text-[10px] text-text-muted hover:text-accent",
+                                                title: "Crop to 16:9",
+                                                onclick: {
+                                                    let id = attachment.id.clone();
+                                                    let target = replying_to
+                                                        .read()
+                                                        .as_ref()
+                                                        .map(|reply| reply.message_id.clone());
+                                                    move |_| {
+                                                        edit_attachment(
+                                                            id.clone(),
+                                                            crate::util::image_processing::Transform::CropWide,
+                                                            attachments,
+                                                            next_attachment_id,
+                                                            target.clone(),
+                                                        )
+                                                    }
+                                                },
+                                                "16:9"
+                                            }
+                                            button {
+                                                r#type: "button",
+                                                class: "px-1 text-[10px] text-text-muted hover:text-accent",
+                                                title: "Crop to 4:3",
+                                                onclick: {
+                                                    let id = attachment.id.clone();
+                                                    let target = replying_to
+                                                        .read()
+                                                        .as_ref()
+                                                        .map(|reply| reply.message_id.clone());
+                                                    move |_| {
+                                                        edit_attachment(
+                                                            id.clone(),
+                                                            crate::util::image_processing::Transform::CropClassic,
+                                                            attachments,
+                                                            next_attachment_id,
+                                                            target.clone(),
+                                                        )
+                                                    }
+                                                },
+                                                "4:3"
                                             }
                                         },
                                         AttachmentState::Failed(error) => rsx! {

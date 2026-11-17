@@ -140,7 +140,7 @@ if ($SkipIfUnchanged) {
         Select-Object -First 1
     if ($bundleIndex) {
         $lastBuild = (Get-Item (Join-Path $bundleIndex.FullName 'index.html')).LastWriteTime
-        $inputDirs = @('ui\src', 'common\src', 'plaza-contract\src', 'plaza-delegate\src', 'ui\assets', 'ui\public\contracts') |
+        $inputDirs = @('ui\src', 'common\src', 'plaza-contract\src', 'plaza-delegate\src', 'ui\assets', 'ui\public') |
             ForEach-Object { Join-Path $repoRoot $_ } |
             Where-Object { Test-Path $_ }
         $newestInput = Get-ChildItem $inputDirs -Recurse -File -ErrorAction SilentlyContinue |
