@@ -173,6 +173,27 @@ pub async fn upload_image(
             state = state.sealed(nonce, version);
         }
         state.validate(&parameters)?;
+        // Unsealed content is content-addressed: if the node already has it,
+        // skip the PUT. Sealed ciphertext differs on every upload.
+        if secret.is_none() {
+            let instance: [u8; 32] = blob_contract_key(&parameters)
+                .id()
+                .as_bytes()
+                .try_into()
+                .map_err(|_| "Unexpected contract id length".to_string())?;
+            if let Ok(existing) = fetch_blob_state(instance).await {
+                if let Ok(blob) = ciborium::de::from_reader::<BlobStateV1, &[u8]>(&existing[..]) {
+                    if !blob.retired
+                        && blob.data.len() == state.data.len()
+                        && image_sha256(&blob.data) == parameters.sha256
+                    {
+                        info!("Image blob {instance:?} already on the node");
+                        remember_upload(secret, plaintext_sha, instance, size);
+                        return Ok((instance, plaintext_sha, size, None));
+                    }
+                }
+            }
+        }
         let copy = BlobCopy {
             parameters: to_cbor_vec(&parameters),
             state: to_cbor_vec(&state),
@@ -657,30 +678,37 @@ fn candidate_secrets() -> Vec<([u8; 32], u32)> {
 fn start_chunk_load(instance: [u8; 32], expected: [u8; 32], manifest: BlobStateV1) {
     crate::util::safe_spawn_local(async move {
         let mut all = Vec::new();
-        for chunk in &manifest.chunks {
-            let state = match fetch_blob_state(chunk.instance).await {
-                Ok(state) => state,
-                Err(error) => {
-                    fail_image(instance, error);
-                    return;
-                }
-            };
-            match ciborium::de::from_reader::<BlobStateV1, &[u8]>(&state[..]) {
-                Ok(blob) if blob.retired => {
-                    fail_image(instance, "a chunk was retired".to_string());
-                    return;
-                }
-                Ok(blob)
-                    if blob.data.len() as u32 != chunk.bytes
-                        || image_sha256(&blob.data) != chunk.sha256 =>
-                {
-                    fail_image(instance, "a chunk does not match its hash".to_string());
-                    return;
-                }
-                Ok(blob) => all.extend(blob.data),
-                Err(error) => {
-                    fail_image(instance, error.to_string());
-                    return;
+        // Three chunk downloads in flight at a time.
+        for batch in manifest.chunks.chunks(3) {
+            let futures = batch.iter().map(|chunk| async move {
+                let state = fetch_blob_state(chunk.instance).await?;
+                Ok::<(&ChunkRef, Vec<u8>), String>((chunk, state))
+            });
+            for result in futures::future::join_all(futures).await {
+                let (chunk, state) = match result {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        fail_image(instance, error);
+                        return;
+                    }
+                };
+                match ciborium::de::from_reader::<BlobStateV1, &[u8]>(&state[..]) {
+                    Ok(blob) if blob.retired => {
+                        fail_image(instance, "a chunk was retired".to_string());
+                        return;
+                    }
+                    Ok(blob)
+                        if blob.data.len() as u32 != chunk.bytes
+                            || image_sha256(&blob.data) != chunk.sha256 =>
+                    {
+                        fail_image(instance, "a chunk does not match its hash".to_string());
+                        return;
+                    }
+                    Ok(blob) => all.extend(blob.data),
+                    Err(error) => {
+                        fail_image(instance, error.to_string());
+                        return;
+                    }
                 }
             }
         }
