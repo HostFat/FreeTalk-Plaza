@@ -253,17 +253,31 @@ fn file_from_bytes(name: &str, bytes: &[u8], mime: &str) -> Option<web_sys::File
     web_sys::File::new_with_blob_sequence_and_options(&blobs.into(), name, &file_options).ok()
 }
 
-fn ask_percent(label: &str, default: u16) -> u16 {
-    web_sys::window()
+fn ask_crop_rect() -> (u16, u16, u16, u16) {
+    let values = web_sys::window()
         .and_then(|window| {
             window
-                .prompt_with_message(&format!("{label} (0-100)"))
+                .prompt_with_message(
+                    "Crop as left,top,width,height in percent (for example 10,10,80,80)",
+                )
                 .ok()
                 .flatten()
         })
-        .and_then(|value| value.trim().parse().ok())
-        .map(|value: u16| value.min(100))
-        .unwrap_or(default)
+        .unwrap_or_default();
+    let parts: Vec<u16> = values
+        .split(',')
+        .filter_map(|value| value.trim().parse::<u16>().ok())
+        .collect();
+    if parts.len() == 4 {
+        (
+            parts[0].min(100),
+            parts[1].min(100),
+            parts[2].clamp(1, 100),
+            parts[3].clamp(1, 100),
+        )
+    } else {
+        (0, 0, 100, 100)
+    }
 }
 
 /// Rotate or crop an attachment, then upload the edited image again.
@@ -1449,10 +1463,7 @@ pub fn PostInput(
                                                         .as_ref()
                                                         .map(|reply| reply.message_id.clone());
                                                     move |_| {
-                                                        let x = ask_percent("Left", 0);
-                                                        let y = ask_percent("Top", 0);
-                                                        let width = ask_percent("Width", 100).max(1);
-                                                        let height = ask_percent("Height", 100).max(1);
+                                                        let (x, y, width, height) = ask_crop_rect();
                                                         edit_attachment(
                                                             id.clone(),
                                                             crate::util::image_processing::Transform::CropRect {
