@@ -235,6 +235,16 @@ impl ResponseHandler {
                                                 // Deserialize the boards data
                                                 match from_reader::<Boards, _>(&boards_data[..]) {
                                                     Ok(loaded_boards) => {
+                                                        let stored_pending: usize = loaded_boards
+                                                            .map
+                                                            .values()
+                                                            .map(|board| board.pending_uploads.len())
+                                                            .sum();
+                                                        info!(
+                                                            "Loaded boards from delegate: {} boards, {} pending uploads",
+                                                            loaded_boards.map.len(),
+                                                            stored_pending
+                                                        );
                                                         // TODO: Remove legacy migration code after 2026-03-01
                                                         if is_legacy_delegate {
                                                             info!("Successfully loaded boards from LEGACY delegate - migrating to new delegate");

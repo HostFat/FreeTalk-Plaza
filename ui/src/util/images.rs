@@ -15,9 +15,12 @@ use freenet_stdlib::prelude::{
     ContractCode, ContractContainer, ContractInstanceId, ContractKey, ContractWasmAPIVersion,
     Parameters, WrappedContract, WrappedState,
 };
+use futures::channel::oneshot;
+use futures::future::{select, Either};
 use plaza_blob_core::{BlobParametersV1, BlobStateV1};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 
 /// State of one on-demand image download.
 #[derive(Clone, Debug, PartialEq)]
@@ -59,6 +62,28 @@ pub fn image_sha256(bytes: &[u8]) -> [u8; 32] {
     plaza_blob_core::sha256(bytes)
 }
 
+/// Blob contracts whose PUT the node has not acknowledged yet. The upload is
+/// only removed from the pending queue once the node answers, so a node that
+/// dies between the send and the store still leaves a resumable entry.
+static PENDING_BLOB_PUTS: LazyLock<Mutex<HashMap<[u8; 32], oneshot::Sender<()>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Complete a waiting upload when the node acknowledges its PUT. Returns true
+/// when the contract belonged to an image upload.
+pub fn complete_blob_put(instance: &[u8; 32]) -> bool {
+    let sender = PENDING_BLOB_PUTS
+        .lock()
+        .ok()
+        .and_then(|mut waiting| waiting.remove(instance));
+    match sender {
+        Some(sender) => {
+            let _ = sender.send(());
+            true
+        }
+        None => false,
+    }
+}
+
 pub fn blob_parameters(
     sha256: [u8; 32],
     uploader: &SigningKey,
@@ -97,6 +122,11 @@ pub async fn upload_image(
     let state = BlobStateV1::live(&parameters, mime, width, height, bytes);
     state.validate(&parameters)?;
     let key = blob_contract_key(&parameters);
+    let instance: [u8; 32] = key
+        .id()
+        .as_bytes()
+        .try_into()
+        .map_err(|_| "Unexpected contract id length".to_string())?;
 
     let contract = ContractContainer::from(ContractWasmAPIVersion::V1(WrappedContract::new(
         Arc::new(ContractCode::from(BLOB_CONTRACT_WASM)),
@@ -110,22 +140,49 @@ pub async fn upload_image(
         blocking_subscribe: false,
     };
 
-    let mut web_api = WEB_API.write();
-    let Some(web_api) = web_api.as_mut() else {
-        return Err("Not connected to a Freenet node".to_string());
-    };
-    web_api
-        .send(ClientRequest::ContractOp(request))
-        .await
-        .map_err(|e| e.to_string())?;
+    let (acknowledged, wait_for_node) = oneshot::channel();
+    if let Ok(mut waiting) = PENDING_BLOB_PUTS.lock() {
+        waiting.insert(instance, acknowledged);
+    }
 
-    let instance: [u8; 32] = key
-        .id()
-        .as_bytes()
-        .try_into()
-        .map_err(|_| "Unexpected contract id length".to_string())?;
+    {
+        // Release the lock before waiting for the node: the response handler
+        // runs on the same task and must not block on it.
+        let mut web_api = WEB_API.write();
+        let Some(web_api) = web_api.as_mut() else {
+            forget_blob_put(&instance);
+            return Err("Not connected to a Freenet node".to_string());
+        };
+        if let Err(error) = web_api.send(ClientRequest::ContractOp(request)).await {
+            forget_blob_put(&instance);
+            return Err(error.to_string());
+        }
+    }
+
+    let timeout = Box::pin(crate::util::sleep(Duration::from_secs(30)));
+    match select(wait_for_node, timeout).await {
+        Either::Left((Ok(()), _)) => {}
+        Either::Left((Err(_), _)) => {
+            forget_blob_put(&instance);
+            return Err("The upload was cancelled".to_string());
+        }
+        Either::Right((_, _)) => {
+            forget_blob_put(&instance);
+            return Err(
+                "The node did not confirm the image; it stays in the queue for the next try"
+                    .to_string(),
+            );
+        }
+    }
+
     info!("Uploaded image blob {instance:?} ({} bytes)", size);
     Ok((instance, sha256, size))
+}
+
+fn forget_blob_put(instance: &[u8; 32]) {
+    if let Ok(mut waiting) = PENDING_BLOB_PUTS.lock() {
+        waiting.remove(instance);
+    }
 }
 
 /// Ask for an image, unless it is already cached or being fetched.

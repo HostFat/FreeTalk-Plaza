@@ -15,6 +15,14 @@ pub async fn handle_put_response(
     let contract_id = key.id();
     info!("Received PutResponse for contract ID: {}", contract_id);
 
+    // An image blob contract: complete the waiting upload and stop here.
+    if let Ok(instance) = <[u8; 32]>::try_from(contract_id.as_bytes()) {
+        if crate::util::images::complete_blob_put(&instance) {
+            info!("Image blob confirmed by the node: {instance:?}");
+            return Ok(());
+        }
+    }
+
     // Get the owner VK first, then release the read lock
     let owner_vk_opt = {
         let sync_info = SYNC_INFO.read();

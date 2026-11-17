@@ -979,6 +979,9 @@ pub fn PostInput(
                                         onclick: {
                                             let id = attachment.id.clone();
                                             move |_| {
+                                                // Dismissing the row also drops the queued
+                                                // upload, otherwise it comes back on reload.
+                                                crate::util::pending_uploads::remove(&id);
                                                 attachments.with_mut(|list| list.retain(|entry| entry.id != id));
                                             }
                                         },
