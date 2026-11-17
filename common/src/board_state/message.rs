@@ -1595,6 +1595,8 @@ mod tests {
             animated,
             nsfw: false,
             thumb: None,
+            placement: Default::default(),
+            align: Default::default(),
         };
         let message = |images: Vec<ImageRef>| {
             AuthorizedMessageV1::new(
@@ -1755,6 +1757,8 @@ mod tests {
             animated: false,
             nsfw: false,
             thumb: None,
+            placement: Default::default(),
+            align: Default::default(),
         }
     }
 

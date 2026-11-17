@@ -21,7 +21,7 @@ use crate::components::conversation::message_input::PostInput;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use plaza_core::board_state::content::CategoryContentV1;
-use plaza_core::board_state::images::ImageRef;
+use plaza_core::board_state::images::{ImageAlign, ImagePlacement, ImageRef};
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::{BoardMessageBody, MessageId, SecretScope};
 use plaza_core::board_state::roles::RoleId;
@@ -253,7 +253,7 @@ pub fn get_all_messages(
                     old_category_secrets,
                 )
             });
-        let content_html = text_to_html(&content_text);
+        let content_html = text_to_html(&crate::util::image_tags::strip(&content_text));
         let title_text = decrypt_message_title(
             &message.message.content,
             secrets,
@@ -1311,6 +1311,9 @@ fn MessageHeader(
     /// Post title, shown next to the author in card views
     #[props(default)]
     title: Option<String>,
+    /// Message sent but not yet confirmed by the network
+    #[props(default)]
+    pending: bool,
     /// First image with a preview, shown in the topic list
     #[props(default)]
     thumb: Option<ImageRef>,
@@ -1383,11 +1386,14 @@ fn MessageHeader(
                 span { class: "text-xs text-accent", "(you)" }
             }
             if matches!(size, MessageSize::Compact) {
-                span {
-                    class: "{time_class}",
-                    title: "{full_time_str}",
-                    if time_clamped { "~{time_str}" } else { "{time_str}" }
-                }
+                    span {
+                        class: "{time_class}",
+                        title: "{full_time_str}",
+                        if time_clamped { "~{time_str}" } else { "{time_str}" }
+                    }
+                    if pending {
+                        span { class: "text-[10px] text-accent", "syncing…" }
+                    }
             }
         }
     }
@@ -1429,6 +1435,11 @@ fn MessageContentDisplay(
     /// Card views show the title in the header instead
     #[props(default = true)]
     show_title: bool,
+    /// Attachments, for `[img=n]` tags inside the text.
+    #[props(default)]
+    images: Vec<ImageRef>,
+    #[props(default)]
+    auto_load_images: bool,
 ) -> Element {
     let (title_class, content_class) = match size {
         MessageSize::Compact => (
@@ -1487,12 +1498,41 @@ fn MessageContentDisplay(
         }
         // Content
         div { class: "{text_class}",
-            div {
-                class: "{content_class}",
-                dangerous_inner_html: "{display_content_html}"
-            }
-            if content_truncated {
-                span { class: "text-accent ml-1", "Read more →" }
+            if expanded && content_text.contains("[img=") {
+                for segment in crate::util::image_tags::parse(&content_text) {
+                    match segment {
+                        crate::util::image_tags::Segment::Text(text) => rsx! {
+                            div {
+                                class: "{content_class}",
+                                dangerous_inner_html: "{text_to_html(&text)}"
+                            }
+                        },
+                        crate::util::image_tags::Segment::Image { index, align } => {
+                            if let Some(image) = images.get(index) {
+                                rsx! {
+                                    div {
+                                        class: match align {
+                                            ImageAlign::Left => "flex justify-start my-2",
+                                            ImageAlign::Center => "flex justify-center my-2",
+                                            ImageAlign::Right => "flex justify-end my-2",
+                                        },
+                                        ImageAttachment { image: image.clone(), auto_load: auto_load_images }
+                                    }
+                                }
+                            } else {
+                                rsx! {}
+                            }
+                        }
+                    }
+                }
+            } else {
+                div {
+                    class: "{content_class}",
+                    dangerous_inner_html: "{display_content_html}"
+                }
+                if content_truncated {
+                    span { class: "text-accent ml-1", "Read more →" }
+                }
             }
             if edited {
                 span { class: "{edited_class}", "(edited)" }
@@ -1978,6 +2018,7 @@ pub fn MessageCard(
     let mut is_hovered = use_signal(|| false);
 
     let msg_id = msg.message_id.clone();
+    let pending = crate::components::app::PENDING_POSTS.read().contains(&msg_id);
     let content_preview = msg.content_text.chars().take(100).collect::<String>();
     let author_id = msg.author_id;
     let author_name = msg.author_name.clone();
@@ -1987,6 +2028,23 @@ pub fn MessageCard(
     let edited = msg.edited;
     let reactions = msg.reactions.clone();
     let images = msg.images.clone();
+    let tagged_images = crate::util::image_tags::tagged_indices(&msg.content_text);
+    let before_images: Vec<ImageRef> = images
+        .iter()
+        .enumerate()
+        .filter(|(index, image)| {
+            image.placement == ImagePlacement::Before && !tagged_images.contains(index)
+        })
+        .map(|(_, image)| image.clone())
+        .collect();
+    let after_images: Vec<ImageRef> = images
+        .iter()
+        .enumerate()
+        .filter(|(index, image)| {
+            image.placement != ImagePlacement::Before && !tagged_images.contains(index)
+        })
+        .map(|(_, image)| image.clone())
+        .collect();
 
     // A light preview for the compact post list, where the body is hidden.
     let preview_tooltip = if hide_content && !content_text.trim().is_empty() {
@@ -2052,6 +2110,7 @@ pub fn MessageCard(
                                 full_time_str: full_time_str.clone(),
                                 time_clamped: msg.time_clamped,
                                 size: size,
+                                pending: pending,
                                 thumb: if hide_content {
                                     images.iter().find(|image| image.thumb.is_some()).cloned()
                                 } else {
@@ -2061,6 +2120,20 @@ pub fn MessageCard(
                         }
 
                         // Content (or edit form)
+                        if !before_images.is_empty() {
+                            div { class: "mt-1 space-y-1",
+                                for image in before_images.iter() {
+                                    div {
+                                        class: match image.align {
+                                            ImageAlign::Left => "flex justify-start",
+                                            ImageAlign::Center => "flex justify-center",
+                                            ImageAlign::Right => "flex justify-end",
+                                        },
+                                        ImageAttachment { image: image.clone(), auto_load: auto_load_images }
+                                    }
+                                }
+                            }
+                        }
                         if *editing.read() {
                             MessageEditForm {
                                 edit_title: edit_title,
@@ -2082,13 +2155,22 @@ pub fn MessageCard(
                                 edited: edited,
                                 size: size,
                                 expanded: false,
+                                images: images.clone(),
+                                auto_load_images: auto_load_images,
                             }
                         }
 
-                        if !images.is_empty() {
-                            div { class: "mt-1",
-                                for image in images.iter() {
-                                    ImageAttachment { image: image.clone(), auto_load: auto_load_images }
+                        if !after_images.is_empty() {
+                            div { class: "mt-1 space-y-1",
+                                for image in after_images.iter() {
+                                    div {
+                                        class: match image.align {
+                                            ImageAlign::Left => "flex justify-start",
+                                            ImageAlign::Center => "flex justify-center",
+                                            ImageAlign::Right => "flex justify-end",
+                                        },
+                                        ImageAttachment { image: image.clone(), auto_load: auto_load_images }
+                                    }
                                 }
                             }
                         }
@@ -2208,6 +2290,7 @@ pub fn MessageCard(
                                 full_time_str: full_time_str.clone(),
                                 time_clamped: msg.time_clamped,
                                 size: size,
+                                pending: pending,
                                 title: Some(header_title.clone()),
                                 thumb: if hide_content {
                                     images.iter().find(|image| image.thumb.is_some()).cloned()
@@ -2221,6 +2304,20 @@ pub fn MessageCard(
                         // title in the header.
                         if !hide_content {
                             div { class: "{content_padding}",
+                                if !before_images.is_empty() {
+                                    div { class: "mb-1 space-y-1",
+                                        for image in before_images.iter() {
+                                            div {
+                                                class: match image.align {
+                                                    ImageAlign::Left => "flex justify-start",
+                                                    ImageAlign::Center => "flex justify-center",
+                                                    ImageAlign::Right => "flex justify-end",
+                                                },
+                                                ImageAttachment { image: image.clone(), auto_load: auto_load_images }
+                                            }
+                                        }
+                                    }
+                                }
                                 if *editing.read() {
                                     MessageEditForm {
                                         edit_title: edit_title,
@@ -2243,6 +2340,8 @@ pub fn MessageCard(
                                         size: size,
                                         expanded: expanded,
                                         show_title: false,
+                                        images: images.clone(),
+                                        auto_load_images: auto_load_images,
                                     }
                                     if !hide_content {
                                         if let Some(poll) = msg.poll.as_ref() {
@@ -2252,10 +2351,17 @@ pub fn MessageCard(
                                                 self_member_id: self_member_id,
                                             }
                                         }
-                                        if !images.is_empty() {
-                                            div { class: "mt-1",
-                                                for image in images.iter() {
-                                                    ImageAttachment { image: image.clone(), auto_load: auto_load_images }
+                                        if !after_images.is_empty() {
+                                            div { class: "mt-1 space-y-1",
+                                                for image in after_images.iter() {
+                                                    div {
+                                                        class: match image.align {
+                                                            ImageAlign::Left => "flex justify-start",
+                                                            ImageAlign::Center => "flex justify-center",
+                                                            ImageAlign::Right => "flex justify-end",
+                                                        },
+                                                        ImageAttachment { image: image.clone(), auto_load: auto_load_images }
+                                                    }
                                                 }
                                             }
                                         }

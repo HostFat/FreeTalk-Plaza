@@ -8,6 +8,7 @@ pub mod ecies;
 pub mod image_meta;
 pub mod image_processing;
 pub mod image_retire;
+pub mod image_tags;
 pub mod images;
 pub mod markdown;
 pub mod member_moderation;
@@ -366,3 +367,4 @@ pub fn member_id_to_color(member_id: &MemberId) -> String {
     // Use moderate saturation and lightness for visibility
     format!("hsl({}, 65%, 55%)", hue)
 }
+

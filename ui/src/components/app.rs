@@ -4,6 +4,7 @@ pub mod freenet_api;
 pub mod notifications;
 pub mod receive_times;
 pub mod sync_info;
+pub mod toasts;
 
 use super::{
     admin_view::AdminView, board_list::BoardList, conversation::Conversation, members::MembersView,
@@ -99,6 +100,10 @@ pub static UPLOAD_PROGRESS: GlobalSignal<std::collections::HashMap<String, (usiz
 
 /// True when the durable upload queue refused a file because of its cap.
 pub static PENDING_QUEUE_FULL: GlobalSignal<bool> = Global::new(|| false);
+
+/// Messages this client sent that the network has not confirmed yet.
+pub static PENDING_POSTS: GlobalSignal<std::collections::HashSet<plaza_core::board_state::message::MessageId>> =
+    Global::new(std::collections::HashSet::new);
 
 /// Set once the boards stored in the delegate have been read (or the delegate
 /// answered that it has none). Until then `BOARDS` is empty only because the
@@ -385,6 +390,7 @@ pub fn App() -> Element {
             div { class: "flex-1 min-h-0 overflow-hidden flex flex-col",
                 Router::<Route> {}
             }
+            toasts::ToastContainer {}
             // Brand footer, centered under the board content.
             if CURRENT_BOARD.read().owner_key.is_some() {
                 button {
@@ -799,4 +805,5 @@ fn get_auth_token_from_window() {
         }
     }
 }
+
 

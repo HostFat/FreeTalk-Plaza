@@ -90,6 +90,8 @@ pub async fn upload_pending(
             animated: record.animated,
             nsfw: record.nsfw,
             thumb,
+            placement: Default::default(),
+            align: Default::default(),
         },
         copy,
     ))

@@ -10,7 +10,7 @@ use crate::components::conversation::TopicThumb;
 use crate::components::app::{BOARDS, CURRENT_BOARD, CURRENT_CATEGORY};
 use crate::board_data::{PendingSend, PendingUpload};
 use crate::util::image_processing::{prepare_image, ImageMode};
-use plaza_core::board_state::images::ImageRef;
+use plaza_core::board_state::images::{ImageAlign, ImagePlacement, ImageRef};
 use plaza_core::board_state::message::MessageId;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -757,6 +757,9 @@ pub fn PostInput(
             crate::util::drafts::clear();
             crate::util::drafts::persist();
             handle_send_message.call((title, content, reply_ctx, poll, images));
+            crate::components::app::toasts::show(
+                "Published. Syncing with the network…",
+            );
         }
     };
 
@@ -1416,6 +1419,57 @@ pub fn PostInput(
                                                 option { value: "50", style: "background-color: #171717; color: #f5f5f5;", "50%" }
                                                 option { value: "75", style: "background-color: #171717; color: #f5f5f5;", "75%" }
                                                 option { value: "100", style: "background-color: #171717; color: #f5f5f5;", "100%" }
+                                            }
+                                            select {
+                                                class: "px-1 py-0.5 bg-neutral-900 border border-border rounded text-xs text-white",
+                                                style: "color-scheme: dark; background-color: #171717; color: #f5f5f5;",
+                                                title: "Image position relative to the text",
+                                                value: if image.placement == ImagePlacement::Before { "before" } else { "after" },
+                                                onchange: {
+                                                    let id = attachment.id.clone();
+                                                    move |event| {
+                                                        let placement = if event.value() == "before" { ImagePlacement::Before } else { ImagePlacement::After };
+                                                        attachments.with_mut(|list| {
+                                                            if let Some(slot) = list.iter_mut().find(|entry| entry.id == id) {
+                                                                if let AttachmentState::Ready(image) = &mut slot.state {
+                                                                    image.placement = placement;
+                                                                }
+                                                            }
+                                                        });
+                                                    }
+                                                },
+                                                option { value: "after", style: "background-color: #171717; color: #f5f5f5;", "After text" }
+                                                option { value: "before", style: "background-color: #171717; color: #f5f5f5;", "Before text" }
+                                            }
+                                            select {
+                                                class: "px-1 py-0.5 bg-neutral-900 border border-border rounded text-xs text-white",
+                                                style: "color-scheme: dark; background-color: #171717; color: #f5f5f5;",
+                                                title: "Horizontal alignment",
+                                                value: match image.align {
+                                                    ImageAlign::Left => "left",
+                                                    ImageAlign::Center => "center",
+                                                    ImageAlign::Right => "right",
+                                                },
+                                                onchange: {
+                                                    let id = attachment.id.clone();
+                                                    move |event| {
+                                                        let align = match event.value().as_str() {
+                                                            "left" => ImageAlign::Left,
+                                                            "right" => ImageAlign::Right,
+                                                            _ => ImageAlign::Center,
+                                                        };
+                                                        attachments.with_mut(|list| {
+                                                            if let Some(slot) = list.iter_mut().find(|entry| entry.id == id) {
+                                                                if let AttachmentState::Ready(image) = &mut slot.state {
+                                                                    image.align = align;
+                                                                }
+                                                            }
+                                                        });
+                                                    }
+                                                },
+                                                option { value: "left", style: "background-color: #171717; color: #f5f5f5;", "Left" }
+                                                option { value: "center", style: "background-color: #171717; color: #f5f5f5;", "Center" }
+                                                option { value: "right", style: "background-color: #171717; color: #f5f5f5;", "Right" }
                                             }
                                             button {
                                                 r#type: "button",

@@ -376,7 +376,23 @@ pub(crate) async fn publish_message(
             }
         }
     });
-    applied.then(|| auth_message.id())
+    if applied {
+        let id = auth_message.id();
+        crate::components::app::PENDING_POSTS
+            .with_mut(|pending| {
+                pending.insert(id.clone());
+            });
+        let cleared = id.clone();
+        crate::util::safe_spawn_local(async move {
+            crate::util::sleep(std::time::Duration::from_secs(25)).await;
+            crate::components::app::PENDING_POSTS.with_mut(|pending| {
+                pending.remove(&cleared);
+            });
+        });
+        Some(id)
+    } else {
+        None
+    }
 }
 
 /// Send one vote for a poll. Votes are hidden from post lists and counted by

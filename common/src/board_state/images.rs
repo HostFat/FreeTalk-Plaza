@@ -40,6 +40,42 @@ pub struct ImageRef {
     /// before thumbnails existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumb: Option<ImageThumbnail>,
+    /// Where the image sits relative to the message text, unless a `[img=n]`
+    /// tag places it inline.
+    #[serde(default, skip_serializing_if = "ImagePlacement::is_after")]
+    pub placement: ImagePlacement,
+    /// Horizontal alignment of the image block.
+    #[serde(default, skip_serializing_if = "ImageAlign::is_center")]
+    pub align: ImageAlign,
+}
+
+/// Placement of an image relative to the text of its message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ImagePlacement {
+    Before,
+    #[default]
+    After,
+}
+
+impl ImagePlacement {
+    pub fn is_after(&self) -> bool {
+        matches!(self, ImagePlacement::After)
+    }
+}
+
+/// Horizontal alignment of an image block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ImageAlign {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+impl ImageAlign {
+    pub fn is_center(&self) -> bool {
+        matches!(self, ImageAlign::Center)
+    }
 }
 
 /// Pointer to the small preview contract of an image.
