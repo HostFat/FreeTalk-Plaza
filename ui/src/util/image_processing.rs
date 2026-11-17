@@ -48,10 +48,12 @@ pub async fn prepare_image(file: &web_sys::File, mode: ImageMode) -> Result<Prep
         || lower_name.ends_with(".heic")
         || lower_name.ends_with(".heif")
     {
-        return Err(
+        // Some systems provide a HEIF codec to the browser. Try it; when the
+        // platform cannot decode it, say so instead of failing obscurely.
+        return reencode_webp(file, DEFAULT_MAX_SIDE).await.map_err(|_| {
             "HEIC/HEIF is not supported here. Export the photo as JPEG or WebP first."
-                .to_string(),
-        );
+                .to_string()
+        });
     }
     let bytes = read_file_bytes(file).await?;
     let animated_gif = declared == "image/gif" || bytes.starts_with(b"GIF");
@@ -96,6 +98,124 @@ pub async fn thumbnail(bytes: &[u8], mime: &str) -> Option<PreparedImage> {
     let blob =
         web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &options).ok()?;
     reencode_webp(&blob, 320).await.ok()
+}
+
+/// Edits offered on an attachment before it is sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transform {
+    RotateRight,
+    RotateLeft,
+    CropSquare,
+}
+
+/// Rotate or square-crop an image, re-encoding it as WebP.
+pub async fn transform(
+    bytes: &[u8],
+    mime: &str,
+    edit: Transform,
+) -> Result<PreparedImage, String> {
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::new();
+    parts.push(&array.buffer());
+    let options = web_sys::BlobPropertyBag::new();
+    options.set_type(mime);
+    let blob =
+        web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &options)
+            .map_err(|e| format!("blob: {e:?}"))?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob)
+        .map_err(|e| format!("blob url: {e:?}"))?;
+    let result = transform_from_url(&url, edit).await;
+    let _ = web_sys::Url::revoke_object_url(&url);
+    result
+}
+
+async fn transform_from_url(url: &str, edit: Transform) -> Result<PreparedImage, String> {
+    let image = HtmlImageElement::new().map_err(|e| format!("image: {e:?}"))?;
+    image.set_src(url);
+    JsFuture::from(image.decode())
+        .await
+        .map_err(|e| format!("decode: {e:?}"))?;
+
+    let (source_width, source_height) = (image.natural_width(), image.natural_height());
+    if source_width == 0 || source_height == 0 {
+        return Err("The image has no readable dimensions".to_string());
+    }
+    let (width, height) = match edit {
+        Transform::RotateRight | Transform::RotateLeft => (source_height, source_width),
+        Transform::CropSquare => {
+            let side = source_width.min(source_height);
+            (side, side)
+        }
+    };
+
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| "No document available".to_string())?;
+    let canvas: HtmlCanvasElement = document
+        .create_element("canvas")
+        .map_err(|e| format!("canvas: {e:?}"))?
+        .dyn_into()
+        .map_err(|_| "canvas element".to_string())?;
+    canvas.set_width(width);
+    canvas.set_height(height);
+    let context: web_sys::CanvasRenderingContext2d = canvas
+        .get_context("2d")
+        .map_err(|e| format!("context: {e:?}"))?
+        .ok_or_else(|| "canvas context unavailable".to_string())?
+        .dyn_into()
+        .map_err(|_| "2d context".to_string())?;
+
+    match edit {
+        Transform::RotateRight => {
+            context.translate(width as f64, 0.0).map_err(|e| format!("{e:?}"))?;
+            context
+                .rotate(std::f64::consts::FRAC_PI_2)
+                .map_err(|e| format!("{e:?}"))?;
+            context
+                .draw_image_with_html_image_element(&image, 0.0, 0.0)
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        Transform::RotateLeft => {
+            context.translate(0.0, height as f64).map_err(|e| format!("{e:?}"))?;
+            context
+                .rotate(-std::f64::consts::FRAC_PI_2)
+                .map_err(|e| format!("{e:?}"))?;
+            context
+                .draw_image_with_html_image_element(&image, 0.0, 0.0)
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        Transform::CropSquare => {
+            let side = source_width.min(source_height) as f64;
+            let sx = (source_width as f64 - side) / 2.0;
+            let sy = (source_height as f64 - side) / 2.0;
+            context
+                .draw_image_with_html_image_element_and_sw_and_sh_and_dx_and_dy_and_dw_and_dh(
+                    &image, sx, sy, side, side, 0.0, 0.0, side, side,
+                )
+                .map_err(|e| format!("{e:?}"))?;
+        }
+    }
+
+    let data_url: String = canvas
+        .to_data_url_with_type("image/webp")
+        .map_err(|e| format!("encode: {e:?}"))?;
+    let encoded = data_url
+        .split_once(',')
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| "encode: unexpected data url".to_string())?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|e| format!("encode: {e}"))?;
+    if bytes.is_empty() {
+        return Err("The encoded image is empty".to_string());
+    }
+    Ok(PreparedImage {
+        bytes,
+        mime: "image/webp".to_string(),
+        width,
+        height,
+        animated: false,
+    })
 }
 
 async fn reencode_webp(file: &web_sys::Blob, max_side: u32) -> Result<PreparedImage, String> {

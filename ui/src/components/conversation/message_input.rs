@@ -230,6 +230,59 @@ fn restore_pending_uploads(mut attachments: Signal<Vec<Attachment>>) {
     });
 }
 
+fn file_from_bytes(name: &str, bytes: &[u8], mime: &str) -> Option<web_sys::File> {
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::new();
+    parts.push(&array.buffer());
+    let blob_options = web_sys::BlobPropertyBag::new();
+    blob_options.set_type(mime);
+    let blob =
+        web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &blob_options).ok()?;
+    let blobs = js_sys::Array::new();
+    blobs.push(&blob);
+    let file_options = web_sys::FilePropertyBag::new();
+    file_options.set_type(mime);
+    web_sys::File::new_with_blob_sequence_and_options(&blobs.into(), name, &file_options).ok()
+}
+
+/// Rotate or crop an attachment, then upload the edited image again.
+fn edit_attachment(
+    id: String,
+    edit: crate::util::image_processing::Transform,
+    mut attachments: Signal<Vec<Attachment>>,
+    next_id: Signal<u64>,
+    reply_target: Option<MessageId>,
+) {
+    let Some(record) = crate::util::pending_uploads::list()
+        .into_iter()
+        .find(|record| record.id == id)
+    else {
+        return;
+    };
+    spawn_local(async move {
+        match crate::util::image_processing::transform(&record.bytes, &record.mime, edit).await {
+            Ok(prepared) => {
+                let Some(file) = file_from_bytes(&record.name, &prepared.bytes, &prepared.mime)
+                else {
+                    return;
+                };
+                attachments.with_mut(|list| list.retain(|attachment| attachment.id != id));
+                crate::util::pending_uploads::remove(&id);
+                add_attachment_files(
+                    vec![file],
+                    attachments,
+                    next_id,
+                    ImageMode::KeepOriginal,
+                    reply_target,
+                );
+            }
+            Err(error) => {
+                dioxus::logger::tracing::warn!("Could not edit the image: {error}");
+            }
+        }
+    });
+}
+
 /// Turn a browser file from a drag or paste event into a `File` the rest of
 /// the pipeline already understands.
 async fn file_from_data(data: &dioxus::html::FileData) -> Option<web_sys::File> {
@@ -1232,6 +1285,72 @@ pub fn PostInput(
                                                 option { value: "50", "50%" }
                                                 option { value: "75", "75%" }
                                                 option { value: "100", "100%" }
+                                            }
+                                            button {
+                                                r#type: "button",
+                                                class: "px-1 text-xs text-text-muted hover:text-accent",
+                                                title: "Rotate right",
+                                                onclick: {
+                                                    let id = attachment.id.clone();
+                                                    let target = replying_to
+                                                        .read()
+                                                        .as_ref()
+                                                        .map(|reply| reply.message_id.clone());
+                                                    move |_| {
+                                                        edit_attachment(
+                                                            id.clone(),
+                                                            crate::util::image_processing::Transform::RotateRight,
+                                                            attachments,
+                                                            next_attachment_id,
+                                                            target.clone(),
+                                                        )
+                                                    }
+                                                },
+                                                "↻"
+                                            }
+                                            button {
+                                                r#type: "button",
+                                                class: "px-1 text-xs text-text-muted hover:text-accent",
+                                                title: "Rotate left",
+                                                onclick: {
+                                                    let id = attachment.id.clone();
+                                                    let target = replying_to
+                                                        .read()
+                                                        .as_ref()
+                                                        .map(|reply| reply.message_id.clone());
+                                                    move |_| {
+                                                        edit_attachment(
+                                                            id.clone(),
+                                                            crate::util::image_processing::Transform::RotateLeft,
+                                                            attachments,
+                                                            next_attachment_id,
+                                                            target.clone(),
+                                                        )
+                                                    }
+                                                },
+                                                "↺"
+                                            }
+                                            button {
+                                                r#type: "button",
+                                                class: "px-1 text-xs text-text-muted hover:text-accent",
+                                                title: "Crop to a square",
+                                                onclick: {
+                                                    let id = attachment.id.clone();
+                                                    let target = replying_to
+                                                        .read()
+                                                        .as_ref()
+                                                        .map(|reply| reply.message_id.clone());
+                                                    move |_| {
+                                                        edit_attachment(
+                                                            id.clone(),
+                                                            crate::util::image_processing::Transform::CropSquare,
+                                                            attachments,
+                                                            next_attachment_id,
+                                                            target.clone(),
+                                                        )
+                                                    }
+                                                },
+                                                "⧉"
                                             }
                                         },
                                         AttachmentState::Failed(error) => rsx! {
