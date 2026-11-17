@@ -121,7 +121,12 @@ pub fn BoardList() -> Element {
                     .name;
                 let board_name = match unseal_bytes_with_secrets(sealed_name, &board_data.secrets) {
                     Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                    Err(_) => sealed_name.to_string_lossy(),
+                    // The name is sealed and this client has no board key. Point
+                    // at the board instead of showing raw ciphertext.
+                    Err(_) => {
+                        let short = bs58::encode(board_key.as_bytes()).into_string();
+                        format!("Private board — key missing ({}…)", &short[..6])
+                    }
                 };
                 let is_current = current_board_key == Some(board_key);
                 (board_key, board_name, is_current, awaiting_sync)

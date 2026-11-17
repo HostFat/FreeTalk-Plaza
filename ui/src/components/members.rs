@@ -433,6 +433,12 @@ fn ExportIdentityModal(is_active: Signal<bool>) -> Element {
                             .iter()
                             .map(|(id, (_, key))| (id.clone(), *key))
                             .collect(),
+                        board_secrets: board_data
+                            .secrets
+                            .iter()
+                            .map(|(version, key)| (*version, *key))
+                            .collect(),
+                        current_board_secret: board_data.current_secret_version,
                     };
                     token_text.set(export.to_armored_string());
                 }
@@ -548,7 +554,11 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     self_sk: export.signing_key,
                     contract_key,
                     last_read_message_id: None,
-                    secrets: HashMap::new(),
+                    secrets: export
+                        .board_secrets
+                        .iter()
+                        .map(|(version, key)| (*version, *key))
+                        .collect(),
                     category_secrets,
                     old_category_secrets: HashMap::new(),
 
@@ -559,10 +569,10 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     last_visit: 0,
                     read_categories: HashMap::new(),
                     draft: None,
-        pending_uploads: Vec::new(),
-        pending_send: None,
+                    pending_uploads: Vec::new(),
+                    pending_send: None,
                     subscribed_categories: Vec::new(),
-                    current_secret_version: None,
+                    current_secret_version: export.current_board_secret,
                     last_secret_rotation: None,
                     key_migrated_to_delegate: false,
                     self_authorized_member: Some(export.authorized_member),

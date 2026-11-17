@@ -37,6 +37,13 @@ pub struct IdentityExport {
     /// invite link rather than by an owner-signed blob.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub category_keys: Vec<(MessageId, [u8; 32])>,
+    /// Board-level secrets (version, key). Without them a private board's
+    /// name and posts stay encrypted after a delegate loss.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub board_secrets: Vec<(u32, [u8; 32])>,
+    /// Version of the board secret currently in use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_board_secret: Option<u32>,
 }
 
 impl IdentityExport {
@@ -159,6 +166,8 @@ mod tests {
             member_info: None,
             board_name: None,
             category_keys: vec![],
+            board_secrets: Vec::new(),
+            current_board_secret: None,
         };
 
         let armored = export.to_armored_string();
@@ -217,6 +226,8 @@ mod tests {
             member_info: None,
             board_name: None,
             category_keys: vec![],
+            board_secrets: Vec::new(),
+            current_board_secret: None,
         };
 
         let armored = export.to_armored_string();
@@ -266,6 +277,8 @@ mod tests {
             member_info: Some(auth_member_info.clone()),
             board_name: Some("Test Board".to_string()),
             category_keys: vec![],
+            board_secrets: Vec::new(),
+            current_board_secret: None,
         };
 
         let armored = export.to_armored_string();
@@ -311,6 +324,8 @@ mod tests {
             member_info: None,
             board_name: None,
             category_keys: vec![],
+            board_secrets: Vec::new(),
+            current_board_secret: None,
         };
 
         let armored = export.to_armored_string();
@@ -363,6 +378,8 @@ mod tests {
             member_info: None,
             board_name: None,
             category_keys: vec![],
+            board_secrets: Vec::new(),
+            current_board_secret: None,
         };
 
         let armored = export.to_armored_string();
