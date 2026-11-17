@@ -670,8 +670,44 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                 error_msg.set(None);
             }
             Err(e) => {
-                error_msg.set(Some(format!("Invalid token: {}", e)));
-                success_msg.set(None);
+                // Not an identity token: accept a board id (owner public key)
+                // and open the board read-only.
+                let trimmed = input.trim();
+                match bs58::decode(trimmed).into_vec() {
+                    Ok(bytes) if bytes.len() == 32 => {
+                        let array: [u8; 32] = bytes.try_into().expect("32 bytes");
+                        match ed25519_dalek::VerifyingKey::from_bytes(&array) {
+                            Ok(owner) => {
+                                match crate::util::spectator::open_spectator_board(owner) {
+                                    Ok(()) => {
+                                        success_msg.set(Some(
+                                            "Board opened read-only. Import its identity token to write.".to_string(),
+                                        ));
+                                        error_msg.set(None);
+                                    }
+                                    Err(error) => {
+                                        error_msg.set(Some(format!(
+                                            "Could not open the board: {error}"
+                                        )));
+                                        success_msg.set(None);
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                error_msg.set(Some(format!(
+                                    "Invalid identity token or board ID: {e}"
+                                )));
+                                success_msg.set(None);
+                            }
+                        }
+                    }
+                    _ => {
+                        error_msg.set(Some(format!(
+                            "Invalid identity token or board ID: {e}"
+                        )));
+                        success_msg.set(None);
+                    }
+                }
             }
         }
     };
@@ -689,14 +725,14 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                 class: "bg-panel border border-border rounded-xl shadow-lg p-6 max-w-lg w-full mx-4",
                 onclick: move |e| e.stop_propagation(),
                 h3 { class: "text-lg font-semibold text-text mb-4",
-                    "Import Identity"
+                    "Import identity or board"
                 }
                 p { class: "text-sm text-text-muted mb-3",
-                    "Paste a FreeTalk Plaza identity token exported from another client."
+                    "Paste an identity token to restore a board with its keys, or a board ID (owner public key) to open it read-only."
                 }
                 textarea {
                     class: "w-full h-40 bg-surface border border-border rounded-lg p-3 text-xs font-mono text-text resize-none",
-                    placeholder: "-----BEGIN FREETALK IDENTITY-----\n...\n-----END FREETALK IDENTITY-----",
+                    placeholder: "-----BEGIN FREETALK IDENTITY-----\n...\n-----END FREETALK IDENTITY-----\n\nor a board ID such as 7TbmNiTz9qvQaPvFHP4JUjJhCaM7aUFxL7A9SUp3qunj",
                     value: "{token_input}",
                     oninput: move |e| token_input.set(e.value()),
                 }
