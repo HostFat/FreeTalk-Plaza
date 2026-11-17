@@ -149,7 +149,7 @@ fn add_attachment_files(
                         animated: prepared.animated,
                         bytes: prepared.bytes,
                     };
-                    crate::util::pending_uploads::queue(record.clone());
+                    crate::util::pending_uploads::queue(record.clone()).await;
                     upload_record(record, attachments, id).await;
                 }
                 Err(error) => {

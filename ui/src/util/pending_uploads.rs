@@ -7,7 +7,7 @@
 use crate::board_data::PendingUpload;
 use crate::components::app::chat_delegate::save_boards_to_delegate;
 use crate::components::app::{BOARDS, CURRENT_BOARD};
-use dioxus::logger::tracing::warn;
+use dioxus::logger::tracing::{info, warn};
 use dioxus::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
@@ -15,7 +15,10 @@ use wasm_bindgen_futures::spawn_local;
 /// memory only, to keep the board entry small.
 pub const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
 
-pub fn queue(record: PendingUpload) {
+/// Queue one upload and wait until the board, with the pending image, is in the
+/// delegate. The caller starts the PUT afterwards, so a crash cannot leave an
+/// upload that no reload can resume.
+pub async fn queue(record: PendingUpload) {
     let Some(key) = CURRENT_BOARD.read().owner_key else {
         return;
     };
@@ -34,10 +37,13 @@ pub fn queue(record: PendingUpload) {
             stored = true;
         }
     });
-    if stored {
-        persist();
-    } else {
+    if !stored {
         warn!("Pending image kept in memory only: the delegate queue is full");
+        return;
+    }
+    match save_boards_to_delegate().await {
+        Ok(()) => info!("Pending image saved to the delegate queue"),
+        Err(error) => warn!("Could not persist the pending image: {error}"),
     }
 }
 
