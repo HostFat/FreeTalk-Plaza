@@ -1202,6 +1202,9 @@ pub fn PostInput(
                                 }
                             },
                         }
+                        div { class: "mt-2 border border-dashed border-border rounded-lg px-3 py-2 text-center text-xs text-text-muted",
+                            "Drag images here, or paste them with Ctrl+V."
+                        }
                         {
                             let owned = crate::util::owned_images::list();
                             if !owned.is_empty() {
@@ -1265,7 +1268,8 @@ pub fn PostInput(
                         div { class: "flex items-center gap-2",
                             label { class: "text-xs text-text-muted", "Format" }
                             select {
-                                class: "px-2 py-1 bg-background border border-border rounded text-xs text-text",
+                                class: "px-2 py-1 bg-neutral-900 border border-border rounded text-xs text-white",
+                                style: "color-scheme: dark; background-color: #171717; color: #f5f5f5;",
                                 value: "{image_mode.read().label()}",
                                 onchange: move |event| {
                                     let value = event.value();
@@ -1286,7 +1290,11 @@ pub fn PostInput(
                                     ImageMode::Webp1280,
                                     ImageMode::KeepOriginal,
                                 ] {
-                                    option { value: "{candidate.label()}", "{candidate.label()}" }
+                                    option {
+                                        value: "{candidate.label()}",
+                                        style: "background-color: #171717; color: #f5f5f5;",
+                                        "{candidate.label()}"
+                                    }
                                 }
                             }
                         }
@@ -1319,7 +1327,8 @@ pub fn PostInput(
                                                 "{image.width}x{image.height} · {image.bytes / 1024} KB"
                                             }
                                             select {
-                                                class: "px-1 py-0.5 bg-background border border-border rounded text-xs text-text",
+                                                class: "px-1 py-0.5 bg-neutral-900 border border-border rounded text-xs text-white",
+                                                style: "color-scheme: dark; background-color: #171717; color: #f5f5f5;",
                                                 title: "Width in the post",
                                                 value: "{image.display}",
                                                 onchange: {
@@ -1336,11 +1345,11 @@ pub fn PostInput(
                                                         });
                                                     }
                                                 },
-                                                option { value: "0", "Full" }
-                                                option { value: "25", "25%" }
-                                                option { value: "50", "50%" }
-                                                option { value: "75", "75%" }
-                                                option { value: "100", "100%" }
+                                                option { value: "0", style: "background-color: #171717; color: #f5f5f5;", "Full" }
+                                                option { value: "25", style: "background-color: #171717; color: #f5f5f5;", "25%" }
+                                                option { value: "50", style: "background-color: #171717; color: #f5f5f5;", "50%" }
+                                                option { value: "75", style: "background-color: #171717; color: #f5f5f5;", "75%" }
+                                                option { value: "100", style: "background-color: #171717; color: #f5f5f5;", "100%" }
                                             }
                                             button {
                                                 r#type: "button",
