@@ -7,7 +7,7 @@ use crate::components::category_create_modal::CREATE_CATEGORY_MODAL;
 use crate::components::category_view::{CategoryCard, CategoryEditData};
 use crate::components::conversation::{
     get_all_messages, get_category_posts, get_subcategories, get_top_level_categories,
-    get_top_level_posts, MessageCard, MessageCardVariant, MessageData,
+    get_top_level_posts, MessageCard, MessageCardVariant, MessageData, TopicThumb,
 };
 use crate::util::avatar::get_avatar;
 use crate::util::format_utc_as_local_time;
@@ -277,6 +277,9 @@ fn PostRow(
             title: preview,
             onclick: move |_| on_click.call(()),
             div { class: "flex items-center gap-4",
+                if let Some(image) = post.images.iter().find(|image| image.thumb.is_some()) {
+                    TopicThumb { image: image.clone() }
+                }
                 img {
                     src: "{avatar}",
                     class: "w-8 h-8 rounded-full flex-shrink-0",

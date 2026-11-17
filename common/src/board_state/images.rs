@@ -36,6 +36,26 @@ pub struct ImageRef {
     /// Needs a click before the image is shown.
     #[serde(default, skip_serializing_if = "is_false")]
     pub nsfw: bool,
+    /// Small WebP preview used in topic lists. Omitted for images uploaded
+    /// before thumbnails existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<ImageThumbnail>,
+}
+
+/// Pointer to the small preview contract of an image.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImageThumbnail {
+    pub instance: [u8; 32],
+    pub sha256: [u8; 32],
+}
+
+impl ImageThumbnail {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.instance == [0u8; 32] || self.sha256 == [0u8; 32] {
+            return Err("Image thumbnail pointer is incomplete".to_string());
+        }
+        Ok(())
+    }
 }
 
 fn is_zero_u16(value: &u16) -> bool {
@@ -56,6 +76,9 @@ impl ImageRef {
         }
         if self.sha256 == [0u8; 32] {
             return Err("Image hash is missing".to_string());
+        }
+        if let Some(thumb) = self.thumb.as_ref() {
+            thumb.validate()?;
         }
         let limit = if self.animated {
             max_animated_bytes

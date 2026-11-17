@@ -86,7 +86,19 @@ pub async fn prepare_image(file: &web_sys::File, mode: ImageMode) -> Result<Prep
     reencode_webp(file, max_side).await
 }
 
-async fn reencode_webp(file: &web_sys::File, max_side: u32) -> Result<PreparedImage, String> {
+/// Small WebP preview for topic lists, longest side 320 px.
+pub async fn thumbnail(bytes: &[u8], mime: &str) -> Option<PreparedImage> {
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::new();
+    parts.push(&array.buffer());
+    let options = web_sys::BlobPropertyBag::new();
+    options.set_type(mime);
+    let blob =
+        web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &options).ok()?;
+    reencode_webp(&blob, 320).await.ok()
+}
+
+async fn reencode_webp(file: &web_sys::Blob, max_side: u32) -> Result<PreparedImage, String> {
     let url = web_sys::Url::create_object_url_with_blob(file)
         .map_err(|e| format!("blob url: {e:?}"))?;
     let result = reencode_from_url(&url, max_side).await;

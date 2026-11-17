@@ -1569,6 +1569,7 @@ mod tests {
             sealed: false,
             animated,
             nsfw: false,
+            thumb: None,
         };
         let message = |images: Vec<ImageRef>| {
             AuthorizedMessageV1::new(
@@ -1715,6 +1716,7 @@ mod tests {
             sealed: false,
             animated: false,
             nsfw: false,
+            thumb: None,
         }
     }
 

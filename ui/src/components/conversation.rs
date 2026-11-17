@@ -2,6 +2,7 @@ use crate::components::app::receive_times::get_delay_secs;
 use crate::components::app::{BOARDS, CURRENT_BOARD, MEMBER_INFO_MODAL};
 use crate::util::avatar::get_avatar;
 use crate::util::ecies::unseal_bytes_with_secrets;
+use crate::util::images::{request_image, ImageStatus, IMAGES};
 use crate::util::markdown::text_to_html;
 use crate::util::member_id_to_color;
 use crate::util::messaging::{send_message, ReplyContext};
@@ -20,6 +21,7 @@ use crate::components::conversation::message_input::PostInput;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use plaza_core::board_state::content::CategoryContentV1;
+use plaza_core::board_state::images::ImageRef;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::{BoardMessageBody, MessageId, SecretScope};
 use plaza_core::board_state::roles::RoleId;
@@ -1216,6 +1218,86 @@ pub enum MessageSize {
     Large,
 }
 
+/// Small preview in the topic list. The image contract is fetched only while
+/// the row exists, and never for NSFW, retired or device-blocked images.
+#[component]
+pub fn TopicThumb(image: ImageRef) -> Element {
+    let thumb = image.thumb.clone();
+    let instance = image.instance;
+    let nsfw = image.nsfw;
+    let suppressed = use_memo({
+        let thumb = thumb.clone();
+        move || {
+            if nsfw {
+                return true;
+            }
+            let Some(thumb) = thumb.as_ref() else {
+                return true;
+            };
+            let Some(key) = CURRENT_BOARD.read().owner_key else {
+                return false;
+            };
+            BOARDS
+                .read()
+                .map
+                .get(&key)
+                .map(|board| {
+                    board.board_state.image_retirements.is_retired(&instance)
+                        || board
+                            .board_state
+                            .image_retirements
+                            .is_hash_denied(&thumb.sha256)
+                })
+                .unwrap_or(false)
+        }
+    });
+    let src = use_memo({
+        let thumb = thumb.clone();
+        move || {
+            use base64::Engine;
+            let thumb = thumb.as_ref()?;
+            match IMAGES.read().get(&thumb.instance) {
+                Some(entry) => match &entry.status {
+                    ImageStatus::Ready(bytes) => Some(format!(
+                        "data:image/webp;base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(bytes)
+                    )),
+                    _ => None,
+                },
+                None => None,
+            }
+        }
+    });
+    use_effect({
+        let thumb = thumb.clone();
+        move || {
+            if *suppressed.read() {
+                return;
+            }
+            if let Some(thumb) = thumb.as_ref() {
+                request_image(thumb.instance, thumb.sha256);
+            }
+        }
+    });
+
+    if *suppressed.read() {
+        return rsx! {};
+    }
+    let source = src.read().clone();
+    match source.as_ref() {
+        Some(src) => rsx! {
+            img {
+                src: "{src}",
+                alt: "",
+                class: "w-12 h-12 rounded object-cover flex-shrink-0",
+            }
+        },
+        None => rsx! {
+            div { class: "w-12 h-12 rounded bg-surface border border-border flex-shrink-0" }
+        },
+    }
+}
+
 /// Shared header component for messages
 #[component]
 fn MessageHeader(
@@ -1229,6 +1311,9 @@ fn MessageHeader(
     /// Post title, shown next to the author in card views
     #[props(default)]
     title: Option<String>,
+    /// First image with a preview, shown in the topic list
+    #[props(default)]
+    thumb: Option<ImageRef>,
 ) -> Element {
     let (avatar_size, name_class) = match size {
         MessageSize::Compact => ("w-8 h-8", "text-sm font-medium text-text"),
@@ -1254,6 +1339,9 @@ fn MessageHeader(
     };
 
     rsx! {
+        if let Some(image) = thumb.as_ref() {
+            TopicThumb { image: image.clone() }
+        }
         img {
             src: "{get_avatar(&author_id)}",
             alt: "Avatar",
@@ -1964,6 +2052,11 @@ pub fn MessageCard(
                                 full_time_str: full_time_str.clone(),
                                 time_clamped: msg.time_clamped,
                                 size: size,
+                                thumb: if hide_content {
+                                    images.iter().find(|image| image.thumb.is_some()).cloned()
+                                } else {
+                                    None
+                                },
                             }
                         }
 
@@ -2116,6 +2209,11 @@ pub fn MessageCard(
                                 time_clamped: msg.time_clamped,
                                 size: size,
                                 title: Some(header_title.clone()),
+                                thumb: if hide_content {
+                                    images.iter().find(|image| image.thumb.is_some()).cloned()
+                                } else {
+                                    None
+                                },
                             }
                         }
 
