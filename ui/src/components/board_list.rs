@@ -297,6 +297,50 @@ pub fn BoardList() -> Element {
                             span { class: "text-2xl", "Import ID" }
                         }
 
+                        // Open a board by its owner key. Read-only unless the
+                        // identity token is imported for that board.
+                        button {
+                            class: "w-full flex items-center gap-4 px-6 py-4 border-t border-border text-text-muted hover:text-accent hover:bg-surface transition-colors",
+                            onclick: move |_| {
+                                if let Some(window) = web_sys::window() {
+                                    if let Ok(Some(value)) = window.prompt_with_message(
+                                        "Board ID (owner public key). This opens the board read-only unless you import its identity token."
+                                    ) {
+                                        match bs58::decode(value.trim()).into_vec() {
+                                            Ok(bytes) if bytes.len() == 32 => {
+                                                let array: [u8; 32] =
+                                                    bytes.try_into().expect("32 bytes");
+                                                match ed25519_dalek::VerifyingKey::from_bytes(&array) {
+                                                    Ok(owner) => {
+                                                        if let Err(error) =
+                                                            crate::util::spectator::open_spectator_board(owner)
+                                                        {
+                                                            let _ = window.alert_with_message(&format!(
+                                                                "Could not open the board: {error}"
+                                                            ));
+                                                        }
+                                                    }
+                                                    Err(_) => {
+                                                        let _ = window.alert_with_message(
+                                                            "That is not a valid board key.",
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                let _ = window.alert_with_message(
+                                                    "That is not a valid board ID.",
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                is_open.set(false);
+                            },
+                            Icon { width: 32, height: 32, icon: FaFileImport }
+                            span { class: "text-2xl", "Open board by ID" }
+                        }
+
                         // Build info footer
                         div { class: "px-6 py-2 border-t border-border text-sm text-text-muted text-center",
                             {"Built: "} {format_build_time_local()}
