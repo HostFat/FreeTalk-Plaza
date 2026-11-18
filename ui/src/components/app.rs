@@ -450,6 +450,19 @@ pub fn App() -> Element {
 /// Route component when no board is selected
 #[component]
 fn Home() -> Element {
+    let map_len = BOARDS.read().map.len();
+    let loaded = *BOARDS_LOADED.read();
+    let mut stored = use_signal(|| None::<i64>);
+    use_effect(move || {
+        wasm_bindgen_futures::spawn_local(async move {
+            let count = chat_delegate::stored_board_count()
+                .await
+                .map(|count| count as i64)
+                .unwrap_or(-1);
+            stored.set(Some(count));
+        });
+    });
+
     rsx! {
         div { class: "flex-1 flex flex-col items-center justify-center px-6 py-10 text-text-muted",
             div { class: "flex items-center gap-3",
@@ -463,6 +476,22 @@ fn Home() -> Element {
             p { class: "text-sm mt-1 mb-4", "Forums on Freenet" }
             p { class: "text-xl", "Select a board above or create one" }
             p { class: "text-sm mt-2", "Topics will appear here" }
+            p { class: "text-xs font-mono mt-4 text-text-muted",
+                "map={map_len} loaded={loaded} store={stored.read().unwrap_or(-2)}"
+            }
+            button {
+                r#type: "button",
+                class: "mt-2 px-3 py-1.5 text-xs rounded-md bg-surface hover:bg-surface-hover text-text",
+                onclick: move |_| {
+                    wasm_bindgen_futures::spawn_local(async move {
+                        match chat_delegate::load_boards_direct().await {
+                            Ok(count) => toasts::show(format!("Loaded {count} board(s)")),
+                            Err(error) => toasts::show_error(format!("Load failed: {error}")),
+                        }
+                    });
+                },
+                "Load store now"
+            }
         }
     }
 }
