@@ -114,12 +114,19 @@ pub async fn import_bytes(bytes: &[u8]) -> Result<usize, String> {
         "Backup save result: {save_result:?}"
     ));
     save_result?;
+    let persisted =
+        crate::components::app::chat_delegate::stored_boards_contain(&imported_keys).await?;
+    if !persisted {
+        return Err(
+            "The backup was written but the delegate does not contain every board".to_string(),
+        );
+    }
     dioxus::logger::tracing::info!(
         "Backup saved; BOARDS has {} boards",
         BOARDS.read().map.len()
     );
     crate::components::app::toasts::show(format!(
-        "Backup saved; BOARDS has {} board(s).",
+        "Backup saved and verified; BOARDS has {} board(s).",
         BOARDS.read().map.len()
     ));
     Ok(imported)

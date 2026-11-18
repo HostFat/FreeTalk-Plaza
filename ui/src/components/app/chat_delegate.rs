@@ -343,6 +343,28 @@ pub async fn save_boards_and_wait() -> Result<(), String> {
 
 /// Write the current board map directly, bypassing the save queue. The import
 /// path uses this when an in-flight save may be waiting on a merge request.
+/// Set while a backup import owns the board store. Periodic saves skip so a
+/// stale empty map cannot overwrite the imported one.
+pub static IMPORT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Check the delegate copy really contains these boards after an import.
+pub async fn stored_boards_contain(
+    keys: &[ed25519_dalek::VerifyingKey],
+) -> Result<bool, String> {
+    let response = send_delegate_request(ChatDelegateRequestMsg::GetRequest {
+        key: ChatDelegateKey::new(BOARDS_STORAGE_KEY.to_vec()),
+    })
+    .await?;
+    let bytes = match response {
+        ChatDelegateResponseMsg::GetResponse { value: Some(bytes), .. } => bytes,
+        _ => return Ok(false),
+    };
+    let Some(boards) = crate::board_data::Boards::decode(bytes.as_slice()) else {
+        return Ok(false);
+    };
+    Ok(keys.iter().all(|key| boards.map.contains_key(key)))
+}
+
 pub async fn save_boards_direct() -> Result<(), String> {
     let boards_data = {
         let mut boards_clone = BOARDS.read().clone();
@@ -385,6 +407,10 @@ async fn save_boards_once() -> Result<(), String> {
     // A reset is deleting the stores; a save now would put them back.
     if LOCAL_RESET.load(Ordering::SeqCst) {
         info!("Skipping delegate save during reset");
+        return Ok(());
+    }
+    if IMPORT_IN_PROGRESS.load(Ordering::SeqCst) {
+        info!("Skipping delegate save during import");
         return Ok(());
     }
 
