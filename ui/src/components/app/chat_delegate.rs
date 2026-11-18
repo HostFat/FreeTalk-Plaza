@@ -19,6 +19,10 @@ use std::sync::Mutex;
 // Constant for the boards storage key
 pub const BOARDS_STORAGE_KEY: &[u8] = b"boards_data";
 
+/// Images this device uploaded, kept apart from the board map: the raw blob
+/// state can reach 24 MiB and must not delay the board list at startup.
+pub const OWNED_IMAGES_STORAGE_KEY: &[u8] = b"owned_images_data";
+
 // Cipher material for `DelegateRequest::RegisterDelegate`. freenet-stdlib 0.12
 // dropped the `DEFAULT_CIPHER`/`DEFAULT_NONCE` associated constants, but the
 // values are wire-visible: the node derives the storage key for the delegate's
@@ -169,20 +173,18 @@ pub async fn set_up_chat_delegate() -> Result<(), String> {
     }
 }
 
-/// Fire a request to load boards from delegate storage without waiting for response.
-/// The response will be handled by the response_handler through the message loop.
-/// This avoids deadlock when called from inside the message loop.
-async fn fire_load_boards_request() {
-    info!("Firing request to load boards from delegate storage");
-
+/// Fire a delegate Get without waiting for the response. The response is
+/// handled by the response_handler through the message loop, so this is safe
+/// to call from inside it.
+async fn fire_delegate_get(key: &[u8]) {
     let request = ChatDelegateRequestMsg::GetRequest {
-        key: ChatDelegateKey::new(BOARDS_STORAGE_KEY.to_vec()),
+        key: ChatDelegateKey::new(key.to_vec()),
     };
 
     // Serialize and send the request without waiting for response
     let mut payload = Vec::new();
     if let Err(e) = ciborium::ser::into_writer(&request, &mut payload) {
-        error!("Failed to serialize load boards request: {}", e);
+        error!("Failed to serialize delegate Get request: {}", e);
         return;
     }
 
@@ -213,10 +215,29 @@ async fn fire_load_boards_request() {
     };
 
     if let Err(e) = api_result {
-        error!("Failed to send load boards request: {}", e);
+        error!(
+            "Failed to send delegate Get for {}: {}",
+            String::from_utf8_lossy(key),
+            e
+        );
     } else {
-        info!("Load boards request sent, response will be handled by message loop");
+        info!(
+            "Delegate Get for {} sent, response will be handled by message loop",
+            String::from_utf8_lossy(key)
+        );
     }
+}
+
+/// Fire a request to load boards from delegate storage without waiting for response.
+async fn fire_load_boards_request() {
+    info!("Firing request to load boards from delegate storage");
+    fire_delegate_get(BOARDS_STORAGE_KEY).await;
+}
+
+/// Load the image index after the board list is already on screen.
+pub(crate) async fn fire_load_owned_images_request() {
+    info!("Firing request to load owned images from delegate storage");
+    fire_delegate_get(OWNED_IMAGES_STORAGE_KEY).await;
 }
 
 /// Load boards from the delegate storage (with response waiting - use outside message loop only)
@@ -290,6 +311,15 @@ async fn save_boards_once() -> Result<(), String> {
     }
 
     merge_stored_boards().await;
+
+    // The image index lives under its own key. Write it first: if the process
+    // stops between the two stores, the bigger data is already safe and the
+    // next save rewrites the small board map. Do not write the board map when
+    // the index failed, or an old blob's entries would be dropped for good.
+    if let Err(error) = crate::util::owned_images::save_if_dirty().await {
+        warn!("Could not save the owned images, keeping the board map: {error}");
+        return Err(format!("owned images were not saved: {error}"));
+    }
 
     info!("Saving boards to delegate storage");
 

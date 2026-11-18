@@ -2078,7 +2078,12 @@ pub struct Boards {
     #[serde(default)]
     pub blocked_image_hashes: Vec<[u8; 32]>,
     /// Images this device uploaded, used for renewal and reuse.
-    #[serde(default)]
+    ///
+    /// Kept in memory only: the entries carry raw blob state up to 24 MiB and
+    /// are stored under their own delegate key, so loading the board list does
+    /// not wait for them. The field still deserializes so a blob written by an
+    /// older version can be migrated; new saves omit it.
+    #[serde(default, skip_serializing)]
     pub owned_images: Vec<OwnedImage>,
 }
 
@@ -2141,6 +2146,9 @@ impl Boards {
                 }
                 Some("removed") => {
                     boards.removed = value.deserialized().unwrap_or_default();
+                }
+                Some("owned_images") => {
+                    boards.owned_images = value.deserialized().unwrap_or_default();
                 }
                 _ => {}
             }
@@ -2434,6 +2442,69 @@ mod tests {
     use super::*;
     use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
     use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
+
+    /// The image index lives under its own delegate key, so the board map does
+    /// not carry its megabytes. A blob from before the split still loads and
+    /// keeps its entries for the migration.
+    #[test]
+    fn owned_images_are_saved_outside_the_boards_blob() {
+        let owned = OwnedImage {
+            image: plaza_core::board_state::images::ImageRef {
+                instance: [7u8; 32],
+                sha256: [8u8; 32],
+                mime: "image/webp".to_string(),
+                width: 10,
+                height: 10,
+                bytes: 2,
+                alt: String::new(),
+                display: 0,
+                sealed: false,
+                animated: false,
+                nsfw: false,
+                thumb: None,
+                placement: Default::default(),
+                align: Default::default(),
+            },
+            parameters: vec![1],
+            state: vec![2, 3],
+            chunks: Vec::new(),
+            uploaded_at: 1,
+            renewed_at: 1,
+        };
+        let boards = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            owned_images: vec![owned.clone()],
+        };
+        let mut buffer = Vec::new();
+        ciborium::ser::into_writer(&boards, &mut buffer).unwrap();
+        let decoded: Boards = ciborium::from_reader(&buffer[..]).unwrap();
+        assert!(decoded.owned_images.is_empty());
+
+        // Older versions wrote the field into the same blob.
+        #[derive(Serialize)]
+        struct LegacyBoards {
+            map: HashMap<VerifyingKey, BoardData>,
+            current_board_key: Option<VerifyingKey>,
+            removed: Vec<VerifyingKey>,
+            blocked_image_hashes: Vec<[u8; 32]>,
+            owned_images: Vec<OwnedImage>,
+        }
+        let legacy = LegacyBoards {
+            map: HashMap::new(),
+            current_board_key: None,
+            removed: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            owned_images: vec![owned],
+        };
+        let mut legacy_buffer = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut legacy_buffer).unwrap();
+        let decoded = Boards::decode(&legacy_buffer).expect("legacy blob decodes");
+        assert_eq!(decoded.owned_images.len(), 1);
+    }
 
     /// A suspended member keeps the role assignment but loses its powers until
     /// the suspension ends. The contract still verifies records signed before

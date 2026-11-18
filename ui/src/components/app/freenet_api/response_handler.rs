@@ -20,6 +20,7 @@ use crate::util::ecies::decrypt_secret_from_member_blob;
 use crate::util::owner_vk_to_contract_key;
 use ciborium::de::from_reader;
 use dioxus::logger::tracing::{error, info, warn};
+use dioxus::prelude::ReadableExt;
 
 use freenet_stdlib::client_api::{ContractResponse, HostResponse};
 use freenet_stdlib::prelude::OutboundDelegateMsg;
@@ -299,6 +300,12 @@ impl ResponseHandler {
                                                         if !loaded_boards.map.is_empty() {
                                                             *DELEGATE_HAD_BOARDS.write() = true;
                                                         }
+                                                        // Older blobs kept the image index
+                                                        // inside the board map. Note it so the
+                                                        // separate key is written after loading.
+                                                        crate::util::owned_images::note_legacy(
+                                                            !loaded_boards.owned_images.is_empty(),
+                                                        );
 
                                                         // Collect board keys and signing keys before merge
                                                         // (must extract before loaded_boards is moved into defer)
@@ -405,6 +412,13 @@ impl ResponseHandler {
                                                             // Saves are refused until this is true, so set it only
                                                             // after the merge has placed the stored boards in BOARDS.
                                                             *BOARDS_LOADED.write() = true;
+                                                        });
+
+                                                        // The board list is already usable; fetch the
+                                                        // larger image index separately so startup does not
+                                                        // wait for it.
+                                                        wasm_bindgen_futures::spawn_local(async {
+                                                            crate::components::app::chat_delegate::fire_load_owned_images_request().await;
                                                         });
 
                                                         // Mark current board as read since user is viewing it
@@ -579,6 +593,46 @@ impl ResponseHandler {
                                                 // - If legacy delegate: it has no data, so nothing to migrate
                                                 mark_legacy_migration_done();
                                             }
+                                        } else if key.as_bytes()
+                                            == crate::components::app::chat_delegate::OWNED_IMAGES_STORAGE_KEY
+                                        {
+                                            let loaded = value.and_then(|bytes| {
+                                                match from_reader::<
+                                                    Vec<crate::board_data::OwnedImage>,
+                                                    _,
+                                                >(&bytes[..])
+                                                {
+                                                    Ok(list) => Some(list),
+                                                    Err(error) => {
+                                                        error!(
+                                                            "Failed to deserialize the owned images: {error}"
+                                                        );
+                                                        None
+                                                    }
+                                                }
+                                            });
+                                            let legacy =
+                                                crate::util::owned_images::take_legacy();
+                                            crate::util::defer(move || {
+                                                crate::util::owned_images::apply_loaded(loaded);
+                                                let has_any = !BOARDS.read().owned_images.is_empty();
+                                                // The board blob still carried entries:
+                                                // write them under the new key once. A
+                                                // missing key with no legacy entries has
+                                                // nothing to migrate.
+                                                if legacy && has_any {
+                                                    crate::util::owned_images::mark_dirty();
+                                                    wasm_bindgen_futures::spawn_local(async {
+                                                        if let Err(error) =
+                                                            save_boards_to_delegate().await
+                                                        {
+                                                            warn!(
+                                                                "Could not migrate the owned images: {error}"
+                                                            );
+                                                        }
+                                                    });
+                                                }
+                                            });
                                         } else {
                                             warn!(
                                                 "Unexpected key in GetResponse: {:?}",
