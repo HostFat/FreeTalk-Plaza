@@ -341,6 +341,29 @@ pub async fn save_boards_and_wait() -> Result<(), String> {
     Ok(())
 }
 
+/// Write the current board map directly, bypassing the save queue. The import
+/// path uses this when an in-flight save may be waiting on a merge request.
+pub async fn save_boards_direct() -> Result<(), String> {
+    let boards_data = {
+        let mut boards_clone = BOARDS.read().clone();
+        boards_clone.current_board_key = CURRENT_BOARD.read().owner_key;
+        let mut buffer = Vec::new();
+        ciborium::ser::into_writer(&boards_clone, &mut buffer)
+            .map_err(|e| format!("Failed to serialize boards: {}", e))?;
+        buffer
+    };
+    match send_delegate_request(ChatDelegateRequestMsg::StoreRequest {
+        key: ChatDelegateKey::new(BOARDS_STORAGE_KEY.to_vec()),
+        value: boards_data,
+    })
+    .await
+    {
+        Ok(ChatDelegateResponseMsg::StoreResponse { result, .. }) => result,
+        Ok(other) => Err(format!("Unexpected response: {:?}", other)),
+        Err(e) => Err(e),
+    }
+}
+
 pub async fn save_boards_to_delegate() -> Result<(), String> {
     if SAVE_RUNNING.swap(true, Ordering::SeqCst) {
         SAVE_AGAIN.store(true, Ordering::SeqCst);

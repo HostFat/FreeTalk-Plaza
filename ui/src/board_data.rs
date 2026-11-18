@@ -2250,10 +2250,17 @@ impl Boards {
     /// written by an older schema (the ids changed before v95) must not take
     /// the whole device's board list down with it: keep every board that
     /// still decodes and report the rest.
+    /// A board present in the map was re-added (import or rejoin); its old
+    /// removal tombstone must not drop it on the next load.
+    pub fn clear_removed_for_present(&mut self) {
+        self.removed.retain(|key| !self.map.contains_key(key));
+    }
+
     pub fn decode(bytes: &[u8]) -> Option<Boards> {
         use dioxus::logger::tracing::warn;
 
-        if let Ok(boards) = ciborium::de::from_reader::<Boards, _>(bytes) {
+        if let Ok(mut boards) = ciborium::de::from_reader::<Boards, _>(bytes) {
+            boards.clear_removed_for_present();
             return Some(boards);
         }
         let value: ciborium::value::Value = ciborium::de::from_reader(bytes).ok()?;
@@ -2308,6 +2315,7 @@ impl Boards {
         if dropped > 0 {
             warn!("Dropped {dropped} stored board(s) written by an incompatible version");
         }
+        boards.clear_removed_for_present();
         Some(boards)
     }
 
