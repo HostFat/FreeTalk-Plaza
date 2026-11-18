@@ -108,13 +108,11 @@ async fn restore_file(file: web_sys::File) {
     let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
     match crate::util::backup::import_bytes(&bytes).await {
         Ok(count) => {
+            // Leave the reload to the reader for now: the count is the only
+            // way to tell a bad decode from a load that drops the boards.
             crate::components::app::toasts::show(format!(
-                "Restored {count} board(s). Reloading…"
+                "Restored {count} board(s). Reload the page to check."
             ));
-            crate::util::sleep(std::time::Duration::from_millis(800)).await;
-            if let Some(window) = window() {
-                let _ = window.location().reload();
-            }
         }
         Err(error) => {
             crate::components::app::toasts::show_error(format!(
