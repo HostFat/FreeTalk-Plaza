@@ -207,6 +207,9 @@ pub struct BoardData {
     /// The composer's unsent post. Local UI state, never shared with the board.
     #[serde(default)]
     pub draft: Option<ComposerDraft>,
+    /// Drafts the user saved for later. Local UI state, kept newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drafts: Vec<ComposerDraft>,
     /// Image uploads prepared but not yet published. Kept in memory only: the
     /// records carry the file bytes (up to 24 MiB) and are stored under their
     /// own delegate key. The field still deserializes so a blob written by an
@@ -2331,6 +2334,7 @@ impl Boards {
             last_visit: 0,
             read_categories: HashMap::new(),
             draft: None,
+            drafts: Vec::new(),
             pending_uploads: Vec::new(),
             pending_send: None,
             subscribed_categories: Vec::new(),
@@ -3360,6 +3364,7 @@ mod tests {
             last_visit: 0,
             read_categories: HashMap::new(),
             draft: None,
+            drafts: Vec::new(),
             pending_uploads: Vec::new(),
             pending_send: None,
             subscribed_categories: Vec::new(),
@@ -3443,6 +3448,7 @@ mod tests {
             last_visit: 0,
             read_categories: HashMap::new(),
             draft: None,
+            drafts: Vec::new(),
             pending_uploads: Vec::new(),
             pending_send: None,
             subscribed_categories: Vec::new(),
@@ -3518,6 +3524,7 @@ mod tests {
                 last_visit: 0,
                 read_categories: HashMap::new(),
                 draft: None,
+                drafts: Vec::new(),
                 pending_uploads: Vec::new(),
                 pending_send: None,
                 subscribed_categories: Vec::new(),

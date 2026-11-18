@@ -451,5 +451,28 @@ pub fn AuditView() -> Element {
                 }
             }
         }
+        div { class: "bg-surface rounded-lg p-4 mt-4",
+            h2 { class: "text-lg font-semibold text-text mb-1", "Storage on this device" }
+            p { class: "text-text-muted text-xs mb-3",
+                "Estimated from the local copy. The network keeps its own copy of the boards."
+            }
+            {
+                let sizes = crate::util::storage::sizes();
+                rsx! {
+                    dl { class: "grid grid-cols-[1fr_auto] gap-x-4 gap-y-1 text-sm",
+                        dt { class: "text-text-muted", "Board map" }
+                        dd { class: "text-text text-right", "{crate::util::storage::format_bytes(sizes.boards)}" }
+                        dt { class: "text-text-muted", "Image index" }
+                        dd { class: "text-text text-right",
+                            "{crate::util::storage::format_bytes(sizes.images)} · {sizes.image_count} image(s)"
+                        }
+                        dt { class: "text-text-muted", "Composer queues" }
+                        dd { class: "text-text text-right",
+                            "{crate::util::storage::format_bytes(sizes.queues)} · {sizes.queued_count} upload(s)"
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -627,6 +627,7 @@ pub fn PostInput(
     });
 
     let has_draft = use_memo(move || crate::util::drafts::load().is_some());
+    let saved_drafts = use_memo(move || crate::util::drafts::list());
 
     // Handler for opening the modal via Compose button
     let open_modal = {
@@ -929,6 +930,83 @@ pub fn PostInput(
                                 }
                             } else {
                                 rsx! {}
+                            }
+                        }
+
+                        // Saved drafts
+                        details { class: "rounded-lg border border-border bg-surface/50 px-3 py-2",
+                            summary { class: "text-xs text-text-muted cursor-pointer",
+                                "Drafts ({saved_drafts().len()})"
+                            }
+                            div { class: "mt-2 space-y-2",
+                                button {
+                                    r#type: "button",
+                                    class: "px-2.5 py-1 text-xs rounded-md bg-surface border border-border text-text hover:bg-surface-hover transition-colors",
+                                    onclick: move |_| {
+                                        let reply = replying_to.read().clone();
+                                        if crate::util::drafts::save_current(
+                                            &title_text.read(),
+                                            &message_text.read(),
+                                            reply.as_ref(),
+                                        ) {
+                                            crate::util::drafts::persist();
+                                            crate::components::app::toasts::show("Draft saved.");
+                                        } else {
+                                            crate::components::app::toasts::show_error(
+                                                "Write something before saving a draft.",
+                                            );
+                                        }
+                                    },
+                                    "Save current as draft"
+                                }
+                                for (index, draft) in saved_drafts().iter().enumerate() {
+                                    {
+                                        let draft = draft.clone();
+                                        let load_draft = draft.clone();
+                                        rsx! {
+                                            div { key: "{index}", class: "flex items-center gap-2 text-xs",
+                                                span { class: "flex-1 truncate text-text", dir: "auto",
+                                                    if !draft.title.is_empty() {
+                                                        "{draft.title}"
+                                                    } else {
+                                                        "{draft.text}"
+                                                    }
+                                                }
+                                                button {
+                                                    r#type: "button",
+                                                    class: "px-2 py-0.5 rounded bg-surface border border-border text-text hover:bg-surface-hover",
+                                                    onclick: move |_| {
+                                                        let reply = load_draft.reply_to.clone().map(|target| ReplyContext {
+                                                            message_id: target,
+                                                            author_name: load_draft.reply_author.clone(),
+                                                            content_preview: load_draft.reply_preview.clone(),
+                                                        });
+                                                        title_text.set(load_draft.title.clone());
+                                                        message_text.set(load_draft.text.clone());
+                                                        replying_to.set(reply.clone());
+                                                        draft_restored.set(true);
+                                                        crate::util::drafts::store(
+                                                            &load_draft.title,
+                                                            &load_draft.text,
+                                                            reply.as_ref(),
+                                                        );
+                                                        crate::util::drafts::persist();
+                                                    },
+                                                    "Load"
+                                                }
+                                                button {
+                                                    r#type: "button",
+                                                    class: "px-2 py-0.5 rounded text-text-muted hover:text-red-400",
+                                                    onclick: move |_| {
+                                                        crate::util::drafts::remove(index);
+                                                        crate::util::drafts::persist();
+                                                    },
+                                                    "\u{00d7}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
 

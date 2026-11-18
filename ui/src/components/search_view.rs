@@ -10,6 +10,10 @@ use plaza_core::board_state::member::MemberId;
 pub fn SearchView() -> Element {
     let mut query = use_signal(String::new);
     let mut author = use_signal(String::new);
+    let mut section_index = use_signal(|| 0usize);
+    let mut from_date = use_signal(String::new);
+    let mut to_date = use_signal(String::new);
+    let mut oldest_first = use_signal(|| false);
 
     let board = use_memo(move || {
         let current = CURRENT_BOARD.read().owner_key?;
@@ -26,19 +30,55 @@ pub fn SearchView() -> Element {
         Some((board.owner_vk, messages))
     });
 
-    let results: Vec<MessageData> = {
+    let (results, sections): (Vec<MessageData>, Vec<(plaza_core::board_state::message::MessageId, String)>) = {
         let snapshot = board.read().clone();
         let Some((_, messages)) = snapshot.as_ref() else {
             return rsx! {};
         };
+        let mut sections: Vec<_> = messages
+            .iter()
+            .filter(|message| message.is_category)
+            .map(|message| {
+                (
+                    message.message_id,
+                    message
+                        .category_name
+                        .clone()
+                        .unwrap_or_else(|| "Section".to_string()),
+                )
+            })
+            .collect();
+        sections.sort_by(|a, b| a.1.cmp(&b.1));
+
         let needle = query.read().trim().to_lowercase();
         let author_needle = author.read().trim().to_lowercase();
         if needle.is_empty() && author_needle.is_empty() {
-            Vec::new()
+            (Vec::new(), sections)
         } else {
+            let selected = *section_index.read();
+            let section_target = if selected > 0 {
+                sections.get(selected - 1).map(|(id, _)| *id)
+            } else {
+                None
+            };
+            let from = from_date.read().clone();
+            let to = to_date.read().clone();
             let mut hits: Vec<MessageData> = messages
                 .iter()
                 .filter(|message| !message.is_category)
+                .filter(|message| {
+                    section_target
+                        .map(|target| message.category_id == Some(target))
+                        .unwrap_or(true)
+                })
+                .filter(|message| {
+                    let date = message
+                        .time
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d")
+                        .to_string();
+                    (from.is_empty() || date >= from) && (to.is_empty() || date <= to)
+                })
                 .filter(|message| {
                     (needle.is_empty()
                         || message.title_text.to_lowercase().contains(&needle)
@@ -48,9 +88,13 @@ pub fn SearchView() -> Element {
                 })
                 .cloned()
                 .collect();
-            hits.sort_by_key(|message| std::cmp::Reverse(message.time));
+            if *oldest_first.read() {
+                hits.sort_by_key(|message| message.time);
+            } else {
+                hits.sort_by_key(|message| std::cmp::Reverse(message.time));
+            }
             hits.truncate(100);
-            hits
+            (hits, sections)
         }
     };
 
@@ -91,6 +135,43 @@ pub fn SearchView() -> Element {
                             placeholder: "Author",
                             value: "{author}",
                             oninput: move |evt| author.set(evt.value()),
+                        }
+                    }
+                    div { class: "flex flex-wrap items-center gap-2 mb-4 text-xs",
+                        select {
+                            class: "px-2 py-1.5 bg-panel border border-border rounded-lg text-text",
+                            value: "{section_index}",
+                            onchange: move |evt| {
+                                section_index.set(evt.value().parse::<usize>().unwrap_or(0));
+                            },
+                            option { value: "0", "All sections" }
+                            for (index, (_, name)) in sections.iter().enumerate() {
+                                option { value: "{index + 1}", "{name}" }
+                            }
+                        }
+                        label { class: "flex items-center gap-1 text-text-muted",
+                            "From"
+                            input {
+                                r#type: "date",
+                                class: "px-2 py-1.5 bg-panel border border-border rounded-lg text-text",
+                                value: "{from_date}",
+                                oninput: move |evt| from_date.set(evt.value()),
+                            }
+                        }
+                        label { class: "flex items-center gap-1 text-text-muted",
+                            "To"
+                            input {
+                                r#type: "date",
+                                class: "px-2 py-1.5 bg-panel border border-border rounded-lg text-text",
+                                value: "{to_date}",
+                                oninput: move |evt| to_date.set(evt.value()),
+                            }
+                        }
+                        button {
+                            r#type: "button",
+                            class: "px-2 py-1.5 bg-panel border border-border rounded-lg text-text hover:border-accent/50",
+                            onclick: move |_| oldest_first.set(!oldest_first()),
+                            if oldest_first() { "Oldest first" } else { "Newest first" }
                         }
                     }
 

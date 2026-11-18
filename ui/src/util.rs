@@ -24,6 +24,7 @@ pub mod pending_send;
 pub mod pq;
 pub mod reset;
 pub mod retry;
+pub mod storage;
 pub mod spectator;
 pub mod subscriptions;
 pub mod trash_actions;
