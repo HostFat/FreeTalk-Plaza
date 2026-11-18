@@ -448,13 +448,14 @@ pub(crate) async fn publish_message(
     });
     if applied {
         let id = auth_message.id();
-        crate::components::app::PENDING_POSTS
-            .with_mut(|pending| {
-                pending.insert(id.clone());
-            });
+        crate::components::app::PENDING_POSTS.with_mut(|pending| {
+            pending.insert(id.clone(), current_board);
+        });
+        // The node's UpdateResponse/PutResponse clears this earlier. The timer
+        // only stops a marker from living forever when no answer arrives.
         let cleared = id.clone();
         crate::util::safe_spawn_local(async move {
-            crate::util::sleep(std::time::Duration::from_secs(25)).await;
+            crate::util::sleep(std::time::Duration::from_secs(60)).await;
             crate::components::app::PENDING_POSTS.with_mut(|pending| {
                 pending.remove(&cleared);
             });

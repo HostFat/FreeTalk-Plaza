@@ -80,6 +80,13 @@ pub async fn handle_put_response(
                 });
             }
 
+            // The node accepted the published state: every revision it carried
+            // is confirmed, and the posts waiting for a badge can clear.
+            crate::util::defer(move || {
+                SYNC_INFO.with_mut(|info| info.mark_acked(&owner_vk));
+                crate::components::app::confirm_pending_posts(owner_vk);
+            });
+
             // Now subscribe to the contract
             let subscribe_result = board_synchronizer.subscribe_to_contract(&key).await;
 

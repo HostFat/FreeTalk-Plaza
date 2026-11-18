@@ -25,14 +25,17 @@ pub fn handle_subscribe_response(key: ContractKey, subscribed: bool) -> bool {
 
             // Update the sync status to subscribed in a separate block
             crate::util::defer(move || {
-                SYNC_INFO
-                    .write()
-                    .update_sync_status(&owner_vk, BoardSyncStatus::Subscribed);
+                {
+                    SYNC_INFO
+                        .write()
+                        .update_sync_status(&owner_vk, BoardSyncStatus::Subscribed);
+                }
                 // A local change may have been applied while the board was still
-                // subscribing. `needs_to_send_update` ignores boards that are not
-                // subscribed and the pending marker was already consumed, so the
-                // change would never be sent. Re-check now that it can send.
-                crate::components::app::mark_needs_sync(owner_vk);
+                // subscribing, and its request may have been lost with the old
+                // connection. Re-check only when something is still unconfirmed.
+                if SYNC_INFO.read().has_unacked(&owner_vk) {
+                    crate::components::app::mark_needs_sync(owner_vk);
+                }
             });
             false
         } else {

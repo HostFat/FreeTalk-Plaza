@@ -101,9 +101,15 @@ pub static UPLOAD_PROGRESS: GlobalSignal<std::collections::HashMap<String, (usiz
 /// True when the durable upload queue refused a file because of its cap.
 pub static PENDING_QUEUE_FULL: GlobalSignal<bool> = Global::new(|| false);
 
-/// Messages this client sent that the network has not confirmed yet.
-pub static PENDING_POSTS: GlobalSignal<std::collections::HashSet<plaza_core::board_state::message::MessageId>> =
-    Global::new(std::collections::HashSet::new);
+/// Messages this client sent that the network has not confirmed yet, mapped to
+/// the board they belong to so a confirmation clears the right badges.
+pub static PENDING_POSTS: GlobalSignal<std::collections::HashMap<MessageId, VerifyingKey>> =
+    Global::new(std::collections::HashMap::new);
+
+/// Drop the pending marker of every message on a board the node just confirmed.
+pub fn confirm_pending_posts(board: VerifyingKey) {
+    PENDING_POSTS.with_mut(|pending| pending.retain(|_, owner| *owner != board));
+}
 
 /// Set once the boards stored in the delegate have been read (or the delegate
 /// answered that it has none). Until then `BOARDS` is empty only because the
@@ -136,6 +142,10 @@ pub static AUTH_TOKEN: GlobalSignal<Option<String>> = Global::new(|| None);
 // This prevents infinite loops where network responses trigger more syncs
 pub static NEEDS_SYNC: GlobalSignal<std::collections::HashSet<VerifyingKey>> =
     Global::new(std::collections::HashSet::new);
+
+/// Bumped by the periodic housekeeping tick so the sync chip can re-evaluate
+/// its timeout even when no board state changed.
+pub static SYNC_TICK: GlobalSignal<u64> = Global::new(|| 0);
 
 /// Tracks the current category being viewed (for auto-parenting new posts/categories)
 pub static CURRENT_CATEGORY: GlobalSignal<CurrentCategoryContext> =
@@ -199,6 +209,8 @@ pub struct CurrentPostContext {
 /// ensuring the write happens in a completely clean execution context.
 pub fn mark_needs_sync(board_key: ed25519_dalek::VerifyingKey) {
     crate::util::defer(move || {
+        // Count the change so the sync chip can wait for the node's answer.
+        sync_info::SYNC_INFO.with_mut(|info| info.mark_local_change(&board_key));
         NEEDS_SYNC.write().insert(board_key);
     });
 }

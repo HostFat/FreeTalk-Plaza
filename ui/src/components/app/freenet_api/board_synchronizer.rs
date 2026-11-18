@@ -481,6 +481,7 @@ impl BoardSynchronizer {
                             info!("Sent PutRequest for board {:?}", MemberId::from(*owner_vk));
                             // Update the sync status to subscribing using with_mut
                             SYNC_INFO.with_mut(|sync_info| {
+                                sync_info.mark_sent(owner_vk);
                                 sync_info
                                     .update_sync_status(owner_vk, BoardSyncStatus::Subscribing);
                             });
@@ -626,6 +627,7 @@ impl BoardSynchronizer {
                         );
                         // Only update the last synced state after successfully sending the update
                         SYNC_INFO.with_mut(|sync_info| {
+                            sync_info.mark_sent(board_vk);
                             sync_info.state_updated(board_vk, state.clone());
                         });
                     }
@@ -636,6 +638,13 @@ impl BoardSynchronizer {
                             MemberId::from(*board_vk),
                             e
                         );
+                        // The sync chip offers a retry for this board.
+                        SYNC_INFO.with_mut(|sync_info| {
+                            sync_info.update_sync_status(
+                                board_vk,
+                                BoardSyncStatus::Error(e.to_string()),
+                            );
+                        });
                     }
                 }
             } else {

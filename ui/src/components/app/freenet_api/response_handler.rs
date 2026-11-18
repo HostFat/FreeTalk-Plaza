@@ -159,9 +159,53 @@ impl ResponseHandler {
                             );
 
                             if let Ok(response) = deserialization_result {
+                                // Never log the whole value: the boards store can
+                                // be tens of megabytes, and formatting it here
+                                // freezes the page before it is applied.
+                                let summary = match &response {
+                                    ChatDelegateResponseMsg::GetResponse { key, value } => {
+                                        format!(
+                                            "GetResponse key={key:?} value_bytes={}",
+                                            value.as_ref().map_or(0, Vec::len)
+                                        )
+                                    }
+                                    ChatDelegateResponseMsg::ListResponse { keys } => {
+                                        format!("ListResponse keys={}", keys.len())
+                                    }
+                                    ChatDelegateResponseMsg::StoreResponse {
+                                        key,
+                                        value_size,
+                                        result,
+                                    } => format!(
+                                        "StoreResponse key={key:?} value_size={value_size} result={result:?}"
+                                    ),
+                                    ChatDelegateResponseMsg::DeleteResponse { key, result } => {
+                                        format!("DeleteResponse key={key:?} result={result:?}")
+                                    }
+                                    ChatDelegateResponseMsg::StoreSigningKeyResponse {
+                                        board_key,
+                                        result,
+                                    } => format!(
+                                        "StoreSigningKeyResponse board={board_key:?} result={result:?}"
+                                    ),
+                                    ChatDelegateResponseMsg::GetPublicKeyResponse {
+                                        board_key,
+                                        public_key,
+                                    } => format!(
+                                        "GetPublicKeyResponse board={board_key:?} found={}",
+                                        public_key.is_some()
+                                    ),
+                                    ChatDelegateResponseMsg::SignResponse {
+                                        board_key,
+                                        request_id,
+                                        signature,
+                                    } => format!(
+                                        "SignResponse board={board_key:?} request={request_id} ok={}",
+                                        signature.is_ok()
+                                    ),
+                                };
                                 info!(
-                                    "Successfully deserialized as ChatDelegateResponseMsg: {:?}",
-                                    response
+                                    "Successfully deserialized as ChatDelegateResponseMsg: {summary}"
                                 );
 
                                 // Try to complete any pending request waiting for this response

@@ -5,6 +5,7 @@ use crate::components::app::{
     BOARDS, COMPOSE_REQUEST, CURRENT_BOARD, CURRENT_CATEGORY, CURRENT_HASH, CURRENT_POST,
     MEMBER_INFO_MODAL, QUOTE_COLLECTION,
 };
+use crate::components::board_sync_chip::BoardSyncChip;
 use crate::components::conversation::message_input::PostInput;
 use crate::util::avatar::get_avatar;
 use crate::util::ecies::unseal_bytes_with_secrets;
@@ -31,6 +32,7 @@ pub fn TopBar() -> Element {
                 crate::util::membership::restore_self_membership();
                 crate::util::pq::housekeeping();
                 crate::components::app::flush_pending_sync();
+                crate::components::app::SYNC_TICK.with_mut(|tick| *tick += 1);
                 crate::util::spectator::fetch_pending_spectator_boards().await;
                 futures_timer::Delay::new(std::time::Duration::from_secs(60)).await;
             }
@@ -301,6 +303,7 @@ pub fn TopBar() -> Element {
 
             // Right side: navigation buttons and post input
             div { class: "flex items-center gap-3 pr-4",
+                BoardSyncChip { board: board_data.owner_vk }
                 // Desktop navigation buttons (hidden on mobile)
                 div { class: "hidden md:flex items-center gap-3",
                     // Board button

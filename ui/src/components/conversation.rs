@@ -2031,7 +2031,9 @@ pub fn MessageCard(
     let mut is_hovered = use_signal(|| false);
 
     let msg_id = msg.message_id.clone();
-    let pending = crate::components::app::PENDING_POSTS.read().contains(&msg_id);
+    let pending = crate::components::app::PENDING_POSTS
+        .read()
+        .contains_key(&msg_id);
     let content_preview = msg.content_text.chars().take(100).collect::<String>();
     let author_id = msg.author_id;
     let author_name = msg.author_name.clone();

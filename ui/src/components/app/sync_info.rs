@@ -28,6 +28,11 @@ pub(crate) fn now_ms() -> f64 {
 
 pub static SYNC_INFO: GlobalSignal<SyncInfo> = Global::new(SyncInfo::new);
 
+/// How long an unconfirmed change keeps the "Syncing" chip visible. A change
+/// that no request carried (a network-driven mark, for example) must not spin
+/// forever.
+const SYNCING_VISIBLE_MS: f64 = 60_000.0;
+
 pub struct SyncInfo {
     map: HashMap<VerifyingKey, BoardSyncInfo>,
     instances: HashMap<ContractInstanceId, VerifyingKey>,
@@ -40,6 +45,14 @@ pub struct BoardSyncInfo {
     pub last_synced_state: Option<ChatBoardStateV1>,
     /// Timestamp (in ms) when subscription was initiated, used for timeout detection
     pub subscribing_since: Option<f64>,
+    /// Bumped for every local change that has to reach the network.
+    pub local_revision: u64,
+    /// The revision carried by the last request we sent.
+    pub sent_revision: Option<u64>,
+    /// The highest revision the node confirmed.
+    pub acked_revision: u64,
+    /// When the last local change was marked.
+    pub last_change_at: Option<f64>,
 }
 
 impl SyncInfo {
@@ -65,6 +78,10 @@ impl SyncInfo {
                 sync_status: BoardSyncStatus::Disconnected,
                 last_synced_state: None,
                 subscribing_since: None,
+                local_revision: 0,
+                sent_revision: None,
+                acked_revision: 0,
+                last_change_at: None,
             });
 
             self.instances.insert(*contract_id, owner_key);
@@ -96,6 +113,54 @@ impl SyncInfo {
     /// Current sync status of a board, if it is known.
     pub fn sync_status_of(&self, owner_key: &VerifyingKey) -> Option<BoardSyncStatus> {
         self.map.get(owner_key).map(|info| info.sync_status.clone())
+    }
+
+    /// Record a local change that has to be published.
+    pub fn mark_local_change(&mut self, owner_key: &VerifyingKey) {
+        if !self.map.contains_key(owner_key) {
+            self.register_new_board(*owner_key);
+        }
+        if let Some(info) = self.map.get_mut(owner_key) {
+            info.local_revision += 1;
+            info.last_change_at = Some(now_ms());
+        }
+    }
+
+    /// Record that the last request carried the current local revision.
+    pub fn mark_sent(&mut self, owner_key: &VerifyingKey) {
+        if let Some(info) = self.map.get_mut(owner_key) {
+            info.sent_revision = Some(info.local_revision);
+        }
+    }
+
+    /// The node confirmed the last request: it carried that revision.
+    /// A confirmation also clears an earlier send error.
+    pub fn mark_acked(&mut self, owner_key: &VerifyingKey) {
+        if let Some(info) = self.map.get_mut(owner_key) {
+            let revision = info.sent_revision.take().unwrap_or(info.local_revision);
+            info.acked_revision = info.acked_revision.max(revision);
+            if matches!(info.sync_status, BoardSyncStatus::Error(_)) {
+                info.sync_status = BoardSyncStatus::Subscribed;
+            }
+        }
+    }
+
+    /// True when the node has not confirmed every local change, regardless of
+    /// how old the change is.
+    pub fn has_unacked(&self, owner_key: &VerifyingKey) -> bool {
+        self.map
+            .get(owner_key)
+            .is_some_and(|info| info.local_revision > info.acked_revision)
+    }
+
+    /// True while a local change has not been confirmed by the node.
+    pub fn is_syncing(&self, owner_key: &VerifyingKey) -> bool {
+        self.map.get(owner_key).is_some_and(|info| {
+            info.local_revision > info.acked_revision
+                && info
+                    .last_change_at
+                    .is_some_and(|at| now_ms() - at < SYNCING_VISIBLE_MS)
+        })
     }
 
     pub fn update_last_synced_state(&mut self, owner_key: &VerifyingKey, state: &ChatBoardStateV1) {        if let Some(sync_info) = self.map.get_mut(owner_key) {
@@ -235,8 +300,15 @@ impl SyncInfo {
             let sync_info = self.map.get(key).unwrap();
             let sync_status = &sync_info.sync_status;
             let has_last_synced = sync_info.last_synced_state.is_some();
-            let states_match =
-                sync_info.last_synced_state.as_ref() == Some(&board_data.board_state);
+            // An unconfirmed revision may have been sent just before a
+            // reconnect. Resending it is harmless and closes the gap. A board
+            // that was never sent yet has no baseline to compare, so it keeps
+            // using the state comparison only.
+            let revision_pending = sync_info.last_synced_state.is_some()
+                && sync_info.local_revision > sync_info.acked_revision;
+            let states_match = sync_info.last_synced_state.as_ref()
+                == Some(&board_data.board_state)
+                && !revision_pending;
 
             debug!(
                 "Board {:?} - sync status: {:?}, has last synced: {}, states match: {}",
@@ -296,6 +368,17 @@ impl SyncInfo {
     }
 }
 
+/// Ask the synchronizer to publish the board again after an error.
+///
+/// Resetting to `Disconnected` makes `ProcessBoards` send the whole state with
+/// a PUT; that also recovers boards that never finished subscribing.
+pub fn retry_board_sync(owner_key: VerifyingKey) {
+    SYNC_INFO.with_mut(|info| {
+        info.update_sync_status(&owner_key, BoardSyncStatus::Disconnected);
+    });
+    crate::components::app::mark_needs_sync(owner_key);
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum BoardSyncStatus {
     Disconnected,
@@ -305,4 +388,61 @@ pub enum BoardSyncStatus {
     Subscribed,
 
     Error(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn board() -> VerifyingKey {
+        ed25519_dalek::SigningKey::generate(&mut rand::thread_rng()).verifying_key()
+    }
+
+    #[test]
+    fn a_change_syncs_until_the_node_confirms_it() {
+        let mut info = SyncInfo::new();
+        let board = board();
+        info.register_new_board(board);
+        assert!(!info.is_syncing(&board));
+
+        info.mark_local_change(&board);
+        assert!(info.is_syncing(&board));
+
+        info.mark_sent(&board);
+        assert!(info.is_syncing(&board));
+
+        info.mark_acked(&board);
+        assert!(!info.is_syncing(&board));
+        assert!(!info.has_unacked(&board));
+    }
+
+    #[test]
+    fn a_change_after_the_send_stays_pending() {
+        let mut info = SyncInfo::new();
+        let board = board();
+        info.register_new_board(board);
+
+        info.mark_local_change(&board);
+        info.mark_sent(&board);
+        // A second change lands while the first request is in flight.
+        info.mark_local_change(&board);
+        info.mark_acked(&board);
+
+        assert!(info.has_unacked(&board));
+        assert!(info.is_syncing(&board));
+    }
+
+    #[test]
+    fn a_confirmation_clears_a_send_error() {
+        let mut info = SyncInfo::new();
+        let board = board();
+        info.register_new_board(board);
+        info.mark_local_change(&board);
+        info.update_sync_status(&board, BoardSyncStatus::Error("offline".to_string()));
+
+        info.mark_sent(&board);
+        info.mark_acked(&board);
+
+        assert_eq!(info.sync_status_of(&board), Some(BoardSyncStatus::Subscribed));
+    }
 }
