@@ -426,6 +426,28 @@ pub fn AuditView() -> Element {
                             }
                         }
                     }
+                    details { class: "mt-3",
+                        summary { class: "text-xs text-text-muted cursor-pointer", "Developer" }
+                        p { class: "text-xs text-text-muted mt-1 mb-2",
+                            "Test hook: backdates the newest uploaded image by two hours so Retire unused can be exercised."
+                        }
+                        button {
+                            r#type: "button",
+                            class: "px-3 py-1.5 bg-surface hover:bg-surface-hover border border-border rounded-lg text-xs text-amber-300",
+                            onclick: move |_| {
+                                if crate::util::owned_images::backdate_newest_image() {
+                                    crate::components::app::toasts::show(
+                                        "Newest image backdated by two hours.",
+                                    );
+                                } else {
+                                    crate::components::app::toasts::show_error(
+                                        "No uploaded images to backdate.",
+                                    );
+                                }
+                            },
+                            "Backdate newest image"
+                        }
+                    }
                 }
             }
         }

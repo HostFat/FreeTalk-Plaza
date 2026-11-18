@@ -269,6 +269,24 @@ pub fn unreferenced(min_age_ms: i64) -> Vec<OwnedImage> {
         .collect()
 }
 
+/// Test hook: make the newest owned image look two hours old, so the
+/// "Retire unused" path can be exercised without waiting an hour.
+pub fn backdate_newest_image() -> bool {
+    let mut changed = false;
+    BOARDS.with_mut(|boards| {
+        if let Some(entry) = boards.owned_images.last_mut() {
+            entry.uploaded_at = now_ms() - 2 * 60 * 60 * 1000;
+            changed = true;
+        }
+    });
+    if changed {
+        OWNED_IMAGES_DIRTY.store(true, Ordering::SeqCst);
+        persist();
+        info!("Backdated the newest owned image for a test");
+    }
+    changed
+}
+
 /// Retire own uploads no board refers to and drop them from the index.
 ///
 /// `announce` is set for the manual action; the automatic pass after a page
