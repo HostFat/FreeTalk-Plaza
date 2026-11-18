@@ -7,7 +7,6 @@ use freenet_scaffold::ComposableState;
 use plaza_core::board_state::admin::{Admin, AdminsDelta, AuthorizedAdmin};
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
-use wasm_bindgen_futures::spawn_local;
 
 #[component]
 pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
@@ -77,8 +76,7 @@ pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
         };
 
         let current_board = board_data.owner_vk;
-        let board_key = board_data.board_key();
-        let self_sk = board_data.owner_key().clone();
+        let owner_sk = board_data.owner_key().clone();
         let board_state_clone = board_data.board_state.clone();
 
         let admin = Admin {
@@ -93,52 +91,34 @@ pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
         on_close.call(());
         selected_member.set(None);
 
-        spawn_local(async move {
-            // Serialize admin to CBOR for signing
-            let mut admin_bytes = Vec::new();
-            if let Err(e) = ciborium::ser::into_writer(&admin, &mut admin_bytes) {
-                error!("Failed to serialize admin for signing: {:?}", e);
-                crate::components::app::toasts::show_error(
-                    "Could not add the admin: the record could not be built",
-                );
-                return;
-            }
+        // The owner key is in memory: sign locally. The delegate may hold the
+        // profile key on a board with a separate owner, and its signature
+        // would not verify against the owner key.
+        let authorized_admin = AuthorizedAdmin::new(admin, &owner_sk);
+        let delta = ChatBoardStateV1Delta {
+            admin: Some(AdminsDelta::new(vec![authorized_admin])),
+            ..Default::default()
+        };
 
-            // Sign using delegate with fallback to local signing
-            let signature =
-                crate::signing::sign_admin_with_fallback(board_key, admin_bytes, &self_sk).await;
-
-            let authorized_admin = AuthorizedAdmin::with_signature(admin, signature);
-
-            let delta = ChatBoardStateV1Delta {
-                admin: Some(AdminsDelta::new(vec![authorized_admin])),
-                ..Default::default()
-            };
-
-            BOARDS.with_mut(|boards| {
-                if let Some(board_data_mut) = boards.map.get_mut(&current_board) {
-                    if let Err(e) = board_data_mut.board_state.apply_delta(
-                        &board_state_clone,
-                        &ChatBoardParametersV1 {
-                            owner: current_board,
-                        },
-                        &Some(delta),
-                    ) {
-                        error!("Failed to apply admin delta: {:?}", e);
-                        crate::components::app::toasts::show_error(format!(
-                            "Could not add the admin: {e}"
-                        ));
-                    } else {
-                        info!("Successfully added admin {:?}", member_id);
-                        crate::components::app::toasts::show(
-                            "Admin added. Syncing with the network…",
-                        );
-                    }
+        BOARDS.with_mut(|boards| {
+            if let Some(board_data_mut) = boards.map.get_mut(&current_board) {
+                if let Err(e) = board_data_mut.board_state.apply_delta(
+                    &board_state_clone,
+                    &ChatBoardParametersV1 {
+                        owner: current_board,
+                    },
+                    &Some(delta),
+                ) {
+                    error!("Failed to apply admin delta: {:?}", e);
+                    crate::components::app::toasts::show_error(format!(
+                        "Could not add the admin: {e}"
+                    ));
+                } else {
+                    info!("Successfully added admin {:?}", member_id);
+                    crate::components::app::toasts::show("Admin added. Syncing with the network…");
+                    mark_needs_sync(current_board);
                 }
-            });
-
-            mark_needs_sync(current_board);
-            info!("Marked board for synchronization after adding admin");
+            }
         });
     };
 

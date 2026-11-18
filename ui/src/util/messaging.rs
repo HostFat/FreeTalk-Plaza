@@ -538,7 +538,7 @@ pub async fn send_poll_vote(
 ///
 /// Only the board owner can do this: the revocation is signed with the owner's
 /// key and is permanent for that member.
-pub async fn revoke_admin(member_id: MemberId) -> Result<(), String> {
+pub fn revoke_admin(member_id: MemberId) -> Result<(), String> {
     use crate::components::app::CURRENT_BOARD;
 
     let (current_board, owner_sk, board_state_clone, generation) = {
@@ -563,7 +563,12 @@ pub async fn revoke_admin(member_id: MemberId) -> Result<(), String> {
         )
     };
 
-    let revocation = AuthorizedAdminRevocation::new(member_id, generation, &owner_sk);
+    let revocation = AuthorizedAdminRevocation::new_at(
+        member_id,
+        generation,
+        crate::util::get_current_system_time(),
+        &owner_sk,
+    );
     let delta = ChatBoardStateV1Delta {
         admin: Some(AdminsDelta::revocation(vec![revocation])),
         ..Default::default()

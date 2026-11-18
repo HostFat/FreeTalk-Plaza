@@ -424,10 +424,22 @@ pub struct AuthorizedAdminRevocation {
 
 impl AuthorizedAdminRevocation {
     pub fn new(member_id: MemberId, generation: u64, owner_sk: &SigningKey) -> Self {
+        Self::new_at(member_id, generation, SystemTime::now(), owner_sk)
+    }
+
+    /// Same as [`Self::new`] with an explicit signed time. Native tests use
+    /// `new`; the wasm client passes `get_current_system_time()`, because
+    /// `SystemTime::now()` is not available on that target.
+    pub fn new_at(
+        member_id: MemberId,
+        generation: u64,
+        signed_at: SystemTime,
+        owner_sk: &SigningKey,
+    ) -> Self {
         let revocation = AdminRevocation {
             member_id,
             generation,
-            signed_at: SystemTime::now(),
+            signed_at,
         };
         Self {
             signature: sign_struct(&revocation, owner_sk),

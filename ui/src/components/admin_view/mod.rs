@@ -17,7 +17,6 @@ use crate::components::trash_view::TrashView;
 use crate::util::format_utc_as_local_time;
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
-use wasm_bindgen_futures::spawn_local;
 
 #[component]
 pub fn AdminView(#[props(default)] tab: String) -> Element {
@@ -373,26 +372,20 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                                         r#type: "button",
                                         class: "px-3 py-1.5 text-xs text-red-400 hover:bg-red-500/10 rounded-lg transition-colors",
                                         onclick: move |_| {
-                                            spawn_local(async move {
-                                                match crate::util::messaging::revoke_admin(
-                                                    member_id,
-                                                )
-                                                .await
-                                                {
-                                                    Ok(()) => {
-                                                        admin_error.set(None);
-                                                        crate::components::app::toasts::show(
-                                                            "Admin removed. Syncing with the network…",
-                                                        );
-                                                    }
-                                                    Err(e) => {
-                                                        crate::components::app::toasts::show_error(
-                                                            format!("Could not remove the admin: {e}"),
-                                                        );
-                                                        admin_error.set(Some(e));
-                                                    }
+                                            match crate::util::messaging::revoke_admin(member_id) {
+                                                Ok(()) => {
+                                                    admin_error.set(None);
+                                                    crate::components::app::toasts::show(
+                                                        "Admin removed. Syncing with the network…",
+                                                    );
                                                 }
-                                            });
+                                                Err(e) => {
+                                                    crate::components::app::toasts::show_error(
+                                                        format!("Could not remove the admin: {e}"),
+                                                    );
+                                                    admin_error.set(Some(e));
+                                                }
+                                            }
                                         },
                                         "Remove"
                                     }
