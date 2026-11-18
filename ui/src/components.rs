@@ -5,6 +5,7 @@ pub mod app;
 pub mod audit_view;
 pub mod board_list;
 pub mod board_sync_chip;
+pub mod lightbox;
 pub mod category_create_modal;
 pub mod category_view;
 pub mod conversation;

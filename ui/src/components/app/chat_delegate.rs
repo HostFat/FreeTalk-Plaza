@@ -316,6 +316,31 @@ static SAVE_AGAIN: AtomicBool = AtomicBool::new(false);
 pub(crate) static BOARDS_READ_FOR_MERGE: AtomicBool = AtomicBool::new(false);
 
 /// Save boards to the delegate storage
+/// Save and wait for the write to finish, including a save already in flight.
+/// Restore uses this so the reload cannot race the delegate write.
+pub async fn save_boards_and_wait() -> Result<(), String> {
+    for _ in 0..400 {
+        if !SAVE_RUNNING.load(Ordering::SeqCst) {
+            break;
+        }
+        crate::util::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    save_boards_to_delegate().await?;
+    // If the call was coalesced into an earlier save, wait and write once more
+    // with the caller's state.
+    crate::util::sleep(std::time::Duration::from_millis(200)).await;
+    if SAVE_RUNNING.load(Ordering::SeqCst) || SAVE_AGAIN.load(Ordering::SeqCst) {
+        for _ in 0..400 {
+            if !SAVE_RUNNING.load(Ordering::SeqCst) {
+                break;
+            }
+            crate::util::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        save_boards_to_delegate().await?;
+    }
+    Ok(())
+}
+
 pub async fn save_boards_to_delegate() -> Result<(), String> {
     if SAVE_RUNNING.swap(true, Ordering::SeqCst) {
         SAVE_AGAIN.store(true, Ordering::SeqCst);

@@ -93,6 +93,71 @@ pub fn AboutModal() -> Element {
                     p { class: "text-xs",
                         "To check whether this site is current, compare the commit above with the latest commit in the repository."
                     }
+                    div { class: "border-t border-border pt-3 space-y-2",
+                        p { class: "text-xs",
+                            "A backup contains the identities, private-board secrets, drafts and settings stored on this device. Board content stays on Freenet; uploaded image bytes and composer queues are not included. Keep it private."
+                        }
+                        div { class: "flex flex-wrap gap-2",
+                            button {
+                                r#type: "button",
+                                class: "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg transition-colors",
+                                onclick: move |_| match crate::util::backup::download() {
+                                    Ok(()) => crate::components::app::toasts::show(
+                                        "Backup downloaded.",
+                                    ),
+                                    Err(error) => crate::components::app::toasts::show_error(format!(
+                                        "Could not create the backup: {error}"
+                                    )),
+                                },
+                                "Download backup"
+                            }
+                            label {
+                                class: "flex flex-col gap-1 text-xs text-text-muted",
+                                span { "Restore backup" }
+                                input {
+                                    id: "plaza-backup-file",
+                                    r#type: "file",
+                                    accept: ".cbor",
+                                    class: "block w-full text-xs text-text-muted",
+                                    onchange: move |_| {
+                                        wasm_bindgen_futures::spawn_local(async move {
+                                            let Some(file) = crate::util::backup::selected_file() else {
+                                                return;
+                                            };
+                                            let Ok(buffer) = wasm_bindgen_futures::JsFuture::from(
+                                                file.array_buffer(),
+                                            )
+                                            .await
+                                            else {
+                                                crate::components::app::toasts::show_error(
+                                                    "Could not read the backup file.",
+                                                );
+                                                return;
+                                            };
+                                            let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+                                            match crate::util::backup::import_bytes(&bytes).await {
+                                                Ok(count) => {
+                                                    crate::components::app::toasts::show(format!(
+                                                        "Restored {count} board(s). Reloading…"
+                                                    ));
+                                                    crate::util::sleep(std::time::Duration::from_millis(800)).await;
+                                                    if let Some(window) = window() {
+                                                        let _ = window.location().reload();
+                                                    }
+                                                }
+                                                Err(error) => {
+                                                    crate::components::app::toasts::show_error(format!(
+                                                        "Could not restore: {error}"
+                                                    ));
+                                                }
+                                            }
+                                        });
+                                    },
+                                }
+                                "Restore backup"
+                            }
+                        }
+                    }
                     p { class: "text-xs",
                         "Source code: "
                         a {

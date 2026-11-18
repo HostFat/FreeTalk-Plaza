@@ -147,6 +147,15 @@ pub static NEEDS_SYNC: GlobalSignal<std::collections::HashSet<VerifyingKey>> =
 /// its timeout even when no board state changed.
 pub static SYNC_TICK: GlobalSignal<u64> = Global::new(|| 0);
 
+/// Image shown in the full-screen viewer, if any.
+#[derive(Clone, PartialEq)]
+pub struct LightboxState {
+    pub src: String,
+    pub alt: String,
+}
+
+pub static LIGHTBOX: GlobalSignal<Option<LightboxState>> = Global::new(|| None);
+
 /// Tracks the current category being viewed (for auto-parenting new posts/categories)
 pub static CURRENT_CATEGORY: GlobalSignal<CurrentCategoryContext> =
     Global::new(|| CurrentCategoryContext::default());
@@ -402,22 +411,22 @@ pub fn App() -> Element {
                 Router::<Route> {}
             }
             toasts::ToastContainer {}
-            // Brand footer, centered under the board content.
-            if CURRENT_BOARD.read().owner_key.is_some() {
-                button {
-                    class: "flex-shrink-0 flex items-center justify-center gap-2 py-2 border-t border-border hover:bg-surface/50 transition-colors",
-                    title: "About FreeTalk Plaza",
-                    onclick: move |_| *ABOUT_MODAL.write() = true,
-                    img {
-                        src: asset!("/assets/plaza_logo.svg"),
-                        class: "w-7 h-7 flex-shrink-0",
-                        alt: "",
-                    }
-                    div { class: "flex flex-col leading-tight text-left",
-                        span { class: "text-sm font-semibold text-text", "FreeTalk Plaza" }
-                        span { class: "text-[10px] uppercase tracking-wide text-text-muted",
-                            "Forums on Freenet"
-                        }
+            crate::components::lightbox::Lightbox {}
+            // Brand footer, centered under the board content. It is also the
+            // About entry on the home page, where no board is selected.
+            button {
+                class: "flex-shrink-0 flex items-center justify-center gap-2 py-2 border-t border-border hover:bg-surface/50 transition-colors",
+                title: "About FreeTalk Plaza",
+                onclick: move |_| *ABOUT_MODAL.write() = true,
+                img {
+                    src: asset!("/assets/plaza_logo.svg"),
+                    class: "w-7 h-7 flex-shrink-0",
+                    alt: "",
+                }
+                div { class: "flex flex-col leading-tight text-left",
+                    span { class: "text-sm font-semibold text-text", "FreeTalk Plaza" }
+                    span { class: "text-[10px] uppercase tracking-wide text-text-muted",
+                        "Forums on Freenet"
                     }
                 }
             }

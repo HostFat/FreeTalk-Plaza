@@ -9,6 +9,7 @@ pub mod ecies;
 pub mod image_meta;
 pub mod image_processing;
 pub mod image_retire;
+pub mod backup;
 pub mod image_tags;
 pub mod images;
 pub mod markdown;

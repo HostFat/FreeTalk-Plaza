@@ -223,8 +223,21 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
                         img {
                             src: "{created}",
                             alt: "{alt}",
-                            class: "rounded-md max-h-[70vh] object-contain mx-auto",
+                            class: "rounded-md max-h-[70vh] object-contain mx-auto cursor-zoom-in",
                             style: "width: {display}%",
+                            onclick: {
+                                let src = created.clone();
+                                let alt = alt.clone();
+                                move |event: MouseEvent| {
+                                    event.stop_propagation();
+                                    *crate::components::app::LIGHTBOX.write() = Some(
+                                        crate::components::app::LightboxState {
+                                            src: src.clone(),
+                                            alt: alt.clone(),
+                                        },
+                                    );
+                                }
+                            },
                         }
                     } else {
                         div { class: "flex items-center gap-2 text-xs text-text-muted",
