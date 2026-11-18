@@ -253,7 +253,10 @@ pub fn get_all_messages(
                     old_category_secrets,
                 )
             });
-        let content_html = text_to_html(&crate::util::image_tags::strip(&content_text));
+        let content_html = text_to_html(&crate::util::image_tags::strip_valid(
+            &content_text,
+            message.message.images.len(),
+        ));
         let title_text = decrypt_message_title(
             &message.message.content,
             secrets,

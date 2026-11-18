@@ -2079,6 +2079,13 @@ pub struct Boards {
     /// any board.
     #[serde(default)]
     pub blocked_image_hashes: Vec<[u8; 32]>,
+    /// Renew old uploaded images automatically. Off by default; at most a
+    /// small batch per day when on.
+    #[serde(default)]
+    pub auto_renew_images: bool,
+    /// Last automatic renewal pass, in ms since the Unix epoch.
+    #[serde(default)]
+    pub last_auto_renew_at: i64,
     /// Images this device uploaded, used for renewal and reuse.
     ///
     /// Kept in memory only: the entries carry raw blob state up to 24 MiB and
@@ -2117,6 +2124,8 @@ impl Boards {
             removed: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
             owned_images: Vec::new(),
         };
         let mut dropped = 0usize;
@@ -2479,6 +2488,8 @@ mod tests {
             removed: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
             owned_images: vec![owned.clone()],
         };
         let mut buffer = Vec::new();
@@ -2520,6 +2531,8 @@ mod tests {
             removed: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
             owned_images: Vec::new(),
         };
         let key =
@@ -2655,6 +2668,8 @@ mod tests {
             removed: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
             owned_images: Vec::new(),
         };
         let key = boards.create_new_board_with_name(
@@ -2699,6 +2714,8 @@ mod tests {
                 removed: Vec::new(),
                 migrated_boards: vec![],
                 blocked_image_hashes: Vec::new(),
+                auto_renew_images: false,
+                last_auto_renew_at: 0,
                 owned_images: Vec::new(),
             };
             let key = boards.create_new_board_with_name(
@@ -2742,6 +2759,8 @@ mod tests {
             removed: Vec::new(),
             migrated_boards: vec![],
             blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
             owned_images: Vec::new(),
         };
 
@@ -2962,6 +2981,8 @@ mod tests {
             removed: Vec::new(),
             migrated_boards: vec![],
             blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
             owned_images: Vec::new(),
         };
         let key = boards.create_new_board_with_name(

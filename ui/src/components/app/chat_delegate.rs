@@ -260,7 +260,11 @@ pub(crate) static LOCAL_RESET: AtomicBool = AtomicBool::new(false);
 /// for a response would collide with a pending Get for the same key.
 pub async fn reset_local_data() -> Result<(), String> {
     LOCAL_RESET.store(true, Ordering::SeqCst);
-    for key in [BOARDS_STORAGE_KEY, OWNED_IMAGES_STORAGE_KEY] {
+    for key in [
+        BOARDS_STORAGE_KEY,
+        OWNED_IMAGES_STORAGE_KEY,
+        PENDING_UPLOADS_STORAGE_KEY,
+    ] {
         let sent = fire_delegate_request(ChatDelegateRequestMsg::DeleteRequest {
             key: ChatDelegateKey::new(key.to_vec()),
         })

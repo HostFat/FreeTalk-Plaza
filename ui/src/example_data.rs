@@ -44,6 +44,8 @@ pub fn create_example_boards() -> Boards {
         removed: Vec::new(),
         migrated_boards: Vec::new(),
         blocked_image_hashes: Vec::new(),
+        auto_renew_images: false,
+        last_auto_renew_at: 0,
         owned_images: Vec::new(),
     }
 }

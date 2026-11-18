@@ -20,8 +20,10 @@ use wasm_bindgen_futures::spawn_local;
 pub const MAX_OWNED_BYTES: usize = 24 * 1024 * 1024;
 /// A blob untouched for this long is put back on the network.
 const RENEW_AFTER_MS: i64 = 7 * 24 * 60 * 60 * 1000;
-
-static RENEW_STARTED: AtomicBool = AtomicBool::new(false);
+/// The automatic pass runs at most once a day.
+const AUTO_RENEW_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
+/// And renews at most this many images per pass.
+const MAX_AUTO_RENEWALS: usize = 10;
 /// The image index changed and its own delegate key has to be rewritten.
 static OWNED_IMAGES_DIRTY: AtomicBool = AtomicBool::new(false);
 /// The boards blob still carried the index when it was loaded.
@@ -64,7 +66,7 @@ pub fn mark_dirty() {
 pub fn apply_loaded(loaded: Option<Vec<OwnedImage>>) {
     let Some(loaded) = loaded else { return };
     BOARDS.with_mut(|boards| merge_entries(&mut boards.owned_images, loaded));
-    renew_due_entries();
+    renew_if_due();
 }
 
 /// Pure merge used by the load path and its test.
@@ -315,22 +317,37 @@ pub fn retire_unused(announce: bool) {
     });
 }
 
-/// Renew the uploads that have not been touched for a week. Runs once per load.
+/// Renew a small batch of old uploads when the user enabled the automatic
+/// pass. Off by default; at most once a day and at most 10 images per pass.
 pub fn renew_if_due() {
-    if RENEW_STARTED.swap(true, Ordering::SeqCst) {
+    let (enabled, last) = {
+        let boards = BOARDS.read();
+        (boards.auto_renew_images, boards.last_auto_renew_at)
+    };
+    if !enabled {
         return;
     }
-    renew_due_entries();
+    let now = now_ms();
+    if last > 0 && now - last < AUTO_RENEW_INTERVAL_MS {
+        return;
+    }
+    BOARDS.with_mut(|boards| boards.last_auto_renew_at = now);
+    spawn_local(async {
+        if let Err(error) = save_boards_to_delegate().await {
+            warn!("Could not save the automatic renewal time: {error}");
+        }
+    });
+    renew_due_entries(MAX_AUTO_RENEWALS);
 }
 
-/// Renewal check for the index, also run once it finishes loading.
-fn renew_due_entries() {
+fn renew_due_entries(limit: usize) {
     let now = now_ms();
     let due: Vec<OwnedImage> = BOARDS
         .read()
         .owned_images
         .iter()
         .filter(|entry| now - entry.renewed_at >= RENEW_AFTER_MS)
+        .take(limit)
         .cloned()
         .collect();
     for entry in due {

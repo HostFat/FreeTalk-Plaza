@@ -369,6 +369,44 @@ pub fn AuditView() -> Element {
         }
         div { class: "bg-surface rounded-lg p-4 mt-4",
             h2 { class: "text-lg font-semibold text-text mb-3", "Your uploaded images" }
+            div { class: "flex flex-wrap items-center justify-between gap-3 mb-3",
+                label { class: "flex items-center gap-2 text-sm text-text",
+                    input {
+                        r#type: "checkbox",
+                        checked: BOARDS.read().auto_renew_images,
+                        onchange: move |event| {
+                            let enabled = event.checked();
+                            BOARDS.with_mut(|boards| {
+                                boards.auto_renew_images = enabled;
+                                // A fresh opt-in runs now instead of waiting a day.
+                                boards.last_auto_renew_at = 0;
+                            });
+                            spawn_local(async {
+                                if let Err(error) =
+                                    crate::components::app::chat_delegate::save_boards_to_delegate()
+                                        .await
+                                {
+                                    crate::components::app::toasts::show_error(format!(
+                                        "Could not save the renewal setting: {error}"
+                                    ));
+                                }
+                            });
+                            if enabled {
+                                crate::util::owned_images::renew_if_due();
+                            }
+                            crate::components::app::toasts::show(if enabled {
+                                "Automatic renewal on: up to 10 images a day."
+                            } else {
+                                "Automatic renewal off."
+                            });
+                        },
+                    }
+                    span { "Auto-renew old images" }
+                }
+                span { class: "text-xs text-text-muted",
+                    "Off by default; at most 10 images per day."
+                }
+            }
             {
                 let unused = crate::util::owned_images::unreferenced(60 * 60 * 1000).len();
                 rsx! {

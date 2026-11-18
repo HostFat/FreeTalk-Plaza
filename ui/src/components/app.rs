@@ -275,7 +275,6 @@ pub fn App() -> Element {
     use_effect(move || {
         if *BOARDS_LOADED.read() {
             crate::util::pending_send::resume_all();
-            crate::util::owned_images::renew_if_due();
             // Once the board state has settled, retire own uploads that no
             // board references anymore.
             crate::util::safe_spawn_local(async {
@@ -783,6 +782,8 @@ fn initial_boards() -> Boards {
         removed: Vec::new(),
         migrated_boards: Vec::new(),
         blocked_image_hashes: Vec::new(),
+        auto_renew_images: false,
+        last_auto_renew_at: 0,
         owned_images: Vec::new(),
     }
 }

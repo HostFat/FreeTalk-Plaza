@@ -93,8 +93,8 @@ pub const MAX_PENDING_BYTES: usize = 24 * 1024 * 1024;
 static PENDING_UPLOADS_DIRTY: AtomicBool = AtomicBool::new(false);
 /// The board map still carried the queue when it was loaded.
 static LEGACY_PENDING: AtomicBool = AtomicBool::new(false);
-/// The separate key has been read at least once.
-static PENDING_LOADED: AtomicBool = AtomicBool::new(false);
+/// A read of the separate key is in flight.
+static PENDING_LOADING: AtomicBool = AtomicBool::new(false);
 
 pub fn mark_dirty() {
     PENDING_UPLOADS_DIRTY.store(true, Ordering::SeqCst);
@@ -115,7 +115,6 @@ pub fn take_legacy() -> bool {
 /// Merge the stored queues and tombstones into the boards. Existing records
 /// win; entries from another tab are added when the cap allows.
 pub fn apply_store(store: Option<PendingUploadsStoreV1>) {
-    PENDING_LOADED.store(true, Ordering::SeqCst);
     let Some(store) = store else { return };
     let entry_count: usize = store.queues.values().map(Vec::len).sum();
     info!(
@@ -166,11 +165,18 @@ pub fn apply_store(store: Option<PendingUploadsStoreV1>) {
     info!("Pending upload queue now holds {total} record(s)");
 }
 
-/// Read the queue on demand. The composer calls this before opening so a
-/// missed background load (or a queue written by another tab) does not hide
-/// the uploads.
+/// Read the queue from the delegate. The composer calls this on every open so
+/// an upload added by another tab shows up without a reload.
 pub async fn ensure_loaded() {
-    if PENDING_LOADED.load(Ordering::SeqCst) {
+    if PENDING_LOADING.swap(true, Ordering::SeqCst) {
+        // Wait for the request already in flight; the caller can then list the
+        // queue that request applied.
+        for _ in 0..40 {
+            crate::util::sleep(std::time::Duration::from_millis(50)).await;
+            if !PENDING_LOADING.load(Ordering::SeqCst) {
+                return;
+            }
+        }
         return;
     }
     match send_delegate_request(ChatDelegateRequestMsg::GetRequest {
@@ -185,6 +191,7 @@ pub async fn ensure_loaded() {
         Ok(other) => warn!("Unexpected response for pending uploads: {other:?}"),
         Err(error) => warn!("Could not load the pending uploads: {error}"),
     }
+    PENDING_LOADING.store(false, Ordering::SeqCst);
 }
 
 /// Write the composer queues to their own key when they changed. The caller

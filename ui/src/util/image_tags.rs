@@ -177,9 +177,31 @@ pub fn strip(text: &str) -> String {
         .to_string()
 }
 
+/// Like [`strip`], but a tag that points at no image stays visible, matching
+/// the expanded message.
+pub fn strip_valid(text: &str, image_count: usize) -> String {
+    parse(text)
+        .into_iter()
+        .map(|segment| match segment {
+            Segment::Text(value) => value,
+            Segment::Image { index, .. } if index < image_count => String::new(),
+            Segment::Image { index, align } => {
+                let suffix = match align {
+                    ImageAlign::Left => " left",
+                    ImageAlign::Center => "",
+                    ImageAlign::Right => " right",
+                };
+                format!("[img={}{suffix}]", index + 1)
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse, strip, tagged_indices, Segment};
+    use super::{parse, strip, strip_valid, tagged_indices, Segment};
     use plaza_core::board_state::images::ImageAlign;
 
     #[test]
@@ -225,6 +247,13 @@ mod tests {
         let text = "a [img=1] b [img=3 left] c";
         assert_eq!(tagged_indices(text), [0, 2].into_iter().collect());
         assert_eq!(strip(text), "a  b  c");
+    }
+
+    #[test]
+    fn a_preview_keeps_only_the_tags_without_an_image() {
+        let text = "a [img=1] b [img=3 left] c";
+        assert_eq!(strip_valid(text, 2), "a  b [img=3 left] c");
+        assert_eq!(strip_valid(text, 3), "a  b  c");
     }
 
     #[test]
