@@ -173,19 +173,15 @@ pub async fn set_up_chat_delegate() -> Result<(), String> {
     }
 }
 
-/// Fire a delegate Get without waiting for the response. The response is
+/// Fire a delegate request without waiting for the response. The response is
 /// handled by the response_handler through the message loop, so this is safe
-/// to call from inside it.
-async fn fire_delegate_get(key: &[u8]) {
-    let request = ChatDelegateRequestMsg::GetRequest {
-        key: ChatDelegateKey::new(key.to_vec()),
-    };
-
+/// to call from inside it. Returns whether the request reached the node.
+async fn fire_delegate_request(request: ChatDelegateRequestMsg) -> bool {
     // Serialize and send the request without waiting for response
     let mut payload = Vec::new();
     if let Err(e) = ciborium::ser::into_writer(&request, &mut payload) {
-        error!("Failed to serialize delegate Get request: {}", e);
-        return;
+        error!("Failed to serialize delegate request: {}", e);
+        return false;
     }
 
     let delegate_code = DelegateCode::from(
@@ -215,29 +211,56 @@ async fn fire_delegate_get(key: &[u8]) {
     };
 
     if let Err(e) = api_result {
-        error!(
-            "Failed to send delegate Get for {}: {}",
-            String::from_utf8_lossy(key),
-            e
-        );
+        error!("Failed to send delegate request: {}", e);
+        false
     } else {
-        info!(
-            "Delegate Get for {} sent, response will be handled by message loop",
-            String::from_utf8_lossy(key)
-        );
+        info!("Delegate request sent, response will be handled by message loop");
+        true
     }
 }
 
 /// Fire a request to load boards from delegate storage without waiting for response.
 async fn fire_load_boards_request() {
     info!("Firing request to load boards from delegate storage");
-    fire_delegate_get(BOARDS_STORAGE_KEY).await;
+    let _ = fire_delegate_request(ChatDelegateRequestMsg::GetRequest {
+        key: ChatDelegateKey::new(BOARDS_STORAGE_KEY.to_vec()),
+    })
+    .await;
 }
 
 /// Load the image index after the board list is already on screen.
 pub(crate) async fn fire_load_owned_images_request() {
     info!("Firing request to load owned images from delegate storage");
-    fire_delegate_get(OWNED_IMAGES_STORAGE_KEY).await;
+    let _ = fire_delegate_request(ChatDelegateRequestMsg::GetRequest {
+        key: ChatDelegateKey::new(OWNED_IMAGES_STORAGE_KEY.to_vec()),
+    })
+    .await;
+}
+
+/// True while a reset deletes the local stores; saves must not rewrite them.
+pub(crate) static LOCAL_RESET: AtomicBool = AtomicBool::new(false);
+
+/// Delete the local board list and image index. The boards stay on the
+/// network; this only clears this device.
+///
+/// The deletes are fire-and-forget: the app reloads right after, and waiting
+/// for a response would collide with a pending Get for the same key.
+pub async fn reset_local_data() -> Result<(), String> {
+    LOCAL_RESET.store(true, Ordering::SeqCst);
+    for key in [BOARDS_STORAGE_KEY, OWNED_IMAGES_STORAGE_KEY] {
+        let sent = fire_delegate_request(ChatDelegateRequestMsg::DeleteRequest {
+            key: ChatDelegateKey::new(key.to_vec()),
+        })
+        .await;
+        if !sent {
+            LOCAL_RESET.store(false, Ordering::SeqCst);
+            return Err(format!(
+                "could not clear {}",
+                String::from_utf8_lossy(key)
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Load boards from the delegate storage (with response waiting - use outside message loop only)
@@ -294,6 +317,12 @@ pub async fn save_boards_to_delegate() -> Result<(), String> {
 }
 
 async fn save_boards_once() -> Result<(), String> {
+    // A reset is deleting the stores; a save now would put them back.
+    if LOCAL_RESET.load(Ordering::SeqCst) {
+        info!("Skipping delegate save during reset");
+        return Ok(());
+    }
+
     // Never write before the initial load has completed: at startup `BOARDS` is
     // empty and `CURRENT_BOARD` may already be set from the URL, so a save here
     // would store an empty map and wipe the boards kept in the delegate.

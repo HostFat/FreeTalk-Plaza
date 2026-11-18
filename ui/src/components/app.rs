@@ -576,6 +576,15 @@ fn BoardGate(board_id: String, children: Element) -> Element {
                 },
                 "Go to Home"
             }
+            button {
+                r#type: "button",
+                class: "mt-2 px-4 py-2 border border-red-500/50 text-red-400 hover:bg-red-500/10 rounded-lg transition-colors text-sm",
+                onclick: move |_| crate::util::reset::confirm_and_reset(),
+                "Reset local data"
+            }
+            p { class: "text-xs text-text-muted mt-3 max-w-md",
+                "Clears the boards and image data stored on this device. The boards stay online; you need their identity token to come back."
+            }
         }
     }
 }

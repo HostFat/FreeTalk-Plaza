@@ -22,6 +22,7 @@ pub mod owned_images;
 pub mod pending_uploads;
 pub mod pending_send;
 pub mod pq;
+pub mod reset;
 pub mod retry;
 pub mod spectator;
 pub mod subscriptions;

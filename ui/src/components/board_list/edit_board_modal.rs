@@ -319,6 +319,16 @@ pub fn EditBoardModal() -> Element {
                             }
                         }
                     }
+                    div { class: "mt-4 pt-4 border-t border-border",
+                        p { class: "text-xs text-text-muted mb-2",
+                            "Clear every board and image stored on this device. The boards stay online; you need their identity token to come back."
+                        }
+                        button {
+                            class: "px-4 py-2 border border-red-500/50 text-red-400 hover:bg-red-500/10 rounded-lg transition-colors text-sm",
+                            onclick: move |_| crate::util::reset::confirm_and_reset(),
+                            "Reset all local data"
+                        }
+                    }
                     // Close button
                     button {
                         class: "absolute top-3 right-3 p-1 text-text-muted hover:text-text transition-colors",
