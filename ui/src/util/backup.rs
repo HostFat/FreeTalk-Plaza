@@ -60,6 +60,7 @@ pub async fn import_bytes(bytes: &[u8]) -> Result<usize, String> {
         backup.boards.map.len(),
         *crate::components::app::BOARDS_LOADED.read()
     );
+    let imported_keys: Vec<VerifyingKey> = backup.boards.map.keys().copied().collect();
     let mut imported = 0usize;
     BOARDS.with_mut(|boards| {
         for (key, mut board) in backup.boards.map {
@@ -72,6 +73,9 @@ pub async fn import_bytes(bytes: &[u8]) -> Result<usize, String> {
             boards.map.insert(key, board);
             imported += 1;
         }
+        // An imported board must not stay tombstoned from an earlier removal:
+        // the next load would drop the copy the backup just restored.
+        boards.removed.retain(|key| !imported_keys.contains(key));
         boards.auto_renew_images = backup.boards.auto_renew_images;
         boards.last_auto_renew_at = backup.boards.last_auto_renew_at;
         for hash in backup.boards.blocked_image_hashes {
@@ -83,6 +87,11 @@ pub async fn import_bytes(bytes: &[u8]) -> Result<usize, String> {
             boards.current_board_key = backup.boards.current_board_key;
         }
     });
+    if imported > 0 {
+        // The store is no longer empty; an empty-map guard must not block this
+        // save if a concurrent load produced no boards.
+        *crate::components::app::DELEGATE_HAD_BOARDS.write() = true;
+    }
     dioxus::logger::tracing::info!("Backup imported {imported} boards; saving");
     crate::components::app::chat_delegate::save_boards_and_wait().await?;
     dioxus::logger::tracing::info!(
