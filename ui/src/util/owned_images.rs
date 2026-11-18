@@ -316,7 +316,7 @@ fn renew_due_entries() {
         .collect();
     for entry in due {
         spawn_local(async move {
-            renew_one(entry).await;
+            renew_one(entry, false).await;
         });
     }
 }
@@ -331,15 +331,21 @@ pub fn renew_now(instance: [u8; 32]) {
         .cloned();
     if let Some(entry) = entry {
         spawn_local(async move {
-            renew_one(entry).await;
+            renew_one(entry, true).await;
         });
     }
 }
 
-async fn renew_one(entry: OwnedImage) {
+/// Renew one upload. `announce` is set for the manual action; the automatic
+/// pass only reports failures, so a page load does not fill the screen with
+/// one toast per image.
+async fn renew_one(entry: OwnedImage, announce: bool) {
     for chunk in &entry.chunks {
         if let Err(error) = put_raw_blob(&chunk.parameters, &chunk.state).await {
             warn!("Could not renew a chunk of {:?}: {error}", entry.image.instance);
+            crate::components::app::toasts::show_error(format!(
+                "Could not renew the image: {error}"
+            ));
             return;
         }
         // Give the node a moment between contracts.
@@ -347,6 +353,9 @@ async fn renew_one(entry: OwnedImage) {
     }
     if let Err(error) = put_raw_blob(&entry.parameters, &entry.state).await {
         warn!("Could not renew image {:?}: {error}", entry.image.instance);
+        crate::components::app::toasts::show_error(format!(
+            "Could not renew the image: {error}"
+        ));
         return;
     }
     BOARDS.with_mut(|boards| {
@@ -361,6 +370,9 @@ async fn renew_one(entry: OwnedImage) {
     OWNED_IMAGES_DIRTY.store(true, Ordering::SeqCst);
     persist();
     info!("Renewed image {:?}", entry.image.instance);
+    if announce {
+        crate::components::app::toasts::show("Image renewed on the network.");
+    }
 }
 
 #[cfg(test)]

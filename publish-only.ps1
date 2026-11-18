@@ -12,7 +12,10 @@ param(
     # Directory with web.contract.wasm, webapp.parameters, webapp.state.
     [string]$StateDir = (Join-Path $env:APPDATA 'freetalk'),
     # Optional explicit path to fdev(.exe).
-    [string]$Fdev
+    [string]$Fdev,
+    # WebSocket API port of another node (for example the Oracle tunnel on
+    # 7511). Zero publishes to the default node.
+    [int]$ApiPort = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -96,7 +99,11 @@ if ($newestSource -and (Test-Path $metadata)) {
     }
 }
 
-$arguments = @(
+$arguments = @()
+if ($ApiPort -gt 0) {
+    $arguments += @('--port', "$ApiPort")
+}
+$arguments += @(
     'publish',
     '--code', $code,
     '--parameters', $parameters,

@@ -12,6 +12,7 @@
 #   pwsh ./deploy-fast.ps1
 #   pwsh ./deploy-fast.ps1 -Version 52
 #   pwsh ./deploy-fast.ps1 -SkipCss
+#   pwsh ./deploy-fast.ps1 -ExtraApiPorts 7511   # also publish to the Oracle tunnel
 
 [CmdletBinding()]
 param(
@@ -29,6 +30,10 @@ param(
     # contract key follows the wasm, so a new build re-keys every image; keep
     # the old bundle unless this is deliberate.
     [switch]$AcceptBlobRekey,
+    # Additional WebSocket API ports to publish the signed bundle to, for
+    # example a tunnel to the Oracle node (7511). The default node is always
+    # published first.
+    [int[]]$ExtraApiPorts = @(),
     [string]$StateDir = (Join-Path $env:APPDATA 'freetalk'),
     [string]$TargetDir = (Join-Path $PSScriptRoot 'target\dx-fast')
 )
@@ -316,5 +321,12 @@ Set-Content -Path $versionFile -Value ($chosenVersion + 1)
 Write-Host "Publishing..."
 & (Join-Path $repoRoot 'publish-only.ps1') -StateDir $StateDir -Fdev $fdev
 if ($LASTEXITCODE -ne 0) { throw "publish-only failed." }
+
+foreach ($apiPort in $ExtraApiPorts) {
+    if ($apiPort -le 0) { continue }
+    Write-Host "Publishing to API port $apiPort..."
+    & (Join-Path $repoRoot 'publish-only.ps1') -StateDir $StateDir -Fdev $fdev -ApiPort $apiPort
+    if ($LASTEXITCODE -ne 0) { throw "publish-only failed for API port $apiPort." }
+}
 
 Write-Host "Deployed version $chosenVersion."
