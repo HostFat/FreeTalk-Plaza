@@ -181,6 +181,7 @@ mod tests {
             time: chrono::Utc.timestamp_millis_opt(time_ms).unwrap(),
             time_clamped: false,
             edited: false,
+            edit_history: Vec::new(),
             reactions: HashMap::new(),
             reply_to_message_id: reply_to,
             reply_to_author: None,

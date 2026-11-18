@@ -79,6 +79,16 @@ impl PollData {
     }
 }
 
+/// One saved version of an edited message, reconstructed from the signed edit
+/// actions still present in the board state.
+#[derive(Clone, PartialEq, Debug)]
+pub struct EditVersion {
+    pub time: DateTime<Utc>,
+    pub author_name: String,
+    pub title: String,
+    pub text: String,
+}
+
 /// A single message for display
 #[derive(Clone, PartialEq, Debug)]
 pub struct MessageData {
@@ -92,6 +102,8 @@ pub struct MessageData {
     pub time: DateTime<Utc>,
     pub time_clamped: bool,
     pub edited: bool,
+    /// Original content first, then each edit that is still in the state.
+    pub edit_history: Vec<EditVersion>,
     pub reactions: HashMap<String, Vec<MemberId>>,
     pub reply_to_message_id: Option<MessageId>,
     pub reply_to_author: Option<String>,
@@ -196,6 +208,54 @@ pub fn get_all_messages(
         if replace {
             by_voter.insert(ballot.voter, ballot);
         }
+    }
+
+    let name_of = |author: MemberId| -> String {
+        state
+            .member_info
+            .member_info
+            .iter()
+            .find(|info| info.member_info.member_id == author)
+            .map(|info| {
+                match unseal_bytes_with_secrets(&info.member_info.preferred_nickname, secrets) {
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                    Err(_) => info.member_info.preferred_nickname.to_string_lossy(),
+                }
+            })
+            .unwrap_or_else(|| "Unknown".to_string())
+    };
+
+    // Edit actions stay in `recent_messages`; each one carries the new content
+    // and the signed author/time. The original message is the first version.
+    let mut edits_by_target: HashMap<MessageId, Vec<EditVersion>> = HashMap::new();
+    for message in &state.recent_messages.messages {
+        let Some(action) = decrypt_action(
+            &message.message.content,
+            secrets,
+            category_secrets,
+            old_category_secrets,
+        ) else {
+            continue;
+        };
+        if action.action_type
+            != plaza_core::board_state::content::ACTION_TYPE_EDIT
+        {
+            continue;
+        }
+        if let Some(payload) = action.edit_payload() {
+            edits_by_target
+                .entry(action.target.clone())
+                .or_default()
+                .push(EditVersion {
+                    time: DateTime::<Utc>::from(message.message.time),
+                    author_name: name_of(message.message.author),
+                    title: payload.new_title,
+                    text: payload.new_text,
+                });
+        }
+    }
+    for versions in edits_by_target.values_mut() {
+        versions.sort_by_key(|version| version.time);
     }
 
     for message in state.recent_messages.display_messages() {
@@ -376,6 +436,31 @@ pub fn get_all_messages(
             }
         });
 
+        let edit_history = match edits_by_target.get(&message_id) {
+            Some(versions) => {
+                let mut history = Vec::with_capacity(versions.len() + 1);
+                history.push(EditVersion {
+                    time: message_time,
+                    author_name: author_name.clone(),
+                    title: decrypt_message_title(
+                        &message.message.content,
+                        secrets,
+                        category_secrets,
+                        old_category_secrets,
+                    ),
+                    text: decrypt_message_content(
+                        &message.message.content,
+                        secrets,
+                        category_secrets,
+                        old_category_secrets,
+                    ),
+                });
+                history.extend(versions.iter().cloned());
+                history
+            }
+            None => Vec::new(),
+        };
+
         messages.push(MessageData {
             message_id,
             author_id,
@@ -387,6 +472,7 @@ pub fn get_all_messages(
             time: message_time,
             time_clamped,
             edited,
+            edit_history,
             reactions,
             reply_to_message_id,
             reply_to_author,
@@ -465,6 +551,88 @@ pub fn build_reply_tree(
 }
 
 /// Secret that opens a body, chosen by the scope recorded on it.
+/// Decode an action from a public or sealed message.
+fn decrypt_action(
+    content: &BoardMessageBody,
+    secrets: &HashMap<u32, [u8; 32]>,
+    category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+    old_category_secrets: &HashMap<MessageId, HashMap<u32, [u8; 32]>>,
+) -> Option<plaza_core::board_state::content::ActionContentV1> {
+    use plaza_core::board_state::content::{ActionContentV1, CONTENT_TYPE_ACTION};
+    match content {
+        BoardMessageBody::Public {
+            content_type, data, ..
+        } if *content_type == CONTENT_TYPE_ACTION => {
+            match ActionContentV1::decode(data) {
+                Ok(action) => Some(action),
+                Err(error) => {
+                    dioxus::logger::tracing::warn!(
+                        "Action decode failed: {error}, data_len={}",
+                        data.len()
+                    );
+                    None
+                }
+            }
+        }
+        BoardMessageBody::Public {
+            content_type, data, ..
+        } if *content_type
+            == plaza_core::board_state::content::CONTENT_TYPE_MODERATION_ACTION =>
+        {
+            use plaza_core::board_state::content::ModerationActionV1;
+            use plaza_core::board_state::privacy::SealedBytes;
+            let envelope = ModerationActionV1::decode(data).ok()?;
+            match &envelope.payload {
+                SealedBytes::Public { value } => ActionContentV1::decode(value).ok(),
+                SealedBytes::Private {
+                    ciphertext,
+                    nonce,
+                    secret_version,
+                    ..
+                } => {
+                    let category_key = category_secrets
+                        .get(&envelope.target)
+                        .filter(|(version, _)| version == secret_version)
+                        .map(|(_, key)| *key)
+                        .or_else(|| {
+                            old_category_secrets
+                                .get(&envelope.target)
+                                .and_then(|versions| versions.get(secret_version))
+                                .copied()
+                        });
+                    let key = category_key.or_else(|| secrets.get(secret_version).copied())?;
+                    let plain = crate::util::ecies::decrypt_with_symmetric_key(
+                        &key,
+                        ciphertext,
+                        nonce,
+                        *secret_version,
+                    )
+                    .ok()?;
+                    ActionContentV1::decode(&plain).ok()
+                }
+            }
+        }
+        BoardMessageBody::Private {
+            content_type,
+            ciphertext,
+            nonce,
+            secret_version,
+            ..
+        } if *content_type == CONTENT_TYPE_ACTION => {
+            let secret = body_secret(content, secrets, category_secrets, old_category_secrets)?;
+            let plain = crate::util::ecies::decrypt_with_symmetric_key(
+                &secret,
+                ciphertext.as_slice(),
+                nonce,
+                *secret_version,
+            )
+            .ok()?;
+            ActionContentV1::decode(&plain).ok()
+        }
+        _ => None,
+    }
+}
+
 fn body_secret(
     content: &BoardMessageBody,
     board_secrets: &HashMap<u32, [u8; 32]>,
@@ -1446,6 +1614,8 @@ fn MessageContentDisplay(
     content_html: String,
     content_text: String,
     edited: bool,
+    #[props(default)]
+    history: Vec<EditVersion>,
     size: MessageSize,
     expanded: bool,
     /// Card views show the title in the header instead
@@ -1457,6 +1627,7 @@ fn MessageContentDisplay(
     #[props(default)]
     auto_load_images: bool,
 ) -> Element {
+    let mut show_history = use_signal(|| false);
     let (title_class, content_class) = match size {
         MessageSize::Compact => (
             "font-semibold text-text mb-1",
@@ -1566,6 +1737,35 @@ fn MessageContentDisplay(
             }
             if edited {
                 span { class: "{edited_class}", "(edited)" }
+            }
+            if !history.is_empty() {
+                button {
+                    r#type: "button",
+                    class: "ml-1 text-xs text-accent hover:underline",
+                    onclick: move |_| show_history.set(!show_history()),
+                    "View {history.len()} versions"
+                }
+            }
+            if show_history() {
+                div { class: "mt-3 border-t border-border pt-2 space-y-2",
+                    for (index, version) in history.iter().enumerate() {
+                        div { class: "text-xs text-text-muted",
+                            div { class: "flex items-baseline gap-2 flex-wrap",
+                                span { class: "font-medium text-text",
+                                    if index == 0 { "Original" } else { "Version {index + 1}" }
+                                }
+                                span { "by {version.author_name}" }
+                                span { "· {format_utc_as_local_time(version.time.timestamp_millis())}" }
+                            }
+                            if !version.title.is_empty() {
+                                p { class: "font-medium text-text mt-1", dir: "auto", "{version.title}" }
+                            }
+                            if !version.text.is_empty() {
+                                p { class: "whitespace-pre-wrap mt-1", dir: "auto", "{version.text}" }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -2185,6 +2385,7 @@ pub fn MessageCard(
                                 content_html: content_html.clone(),
                                 content_text: content_text.clone(),
                                 edited: edited,
+                                history: msg.edit_history.clone(),
                                 size: size,
                                 expanded: false,
                                 images: images.clone(),
@@ -2369,6 +2570,7 @@ pub fn MessageCard(
                                         content_html: content_html.clone(),
                                         content_text: content_text.clone(),
                                         edited: edited,
+                                        history: msg.edit_history.clone(),
                                         size: size,
                                         expanded: expanded,
                                         show_title: false,
