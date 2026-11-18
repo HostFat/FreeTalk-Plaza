@@ -516,7 +516,7 @@ impl BoardSynchronizer {
                     .read()
                     .map
                     .get(owner_vk)
-                    .is_some_and(|rd| rd.self_sk.verifying_key() == *owner_vk);
+                    .is_some_and(|rd| rd.is_current_owner());
 
                 if !is_owner {
                     continue;
@@ -546,7 +546,7 @@ impl BoardSynchronizer {
                             new_chatboard_address: new_address,
                         };
                         let authorized_upgrade =
-                            AuthorizedUpgradeV1::new(upgrade, &board_data.self_sk);
+                            AuthorizedUpgradeV1::new(upgrade, board_data.owner_key());
 
                         // Create a minimal state with just the upgrade field set
                         let upgrade_state = ChatBoardStateV1 {

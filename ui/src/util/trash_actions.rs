@@ -19,7 +19,8 @@ use plaza_core::board_state::trash::{
     AuthorizedTrashAction, AuthorizedTrashItem, ReasonCode, TrashActionKind, TrashActionV1,
     TrashDelta, TrashItemV1,
 };
-use plaza_core::board_state::ChatBoardStateV1Delta;
+use plaza_core::board_state::roles::AuthorityProof;
+use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -35,16 +36,16 @@ pub async fn hide_topic(
     code: ReasonCode,
 ) -> Result<(), String> {
     let self_id = plaza_core::board_state::member::MemberId::from(&ctx.self_sk.verifying_key());
-    let is_owner = self_id == plaza_core::board_state::member::MemberId::from(&ctx.current_board);
     let is_admin = ctx
         .board_state
         .admin
         .admins
         .iter()
         .any(|admin| admin.admin.id() == self_id);
-    if !is_owner && !is_admin && !ctx.board_state.roles.can_manage_trash(&self_id) {
+    if !ctx.is_current_owner() && !is_admin && !ctx.board_state.roles.can_manage_trash(&self_id) {
         return Err("You cannot hide topics".to_string());
     }
+    let (signing_key, _signer, proof) = trash_signer(ctx);
 
     let routes = ctx.board_state.moderation.routes_map();
     let mut ids = Vec::new();
@@ -104,9 +105,7 @@ pub async fn hide_topic(
         use std::collections::BTreeSet;
 
         let mut managers = BTreeSet::new();
-        managers.insert(plaza_core::board_state::member::MemberId::from(
-            &ctx.current_board,
-        ));
+        managers.insert(trash_owner_id(ctx));
         for admin in &ctx.board_state.admin.admins {
             managers.insert(admin.admin.id());
         }
@@ -129,10 +128,8 @@ pub async fn hide_topic(
             let Some(kem) = ctx.board_state.pq_secrets.key_for(*manager) else {
                 continue;
             };
-            let vk = if *manager
-                == plaza_core::board_state::member::MemberId::from(&ctx.current_board)
-            {
-                ctx.current_board
+            let vk = if *manager == trash_owner_id(ctx) {
+                trash_owner_vk(ctx)
             } else if let Some(member) = ctx
                 .board_state
                 .members
@@ -177,9 +174,9 @@ pub async fn hide_topic(
                     secrets: sealed,
                     signed_at: chrono::Utc::now().timestamp_millis(),
                 },
-                &ctx.self_sk,
+                &signing_key,
             )
-            .with_optional_authority(trash_authority(ctx));
+            .with_optional_authority(proof.clone());
             pq_set = Some(PqSecretsDelta {
                 keys: Vec::new(),
                 sets: vec![set],
@@ -209,8 +206,8 @@ pub async fn hide_topic(
         generation: 1,
     };
     item.id = item.compute_id();
-    let authorized = AuthorizedTrashItem::new(item, &ctx.self_sk)
-        .with_optional_authority(trash_authority(ctx));
+    let authorized = AuthorizedTrashItem::new(item, &signing_key)
+        .with_optional_authority(proof);
 
     apply_state_delta(
         ctx,
@@ -338,6 +335,7 @@ pub async fn restore_item(
     destination: Option<MessageId>,
 ) -> Result<(), String> {
     let bundle = decrypt_bundle(ctx, item)?;
+    let (signing_key, _, proof) = trash_signer(ctx);
 
     let action = AuthorizedTrashAction::new(
         TrashActionV1 {
@@ -349,9 +347,9 @@ pub async fn restore_item(
             reason: "restored by moderator".to_string(),
             content_hash: None,
         },
-        &ctx.self_sk,
+        &signing_key,
     )
-    .with_optional_authority(trash_authority(ctx));
+    .with_optional_authority(proof);
 
     let existing_messages: std::collections::HashSet<_> = ctx
         .board_state
@@ -436,7 +434,7 @@ pub async fn restore_item(
                         moved_at: chrono::Utc::now().timestamp(),
                         leave_redirect: false,
                     },
-                    &fresh.self_sk,
+                    &fresh.management_signer().0,
                 )],
             }),
             ..Default::default()
@@ -455,6 +453,7 @@ pub async fn purge_item(
     let content_hash = preview_bundle_bytes(ctx, item)
         .ok()
         .map(|bytes| *blake3::hash(&bytes).as_bytes());
+    let (signing_key, _, proof) = trash_signer(ctx);
     let action = AuthorizedTrashAction::new(
         TrashActionV1 {
             item_id: item.item.id,
@@ -465,9 +464,9 @@ pub async fn purge_item(
             reason: reason.to_string(),
             content_hash,
         },
-        &ctx.self_sk,
+        &signing_key,
     )
-    .with_optional_authority(trash_authority(ctx));
+    .with_optional_authority(proof);
     apply_state_delta(
         ctx,
         ChatBoardStateV1Delta {
@@ -531,6 +530,8 @@ pub async fn purge_illegal(
     reason: &str,
     code: ReasonCode,
 ) -> Result<(), String> {
+    let (signing_key, signer, _) = trash_signer(ctx);
+    let actor_id = signer.unwrap_or_else(|| trash_owner_id(ctx));
     let messages = ctx
         .board_state
         .recent_messages
@@ -573,7 +574,7 @@ pub async fn purge_illegal(
             acted_at: chrono::Utc::now().timestamp(),
             generation: 1,
         },
-        &ctx.self_sk,
+        &signing_key,
     );
     if reason == "debug purge" {
         return apply_state_delta(
@@ -590,7 +591,6 @@ pub async fn purge_illegal(
             },
         );
     }
-    let self_id = plaza_core::board_state::member::MemberId::from(&ctx.self_sk.verifying_key());
     let owner_id = plaza_core::board_state::member::MemberId::from(&ctx.current_board);
     let topic_author = ctx
         .board_state
@@ -663,7 +663,7 @@ pub async fn purge_illegal(
         let message = MessageV1 {
             images: Vec::new(),
             board_owner: owner_id,
-            author: self_id,
+            author: actor_id,
             time: chrono::Utc::now().into(),
             content,
         };
@@ -675,7 +675,7 @@ pub async fn purge_illegal(
                 ed25519_dalek::Signature::from_bytes(&[0u8; 64]),
             )
         } else {
-            AuthorizedMessageV1::new(message, &ctx.self_sk)
+            AuthorizedMessageV1::new(message, &signing_key)
         };
         let replacement_id = replacement.id();
         routes.push(AuthorizedMessageRoute::new(
@@ -688,7 +688,7 @@ pub async fn purge_illegal(
                 is_group: false,
                 generation: 1,
             },
-            &ctx.self_sk,
+            &signing_key,
         ));
         messages.push(replacement);
     }
@@ -712,7 +712,7 @@ pub async fn purge_illegal(
     // Ban the author when they are a regular member or admin, never the owner.
     let mut bans = Vec::new();
     if let Some(author) = topic_author {
-        if author != owner_id && author != self_id {
+        if author != owner_id && author != actor_id {
             if let Some(target) = ctx
                 .board_state
                 .members
@@ -749,8 +749,8 @@ pub async fn purge_illegal(
                 };
                 bans.push(plaza_core::board_state::ban::AuthorizedUserBan::new(
                     ban,
-                    self_id,
-                    &ctx.self_sk,
+                    actor_id,
+                    &signing_key,
                 ));
             }
         }
@@ -831,9 +831,8 @@ fn latest_trash_set(state: &plaza_core::ChatBoardStateV1) -> Option<&AuthorizedP
 
 /// Members that should hold the trash key: owner, admins and active trash roles.
 fn trash_managers(ctx: &ActionContext) -> std::collections::BTreeSet<MemberId> {
-    let owner_id = MemberId::from(&ctx.current_board);
     let mut managers = std::collections::BTreeSet::new();
-    managers.insert(owner_id);
+    managers.insert(trash_owner_id(ctx));
     for admin in &ctx.board_state.admin.admins {
         managers.insert(admin.admin.id());
     }
@@ -858,8 +857,8 @@ fn seal_for_manager(
     trash_key: &[u8; 32],
 ) -> Option<PqSealedSecret> {
     let kem = ctx.board_state.pq_secrets.key_for(member)?;
-    let vk = if member == MemberId::from(&ctx.current_board) {
-        ctx.current_board
+    let vk = if member == trash_owner_id(ctx) {
+        trash_owner_vk(ctx)
     } else {
         ctx.board_state
             .members
@@ -904,6 +903,7 @@ fn grant_trash_once(ctx: &ActionContext, member: MemberId) -> Result<(), String>
     secrets.retain(|entry| entry.member_id != member);
     secrets.push(sealed);
     let version = latest.map(|entry| entry.set.version).unwrap_or(0) + 1;
+    let (signing_key, _, proof) = trash_signer(ctx);
     let set = AuthorizedPqSecretSet::new(
         PqSecretSet {
             scope: PqScope::Trash,
@@ -912,9 +912,9 @@ fn grant_trash_once(ctx: &ActionContext, member: MemberId) -> Result<(), String>
             secrets,
             signed_at: chrono::Utc::now().timestamp_millis(),
         },
-        &ctx.self_sk,
+        &signing_key,
     )
-    .with_optional_authority(trash_authority(ctx));
+    .with_optional_authority(proof);
     apply_state_delta(
         ctx,
         ChatBoardStateV1Delta {
@@ -971,6 +971,7 @@ fn publish_trash_set(ctx: &ActionContext, version: u32) -> Result<usize, String>
         return Err("No manager has a PQ key yet".to_string());
     }
     let sealed_count = secrets.len();
+    let (signing_key, _, proof) = trash_signer(ctx);
     let set = AuthorizedPqSecretSet::new(
         PqSecretSet {
             scope: PqScope::Trash,
@@ -979,9 +980,9 @@ fn publish_trash_set(ctx: &ActionContext, version: u32) -> Result<usize, String>
             secrets,
             signed_at: chrono::Utc::now().timestamp_millis(),
         },
-        &ctx.self_sk,
+        &signing_key,
     )
-    .with_optional_authority(trash_authority(ctx));
+    .with_optional_authority(proof);
     apply_state_delta(
         ctx,
         ChatBoardStateV1Delta {
@@ -1030,21 +1031,21 @@ pub async fn revoke_trash_access(
     ctx: &ActionContext,
     member: MemberId,
 ) -> Result<(), String> {
-    let owner_id = MemberId::from(&ctx.current_board);
+    let owner_id = trash_owner_id(ctx);
     if member == owner_id {
         return Err("The owner always keeps the trash key".to_string());
     }
     // Rotation creates a new key. Two managers rotating at the same time would
     // seal items with rival keys under one secret_version, so keep it to a
     // single actor: the owner or an admin.
-    let signer = MemberId::from(&ctx.self_sk.verifying_key());
-    let signer_is_admin = ctx
+    let actor_id = MemberId::from(&ctx.self_sk.verifying_key());
+    let actor_is_admin = ctx
         .board_state
         .admin
         .admins
         .iter()
-        .any(|admin| admin.admin.id() == signer);
-    if signer != owner_id && !signer_is_admin {
+        .any(|admin| admin.admin.id() == actor_id);
+    if !ctx.is_current_owner() && !actor_is_admin {
         return Err("Only the owner or an admin can rotate the trash key".to_string());
     }
     let (_, _) = ctx.trash_secret.ok_or("You do not have the trash key")?;
@@ -1074,6 +1075,7 @@ pub async fn revoke_trash_access(
         return Err("Cannot rotate the trash key: no manager has a PQ key yet".to_string());
     }
 
+    let (signing_key, _, proof) = trash_signer(ctx);
     let set = AuthorizedPqSecretSet::new(
         PqSecretSet {
             scope: PqScope::Trash,
@@ -1082,9 +1084,9 @@ pub async fn revoke_trash_access(
             secrets,
             signed_at: chrono::Utc::now().timestamp_millis(),
         },
-        &ctx.self_sk,
+        &signing_key,
     )
-    .with_optional_authority(trash_authority(ctx));
+    .with_optional_authority(proof);
     apply_state_delta(
         ctx,
         ChatBoardStateV1Delta {
@@ -1110,13 +1112,42 @@ fn public_replacement_body(title: String, text: String) -> BoardMessageBody {
     BoardMessageBody::public(title, text)
 }
 
-/// Authority the current signer holds for a Trash set. Keeping the admin record
-/// or the role grant in the set lets it verify after the signer loses the role.
-fn trash_authority(
+/// Member id of the board's current owner.
+fn trash_owner_id(ctx: &ActionContext) -> MemberId {
+    ctx.board_state
+        .ownership
+        .current_owner(&ChatBoardParametersV1 {
+            owner: ctx.current_board,
+        })
+}
+
+/// Signing key of the board's current owner.
+fn trash_owner_vk(ctx: &ActionContext) -> ed25519_dalek::VerifyingKey {
+    ctx.board_state
+        .ownership
+        .current_owner_key(&ChatBoardParametersV1 {
+            owner: ctx.current_board,
+        })
+}
+
+/// Signing key, signer id and authority proof for a Trash record. The owner
+/// signs as the owner; a trash manager signs as its profile.
+fn trash_signer(
     ctx: &ActionContext,
-) -> Option<plaza_core::board_state::roles::AuthorityProof> {
+) -> (
+    ed25519_dalek::SigningKey,
+    Option<MemberId>,
+    Option<AuthorityProof>,
+) {
+    let (signing_key, signer) = ctx.management_signer();
+    let proof = signer.and_then(|id| trash_authority_for(ctx, id));
+    (signing_key, signer, proof)
+}
+
+/// Authority the signer holds for a Trash set. Keeping the admin record or the
+/// role grant in the set lets it verify after the signer loses the role.
+fn trash_authority_for(ctx: &ActionContext, signer: MemberId) -> Option<AuthorityProof> {
     use plaza_core::board_state::roles::{admin_authority_proof, trash_authority_proof};
-    let signer = plaza_core::board_state::member::MemberId::from(&ctx.self_sk.verifying_key());
     admin_authority_proof(&ctx.board_state, &signer)
         .or_else(|| trash_authority_proof(&ctx.board_state, &signer))
 }

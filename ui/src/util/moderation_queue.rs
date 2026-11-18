@@ -123,7 +123,7 @@ pub fn approve_post(ctx: &ActionContext, target: MessageId, approved: bool) -> R
 
 /// Owner-only: require approval for posts by members without an approved post.
 pub fn set_approval_required(ctx: &ActionContext, required: bool) -> Result<(), String> {
-    if ctx.self_sk.verifying_key() != ctx.current_board {
+    if !ctx.is_current_owner() {
         return Err("Only the board owner can change this setting".to_string());
     }
     if ctx
@@ -138,7 +138,7 @@ pub fn set_approval_required(ctx: &ActionContext, required: bool) -> Result<(), 
     let mut config = ctx.board_state.configuration.configuration.clone();
     config.approval_required = required;
     config.configuration_version += 1;
-    let authorized = AuthorizedConfigurationV1::new(config, &ctx.self_sk);
+    let authorized = AuthorizedConfigurationV1::new(config, &ctx.owner_sk);
     let delta = ChatBoardStateV1Delta {
         configuration: Some(authorized),
         ..Default::default()

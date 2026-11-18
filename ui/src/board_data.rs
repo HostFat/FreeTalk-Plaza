@@ -2725,6 +2725,117 @@ mod tests {
         assert_eq!(signer, Some(MemberId::from(&member_sk.verifying_key())));
     }
 
+    /// The owner's profile is a member like any other: if the contract prunes
+    /// its record, the stored signed membership puts it back.
+    #[test]
+    fn a_split_owner_profile_can_republish_its_membership() {
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let profile_sk = SigningKey::generate(&mut rng);
+        let profile_vk = profile_sk.verifying_key();
+        let mut boards = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            profiles: Vec::new(),
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
+            owned_images: Vec::new(),
+        };
+        let key = boards.create_new_board_with_identity(
+            owner_sk,
+            IdentityProfile::new("Profile".to_string(), profile_sk),
+            "Board".to_string(),
+            "Profile".to_string(),
+            false,
+        );
+        let mut board = boards.map.get(&key).unwrap().clone();
+        assert!(board.self_authorized_member.is_some());
+
+        // The contract pruned the profile because it had no recent messages.
+        board.board_state.members.members.clear();
+        let (members, member_info) = crate::util::messaging::self_membership_delta(&board)
+            .expect("the stored record is republished");
+
+        let before = board.board_state.clone();
+        board
+            .board_state
+            .apply_delta(
+                &before,
+                &ChatBoardParametersV1 { owner: key },
+                &Some(plaza_core::board_state::ChatBoardStateV1Delta {
+                    members: Some(members),
+                    member_info: Some(member_info),
+                    ..Default::default()
+                }),
+            )
+            .expect("the republished membership verifies");
+        assert!(board
+            .board_state
+            .members
+            .members
+            .iter()
+            .any(|member| member.member.member_vk == profile_vk));
+    }
+
+    /// The owner key, not the visible profile, signs an admin revocation.
+    #[test]
+    fn a_split_owner_can_revoke_an_admin() {
+        use plaza_core::board_state::admin::{AdminsDelta, AuthorizedAdminRevocation};
+
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let profile_sk = SigningKey::generate(&mut rng);
+        let profile_id = MemberId::from(&profile_sk.verifying_key());
+        let mut boards = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            profiles: Vec::new(),
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
+            owned_images: Vec::new(),
+        };
+        let key = boards.create_new_board_with_identity(
+            owner_sk,
+            IdentityProfile::new("Profile".to_string(), profile_sk),
+            "Board".to_string(),
+            "Profile".to_string(),
+            false,
+        );
+        let board = boards.map.get_mut(&key).unwrap();
+        assert!(board.is_current_owner());
+        assert!(board
+            .board_state
+            .admin
+            .admins
+            .iter()
+            .any(|admin| admin.admin.id() == profile_id));
+
+        let generation = board.board_state.admin.next_generation(&profile_id);
+        let revocation =
+            AuthorizedAdminRevocation::new(profile_id, generation, board.owner_key());
+        let before = board.board_state.clone();
+        board
+            .board_state
+            .apply_delta(
+                &before,
+                &ChatBoardParametersV1 { owner: key },
+                &Some(plaza_core::board_state::ChatBoardStateV1Delta {
+                    admin: Some(AdminsDelta::revocation(vec![revocation])),
+                    ..Default::default()
+                }),
+            )
+            .expect("the owner revocation verifies");
+
+        assert!(board.board_state.admin.admins.is_empty());
+        assert!(board.board_state.admin.is_revoked(&profile_id));
+    }
+
     #[test]
     fn owned_images_are_saved_outside_the_boards_blob() {
         let owned = OwnedImage {

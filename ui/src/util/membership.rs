@@ -30,8 +30,10 @@ pub fn restore_self_membership() -> bool {
     };
     let self_id = MemberId::from(&board.self_sk.verifying_key());
     // The current owner has no member record; a former owner is an ordinary
-    // member and may need one.
-    if board.owner_key().verifying_key() == board.current_owner_key() {
+    // member and may need one. Check the visible key: a client can hold the
+    // owner key while posting as a separate profile, and that profile still
+    // needs its member record.
+    if board.self_sk.verifying_key() == board.current_owner_key() {
         return false;
     }
     if board

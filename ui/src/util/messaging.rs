@@ -161,7 +161,7 @@ pub fn prepare_message(
         .get(&current_board)
         .map(|board_data| {
             let self_vk = board_data.self_sk.verifying_key();
-            self_vk != board_data.owner_vk
+            self_vk != board_data.current_owner_key()
                 && !board_data
                     .board_state
                     .members
@@ -295,7 +295,7 @@ pub(crate) fn self_membership_delta(
     Vec<plaza_core::board_state::member_info::AuthorizedMemberInfo>,
 )> {
     let self_vk = board_data.self_sk.verifying_key();
-    let is_in_members = self_vk == board_data.owner_vk
+    let is_in_members = self_vk == board_data.current_owner_key()
         || board_data
             .board_state
             .members
@@ -551,14 +551,13 @@ pub async fn revoke_admin(member_id: MemberId) -> Result<(), String> {
             .get(&current_board)
             .ok_or("Board not found")?;
 
-        let self_id = MemberId::from(&board_data.self_sk.verifying_key());
-        if self_id != MemberId::from(current_board) {
+        if !board_data.is_current_owner() {
             return Err("Only the board owner can remove an admin".to_string());
         }
 
         (
             current_board,
-            board_data.self_sk.clone(),
+            board_data.owner_key().clone(),
             board_data.board_state.clone(),
             board_data.board_state.admin.next_generation(&member_id),
         )
@@ -650,7 +649,7 @@ pub async fn send_category(
     if let Some(board_data) = BOARDS.read().map.get(&current_board) {
         board_data.ensure_can_write()?;
     }
-    if !restricted_roles.is_empty() && self_sk.verifying_key() != current_board {
+    if !restricted_roles.is_empty() && !board_snapshot.is_current_owner() {
         return Err("Only the board owner can create restricted categories".to_string());
     }
 

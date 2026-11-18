@@ -108,6 +108,19 @@ impl ActionContext {
             )
     }
 
+    /// Key and signer id for management records. The owner signs as the owner;
+    /// a manager signs as its profile and carries an authority proof.
+    pub fn management_signer(&self) -> (SigningKey, Option<MemberId>) {
+        if self.is_current_owner() {
+            (self.owner_sk.clone(), None)
+        } else {
+            (
+                self.self_sk.clone(),
+                Some(MemberId::from(&self.self_sk.verifying_key())),
+            )
+        }
+    }
+
     /// Category content of a message, opened with whichever key sealed it.
     fn category_content(&self, target: &MessageId) -> Option<CategoryContentV1> {
         let message = self
@@ -275,7 +288,7 @@ pub async fn reseal_category_name(category_id: MessageId) {
     let Some(ctx) = ActionContext::from_current_board() else {
         return;
     };
-    if ctx.self_sk.verifying_key() != ctx.current_board {
+    if !ctx.is_current_owner() {
         return;
     }
     let Some(category) = ctx.category_content(&category_id) else {
