@@ -78,7 +78,7 @@ pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
 
         let current_board = board_data.owner_vk;
         let board_key = board_data.board_key();
-        let self_sk = board_data.self_sk.clone();
+        let self_sk = board_data.owner_key().clone();
         let board_state_clone = board_data.board_state.clone();
 
         let admin = Admin {

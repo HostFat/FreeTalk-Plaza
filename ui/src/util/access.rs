@@ -60,9 +60,9 @@ impl JoinLink {
 }
 
 fn with_manager_board<T>(
-    f: impl FnOnce(&BoardData, SigningKey, VerifyingKey, MemberId) -> Result<T, String>,
+    f: impl FnOnce(&BoardData, SigningKey, VerifyingKey, Option<MemberId>) -> Result<T, String>,
 ) -> Result<T, String> {
-    let (board_key, self_sk, data) = {
+    let (board_key, data) = {
         let current_board = CURRENT_BOARD.read().owner_key.ok_or("No board selected")?;
         let boards = BOARDS.read();
         let data = boards
@@ -70,30 +70,22 @@ fn with_manager_board<T>(
             .get(&current_board)
             .ok_or("Board not found")?
             .clone();
-        (current_board, data.self_sk.clone(), data)
+        (current_board, data)
     };
-    let self_id = MemberId::from(&self_sk.verifying_key());
+    let self_id = MemberId::from(&data.self_sk.verifying_key());
     data.ensure_can_write()?;
-    let is_owner = self_id == MemberId::from(board_key);
-    if !is_owner && !data.board_state.roles.can_manage_access(&self_id) {
+    if !data.is_current_owner() && !data.board_state.roles.can_manage_access(&self_id) {
         return Err("You are not allowed to manage access on this board".to_string());
     }
-    f(&data, self_sk, board_key, self_id)
-}
-
-fn signer_for(self_id: MemberId, board_key: VerifyingKey) -> Option<MemberId> {
-    if self_id == MemberId::from(board_key) {
-        None
-    } else {
-        Some(self_id)
-    }
+    let (signing_key, signer) = data.management_signer();
+    f(&data, signing_key, board_key, signer)
 }
 
 /// Role definitions may be signed by the owner or a board admin.
 fn with_admin_board<T>(
-    f: impl FnOnce(&BoardData, SigningKey, VerifyingKey, MemberId) -> Result<T, String>,
+    f: impl FnOnce(&BoardData, SigningKey, VerifyingKey, Option<MemberId>) -> Result<T, String>,
 ) -> Result<T, String> {
-    let (board_key, self_sk, data) = {
+    let (board_key, data) = {
         let current_board = CURRENT_BOARD.read().owner_key.ok_or("No board selected")?;
         let boards = BOARDS.read();
         let data = boards
@@ -101,16 +93,17 @@ fn with_admin_board<T>(
             .get(&current_board)
             .ok_or("Board not found")?
             .clone();
-        (current_board, data.self_sk.clone(), data)
+        (current_board, data)
     };
-    let self_id = MemberId::from(&self_sk.verifying_key());
+    let self_id = MemberId::from(&data.self_sk.verifying_key());
     data.ensure_can_write()?;
-    if self_id != MemberId::from(board_key)
+    if !data.is_current_owner()
         && !plaza_core::board_state::roles::is_board_admin(&data.board_state, &self_id)
     {
         return Err("Only the board owner or an admin can define roles".to_string());
     }
-    f(&data, self_sk, board_key, self_id)
+    let (signing_key, signer) = data.management_signer();
+    f(&data, signing_key, board_key, signer)
 }
 
 /// Role definitions are owner-only: a manager must not be able to widen its own
@@ -118,7 +111,7 @@ fn with_admin_board<T>(
 fn with_owner_board<T>(
     f: impl FnOnce(&BoardData, SigningKey, VerifyingKey) -> Result<T, String>,
 ) -> Result<T, String> {
-    let (board_key, self_sk, data) = {
+    let (board_key, data) = {
         let current_board = CURRENT_BOARD.read().owner_key.ok_or("No board selected")?;
         let boards = BOARDS.read();
         let data = boards
@@ -126,13 +119,13 @@ fn with_owner_board<T>(
             .get(&current_board)
             .ok_or("Board not found")?
             .clone();
-        (current_board, data.self_sk.clone(), data)
+        (current_board, data)
     };
     data.ensure_can_write()?;
-    if MemberId::from(&self_sk.verifying_key()) != MemberId::from(board_key) {
+    if !data.is_current_owner() {
         return Err("Only the board owner can define roles".to_string());
     }
-    f(&data, self_sk, board_key)
+    f(&data, data.owner_key().clone(), board_key)
 }
 
 fn apply_and_sync(
@@ -190,7 +183,7 @@ pub fn create_role(
     }
     scope.sort();
     scope.dedup();
-    with_admin_board(|data, signing_key, board_key, self_id| {
+    with_admin_board(|data, signing_key, board_key, signer_id| {
         let mut id: RoleId = [0u8; 16];
         let random = SigningKey::generate(&mut rand::thread_rng());
         id.copy_from_slice(&random.to_bytes()[..16]);
@@ -213,7 +206,7 @@ pub fn create_role(
             deleted: false,
             signed_at: crate::util::get_current_system_time(),
         };
-        let authorized = match signer_for(self_id, board_key) {
+        let authorized = match signer_id {
             Some(signer) => AuthorizedRole::signed_by(role, signer, &signing_key)
                 .with_optional_authority(admin_authority_proof(&data.board_state, &signer)),
             None => AuthorizedRole::new(role, &signing_key),
@@ -242,7 +235,7 @@ pub fn update_role_moderation(
 ) -> Result<(), String> {
     scope.sort();
     scope.dedup();
-    with_admin_board(|data, signing_key, board_key, self_id| {
+    with_admin_board(|data, signing_key, board_key, signer_id| {
         let current = data
             .board_state
             .roles
@@ -262,7 +255,7 @@ pub fn update_role_moderation(
             signed_at: crate::util::get_current_system_time(),
             ..current
         };
-        let authorized = match signer_for(self_id, board_key) {
+        let authorized = match signer_id {
             Some(signer) => AuthorizedRole::signed_by(role, signer, &signing_key)
                 .with_optional_authority(admin_authority_proof(&data.board_state, &signer)),
             None => AuthorizedRole::new(role, &signing_key),
@@ -419,7 +412,7 @@ pub fn remove_role(role_id: RoleId) -> Result<(), String> {
 }
 
 pub fn set_role_member(role_id: RoleId, member_id: MemberId, grant: bool) -> Result<(), String> {
-    with_manager_board(|data, self_sk, board_key, self_id| {
+    with_manager_board(|data, signing_key, board_key, signer_id| {
         let generation = data
             .board_state
             .roles
@@ -431,10 +424,10 @@ pub fn set_role_member(role_id: RoleId, member_id: MemberId, grant: bool) -> Res
             revoked: !grant,
             signed_at: crate::util::get_current_system_time(),
         };
-        let authorized = match signer_for(self_id, board_key) {
-            Some(signer) => AuthorizedRoleAssignment::signed_by(assignment, signer, &self_sk)
+        let authorized = match signer_id {
+            Some(signer) => AuthorizedRoleAssignment::signed_by(assignment, signer, &signing_key)
                 .with_optional_authority(manager_authority_proof(&data.board_state, &signer)),
-            None => AuthorizedRoleAssignment::new(assignment, &self_sk),
+            None => AuthorizedRoleAssignment::new(assignment, &signing_key),
         };
         let delta = ChatBoardStateV1Delta {
             roles: Some(RolesDelta {
@@ -462,7 +455,7 @@ fn category_keys_for_role(data: &BoardData, role_id: RoleId) -> Vec<(MessageId, 
 
 /// Owner/manager: rename a link so the list stays readable.
 pub fn rename_invite_link(token_id: TokenId, label: String) -> Result<(), String> {
-    with_manager_board(|data, self_sk, board_key, self_id| {
+    with_manager_board(|data, signing_key, board_key, signer_id| {
         let current = data
             .board_state
             .invites
@@ -478,10 +471,10 @@ pub fn rename_invite_link(token_id: TokenId, label: String) -> Result<(), String
                 .collect(),
             ..current
         };
-        let authorized = match signer_for(self_id, board_key) {
-            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &self_sk)
+        let authorized = match signer_id {
+            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &signing_key)
                 .with_optional_authority(manager_authority_proof(&data.board_state, &signer)),
-            None => AuthorizedInviteToken::new(token, &self_sk),
+            None => AuthorizedInviteToken::new(token, &signing_key),
         };
         let delta = ChatBoardStateV1Delta {
             invites: Some(InviteTokensDelta {
@@ -501,7 +494,7 @@ pub fn create_invite_link(
     include_category_keys: bool,
     label: String,
 ) -> Result<String, String> {
-    with_manager_board(|data, self_sk, board_key, self_id| {
+    with_manager_board(|data, signing_key, board_key, signer_id| {
         if data.board_state.roles.role(&role_id).is_none() {
             return Err("Role not found".to_string());
         }
@@ -526,10 +519,10 @@ pub fn create_invite_link(
             created_at: Some(crate::util::get_current_system_time()),
             includes_category_keys: include_category_keys,
         };
-        let authorized = match signer_for(self_id, board_key) {
-            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &self_sk)
+        let authorized = match signer_id {
+            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &signing_key)
                 .with_optional_authority(manager_authority_proof(&data.board_state, &signer)),
-            None => AuthorizedInviteToken::new(token, &self_sk),
+            None => AuthorizedInviteToken::new(token, &signing_key),
         };
         let delta = ChatBoardStateV1Delta {
             invites: Some(InviteTokensDelta {
@@ -556,7 +549,7 @@ pub fn create_invite_link(
 }
 
 pub fn revoke_invite_link(token_id: TokenId) -> Result<(), String> {
-    with_manager_board(|data, self_sk, board_key, self_id| {
+    with_manager_board(|data, signing_key, board_key, signer_id| {
         let current = data
             .board_state
             .invites
@@ -570,10 +563,10 @@ pub fn revoke_invite_link(token_id: TokenId) -> Result<(), String> {
             deleted: true,
             ..current
         };
-        let authorized = match signer_for(self_id, board_key) {
-            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &self_sk)
+        let authorized = match signer_id {
+            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &signing_key)
                 .with_optional_authority(manager_authority_proof(&data.board_state, &signer)),
-            None => AuthorizedInviteToken::new(token, &self_sk),
+            None => AuthorizedInviteToken::new(token, &signing_key),
         };
         let delta = ChatBoardStateV1Delta {
             invites: Some(InviteTokensDelta {
@@ -585,16 +578,20 @@ pub fn revoke_invite_link(token_id: TokenId) -> Result<(), String> {
     })
 }
 
-/// Join a board through a link: create our own identity, prove we hold the link
-/// key, and hand the member record to the synchronizer, which fetches the board
-/// state and subscribes.
-pub fn join_with_token(link: &JoinLink, nickname: String) -> Result<(), String> {
+/// Join a board through a link: use the chosen profile (or create an
+/// unlinkable one), prove we hold the link key, and hand the member record to
+/// the synchronizer, which fetches the board state and subscribes.
+pub fn join_with_token(
+    link: &JoinLink,
+    nickname: String,
+    profile: Option<SigningKey>,
+) -> Result<(), String> {
     let nickname = nickname.trim().to_string();
     if nickname.is_empty() {
         return Err("Please choose a nickname".to_string());
     }
 
-    let member_sk = SigningKey::generate(&mut rand::thread_rng());
+    let member_sk = profile.unwrap_or_else(|| SigningKey::generate(&mut rand::thread_rng()));
     let member_vk = member_sk.verifying_key();
     let owner_id = MemberId::from(link.board);
     let member_id = MemberId::from(&member_vk);
@@ -611,6 +608,15 @@ pub fn join_with_token(link: &JoinLink, nickname: String) -> Result<(), String> 
         join_proof: Some(proof),
     };
     let authorized = AuthorizedMember::new(member, &member_sk);
+
+    // Keep the key on this device so the same profile can be picked again for
+    // another board.
+    BOARDS.with_mut(|boards| {
+        boards.remember_profile(crate::board_data::IdentityProfile::new(
+            nickname.clone(),
+            member_sk.clone(),
+        ));
+    });
 
     PENDING_INVITES.with_mut(|pending| {
         pending.map.insert(

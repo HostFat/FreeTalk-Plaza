@@ -86,7 +86,7 @@ fn start_transfer(
             let delta = ChatBoardStateV1Delta {
                 admin: Some(AdminsDelta::new(vec![AuthorizedAdmin::new(
                     admin,
-                    &ctx.self_sk,
+                    &ctx.owner_sk,
                 )])),
                 ..Default::default()
             };
@@ -110,11 +110,11 @@ fn start_transfer(
             deactivations.push(AuthorizedKeyDeactivation::new(
                 KeyDeactivationV1 {
                     member: owner_id,
-                    key: ctx.self_sk.verifying_key(),
+                    key: ctx.owner_sk.verifying_key(),
                     generation: 1,
                     deactivated_at: signed_at,
                 },
-                &ctx.self_sk,
+                &ctx.owner_sk,
             ));
         }
         delta.ownership = Some(OwnershipDelta {
@@ -127,7 +127,7 @@ fn start_transfer(
                     transferred_at,
                     outgoing,
                 },
-                &ctx.self_sk,
+                &ctx.owner_sk,
             )],
             deactivations,
         });
@@ -146,10 +146,10 @@ fn start_transfer(
                 Member {
                     owner_member_id: parameters.owner_id(),
                     invited_by: owner_id,
-                    member_vk: ctx.self_sk.verifying_key(),
+                    member_vk: ctx.owner_sk.verifying_key(),
                     join_proof: None,
                 },
-                &ctx.self_sk,
+                &ctx.owner_sk,
             )]));
         }
         let next_admin_generation = ctx.board_state.admin.next_generation(&owner_id);
@@ -170,7 +170,7 @@ fn start_transfer(
                         generation: next_admin_generation,
                         signed_at,
                     },
-                    &ctx.self_sk,
+                    &ctx.owner_sk,
                 )]));
             }
         } else if owner_is_admin {
@@ -181,7 +181,7 @@ fn start_transfer(
             };
             let authorized = AuthorizedAdminRevocation::with_signature(
                 revocation.clone(),
-                sign_struct(&revocation, &ctx.self_sk),
+                sign_struct(&revocation, &ctx.owner_sk),
             );
             delta.admin = Some(AdminsDelta::revocation(vec![authorized]));
         }
@@ -224,7 +224,7 @@ pub fn OwnershipView() -> Element {
     };
     let owner_id = ctx.board_state.ownership.current_owner(&parameters);
     let is_owner =
-        ctx.self_sk.verifying_key() == ctx.board_state.ownership.current_owner_key(&parameters);
+        ctx.owner_sk.verifying_key() == ctx.board_state.ownership.current_owner_key(&parameters);
 
     // Members that can receive the board: a valid key, not the current owner,
     // not deactivated. An admin target skips the promotion step.

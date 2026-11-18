@@ -135,9 +135,7 @@ impl BoardSynchronizer {
                         // runs on an incoming update; doing it inside
                         // needs_to_send_update is what caused the render loop
                         // that made the old implementation get disabled.
-                        if board_data.is_private()
-                            && board_data.owner_vk == board_data.self_sk.verifying_key()
-                        {
+                        if board_data.is_private() && board_data.is_current_owner() {
                             if let Some(secrets_delta) =
                                 board_data.generate_missing_member_secrets()
                             {
@@ -194,9 +192,7 @@ impl BoardSynchronizer {
                         // The owner seals board secrets; owners and key
                         // distributors seal category secrets.
                         let mut pq_changed = board_data.generate_missing_pq_category_secrets();
-                        if board_data.is_private()
-                            && board_data.owner_vk == board_data.self_sk.verifying_key()
-                        {
+                        if board_data.is_private() && board_data.is_current_owner() {
                             pq_changed |= board_data.generate_missing_pq_secrets();
                         }
                         if pq_changed {

@@ -23,6 +23,10 @@ pub struct IdentityExport {
     pub board_owner: VerifyingKey,
     /// The user's private signing key
     pub signing_key: SigningKey,
+    /// Board owner key, when it differs from the profile key. Older exports
+    /// omit it and the signing key was also the owner key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_signing_key: Option<SigningKey>,
     /// The user's signed membership proof
     pub authorized_member: AuthorizedMember,
     /// Chain of AuthorizedMembers from this member up to the owner,
@@ -161,6 +165,7 @@ mod tests {
         let export = IdentityExport {
             board_owner: owner_vk,
             signing_key: member_sk,
+            owner_signing_key: None,
             authorized_member,
             invite_chain: vec![],
             member_info: None,
@@ -221,6 +226,7 @@ mod tests {
         let export = IdentityExport {
             board_owner: owner_vk,
             signing_key: wrong_sk,
+            owner_signing_key: None,
             authorized_member,
             invite_chain: vec![],
             member_info: None,
@@ -272,6 +278,7 @@ mod tests {
         let export = IdentityExport {
             board_owner: owner_vk,
             signing_key: member_b_sk.clone(),
+            owner_signing_key: None,
             authorized_member: auth_member_b.clone(),
             invite_chain: vec![auth_member_a.clone()],
             member_info: Some(auth_member_info.clone()),
@@ -319,6 +326,7 @@ mod tests {
         let export = IdentityExport {
             board_owner: owner_vk,
             signing_key: member_sk,
+            owner_signing_key: None,
             authorized_member,
             invite_chain: vec![],
             member_info: None,
@@ -373,6 +381,7 @@ mod tests {
         let export = IdentityExport {
             board_owner: owner_vk,
             signing_key: member_sk,
+            owner_signing_key: None,
             authorized_member,
             invite_chain: vec![],
             member_info: None,

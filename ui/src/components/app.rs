@@ -788,6 +788,7 @@ fn initial_boards() -> Boards {
     Boards {
         map: std::collections::HashMap::new(),
         current_board_key: None,
+        profiles: Vec::new(),
         removed: Vec::new(),
         migrated_boards: Vec::new(),
         blocked_image_hashes: Vec::new(),

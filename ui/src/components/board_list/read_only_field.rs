@@ -23,7 +23,7 @@ pub fn ReadOnlyField(config: Configuration, is_owner: bool) -> Element {
             boards
                 .map
                 .get(&owner_key)
-                .map(|board| (board.board_key(), board.self_sk.clone(), board.board_state.clone()))
+                .map(|board| (board.board_key(), board.owner_key().clone(), board.board_state.clone()))
         });
         let Some((board_key, self_sk, parent_state)) = signing_data else {
             error!("Board state not found for current board");

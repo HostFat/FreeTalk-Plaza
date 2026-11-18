@@ -9,8 +9,8 @@ use freenet_stdlib::prelude::{ContractCode, ContractKey, Parameters};
 use plaza_core::board_state::category_secrets::{CategorySecretSetDelta, CategorySecretsDelta};
 use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
 use plaza_core::board_state::content::CategoryContentV1;
-use plaza_core::board_state::member::AuthorizedMember;
-use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::admin::{Admin, AuthorizedAdmin};
+use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
 use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
 use plaza_core::board_state::message::{BoardMessageBody, MessageId, SecretScope};
 use plaza_core::board_state::privacy::{
@@ -180,7 +180,13 @@ pub struct OwnedImage {
 pub struct BoardData {
     pub owner_vk: VerifyingKey,
     pub board_state: ChatBoardStateV1,
+    /// Key used for posts, admin and membership. It is the chosen profile and
+    /// may be shared with other boards.
     pub self_sk: SigningKey,
+    /// Key that owns this board. Older boards did not store it separately;
+    /// `owner_key()` then falls back to `self_sk`.
+    #[serde(default)]
+    pub owner_sk: Option<SigningKey>,
     pub contract_key: ContractKey,
     /// The last message ID that was read by the user (for unread tracking)
     /// Messages after this ID from other users are considered unread.
@@ -300,8 +306,27 @@ impl BoardData {
     }
 
     /// Whether this client holds the owner powers right now.
+    /// Key that signs ownership and configuration. Older boards use the same
+    /// key for ownership and posting.
+    pub fn owner_key(&self) -> &SigningKey {
+        self.owner_sk.as_ref().unwrap_or(&self.self_sk)
+    }
+
     pub fn is_current_owner(&self) -> bool {
-        self.self_sk.verifying_key() == self.current_owner_key()
+        self.owner_key().verifying_key() == self.current_owner_key()
+    }
+
+    /// Key and signer id for management records. The owner signs as the owner;
+    /// a profile signs as a member and must carry its authority proof.
+    pub fn management_signer(&self) -> (SigningKey, Option<MemberId>) {
+        if self.is_current_owner() {
+            (self.owner_key().clone(), None)
+        } else {
+            (
+                self.self_sk.clone(),
+                Some(MemberId::from(&self.self_sk.verifying_key())),
+            )
+        }
     }
 
     /// Whether this client is suspended right now.
@@ -554,6 +579,8 @@ impl BoardData {
         include_version: bool,
     ) -> CategorySecretSetDelta {
         let owner_id = MemberId::from(&self.owner_vk);
+        let (signing_key, signer) = self.management_signer();
+        let provider_id = signer.unwrap_or(owner_id);
         let mut encrypted_secrets = Vec::new();
         for member_id in readers {
             let member_vk = if *member_id == owner_id {
@@ -574,20 +601,22 @@ impl BoardData {
                 ciphertext,
                 nonce,
                 sender_ephemeral_public_key: ephemeral_key.to_bytes(),
-                provider: MemberId::from(&self.self_sk.verifying_key()),
+                provider: provider_id,
                 category_id: Some(*category_id),
             };
-            let self_id = MemberId::from(&self.self_sk.verifying_key());
-            encrypted_secrets.push(if self_id == owner_id {
-                AuthorizedEncryptedSecretForMember::new(record, &self.self_sk)
-            } else {
-                AuthorizedEncryptedSecretForMember::signed_by(record, self_id, &self.self_sk)
-                    .with_optional_authority(
-                        plaza_core::board_state::roles::distributor_authority_proof(
-                            &self.board_state,
-                            &self_id,
-                        ),
-                    )
+            encrypted_secrets.push(match signer {
+                None => AuthorizedEncryptedSecretForMember::new(record, &signing_key),
+                Some(self_id) => AuthorizedEncryptedSecretForMember::signed_by(
+                    record,
+                    self_id,
+                    &signing_key,
+                )
+                .with_optional_authority(
+                    plaza_core::board_state::roles::distributor_authority_proof(
+                        &self.board_state,
+                        &self_id,
+                    ),
+                ),
             });
         }
 
@@ -599,7 +628,7 @@ impl BoardData {
                     created_at: get_current_system_time(),
                     category_id: Some(*category_id),
                 },
-                &self.self_sk,
+                &signing_key,
             )]
         } else {
             Vec::new()
@@ -1710,10 +1739,9 @@ impl BoardData {
     /// Check if the current user can create categories (must be owner or admin)
     pub fn can_create_categories(&self) -> bool {
         let self_id = MemberId::from(&self.self_sk.verifying_key());
-        let owner_id = MemberId::from(&self.owner_vk);
 
         // Owner can always create categories
-        if self_id == owner_id {
+        if self.is_current_owner() {
             return true;
         }
 
@@ -1834,7 +1862,8 @@ impl BoardData {
             category_id: None,
         };
 
-        let authorized_version = AuthorizedSecretVersionRecord::new(secret_version, &self.self_sk);
+        let authorized_version =
+            AuthorizedSecretVersionRecord::new(secret_version, self.owner_key());
 
         // Get all current members, excluding banned members
         let banned_members: std::collections::HashSet<MemberId> = self
@@ -1899,7 +1928,7 @@ impl BoardData {
                 };
 
                 let authorized_encrypted_secret =
-                    AuthorizedEncryptedSecretForMember::new(encrypted_secret, &self.self_sk);
+                    AuthorizedEncryptedSecretForMember::new(encrypted_secret, self.owner_key());
 
                 new_encrypted_secrets.push(authorized_encrypted_secret);
             }
@@ -1997,7 +2026,7 @@ impl BoardData {
                 };
 
                 let authorized_encrypted_secret =
-                    AuthorizedEncryptedSecretForMember::new(encrypted_secret, &self.self_sk);
+                    AuthorizedEncryptedSecretForMember::new(encrypted_secret, self.owner_key());
 
                 new_encrypted_secrets.push(authorized_encrypted_secret);
             }
@@ -2031,7 +2060,7 @@ impl BoardData {
                 };
                 new_encrypted_secrets.push(AuthorizedEncryptedSecretForMember::new(
                     encrypted_secret,
-                    &self.self_sk,
+                    self.owner_key(),
                 ));
             }
         }
@@ -2068,11 +2097,35 @@ impl PartialEq for CurrentBoard {
     }
 }
 
+/// A reusable identity: a display name and a signing key. Stored only on this
+/// device; it is never published. Reusing a profile on several boards makes
+/// the same member id appear on each; using another profile keeps them apart.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IdentityProfile {
+    pub id: String,
+    pub name: String,
+    pub signing_key: SigningKey,
+}
+
+impl IdentityProfile {
+    pub fn new(name: String, signing_key: SigningKey) -> Self {
+        let id = bs58::encode(signing_key.verifying_key().as_bytes()).into_string();
+        Self {
+            id,
+            name,
+            signing_key,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Boards {
     pub map: HashMap<VerifyingKey, BoardData>,
     #[serde(default)]
     pub current_board_key: Option<VerifyingKey>,
+    /// Reusable identities created on this device.
+    #[serde(default)]
+    pub profiles: Vec<IdentityProfile>,
     /// Boards the user left on this device. A stale tab must not resurrect
     /// them when its save merges the stored map.
     #[serde(default)]
@@ -2128,6 +2181,7 @@ impl Boards {
         let mut boards = Boards {
             map: HashMap::new(),
             current_board_key: None,
+            profiles: Vec::new(),
             removed: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
@@ -2184,13 +2238,62 @@ impl Boards {
         nickname: String,
         is_private: bool,
     ) -> VerifyingKey {
+        // Old callers use one key for ownership and posts. New boards can
+        // choose a separate owner key and a reusable profile.
+        let profile = IdentityProfile::new(nickname.clone(), self_sk.clone());
+        self.create_new_board_with_identity(self_sk, profile, name, nickname, is_private)
+    }
+
+    /// Store a profile once, keyed by its verifying key.
+    pub fn remember_profile(&mut self, profile: IdentityProfile) {
+        let vk = profile.signing_key.verifying_key();
+        if !self
+            .profiles
+            .iter()
+            .any(|existing| existing.signing_key.verifying_key() == vk)
+        {
+            self.profiles.push(profile);
+        }
+    }
+
+    /// Rename a stored profile. Signing keys do not change, so the member id
+    /// stays the same on every board.
+    pub fn rename_profile(&mut self, id: &str, name: String) -> bool {
+        let Some(profile) = self.profiles.iter_mut().find(|p| p.id == id) else {
+            return false;
+        };
+        profile.name = name;
+        true
+    }
+
+    /// Drop a profile from this device. Boards already using its key keep it.
+    pub fn forget_profile(&mut self, id: &str) -> bool {
+        let before = self.profiles.len();
+        self.profiles.retain(|p| p.id != id);
+        before != self.profiles.len()
+    }
+
+    /// Create a board owned by `owner_sk`, with `profile` as its member and
+    /// administrator. Reusing a profile on several boards links their member
+    /// ids; a new profile keeps them apart.
+    pub fn create_new_board_with_identity(
+        &mut self,
+        owner_sk: SigningKey,
+        profile: IdentityProfile,
+        name: String,
+        nickname: String,
+        is_private: bool,
+    ) -> VerifyingKey {
         use dioxus::logger::tracing::info;
         info!(
-            "🟢 create_new_board_with_name called: name='{}', nickname='{}', is_private={}",
+            "🟢 create_new_board_with_identity called: name='{}', nickname='{}', is_private={}",
             name, nickname, is_private
         );
 
-        let owner_vk = self_sk.verifying_key();
+        let self_sk = profile.signing_key.clone();
+        let owner_vk = owner_sk.verifying_key();
+        let profile_vk = self_sk.verifying_key();
+        let has_separate_profile = profile_vk != owner_vk;
         let mut board_state = ChatBoardStateV1::default();
 
         // Generate board secret if private
@@ -2211,7 +2314,8 @@ impl Boards {
                 category_id: None,
             };
 
-            let authorized_version = AuthorizedSecretVersionRecord::new(secret_version, &self_sk);
+            let authorized_version =
+                AuthorizedSecretVersionRecord::new(secret_version, &owner_sk);
 
             // Create encrypted secret for the owner
             let encrypted_secret = EncryptedSecretForMemberV1 {
@@ -2225,7 +2329,7 @@ impl Boards {
             };
 
             let authorized_encrypted_secret =
-                AuthorizedEncryptedSecretForMember::new(encrypted_secret, &self_sk);
+                AuthorizedEncryptedSecretForMember::new(encrypted_secret, &owner_sk);
 
             // Add to board state
             board_state.secrets.versions.push(authorized_version);
@@ -2233,6 +2337,23 @@ impl Boards {
                 .secrets
                 .encrypted_secrets
                 .push(authorized_encrypted_secret);
+
+            if has_separate_profile {
+                let (profile_ciphertext, profile_nonce, profile_ephemeral) =
+                    encrypt_secret_for_member(&secret, &profile_vk);
+                let profile_secret = EncryptedSecretForMemberV1 {
+                    member_id: profile_vk.into(),
+                    secret_version: 0,
+                    ciphertext: profile_ciphertext,
+                    nonce: profile_nonce,
+                    sender_ephemeral_public_key: profile_ephemeral.to_bytes(),
+                    provider: owner_vk.into(),
+                    category_id: None,
+                };
+                board_state.secrets.encrypted_secrets.push(
+                    AuthorizedEncryptedSecretForMember::new(profile_secret, &owner_sk),
+                );
+            }
             board_state.secrets.current_version = 0;
 
             info!("🟢 Private board secret generated and encrypted");
@@ -2267,11 +2388,11 @@ impl Boards {
             updated_at: get_current_system_time(),
             ..Configuration::default()
         };
-        board_state.configuration = AuthorizedConfigurationV1::new(config, &self_sk);
+        board_state.configuration = AuthorizedConfigurationV1::new(config, &owner_sk);
 
-        // Add owner to member_info
+        // Add the profile to member_info; the owner key is not a member.
         let owner_info = MemberInfo {
-            member_id: owner_vk.into(),
+            member_id: profile_vk.into(),
             version: 0,
             preferred_nickname: if let Some(ref secret) = board_secret {
                 // Encrypt nickname for private boards
@@ -2288,11 +2409,45 @@ impl Boards {
                 SealedBytes::public(nickname.into_bytes())
             },
         };
-        let authorized_owner_info = AuthorizedMemberInfo::new(owner_info, &self_sk);
+        let authorized_profile_info = AuthorizedMemberInfo::new(owner_info, &self_sk);
         board_state
             .member_info
             .member_info
-            .push(authorized_owner_info);
+            .push(authorized_profile_info.clone());
+
+        let self_authorized_member = if has_separate_profile {
+            // The contract keeps the owner out of the members list. The chosen
+            // profile becomes a member and an administrator.
+            let member = Member {
+                owner_member_id: owner_vk.into(),
+                invited_by: owner_vk.into(),
+                member_vk: profile_vk,
+                join_proof: None,
+            };
+            let authorized = AuthorizedMember::new(member, &owner_sk);
+            board_state.members.members.push(authorized.clone());
+            let admin = Admin {
+                member_id: profile_vk.into(),
+                generation: 0,
+                signed_at: get_current_system_time(),
+            };
+            board_state
+                .admin
+                .admins
+                .push(AuthorizedAdmin::new(admin, &owner_sk));
+            Some(authorized)
+        } else {
+            None
+        };
+
+        // Remember the profile so it can be reused on another board.
+        if !self
+            .profiles
+            .iter()
+            .any(|existing| existing.signing_key.verifying_key() == profile_vk)
+        {
+            self.profiles.push(profile.clone());
+        }
 
         // Generate contract key for the board
         info!("🟢 Generating contract key...");
@@ -2316,6 +2471,7 @@ impl Boards {
             owner_vk,
             board_state,
             self_sk,
+            owner_sk: Some(owner_sk),
             contract_key,
             last_read_message_id: None,
             secrets,
@@ -2326,9 +2482,9 @@ impl Boards {
                 None
             },
             key_migrated_to_delegate: false, // Will be checked/migrated on startup
-            self_authorized_member: None,    // Owner doesn't need this
+            self_authorized_member,
             invite_chain: vec![],
-            self_member_info: None,
+            self_member_info: Some(authorized_profile_info),
             spectator: false,
             category_secrets: HashMap::new(),
             old_category_secrets: HashMap::new(),
@@ -2371,6 +2527,16 @@ impl Boards {
         for hash in other.blocked_image_hashes {
             if !self.blocked_image_hashes.contains(&hash) {
                 self.blocked_image_hashes.push(hash);
+            }
+        }
+        // Profiles are local and follow the union rule by signing key.
+        for profile in other.profiles {
+            if !self
+                .profiles
+                .iter()
+                .any(|existing| existing.signing_key.verifying_key() == profile.signing_key.verifying_key())
+            {
+                self.profiles.push(profile);
             }
         }
         // Own uploads follow the union rule too; keep the fresher copy when
@@ -2467,6 +2633,99 @@ mod tests {
     /// not carry its megabytes. A blob from before the split still loads and
     /// keeps its entries for the migration.
     #[test]
+    fn a_board_can_have_a_separate_owner_and_profile() {
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let profile = IdentityProfile::new(
+            "Shared profile".to_string(),
+            SigningKey::generate(&mut rng),
+        );
+        let profile_vk = profile.signing_key.verifying_key();
+        let mut boards = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            profiles: Vec::new(),
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
+            owned_images: Vec::new(),
+        };
+        let owner_vk = owner_sk.verifying_key();
+        let key = boards.create_new_board_with_identity(
+            owner_sk,
+            profile,
+            "Shared board".to_string(),
+            "Shared profile".to_string(),
+            false,
+        );
+        assert_eq!(key, owner_vk);
+        let board = boards.map.get(&key).expect("board inserted");
+        assert!(board.owner_sk.is_some());
+        assert_eq!(board.owner_key().verifying_key(), owner_vk);
+        assert_eq!(board.self_sk.verifying_key(), profile_vk);
+        assert!(board
+            .board_state
+            .members
+            .members
+            .iter()
+            .any(|member| member.member.member_vk == profile_vk));
+        assert!(board
+            .board_state
+            .admin
+            .admins
+            .iter()
+            .any(|admin| admin.admin.member_id == MemberId::from(&profile_vk)));
+        let parameters = ChatBoardParametersV1 { owner: owner_vk };
+        board
+            .board_state
+            .verify(&board.board_state, &parameters)
+            .expect("board state verifies");
+    }
+
+    /// Management records use the owner key when this client holds it, and the
+    /// profile key (as a named member) otherwise.
+    #[test]
+    fn management_signing_uses_the_key_that_holds_the_authority() {
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let profile_sk = SigningKey::generate(&mut rng);
+        let member_sk = SigningKey::generate(&mut rng);
+        let mut boards = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            profiles: Vec::new(),
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
+            owned_images: Vec::new(),
+        };
+        let key = boards.create_new_board_with_identity(
+            owner_sk.clone(),
+            IdentityProfile::new("Owner profile".to_string(), profile_sk),
+            "Board".to_string(),
+            "Owner".to_string(),
+            false,
+        );
+
+        let owner_view = boards.map.get(&key).unwrap().clone();
+        let (signing_key, signer) = owner_view.management_signer();
+        assert_eq!(signing_key.verifying_key(), owner_sk.verifying_key());
+        assert_eq!(signer, None, "the owner signs without an authority proof");
+
+        // A member only ever holds its own key.
+        let mut member_view = owner_view;
+        member_view.self_sk = member_sk.clone();
+        member_view.owner_sk = None;
+        let (signing_key, signer) = member_view.management_signer();
+        assert_eq!(signing_key.verifying_key(), member_sk.verifying_key());
+        assert_eq!(signer, Some(MemberId::from(&member_sk.verifying_key())));
+    }
+
+    #[test]
     fn owned_images_are_saved_outside_the_boards_blob() {
         let owned = OwnedImage {
             image: plaza_core::board_state::images::ImageRef {
@@ -2494,6 +2753,7 @@ mod tests {
         let boards = Boards {
             map: HashMap::new(),
             current_board_key: None,
+            profiles: Vec::new(),
             removed: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
@@ -2537,6 +2797,7 @@ mod tests {
         let mut boards = Boards {
             map: HashMap::new(),
             current_board_key: None,
+            profiles: Vec::new(),
             removed: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
@@ -2674,6 +2935,7 @@ mod tests {
         let mut boards = Boards {
             map: HashMap::new(),
             current_board_key: None,
+            profiles: Vec::new(),
             removed: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
@@ -2720,6 +2982,7 @@ mod tests {
             let mut boards = Boards {
                 map: HashMap::new(),
                 current_board_key: None,
+                profiles: Vec::new(),
                 removed: Vec::new(),
                 migrated_boards: vec![],
                 blocked_image_hashes: Vec::new(),
@@ -2765,6 +3028,7 @@ mod tests {
         let mut boards = Boards {
             map: HashMap::new(),
             current_board_key: None,
+            profiles: Vec::new(),
             removed: Vec::new(),
             migrated_boards: vec![],
             blocked_image_hashes: Vec::new(),
@@ -2987,6 +3251,7 @@ mod tests {
         let mut boards = Boards {
             map: HashMap::new(),
             current_board_key: None,
+            profiles: Vec::new(),
             removed: Vec::new(),
             migrated_boards: vec![],
             blocked_image_hashes: Vec::new(),
@@ -3186,6 +3451,7 @@ mod tests {
         // The invitee decrypts their blob and sees the same name.
         let mut invitee_view = owner_view.clone();
         invitee_view.self_sk = invitee_sk.clone();
+        invitee_view.owner_sk = None;
         invitee_view.category_secrets.clear();
         invitee_view.decrypt_pq_category_secrets();
         assert_eq!(
@@ -3201,6 +3467,7 @@ mod tests {
         let outsider_id: MemberId = outsider_sk.verifying_key().into();
         let mut outsider_view = owner_view.clone();
         outsider_view.self_sk = outsider_sk.clone();
+        outsider_view.owner_sk = None;
         outsider_view.category_secrets.clear();
         outsider_view.decrypt_category_secrets();
         assert!(outsider_view.category_secret(&category_id).is_none());
@@ -3274,6 +3541,7 @@ mod tests {
         // the key-distribution permission, not from the owner.
         let mut distributor_view = boards.map.get(&key).unwrap().clone();
         distributor_view.self_sk = invitee_sk.clone();
+        distributor_view.owner_sk = None;
         distributor_view.category_secrets.clear();
         distributor_view.decrypt_category_secrets();
         assert_eq!(
@@ -3308,6 +3576,7 @@ mod tests {
 
         let mut newcomer = boards.map.get(&key).unwrap().clone();
         newcomer.self_sk = outsider_sk;
+        newcomer.owner_sk = None;
         newcomer.category_secrets.clear();
         newcomer.decrypt_category_secrets();
         assert_eq!(
@@ -3358,6 +3627,7 @@ mod tests {
             owner_vk,
             board_state,
             self_sk: stale_sk,
+            owner_sk: None,
             contract_key,
             last_read_message_id: None,
             secrets: HashMap::new(),
@@ -3443,6 +3713,7 @@ mod tests {
             owner_vk,
             board_state,
             self_sk: invitee_sk.clone(),
+            owner_sk: None,
             contract_key,
             last_read_message_id: None,
             secrets: HashMap::new(),
@@ -3518,6 +3789,7 @@ mod tests {
                 owner_vk,
                 board_state,
                 self_sk: sk,
+                owner_sk: None,
                 contract_key,
                 last_read_message_id: None,
                 secrets: HashMap::new(),

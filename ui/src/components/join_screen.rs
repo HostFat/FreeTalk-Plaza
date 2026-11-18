@@ -9,10 +9,12 @@ pub fn JoinScreen(token: String) -> Element {
     let decoded = use_memo(move || JoinLink::decode(&token));
     let decoded_value = decoded.read().clone();
     let mut nickname = use_signal(String::new);
+    let mut selected_profile = use_signal(|| 0usize);
     let mut error = use_signal(|| None::<String>);
     let mut joining = use_signal(|| false);
     let mut joined = use_signal(|| false);
     let mut timed_out = use_signal(|| false);
+    let profiles = use_memo(move || BOARDS.read().profiles.clone());
 
     let board_key = decoded_value.as_ref().ok().map(|link| link.board);
 
@@ -60,8 +62,32 @@ pub fn JoinScreen(token: String) -> Element {
                                 "{err}"
                             }
                         }
+                        if !profiles.read().is_empty() {
+                            label { class: "block text-sm font-medium text-text mb-1", "Identity" }
+                            select {
+                                class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text text-sm mb-1",
+                                value: "{selected_profile}",
+                                onchange: move |evt| {
+                                    let index = evt.value().parse::<usize>().unwrap_or(0);
+                                    selected_profile.set(index);
+                                    if index > 0 {
+                                        if let Some(profile) = profiles.read().get(index - 1) {
+                                            nickname.set(profile.name.clone());
+                                        }
+                                    }
+                                },
+                                option { value: "0", "New identity (unlinkable)" }
+                                for (index, profile) in profiles.read().iter().enumerate() {
+                                    option { value: "{index + 1}", "{profile.name} (same identity)" }
+                                }
+                            }
+                            p { class: "text-xs text-text-muted mb-3",
+                                "Reusing a profile shows the same member id on this board too. A new identity keeps the boards apart."
+                            }
+                        }
                         input {
                             class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text placeholder-text-muted mb-3",
+                            dir: "auto",
                             placeholder: "Your nickname",
                             value: "{nickname}",
                             oninput: move |evt| nickname.set(evt.value()),
@@ -71,7 +97,19 @@ pub fn JoinScreen(token: String) -> Element {
                             class: "w-full px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-lg disabled:opacity-50",
                             disabled: *joining.read() || nickname.read().trim().is_empty(),
                             onclick: move |_| {
-                                match crate::util::access::join_with_token(&link, nickname.read().clone()) {
+                                let profile_key = {
+                                    let index = *selected_profile.read();
+                                    profiles
+                                        .read()
+                                        .get(index.saturating_sub(1))
+                                        .filter(|_| index > 0)
+                                        .map(|profile| profile.signing_key.clone())
+                                };
+                                match crate::util::access::join_with_token(
+                                    &link,
+                                    nickname.read().clone(),
+                                    profile_key,
+                                ) {
                                     Ok(()) => {
                                         joining.set(true);
                                         joined.set(true);

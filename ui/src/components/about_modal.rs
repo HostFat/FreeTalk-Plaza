@@ -1,7 +1,7 @@
 //! "About FreeTalk Plaza" panel: name, what the app is, and the build/deployment
 //! details a user needs when reporting a problem.
 
-use crate::components::app::ABOUT_MODAL;
+use crate::components::app::{ABOUT_MODAL, BOARDS};
 use dioxus::prelude::*;
 use web_sys::window;
 
@@ -27,6 +27,19 @@ fn site_contract_id() -> Option<String> {
     }
 }
 
+/// Profile edits are local state; write them before a reload can drop them.
+fn persist_profiles() {
+    crate::util::safe_spawn_local(async {
+        if let Err(error) =
+            crate::components::app::chat_delegate::save_boards_and_wait().await
+        {
+            crate::components::app::toasts::show_error(format!(
+                "Could not save the profile: {error}"
+            ));
+        }
+    });
+}
+
 #[component]
 pub fn AboutModal() -> Element {
     if !*ABOUT_MODAL.read() {
@@ -38,6 +51,8 @@ pub fn AboutModal() -> Element {
         .unwrap_or_else(|| "unknown".to_string());
     let site = site_contract_id();
     let site_label = site.clone().unwrap_or_else(|| "local".to_string());
+    let mut renaming = use_signal(|| None::<String>);
+    let mut rename_text = use_signal(String::new);
 
     rsx! {
         div {
@@ -92,6 +107,81 @@ pub fn AboutModal() -> Element {
                     }
                     p { class: "text-xs",
                         "To check whether this site is current, compare the commit above with the latest commit in the repository."
+                    }
+                    div { class: "border-t border-border pt-3 space-y-2",
+                        p { class: "text-sm text-text", "Your identities" }
+                        p { class: "text-xs",
+                            "A profile is a local key. Reusing it on several boards shows the same member id on each; a separate profile keeps them unlinked. Keys never leave this device."
+                        }
+                        for profile in BOARDS.read().profiles.clone() {
+                            div { key: "{profile.id}", class: "flex items-center gap-2 flex-wrap",
+                                if renaming.read().as_deref() == Some(profile.id.as_str()) {
+                                    input {
+                                        class: "flex-1 min-w-24 px-2 py-1 bg-surface border border-border rounded text-text text-xs",
+                                        dir: "auto",
+                                        value: "{rename_text}",
+                                        oninput: move |evt| rename_text.set(evt.value()),
+                                    }
+                                    button {
+                                        r#type: "button",
+                                        class: "px-2 py-1 bg-accent text-white text-xs rounded",
+                                        onclick: {
+                                            let id = profile.id.clone();
+                                            move |_| {
+                                                let name = rename_text.read().trim().to_string();
+                                                if !name.is_empty() {
+                                                    BOARDS.with_mut(|boards| {
+                                                        boards.rename_profile(&id, name)
+                                                    });
+                                                    persist_profiles();
+                                                }
+                                                renaming.set(None);
+                                            }
+                                        },
+                                        "Save"
+                                    }
+                                    button {
+                                        r#type: "button",
+                                        class: "px-2 py-1 bg-surface text-text text-xs rounded",
+                                        onclick: move |_| renaming.set(None),
+                                        "Cancel"
+                                    }
+                                } else {
+                                    span { class: "text-text text-xs", "{profile.name}" }
+                                    span { class: "text-text-muted text-[10px] font-mono",
+                                        "{profile.id.chars().take(8).collect::<String>()}"
+                                    }
+                                    button {
+                                        r#type: "button",
+                                        class: "px-2 py-1 bg-surface hover:bg-surface-hover text-text text-xs rounded",
+                                        onclick: {
+                                            let id = profile.id.clone();
+                                            let name = profile.name.clone();
+                                            move |_| {
+                                                rename_text.set(name.clone());
+                                                renaming.set(Some(id.clone()));
+                                            }
+                                        },
+                                        "Rename"
+                                    }
+                                    button {
+                                        r#type: "button",
+                                        class: "px-2 py-1 bg-surface hover:bg-surface-hover text-text-muted text-xs rounded",
+                                        onclick: {
+                                            let id = profile.id.clone();
+                                            move |_| {
+                                                BOARDS.with_mut(|boards| boards.forget_profile(&id));
+                                                persist_profiles();
+                                            }
+                                        },
+                                        "Forget"
+                                    }
+                                }
+                            }
+                        }
+                        if BOARDS.read().profiles.is_empty() {
+                            p { class: "text-xs", "No profiles yet. Create one with a board or an invite." }
+                        }
                     }
                     div { class: "border-t border-border pt-3 space-y-2",
                         p { class: "text-xs",

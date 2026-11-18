@@ -837,24 +837,22 @@ pub async fn retire_in_contract(instance: [u8; 32]) -> Result<(), String> {
         return Err("Board data is not loaded".to_string());
     };
     let self_vk = board.self_sk.verifying_key();
-    let parameters = plaza_core::board_state::ChatBoardParametersV1 {
-        owner: board.owner_vk,
-    };
-    let role = if state.uploader == self_vk {
-        RetirementRole::Uploader
-    } else if self_vk == board.owner_vk {
-        RetirementRole::OwnerFounding
-    } else if plaza_core::board_state::member::MemberId::from(&self_vk)
-        == board.board_state.ownership.current_owner(&parameters)
-    {
-        RetirementRole::OwnerCurrent
+    let owner_vk = board.owner_key().verifying_key();
+    // Blob parameters name three keys: the uploader profile, the founding owner
+    // and the current owner. Sign each role with the matching key.
+    let (signing_key, role) = if state.uploader == self_vk {
+        (board.self_sk.clone(), RetirementRole::Uploader)
+    } else if owner_vk == board.owner_vk {
+        (board.owner_key().clone(), RetirementRole::OwnerFounding)
+    } else if owner_vk == board.current_owner_key() {
+        (board.owner_key().clone(), RetirementRole::OwnerCurrent)
     } else {
         return Err(
             "Only the uploader or a board owner can retire the contract itself".to_string(),
         );
     };
 
-    let retired = BlobStateV1::retired_by(&state, content, &board.self_sk, role);
+    let retired = BlobStateV1::retired_by(&state, content, &signing_key, role);
     send_retirement(instance, &retired).await?;
 
     // A manifest leaves its chunks reachable by key; the same owner keys are

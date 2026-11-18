@@ -22,9 +22,10 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
     };
     board_data.ensure_can_write()?;
 
-    let self_sk = board_data.self_sk.clone();
+    // The owner signs with the owner key; an admin signs as its profile.
+    let (signing_key, signer) = board_data.management_signer();
     let board_state_clone = board_data.board_state.clone();
-    let banned_by = MemberId::from(&self_sk.verifying_key());
+    let banned_by = signer.unwrap_or_else(|| MemberId::from(&current_board));
     let params = ChatBoardParametersV1 {
         owner: current_board,
     };
@@ -74,9 +75,9 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
     // Sign locally: the delegate round trip can stall the ban, and the client
     // already holds the same signing key.
     use ed25519_dalek::Signer;
-    let signature = self_sk.sign(&ban_bytes);
+    let signature = signing_key.sign(&ban_bytes);
     let authorized_ban = AuthorizedUserBan::with_signature(ban, banned_by, signature)
-        .with_signer_key(self_sk.verifying_key())
+        .with_signer_key(signing_key.verifying_key())
         .with_optional_authority(plaza_core::board_state::roles::admin_authority_proof(
             &board_state_clone,
             &banned_by,
@@ -95,21 +96,32 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
         .map(|entry| {
             // The revocation must name this signer; `new` would claim the
             // owner signed it and fail verification for an admin.
-            plaza_core::board_state::roles::AuthorizedRoleAssignment::signed_by(
-                plaza_core::board_state::roles::RoleAssignment {
-                    role_id: entry.assignment.role_id,
-                    member_id: member_to_ban,
-                    generation: entry.assignment.generation + 1,
-                    revoked: true,
-                    signed_at: get_current_system_time(),
-                },
-                banned_by,
-                &self_sk,
-            )
-            .with_optional_authority(plaza_core::board_state::roles::admin_authority_proof(
-                &board_state_clone,
-                &banned_by,
-            ))
+            let assignment = plaza_core::board_state::roles::RoleAssignment {
+                role_id: entry.assignment.role_id,
+                member_id: member_to_ban,
+                generation: entry.assignment.generation + 1,
+                revoked: true,
+                signed_at: get_current_system_time(),
+            };
+            match signer {
+                None => plaza_core::board_state::roles::AuthorizedRoleAssignment::new(
+                    assignment,
+                    &signing_key,
+                ),
+                Some(self_id) => {
+                    plaza_core::board_state::roles::AuthorizedRoleAssignment::signed_by(
+                        assignment,
+                        self_id,
+                        &signing_key,
+                    )
+                    .with_optional_authority(
+                        plaza_core::board_state::roles::admin_authority_proof(
+                            &board_state_clone,
+                            &self_id,
+                        ),
+                    )
+                }
+            }
         })
         .collect();
     let delta = ChatBoardStateV1Delta {
@@ -140,7 +152,7 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
 
         // On a private board, rotate the secret so the banned member cannot
         // decrypt messages sent after the ban.
-        if data.is_private() && data.owner_vk == data.self_sk.verifying_key() {
+        if data.is_private() && data.is_current_owner() {
             match data.rotate_secret() {
                 Ok(secrets_delta) => {
                     let current_state = data.board_state.clone();
@@ -171,10 +183,10 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
     Ok(())
 }
 
-/// Lift a ban with a signed revocation. Owner and admins can do it.
+/// Lift a ban with a signed revocation. Only the board owner can do it.
 pub fn lift_ban(ban_id: BanId, banned_user: MemberId) -> Result<(), String> {
     let current_board = CURRENT_BOARD.read().owner_key.ok_or("No board selected")?;
-    let (board_state, self_sk) = {
+    let (board_state, owner_sk) = {
         let boards = BOARDS.read();
         let data = boards
             .map
@@ -182,7 +194,10 @@ pub fn lift_ban(ban_id: BanId, banned_user: MemberId) -> Result<(), String> {
             .ok_or("Board not found")?
             .clone();
         data.ensure_can_write()?;
-        (data.board_state.clone(), data.self_sk.clone())
+        if !data.is_current_owner() {
+            return Err("Only the board owner can lift a ban".to_string());
+        }
+        (data.board_state.clone(), data.owner_key().clone())
     };
     let revocation = AuthorizedBanRevocation::new(
         BanRevocationV1 {
@@ -190,7 +205,7 @@ pub fn lift_ban(ban_id: BanId, banned_user: MemberId) -> Result<(), String> {
             banned_user,
             revoked_at: get_current_system_time(),
         },
-        &self_sk,
+        &owner_sk,
     );
     let delta = ChatBoardStateV1Delta {
         ban_revocations: Some(vec![revocation]),
@@ -230,7 +245,7 @@ pub fn auto_lift_expired_bans() {
         let Some(data) = boards.map.get(&current_board) else {
             return;
         };
-        if data.self_sk.verifying_key() != data.owner_vk {
+        if !data.is_current_owner() {
             return;
         }
         data.board_state

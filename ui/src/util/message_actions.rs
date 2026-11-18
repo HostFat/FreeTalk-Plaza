@@ -37,6 +37,8 @@ pub struct ActionContext {
     pub board_key: BoardKey,
     pub self_sk: SigningKey,
     pub board_state: ChatBoardStateV1,
+    /// Board owner key for ownership and configuration actions.
+    pub owner_sk: SigningKey,
     pub is_private: bool,
     pub secret_opt: Option<([u8; 32], u32)>,
     pub board_secrets: std::collections::HashMap<u32, [u8; 32]>,
@@ -81,6 +83,7 @@ impl ActionContext {
                     current_board: key,
                     board_key: board_data.board_key(),
                     self_sk: board_data.self_sk.clone(),
+                    owner_sk: board_data.owner_key().clone(),
                     board_state: board_data.board_state.clone(),
                     is_private: board_data.is_private(),
                     secret_opt: board_data.get_secret().map(|(s, v)| (*s, v)),
@@ -93,6 +96,16 @@ impl ActionContext {
             }
         }
         None
+    }
+
+    /// Whether the key in hand is the board's current owner.
+    pub fn is_current_owner(&self) -> bool {
+        self.owner_sk.verifying_key()
+            == self.board_state.ownership.current_owner_key(
+                &ChatBoardParametersV1 {
+                    owner: self.current_board,
+                },
+            )
     }
 
     /// Category content of a message, opened with whichever key sealed it.

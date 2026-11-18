@@ -9,6 +9,7 @@ pub fn CreateBoardModal() -> Element {
     let mut nickname = use_signal(String::new);
     let mut error_msg = use_signal(|| None::<String>);
     let mut is_private = use_signal(|| false);
+    let mut selected_profile = use_signal(|| 0usize);
 
     let create_board = move |_| {
         use dioxus::logger::tracing::info;
@@ -43,9 +44,24 @@ pub fn CreateBoardModal() -> Element {
         error_msg.set(None);
         info!("🔵 Board name: {}", name);
 
-        // Generate key outside the borrow
-        info!("🔵 Generating signing key...");
-        let self_sk = SigningKey::generate(&mut rand::thread_rng());
+        // The owner key stays unique per board; the profile key may be reused.
+        info!("🔵 Generating owner key...");
+        let owner_sk = SigningKey::generate(&mut rand::thread_rng());
+        let profile = {
+            let index = *selected_profile.read();
+            let existing = BOARDS
+                .read()
+                .profiles
+                .get(index.saturating_sub(1))
+                .cloned();
+            match existing {
+                Some(profile) if index > 0 => profile,
+                _ => crate::board_data::IdentityProfile::new(
+                    nick.clone(),
+                    SigningKey::generate(&mut rand::thread_rng()),
+                ),
+            }
+        };
         let private = *is_private.read();
         info!(
             "🔵 Creating {} board with nickname: {}",
@@ -55,8 +71,9 @@ pub fn CreateBoardModal() -> Element {
 
         // Create board and get the key
         info!("🔵 About to call create_new_board_with_name...");
-        let new_board_key = BOARDS
-            .with_mut(|boards| boards.create_new_board_with_name(self_sk, name, nick, private));
+        let new_board_key = BOARDS.with_mut(|boards| {
+            boards.create_new_board_with_identity(owner_sk, profile, name, nick, private)
+        });
         info!("🔵 Board created with key: {:?}", new_board_key);
 
         // Navigate to board URL using hash (modal is outside Router context)
@@ -78,6 +95,7 @@ pub fn CreateBoardModal() -> Element {
         board_name.set(String::new());
         nickname.set(String::new());
         is_private.set(false);
+        selected_profile.set(0);
         info!("🔵 Closing modal...");
         CREATE_BOARD_MODAL.with_mut(|modal| {
             modal.show = false;
@@ -87,6 +105,7 @@ pub fn CreateBoardModal() -> Element {
     };
 
     let is_open = CREATE_BOARD_MODAL.read().show;
+    let profiles = BOARDS.read().profiles.clone();
 
     if !is_open {
         return rsx! {};
@@ -137,6 +156,30 @@ pub fn CreateBoardModal() -> Element {
                             value: "{board_name}",
                             placeholder: "Enter board name",
                             oninput: move |evt| board_name.set(evt.value().to_string())
+                        }
+                    }
+
+                    div {
+                        label { class: "block text-sm font-medium text-text mb-1", "Identity" }
+                        select {
+                            class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text text-sm focus:outline-none focus:ring-2 focus:ring-accent/50",
+                            value: "{selected_profile}",
+                            onchange: move |evt| {
+                                let index = evt.value().parse::<usize>().unwrap_or(0);
+                                selected_profile.set(index);
+                                if index > 0 {
+                                    if let Some(profile) = BOARDS.read().profiles.get(index - 1) {
+                                        nickname.set(profile.name.clone());
+                                    }
+                                }
+                            },
+                            option { value: "0", "New identity (unlinkable)" }
+                            for (index, profile) in profiles.iter().enumerate() {
+                                option { value: "{index + 1}", "{profile.name} (same identity)" }
+                            }
+                        }
+                        p { class: "text-xs text-text-muted mt-1",
+                            "Sharing a profile makes the same member id appear on both boards. A new identity does not link them."
                         }
                     }
 

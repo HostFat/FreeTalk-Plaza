@@ -17,16 +17,25 @@ pub fn retire_image(
     sha256: [u8; 32],
     reason: String,
 ) -> Result<(), String> {
-    let self_id = MemberId::from(&ctx.self_sk.verifying_key());
-    let proof = admin_authority_proof(&ctx.board_state, &self_id)
-        .or_else(|| image_retire_authority_proof(&ctx.board_state, &self_id));
+    // The owner signs with the owner key; a moderator signs as its profile
+    // member and carries the authority proof.
+    let (signing_key, signer) = if ctx.is_current_owner() {
+        (ctx.owner_sk.clone(), None)
+    } else {
+        let id = MemberId::from(&ctx.self_sk.verifying_key());
+        (ctx.self_sk.clone(), Some(id))
+    };
+    let proof = signer.and_then(|self_id| {
+        admin_authority_proof(&ctx.board_state, &self_id)
+            .or_else(|| image_retire_authority_proof(&ctx.board_state, &self_id))
+    });
     let retirement = ImageRetirementV1 {
         instance,
         sha256,
         reason: reason.chars().take(280).collect(),
         created_at: chrono::Utc::now().timestamp_millis(),
     };
-    let entry = AuthorizedImageRetirement::new(retirement, &ctx.self_sk)
+    let entry = AuthorizedImageRetirement::new(retirement, &signing_key)
         .with_optional_authority(proof);
     let delta = ChatBoardStateV1Delta {
         image_retirements: Some(ImageRetirementsDelta {

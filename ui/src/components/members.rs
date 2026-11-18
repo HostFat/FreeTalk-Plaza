@@ -424,6 +424,9 @@ fn ExportIdentityModal(is_active: Signal<bool>) -> Element {
                     let export = IdentityExport {
                         board_owner: owner_key,
                         signing_key: board_data.self_sk.clone(),
+                        owner_signing_key: board_data
+                            .is_current_owner()
+                            .then(|| board_data.owner_key().clone()),
                         authorized_member,
                         invite_chain: board_data.invite_chain.clone(),
                         member_info: board_data.self_member_info.clone(),
@@ -540,6 +543,10 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                 }
                 // Capture signing key for delegate migration before moving into BoardData
                 let signing_key_for_migration = export.signing_key.clone();
+                let owner_sk_for_import = export
+                    .owner_signing_key
+                    .clone()
+                    .unwrap_or_else(|| export.signing_key.clone());
                 let board_key_bytes = owner_key.to_bytes();
 
                 let category_secrets = export
@@ -552,6 +559,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     owner_vk: owner_key,
                     board_state: initial_state, // Will be fully populated on sync
                     self_sk: export.signing_key,
+                    owner_sk: Some(owner_sk_for_import),
                     contract_key,
                     last_read_message_id: None,
                     secrets: export
@@ -583,9 +591,20 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     spectator: false,
                 };
 
+                // Keep the imported profile around so it can be reused on
+                // another board.
+                let imported_profile = crate::board_data::IdentityProfile::new(
+                    export
+                        .board_name
+                        .clone()
+                        .unwrap_or_else(|| "Imported identity".to_string()),
+                    signing_key_for_migration.clone(),
+                );
+
                 // Add to BOARDS and trigger sync
                 BOARDS.with_mut(|boards| {
                     boards.removed.retain(|vk| *vk != owner_key);
+                    boards.remember_profile(imported_profile);
                     boards.map.insert(owner_key, board_data);
                 });
 

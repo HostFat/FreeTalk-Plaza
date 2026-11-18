@@ -142,6 +142,7 @@ pub async fn handle_get_response(
                         owner_vk,
                         board_state: retrieved_state.clone(),
                         self_sk: self_sk.clone(),
+                        owner_sk: None,
                         contract_key: key,
                         last_read_message_id: None,
                         secrets: std::collections::HashMap::new(),

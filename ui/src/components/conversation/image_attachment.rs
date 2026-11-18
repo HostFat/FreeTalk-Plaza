@@ -91,7 +91,7 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
             .map
             .get(&key)
             .map(|board| {
-                let self_vk = board.self_sk.verifying_key();
+                let self_vk = board.owner_key().verifying_key();
                 self_vk == board.owner_vk || self_vk == board.current_owner_key()
             })
             .unwrap_or(false)

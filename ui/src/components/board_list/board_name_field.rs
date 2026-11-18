@@ -53,7 +53,7 @@ pub fn BoardNameField(config: Configuration, is_owner: bool) -> Element {
                 if let Some(board_data) = boards.map.get(&owner_key) {
                     Some((
                         board_data.board_key(),
-                        board_data.self_sk.clone(),
+                        board_data.owner_key().clone(),
                         board_data.board_state.clone(),
                         board_data.get_secret().map(|(s, v)| (*s, v)),
                     ))

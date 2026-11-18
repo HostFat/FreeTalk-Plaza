@@ -41,6 +41,7 @@ pub fn create_example_boards() -> Boards {
     Boards {
         map,
         current_board_key: None,
+        profiles: Vec::new(),
         removed: Vec::new(),
         migrated_boards: Vec::new(),
         blocked_image_hashes: Vec::new(),
@@ -218,6 +219,7 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
             owner_vk: owner_vk.clone(),
             board_state,
             self_sk: self_sk.clone(),
+            owner_sk: None,
             contract_key,
             last_read_message_id: None,
             secrets: std::collections::HashMap::new(),
