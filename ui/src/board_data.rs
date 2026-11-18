@@ -2688,7 +2688,16 @@ impl Boards {
                 // If the board is already in the map, merge in the new data
                 let self_board_data = self.map.get_mut(&vk).unwrap();
                 if self_board_data.self_sk != board_data.self_sk {
-                    return Err("self_sk is different".to_string());
+                    // The visible identity is a local choice and can be
+                    // switched; keep the incoming profile and its membership
+                    // data, and keep an owner key from either side.
+                    self_board_data.self_sk = board_data.self_sk.clone();
+                    self_board_data.self_authorized_member =
+                        board_data.self_authorized_member.clone();
+                    self_board_data.self_member_info = board_data.self_member_info.clone();
+                    if board_data.owner_sk.is_some() {
+                        self_board_data.owner_sk = board_data.owner_sk.clone();
+                    }
                 }
                 self_board_data.board_state.merge(
                     &self_board_data.board_state.clone(),
@@ -3245,6 +3254,75 @@ mod tests {
         assert!(board.self_authorized_member.is_some());
         assert!(board.can_participate().is_ok());
         assert!(board.switch_profile(&SigningKey::generate(&mut rng)).is_err());
+    }
+
+    /// A profile switch changes `self_sk`; the save merge must accept it and
+    /// keep the new identity instead of dropping the board.
+    #[test]
+    fn merge_accepts_a_profile_switch() {
+        use plaza_core::board_state::member::AuthorizedMember;
+
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let first_sk = SigningKey::generate(&mut rng);
+        let second_sk = SigningKey::generate(&mut rng);
+        let second_vk = second_sk.verifying_key();
+        let mut boards = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            profiles: Vec::new(),
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
+            owned_images: Vec::new(),
+        };
+        let key = boards.create_new_board_with_identity(
+            owner_sk.clone(),
+            IdentityProfile::new("First".to_string(), first_sk),
+            "Board".to_string(),
+            "First".to_string(),
+            false,
+        );
+        let board = boards.map.get_mut(&key).unwrap();
+        board
+            .board_state
+            .members
+            .members
+            .push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: MemberId::from(key),
+                    invited_by: MemberId::from(key),
+                    member_vk: second_vk,
+                    join_proof: None,
+                },
+                &owner_sk,
+            ));
+        board.switch_profile(&second_sk).expect("the profile switches");
+        boards.current_board_key = Some(key);
+
+        let mut stored = Boards {
+            map: HashMap::new(),
+            current_board_key: Some(key),
+            profiles: boards.profiles.clone(),
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
+            owned_images: Vec::new(),
+        };
+        let mut old_board = boards.map.get(&key).cloned().unwrap();
+        old_board.self_sk = SigningKey::generate(&mut rng);
+        stored.map.insert(key, old_board);
+
+        stored.merge(boards).expect("the switch merges");
+        assert_eq!(
+            stored.map.get(&key).unwrap().self_sk.verifying_key(),
+            second_vk
+        );
+        assert!(stored.map.get(&key).unwrap().owner_sk.is_some());
     }
 
     #[test]

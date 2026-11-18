@@ -47,6 +47,20 @@ pub fn TrashView() -> Element {
             if changed {
                 crate::components::app::mark_needs_sync(board_key);
             }
+            // A fresh board has KEM keys but no trash set yet. Create it now,
+            // so access can be shared and rotated before the first hide.
+            if let Some(ctx) = ActionContext::from_current_board() {
+                match crate::util::trash_actions::ensure_trash_key(&ctx) {
+                    Ok(true) => {
+                        crate::components::app::toasts::show("Trash key created.")
+                    }
+                    Ok(false) => {}
+                    Err(error) if error.contains("cannot create") => {}
+                    Err(error) => crate::components::app::toasts::show_error(format!(
+                        "Could not create the trash key: {error}"
+                    )),
+                }
+            }
         }
     });
 

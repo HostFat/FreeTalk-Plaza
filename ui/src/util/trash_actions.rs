@@ -4,6 +4,7 @@
 use crate::util::ecies::{decrypt_with_symmetric_key, encrypt_with_symmetric_key};
 use crate::util::message_actions::{apply_state_delta, ActionContext};
 use dioxus::prelude::*;
+use ed25519_dalek::SigningKey;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::{
     AuthorizedMessageV1, BoardMessageBody, MessageId, MessageV1,
@@ -95,95 +96,8 @@ pub async fn hide_topic(
     let (bundle_ciphertext, bundle_nonce) = encrypt_with_symmetric_key(&item_key, &plaintext, 0);
 
     // Prefer the dedicated trash key, shared only with the trash managers.
-    let mut pq_set = None;
-    let (secret, secret_version) = if let Some((version, key)) = ctx.trash_secret {
-        (key, version)
-    } else {
-        use plaza_core::board_state::pq_secrets::{
-            AuthorizedPqSecretSet, PqScope, PqSecretSet, PqSecretsDelta,
-        };
-        use std::collections::BTreeSet;
-
-        let mut managers = BTreeSet::new();
-        managers.insert(trash_owner_id(ctx));
-        for admin in &ctx.board_state.admin.admins {
-            managers.insert(admin.admin.id());
-        }
-        for assignment in &ctx.board_state.roles.assignments {
-            if assignment.assignment.revoked {
-                continue;
-            }
-            if ctx.board_state.roles.roles.iter().any(|role| {
-                role.role.id == assignment.assignment.role_id
-                    && role.role.can_manage_trash
-                    && !role.role.deleted
-            }) {
-                managers.insert(assignment.assignment.member_id);
-            }
-        }
-
-        let trash_key = rand::random::<[u8; 32]>();
-        let mut sealed = Vec::new();
-        for manager in &managers {
-            let Some(kem) = ctx.board_state.pq_secrets.key_for(*manager) else {
-                continue;
-            };
-            let vk = if *manager == trash_owner_id(ctx) {
-                trash_owner_vk(ctx)
-            } else if let Some(member) = ctx
-                .board_state
-                .members
-                .members
-                .iter()
-                .find(|member| member.member.id() == *manager)
-            {
-                member.member.member_vk
-            } else {
-                continue;
-            };
-            if let Ok(record) = crate::util::pq::seal_secret(&trash_key, &kem.ek, *manager, &vk) {
-                sealed.push(record);
-            }
-        }
-
-        if sealed.is_empty() {
-            // No manager has a PQ key yet: fall back to the board secret.
-            let version = ctx.board_state.secrets.current_version;
-            let key = ctx
-                .board_secrets
-                .get(&version)
-                .copied()
-                .ok_or("The board has no secret to protect the trash")?;
-            (key, version)
-        } else {
-            let version = ctx
-                .board_state
-                .pq_secrets
-                .sets
-                .iter()
-                .filter(|entry| matches!(entry.set.scope, PqScope::Trash))
-                .map(|entry| entry.set.version)
-                .max()
-                .unwrap_or(0)
-                + 1;
-            let set = AuthorizedPqSecretSet::new(
-                PqSecretSet {
-                    scope: PqScope::Trash,
-                    version,
-                    secret_version: 1,
-                    secrets: sealed,
-                    signed_at: chrono::Utc::now().timestamp_millis(),
-                },
-                &signing_key,
-            )
-            .with_optional_authority(proof.clone());
-            pq_set = Some(PqSecretsDelta {
-                keys: Vec::new(),
-                sets: vec![set],
-            });
-            (trash_key, 1)
-        }
-    };
+    let (secret, secret_version, pq_set) =
+        trash_key_for_hide(ctx, &signing_key, &proof)?;
 
     let (sealed_item_key, item_key_nonce) =
         encrypt_with_symmetric_key(&secret, &item_key, secret_version);
@@ -230,6 +144,138 @@ pub async fn hide_topic(
             board.trash_secrets.insert(secret_version, secret);
         }
     })
+}
+
+/// Key for a hide action, creating the first trash set when none exists.
+fn trash_key_for_hide(
+    ctx: &ActionContext,
+    signing_key: &SigningKey,
+    proof: &Option<AuthorityProof>,
+) -> Result<([u8; 32], u32, Option<PqSecretsDelta>), String> {
+    if let Some((version, key)) = ctx.trash_secret {
+        return Ok((key, version, None));
+    }
+    use plaza_core::board_state::pq_secrets::{
+        AuthorizedPqSecretSet, PqScope, PqSecretSet, PqSecretsDelta,
+    };
+
+    let trash_key = rand::random::<[u8; 32]>();
+    let mut sealed = Vec::new();
+    for manager in trash_managers(ctx) {
+        let Some(kem) = ctx.board_state.pq_secrets.key_for(manager) else {
+            continue;
+        };
+        let vk = if manager == trash_owner_id(ctx) {
+            trash_owner_vk(ctx)
+        } else if let Some(member) = ctx
+            .board_state
+            .members
+            .members
+            .iter()
+            .find(|member| member.member.id() == manager)
+        {
+            member.member.member_vk
+        } else {
+            continue;
+        };
+        if let Ok(record) = crate::util::pq::seal_secret(&trash_key, &kem.ek, manager, &vk) {
+            sealed.push(record);
+        }
+    }
+
+    if sealed.is_empty() {
+        // No manager has a PQ key yet: fall back to the board secret.
+        let version = ctx.board_state.secrets.current_version;
+        let key = ctx
+            .board_secrets
+            .get(&version)
+            .copied()
+            .ok_or("The board has no secret to protect the trash")?;
+        return Ok((key, version, None));
+    }
+
+    let version = ctx
+        .board_state
+        .pq_secrets
+        .sets
+        .iter()
+        .filter(|entry| matches!(entry.set.scope, PqScope::Trash))
+        .map(|entry| entry.set.version)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let set = AuthorizedPqSecretSet::new(
+        PqSecretSet {
+            scope: PqScope::Trash,
+            version,
+            secret_version: 1,
+            secrets: sealed,
+            signed_at: chrono::Utc::now().timestamp_millis(),
+        },
+        signing_key,
+    )
+    .with_optional_authority(proof.clone());
+    Ok((
+        trash_key,
+        1,
+        Some(PqSecretsDelta {
+            keys: Vec::new(),
+            sets: vec![set],
+        }),
+    ))
+}
+
+/// Create the first trash key set for this board, if the caller may manage
+/// the trash and no set exists yet. Idempotent.
+pub fn ensure_trash_key(ctx: &ActionContext) -> Result<bool, String> {
+    use plaza_core::board_state::pq_secrets::PqScope;
+
+    if ctx.trash_secret.is_some() {
+        return Ok(false);
+    }
+    if ctx
+        .board_state
+        .pq_secrets
+        .sets
+        .iter()
+        .any(|entry| matches!(entry.set.scope, PqScope::Trash))
+    {
+        // A set exists but this client lacks the key. Do not create a rival
+        // set; a manager has to share or rotate the existing one.
+        return Ok(false);
+    }
+    let self_id = MemberId::from(&ctx.self_sk.verifying_key());
+    let is_admin = ctx
+        .board_state
+        .admin
+        .admins
+        .iter()
+        .any(|admin| admin.admin.id() == self_id);
+    if !ctx.is_current_owner() && !is_admin && !ctx.board_state.roles.can_manage_trash(&self_id) {
+        return Err("You cannot create the trash key".to_string());
+    }
+
+    let (signing_key, _signer, proof) = trash_signer(ctx);
+    let (secret, version, pq_set) = trash_key_for_hide(ctx, &signing_key, &proof)?;
+    let Some(pq_set) = pq_set else {
+        return Ok(false);
+    };
+    apply_state_delta(
+        ctx,
+        ChatBoardStateV1Delta {
+            pq_secrets: Some(pq_set),
+            ..Default::default()
+        },
+    )?;
+    if let Some(board) = crate::components::app::BOARDS
+        .write()
+        .map
+        .get_mut(&ctx.current_board)
+    {
+        board.trash_secret = Some((version, secret));
+        board.trash_secrets.insert(version, secret);
+    }
+    Ok(true)
 }
 
 /// Keys to try for an item, in order: the trash key for its version, then the

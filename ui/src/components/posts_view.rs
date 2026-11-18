@@ -1019,8 +1019,9 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                             let board_info = current_board_data.as_ref()
                                 .map(|bd| {
                                     let self_member_id = MemberId::from(&bd.self_sk.verifying_key());
-                                    let owner_id = MemberId::from(&bd.owner_vk);
-                                    let is_owner = self_member_id == owner_id;
+                                    // A split board can own and post with different
+                                    // keys: owner powers follow the ownership chain.
+                                    let is_owner = bd.is_current_owner();
                                     let is_admin = bd.board_state.admin.admins.iter()
                                         .any(|a| a.admin.id() == self_member_id);
                                     (self_member_id, is_owner, is_admin)

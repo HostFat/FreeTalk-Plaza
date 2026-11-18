@@ -172,8 +172,16 @@ pub async fn handle_get_response(
                 // If the board already existed, update self_sk and merge state
                 if !is_new_entry {
                     // Only update self_sk if the user is NOT the board owner,
-                    // to avoid stripping owner privileges
+                    // to avoid stripping owner privileges. On an older board
+                    // that had no separate owner key, keep the old owner key
+                    // before the profile takes over the posting identity.
                     if board_data.self_sk.verifying_key() != owner_vk {
+                        if board_data.owner_sk.is_none()
+                            && board_data.self_sk.verifying_key()
+                                == board_data.current_owner_key()
+                        {
+                            board_data.owner_sk = Some(board_data.self_sk.clone());
+                        }
                         board_data.self_sk = self_sk.clone();
                         // Reset migration flag so the new key gets migrated
                         board_data.key_migrated_to_delegate = false;
