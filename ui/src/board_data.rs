@@ -207,9 +207,11 @@ pub struct BoardData {
     /// The composer's unsent post. Local UI state, never shared with the board.
     #[serde(default)]
     pub draft: Option<ComposerDraft>,
-    /// Image uploads prepared but not yet published, kept with the board so a
-    /// reload resumes them (drafts and this survive in the delegate store).
-    #[serde(default)]
+    /// Image uploads prepared but not yet published. Kept in memory only: the
+    /// records carry the file bytes (up to 24 MiB) and are stored under their
+    /// own delegate key. The field still deserializes so a blob written by an
+    /// older version can be migrated; new saves omit it.
+    #[serde(default, skip_serializing)]
     pub pending_uploads: Vec<PendingUpload>,
 
     /// A post the user asked to publish whose images were still uploading.
@@ -2504,6 +2506,47 @@ mod tests {
         ciborium::ser::into_writer(&legacy, &mut legacy_buffer).unwrap();
         let decoded = Boards::decode(&legacy_buffer).expect("legacy blob decodes");
         assert_eq!(decoded.owned_images.len(), 1);
+    }
+
+    /// The composer queues can hold 24 MiB of file bytes; they are stored
+    /// under their own key too, so the board map stays small.
+    #[test]
+    fn pending_uploads_are_saved_outside_the_boards_blob() {
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let mut boards = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            owned_images: Vec::new(),
+        };
+        let key =
+            boards.create_new_board_with_name(owner_sk, "Queue".to_string(), "alice".to_string(), false);
+        boards
+            .map
+            .get_mut(&key)
+            .unwrap()
+            .pending_uploads
+            .push(PendingUpload {
+                id: "p1".to_string(),
+                name: "photo.png".to_string(),
+                alt: "photo".to_string(),
+                nsfw: false,
+                mime: "image/png".to_string(),
+                width: 2,
+                height: 2,
+                animated: false,
+                bytes: vec![1, 2, 3],
+                secret: None,
+                image: None,
+            });
+
+        let mut buffer = Vec::new();
+        ciborium::ser::into_writer(&boards, &mut buffer).unwrap();
+        let decoded: Boards = ciborium::from_reader(&buffer[..]).unwrap();
+        assert!(decoded.map[&key].pending_uploads.is_empty());
     }
 
     /// A suspended member keeps the role assignment but loses its powers until

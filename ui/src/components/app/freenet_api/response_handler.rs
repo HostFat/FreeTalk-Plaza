@@ -6,7 +6,7 @@ mod update_response;
 
 use super::board_synchronizer::BoardSynchronizer;
 use super::error::SynchronizerError;
-use crate::board_data::Boards;
+use crate::board_data::{Boards, PendingUpload};
 use crate::components::app::chat_delegate::{
     complete_pending_public_key_request, complete_pending_request, complete_pending_sign_request,
     complete_pending_signing_key_request, is_legacy_delegate_key, mark_legacy_migration_done,
@@ -21,6 +21,8 @@ use crate::util::owner_vk_to_contract_key;
 use ciborium::de::from_reader;
 use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::ReadableExt;
+use ed25519_dalek::VerifyingKey;
+use std::collections::HashMap;
 
 use freenet_stdlib::client_api::{ContractResponse, HostResponse};
 use freenet_stdlib::prelude::OutboundDelegateMsg;
@@ -301,11 +303,16 @@ impl ResponseHandler {
                                                             *DELEGATE_HAD_BOARDS.write() = true;
                                                         }
                                                         // Older blobs kept the image index
-                                                        // inside the board map. Note it so the
-                                                        // separate key is written after loading.
-                                                        crate::util::owned_images::note_legacy(
-                                                            !loaded_boards.owned_images.is_empty(),
-                                                        );
+                                                        // and the composer queues inside the
+                                                        // board map. Note them after the merge
+                                                        // so a save cannot read them from an
+                                                        // empty map first.
+                                                        let had_legacy_images =
+                                                            !loaded_boards.owned_images.is_empty();
+                                                        let had_legacy_pending =
+                                                            loaded_boards.map.values().any(|board| {
+                                                                !board.pending_uploads.is_empty()
+                                                            });
 
                                                         // Collect board keys and signing keys before merge
                                                         // (must extract before loaded_boards is moved into defer)
@@ -409,6 +416,12 @@ impl ResponseHandler {
                                                                 }
                                                             }
                                                         });
+                                                            crate::util::owned_images::note_legacy(
+                                                                had_legacy_images,
+                                                            );
+                                                            crate::util::pending_uploads::note_legacy(
+                                                                had_legacy_pending,
+                                                            );
                                                             // Saves are refused until this is true, so set it only
                                                             // after the merge has placed the stored boards in BOARDS.
                                                             *BOARDS_LOADED.write() = true;
@@ -419,6 +432,7 @@ impl ResponseHandler {
                                                         // wait for it.
                                                         wasm_bindgen_futures::spawn_local(async {
                                                             crate::components::app::chat_delegate::fire_load_owned_images_request().await;
+                                                            crate::components::app::chat_delegate::fire_load_pending_uploads_request().await;
                                                         });
 
                                                         // Mark current board as read since user is viewing it
@@ -631,6 +645,49 @@ impl ResponseHandler {
                                                             );
                                                         }
                                                     });
+                                                }
+                                            });
+                                        } else if key.as_bytes()
+                                            == crate::components::app::chat_delegate::PENDING_UPLOADS_STORAGE_KEY
+                                        {
+                                            let loaded = value.and_then(|bytes| {
+                                                match from_reader::<
+                                                    HashMap<VerifyingKey, Vec<PendingUpload>>,
+                                                    _,
+                                                >(&bytes[..])
+                                                {
+                                                    Ok(queues) => Some(queues),
+                                                    Err(error) => {
+                                                        error!(
+                                                            "Failed to deserialize the pending uploads: {error}"
+                                                        );
+                                                        None
+                                                    }
+                                                }
+                                            });
+                                            let legacy =
+                                                crate::util::pending_uploads::take_legacy();
+                                            // Queue the merge outside the message
+                                            // loop; a zero-delay task is enough and
+                                            // does not depend on the defer runtime.
+                                            wasm_bindgen_futures::spawn_local(async move {
+                                                crate::util::sleep(std::time::Duration::from_millis(10))
+                                                    .await;
+                                                crate::util::pending_uploads::apply_loaded(loaded);
+                                                let has_any = BOARDS
+                                                    .read()
+                                                    .map
+                                                    .values()
+                                                    .any(|board| !board.pending_uploads.is_empty());
+                                                if legacy && has_any {
+                                                    crate::util::pending_uploads::mark_dirty();
+                                                    if let Err(error) =
+                                                        save_boards_to_delegate().await
+                                                    {
+                                                        warn!(
+                                                            "Could not migrate the pending uploads: {error}"
+                                                        );
+                                                    }
                                                 }
                                             });
                                         } else {

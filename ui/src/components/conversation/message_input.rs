@@ -197,6 +197,7 @@ fn restore_pending_uploads(mut attachments: Signal<Vec<Attachment>>) {
         })
         .unwrap_or(4);
     spawn_local(async move {
+        crate::util::pending_uploads::ensure_loaded().await;
         let records = crate::util::pending_uploads::list();
         for record in records {
             if attachments.read().len() >= max_images {
@@ -205,6 +206,10 @@ fn restore_pending_uploads(mut attachments: Signal<Vec<Attachment>>) {
             if record.bytes.is_empty() {
                 // A placeholder whose preparation never finished: nothing to
                 // upload.
+                dioxus::logger::tracing::warn!(
+                    "Dropping empty pending upload {}",
+                    record.id
+                );
                 crate::util::pending_uploads::remove(&record.id);
                 continue;
             }
@@ -604,6 +609,7 @@ pub fn PostInput(
             }
         }
         restore_draft();
+        restore_pending_uploads(attachments);
         show_modal.set(true);
         save_draft_now();
     });

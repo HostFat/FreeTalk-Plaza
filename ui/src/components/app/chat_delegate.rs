@@ -23,6 +23,10 @@ pub const BOARDS_STORAGE_KEY: &[u8] = b"boards_data";
 /// state can reach 24 MiB and must not delay the board list at startup.
 pub const OWNED_IMAGES_STORAGE_KEY: &[u8] = b"owned_images_data";
 
+/// Image uploads waiting in the composer, kept apart from the board map for
+/// the same reason: the queued file bytes can reach 24 MiB.
+pub const PENDING_UPLOADS_STORAGE_KEY: &[u8] = b"pending_uploads_data";
+
 // Cipher material for `DelegateRequest::RegisterDelegate`. freenet-stdlib 0.12
 // dropped the `DEFAULT_CIPHER`/`DEFAULT_NONCE` associated constants, but the
 // values are wire-visible: the node derives the storage key for the delegate's
@@ -237,6 +241,15 @@ pub(crate) async fn fire_load_owned_images_request() {
     .await;
 }
 
+/// Load the composer queues after the board list is already on screen.
+pub(crate) async fn fire_load_pending_uploads_request() {
+    info!("Firing request to load pending uploads from delegate storage");
+    let _ = fire_delegate_request(ChatDelegateRequestMsg::GetRequest {
+        key: ChatDelegateKey::new(PENDING_UPLOADS_STORAGE_KEY.to_vec()),
+    })
+    .await;
+}
+
 /// True while a reset deletes the local stores; saves must not rewrite them.
 pub(crate) static LOCAL_RESET: AtomicBool = AtomicBool::new(false);
 
@@ -348,6 +361,12 @@ async fn save_boards_once() -> Result<(), String> {
     if let Err(error) = crate::util::owned_images::save_if_dirty().await {
         warn!("Could not save the owned images, keeping the board map: {error}");
         return Err(format!("owned images were not saved: {error}"));
+    }
+    // Same for the composer queues: their bytes belong in their own key, and a
+    // failed write must not strip them from an old board blob.
+    if let Err(error) = crate::util::pending_uploads::save_if_dirty().await {
+        warn!("Could not save the pending uploads, keeping the board map: {error}");
+        return Err(format!("pending uploads were not saved: {error}"));
     }
 
     info!("Saving boards to delegate storage");
@@ -507,10 +526,103 @@ fn get_request_key(request: &ChatDelegateRequestMsg) -> Vec<u8> {
     }
 }
 
+/// One-line summary of a delegate request. The payloads can reach tens of
+/// megabytes (board map, image index, composer queues): formatting the whole
+/// request freezes the page before it is sent.
+fn describe_request(request: &ChatDelegateRequestMsg) -> String {
+    match request {
+        ChatDelegateRequestMsg::StoreRequest { key, value } => format!(
+            "StoreRequest key={:?} value_bytes={}",
+            String::from_utf8_lossy(key.as_bytes()),
+            value.len()
+        ),
+        ChatDelegateRequestMsg::GetRequest { key } => format!(
+            "GetRequest key={:?}",
+            String::from_utf8_lossy(key.as_bytes())
+        ),
+        ChatDelegateRequestMsg::DeleteRequest { key } => format!(
+            "DeleteRequest key={:?}",
+            String::from_utf8_lossy(key.as_bytes())
+        ),
+        ChatDelegateRequestMsg::ListRequest => "ListRequest".to_string(),
+        ChatDelegateRequestMsg::StoreSigningKey {
+            signing_key_bytes, ..
+        } => format!("StoreSigningKey key_bytes={}", signing_key_bytes.len()),
+        ChatDelegateRequestMsg::GetPublicKey { .. } => "GetPublicKey".to_string(),
+        ChatDelegateRequestMsg::SignMessage { message_bytes, .. } => {
+            format!("SignMessage bytes={}", message_bytes.len())
+        }
+        ChatDelegateRequestMsg::SignMember { member_bytes, .. } => {
+            format!("SignMember bytes={}", member_bytes.len())
+        }
+        ChatDelegateRequestMsg::SignBan { ban_bytes, .. } => {
+            format!("SignBan bytes={}", ban_bytes.len())
+        }
+        ChatDelegateRequestMsg::SignConfig { config_bytes, .. } => {
+            format!("SignConfig bytes={}", config_bytes.len())
+        }
+        ChatDelegateRequestMsg::SignMemberInfo {
+            member_info_bytes, ..
+        } => format!("SignMemberInfo bytes={}", member_info_bytes.len()),
+        ChatDelegateRequestMsg::SignSecretVersion { record_bytes, .. } => {
+            format!("SignSecretVersion bytes={}", record_bytes.len())
+        }
+        ChatDelegateRequestMsg::SignEncryptedSecret { secret_bytes, .. } => {
+            format!("SignEncryptedSecret bytes={}", secret_bytes.len())
+        }
+        ChatDelegateRequestMsg::SignUpgrade { upgrade_bytes, .. } => {
+            format!("SignUpgrade bytes={}", upgrade_bytes.len())
+        }
+        ChatDelegateRequestMsg::SignAdmin { admin_bytes, .. } => {
+            format!("SignAdmin bytes={}", admin_bytes.len())
+        }
+    }
+}
+
+/// One-line summary of a delegate response, for the same reason.
+fn describe_response(response: &ChatDelegateResponseMsg) -> String {
+    match response {
+        ChatDelegateResponseMsg::GetResponse { key, value } => format!(
+            "GetResponse key={:?} value_bytes={}",
+            String::from_utf8_lossy(key.as_bytes()),
+            value.as_ref().map_or(0, Vec::len)
+        ),
+        ChatDelegateResponseMsg::ListResponse { keys } => {
+            format!("ListResponse keys={}", keys.len())
+        }
+        ChatDelegateResponseMsg::StoreResponse {
+            key,
+            value_size,
+            result,
+        } => format!(
+            "StoreResponse key={:?} value_size={value_size} result={result:?}",
+            String::from_utf8_lossy(key.as_bytes())
+        ),
+        ChatDelegateResponseMsg::DeleteResponse { key, result } => format!(
+            "DeleteResponse key={:?} result={result:?}",
+            String::from_utf8_lossy(key.as_bytes())
+        ),
+        ChatDelegateResponseMsg::StoreSigningKeyResponse { result, .. } => {
+            format!("StoreSigningKeyResponse result={result:?}")
+        }
+        ChatDelegateResponseMsg::GetPublicKeyResponse { public_key, .. } => {
+            format!("GetPublicKeyResponse found={}", public_key.is_some())
+        }
+        ChatDelegateResponseMsg::SignResponse {
+            request_id,
+            signature,
+            ..
+        } => format!(
+            "SignResponse request={request_id} ok={}",
+            signature.is_ok()
+        ),
+    }
+}
+
 pub async fn send_delegate_request(
     request: ChatDelegateRequestMsg,
 ) -> Result<ChatDelegateResponseMsg, String> {
-    info!("Sending delegate request: {:?}", request);
+    info!("Sending delegate request: {}", describe_request(&request));
 
     // Get the key bytes for tracking this request
     let key_bytes = get_request_key(&request);
@@ -578,7 +690,7 @@ pub async fn send_delegate_request(
     match select(receiver, timeout).await {
         Either::Left((response, _)) => match response {
             Ok(resp) => {
-                info!("Received delegate response: {:?}", resp);
+                info!("Received delegate response: {}", describe_response(&resp));
                 Ok(resp)
             }
             Err(_) => Err("Response channel was cancelled".to_string()),
