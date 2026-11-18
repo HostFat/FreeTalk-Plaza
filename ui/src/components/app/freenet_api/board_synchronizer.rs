@@ -575,6 +575,9 @@ impl BoardSynchronizer {
                                 MemberId::from(*owner_vk),
                                 old_contract_key.id()
                             );
+                            crate::components::app::toasts::show(
+                                "Upgrade pointer sent to the old contract.",
+                            );
                         }
                         Err(e) => {
                             warn!(
@@ -582,6 +585,9 @@ impl BoardSynchronizer {
                                 MemberId::from(*owner_vk),
                                 e
                             );
+                            crate::components::app::toasts::show_error(format!(
+                                "Could not send the upgrade pointer: {e}"
+                            ));
                         }
                     }
                 }

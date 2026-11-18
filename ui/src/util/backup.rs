@@ -60,11 +60,7 @@ pub async fn import_bytes(bytes: &[u8]) -> Result<usize, String> {
         backup.boards.map.len(),
         *crate::components::app::BOARDS_LOADED.read()
     );
-    crate::components::app::toasts::show(format!(
-        "Backup decoded: {} board(s), loaded={}",
-        backup.boards.map.len(),
-        *crate::components::app::BOARDS_LOADED.read()
-    ));
+
     // The initial delegate load replaces BOARDS when it finishes. Importing
     // before that point would be wiped by the load; wait briefly for it.
     let deadline = crate::util::get_current_system_time() + std::time::Duration::from_secs(3);
@@ -106,13 +102,7 @@ pub async fn import_bytes(bytes: &[u8]) -> Result<usize, String> {
         *crate::components::app::DELEGATE_HAD_BOARDS.write() = true;
     }
     dioxus::logger::tracing::info!("Backup imported {imported} boards; saving");
-    crate::components::app::toasts::show(format!(
-        "Backup inserted {imported} board(s); saving…"
-    ));
     let save_result = crate::components::app::chat_delegate::save_boards_direct().await;
-    crate::components::app::toasts::show(format!(
-        "Backup save result: {save_result:?}"
-    ));
     save_result?;
     let persisted =
         crate::components::app::chat_delegate::stored_boards_contain(&imported_keys).await?;
@@ -125,10 +115,6 @@ pub async fn import_bytes(bytes: &[u8]) -> Result<usize, String> {
         "Backup saved; BOARDS has {} boards",
         BOARDS.read().map.len()
     );
-    crate::components::app::toasts::show(format!(
-        "Backup saved and verified; BOARDS has {} board(s).",
-        BOARDS.read().map.len()
-    ));
     Ok(imported)
 }
 

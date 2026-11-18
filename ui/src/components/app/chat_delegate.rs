@@ -393,21 +393,6 @@ pub async fn load_boards_direct() -> Result<usize, String> {
     Ok(count)
 }
 
-/// Number of boards in the delegate copy, for the startup diagnostic.
-pub async fn stored_board_count() -> Result<usize, String> {
-    let response = send_delegate_request(ChatDelegateRequestMsg::GetRequest {
-        key: ChatDelegateKey::new(BOARDS_STORAGE_KEY.to_vec()),
-    })
-    .await?;
-    let bytes = match response {
-        ChatDelegateResponseMsg::GetResponse { value: Some(bytes), .. } => bytes,
-        _ => return Ok(0),
-    };
-    let boards = crate::board_data::Boards::decode(bytes.as_slice())
-        .ok_or("The stored board map does not decode")?;
-    Ok(boards.map.len())
-}
-
 /// Check the delegate copy really contains these boards after an import.
 pub async fn stored_boards_contain(
     keys: &[ed25519_dalek::VerifyingKey],
