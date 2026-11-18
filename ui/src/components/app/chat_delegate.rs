@@ -171,6 +171,26 @@ pub async fn set_up_chat_delegate() -> Result<(), String> {
             // TODO: Remove this after 2026-03-01
             fire_legacy_migration_request().await;
 
+            // The first load request can race the delegate channel setup and
+            // its response is dropped. Retry once if nothing arrived.
+            wasm_bindgen_futures::spawn_local(async {
+                for _ in 0..8 {
+                    if !crate::components::app::BOARDS.read().map.is_empty() {
+                        return;
+                    }
+                    futures_timer::Delay::new(std::time::Duration::from_millis(250)).await;
+                }
+                if crate::components::app::BOARDS.read().map.is_empty() {
+                    info!("Boards load did not arrive, reading the store directly");
+                    match load_boards_direct().await {
+                        Ok(count) => crate::components::app::toasts::show(format!(
+                            "Direct load: {count} board(s)"
+                        )),
+                        Err(error) => warn!("Direct board load failed: {error}"),
+                    }
+                }
+            });
+
             Ok(())
         }
         Err(e) => Err(format!("Failed to register chat delegate: {}", e)),
@@ -346,6 +366,32 @@ pub async fn save_boards_and_wait() -> Result<(), String> {
 /// Set while a backup import owns the board store. Periodic saves skip so a
 /// stale empty map cannot overwrite the imported one.
 pub static IMPORT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Read the stored board map directly and merge it. This bypasses the
+/// fire-and-forget startup response, which can be consumed by a save read.
+pub async fn load_boards_direct() -> Result<usize, String> {
+    let response = send_delegate_request(ChatDelegateRequestMsg::GetRequest {
+        key: ChatDelegateKey::new(BOARDS_STORAGE_KEY.to_vec()),
+    })
+    .await?;
+    let bytes = match response {
+        ChatDelegateResponseMsg::GetResponse { value: Some(bytes), .. } => bytes,
+        _ => {
+            *crate::components::app::BOARDS_LOADED.write() = true;
+            return Ok(0);
+        }
+    };
+    let boards = crate::board_data::Boards::decode(bytes.as_slice())
+        .ok_or("The stored board map does not decode")?;
+    let count = boards.map.len();
+    BOARDS.with_mut(|current| {
+        if let Err(error) = current.merge(boards) {
+            warn!("Could not merge the direct board load: {error}");
+        }
+    });
+    *crate::components::app::BOARDS_LOADED.write() = true;
+    Ok(count)
+}
 
 /// Check the delegate copy really contains these boards after an import.
 pub async fn stored_boards_contain(

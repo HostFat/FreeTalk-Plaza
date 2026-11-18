@@ -272,6 +272,15 @@ impl ResponseHandler {
                                         // Check if this is the boards data. A save reads it
                                         // first to merge boards added by another tab; that
                                         // read must not run the startup load path.
+                                        if key.as_bytes() == BOARDS_STORAGE_KEY {
+                                            let merge_read = crate::components::app::chat_delegate::BOARDS_READ_FOR_MERGE
+                                                .load(std::sync::atomic::Ordering::SeqCst);
+                                            crate::components::app::toasts::show(format!(
+                                                "boards_data response: value={} merge_read={}",
+                                                value.is_some(),
+                                                merge_read
+                                            ));
+                                        }
                                         if key.as_bytes() == BOARDS_STORAGE_KEY
                                             && !crate::components::app::chat_delegate::BOARDS_READ_FOR_MERGE
                                                 .swap(false, std::sync::atomic::Ordering::SeqCst)
