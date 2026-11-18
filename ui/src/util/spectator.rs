@@ -42,6 +42,7 @@ pub fn open_spectator_board(owner_vk: VerifyingKey) -> Result<(), String> {
         read_categories: HashMap::new(),
         draft: None,
         drafts: Vec::new(),
+        trash_retention_days: 0,
         pending_uploads: Vec::new(),
         pending_send: None,
         subscribed_categories: Vec::new(),

@@ -480,6 +480,34 @@ pub async fn purge_item(
     )
 }
 
+/// Purge active items hidden more than `days` ago, at most `limit` per call.
+pub async fn purge_expired(ctx: &ActionContext, days: u32, limit: usize) -> Result<usize, String> {
+    if days == 0 {
+        return Ok(0);
+    }
+    let cutoff = chrono::Utc::now().timestamp() - (days as i64) * 86_400;
+    let items: Vec<_> = ctx
+        .board_state
+        .trash
+        .items
+        .iter()
+        .filter(|item| ctx.board_state.trash.active_item(&item.item.id).is_some())
+        .filter(|item| item.item.hidden_at < cutoff)
+        .take(limit)
+        .cloned()
+        .collect();
+    let mut purged = 0;
+    for item in &items {
+        match purge_item(ctx, item, "Automatic retention", ReasonCode::Other).await {
+            Ok(()) => purged += 1,
+            Err(error) => {
+                dioxus::logger::tracing::warn!("Could not purge expired trash item: {error}")
+            }
+        }
+    }
+    Ok(purged)
+}
+
 fn preview_bundle_bytes(
     ctx: &ActionContext,
     item: &AuthorizedTrashItem,

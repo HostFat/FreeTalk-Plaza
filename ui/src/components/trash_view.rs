@@ -25,6 +25,35 @@ pub fn TrashView() -> Element {
         return rsx! { p { class: "text-text-muted", "Select a board." } };
     };
 
+    // Apply the retention setting when the page opens, once per mount.
+    let mut retention_ran = use_signal(|| false);
+    use_effect({
+        let days = data.trash_retention_days;
+        move || {
+            if *retention_ran.peek() {
+                return;
+            }
+            *retention_ran.write() = true;
+            if days == 0 {
+                return;
+            }
+            let Some(ctx) = ActionContext::from_current_board() else {
+                return;
+            };
+            wasm_bindgen_futures::spawn_local(async move {
+                match crate::util::trash_actions::purge_expired(&ctx, days, 5).await {
+                    Ok(0) => {}
+                    Ok(count) => crate::components::app::toasts::show(format!(
+                        "Purged {count} expired item(s)."
+                    )),
+                    Err(message) => crate::components::app::toasts::show_error(format!(
+                        "Could not purge expired trash: {message}"
+                    )),
+                }
+            });
+        }
+    });
+
     let mut error = use_signal(|| None::<String>);
     let mut preview = use_signal(|| {
         None::<(
@@ -42,6 +71,7 @@ pub fn TrashView() -> Element {
             .any(|admin| admin.admin.id() == self_id);
     let mut restore_targets = use_signal(HashMap::<MessageId, MessageId>::new);
     let mut handled = use_signal(std::collections::HashSet::<MessageId>::new);
+    let mut selected = use_signal(HashSet::<MessageId>::new);
     let mut grant_index = use_signal(|| 0usize);
     let mut grant_notice = use_signal(|| None::<String>);
     let routes = data.board_state.moderation.routes_map();
@@ -147,6 +177,7 @@ pub fn TrashView() -> Element {
         .cloned()
         .collect::<Vec<_>>();
     items.sort_by_key(|item| std::cmp::Reverse(item.item.hidden_at));
+    let bulk_items = items.clone();
 
     rsx! {
         div { class: "space-y-3",
@@ -387,6 +418,103 @@ pub fn TrashView() -> Element {
                     }
                 }
             }
+            div { class: "flex flex-wrap items-center gap-3 border border-border rounded-lg p-3 bg-panel",
+                label { class: "text-xs text-text-muted", "Auto-purge after" }
+                select {
+                    class: "px-2 py-1.5 bg-surface border border-border rounded-lg text-xs text-text",
+                    value: "{data.trash_retention_days}",
+                    onchange: {
+                        let owner = data.owner_vk;
+                        move |event| {
+                            let days = event.value().parse::<u32>().unwrap_or(0);
+                            BOARDS.with_mut(|boards| {
+                                if let Some(board) = boards.map.get_mut(&owner) {
+                                    board.trash_retention_days = days;
+                                }
+                            });
+                            wasm_bindgen_futures::spawn_local(async {
+                                let _ = crate::components::app::chat_delegate::save_boards_to_delegate()
+                                    .await;
+                            });
+                            if days == 0 {
+                                return;
+                            }
+                            let Some(ctx) = ActionContext::from_current_board() else {
+                                return;
+                            };
+                            wasm_bindgen_futures::spawn_local(async move {
+                                match crate::util::trash_actions::purge_expired(&ctx, days, 5).await {
+                                    Ok(0) => {}
+                                    Ok(count) => crate::components::app::toasts::show(format!(
+                                        "Purged {count} expired item(s)."
+                                    )),
+                                    Err(message) => crate::components::app::toasts::show_error(
+                                        format!("Could not purge expired trash: {message}"),
+                                    ),
+                                }
+                            });
+                        }
+                    },
+                    option { value: "0", "Off" }
+                    option { value: "7", "7 days" }
+                    option { value: "30", "30 days" }
+                    option { value: "90", "90 days" }
+                }
+                span { class: "text-xs text-text-muted",
+                    "Runs when this page opens; at most 5 items each time."
+                }
+                if !selected.read().is_empty() {
+                    button {
+                        r#type: "button",
+                        class: "ml-auto px-3 py-1.5 text-xs rounded-md bg-red-600 hover:bg-red-500 text-white",
+                        onclick: move |_| {
+                            let Some((code, reason)) =
+                                crate::util::trash_actions::ask_reason("spam")
+                            else {
+                                return;
+                            };
+                            let chosen: Vec<_> = bulk_items
+                                .iter()
+                                .filter(|item| selected.read().contains(&item.item.id))
+                                .cloned()
+                                .collect();
+                            let Some(ctx) = ActionContext::from_current_board() else {
+                                return;
+                            };
+                            wasm_bindgen_futures::spawn_local(async move {
+                                let mut ok = 0usize;
+                                let mut failed = 0usize;
+                                for item in chosen {
+                                    match crate::util::trash_actions::purge_item(
+                                        &ctx, &item, &reason, code,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => ok += 1,
+                                        Err(message) => {
+                                            failed += 1;
+                                            crate::components::app::toasts::show_error(format!(
+                                                "Could not purge an item: {message}"
+                                            ));
+                                        }
+                                    }
+                                }
+                                if ok > 0 {
+                                    crate::components::app::toasts::show(format!(
+                                        "Purged {ok} item(s). Syncing with the network…"
+                                    ));
+                                }
+                                if failed > 0 {
+                                    crate::components::app::toasts::show_error(format!(
+                                        "{failed} item(s) could not be purged."
+                                    ));
+                                }
+                            });
+                        },
+                        "Purge selected ({selected.read().len()})"
+                    }
+                }
+            }
             if items.is_empty() {
                 p { class: "text-sm text-text-muted", "The trash is empty." }
             }
@@ -395,7 +523,24 @@ pub fn TrashView() -> Element {
                     key: "{item.item.id}",
                     class: "border border-border rounded-lg p-3 bg-panel space-y-2",
                     div { class: "flex items-center justify-between gap-3",
-                        div { class: "min-w-0",
+                        input {
+                            r#type: "checkbox",
+                            class: "mt-1",
+                            checked: selected.read().contains(&item.item.id),
+                            onchange: {
+                                let item_id = item.item.id;
+                                move |event: Event<FormData>| {
+                                    selected.with_mut(|set| {
+                                        if event.checked() {
+                                            set.insert(item_id);
+                                        } else {
+                                            set.remove(&item_id);
+                                        }
+                                    });
+                                }
+                            },
+                        }
+                        div { class: "min-w-0 flex-1",
                             p { class: "text-sm text-text truncate", "Topic {item.item.root}" }
                             p { class: "text-xs text-text-muted",
                                 "{item.item.messages.len()} messages · {item.item.reason}"

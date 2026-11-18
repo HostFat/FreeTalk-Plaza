@@ -210,6 +210,10 @@ pub struct BoardData {
     /// Drafts the user saved for later. Local UI state, kept newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drafts: Vec<ComposerDraft>,
+    /// Days after which items in the trash are purged when the Trash page
+    /// opens. Zero disables it. Local preference.
+    #[serde(default)]
+    pub trash_retention_days: u32,
     /// Image uploads prepared but not yet published. Kept in memory only: the
     /// records carry the file bytes (up to 24 MiB) and are stored under their
     /// own delegate key. The field still deserializes so a blob written by an
@@ -2335,6 +2339,7 @@ impl Boards {
             read_categories: HashMap::new(),
             draft: None,
             drafts: Vec::new(),
+            trash_retention_days: 0,
             pending_uploads: Vec::new(),
             pending_send: None,
             subscribed_categories: Vec::new(),
@@ -3365,6 +3370,7 @@ mod tests {
             read_categories: HashMap::new(),
             draft: None,
             drafts: Vec::new(),
+            trash_retention_days: 0,
             pending_uploads: Vec::new(),
             pending_send: None,
             subscribed_categories: Vec::new(),
@@ -3449,6 +3455,7 @@ mod tests {
             read_categories: HashMap::new(),
             draft: None,
             drafts: Vec::new(),
+            trash_retention_days: 0,
             pending_uploads: Vec::new(),
             pending_send: None,
             subscribed_categories: Vec::new(),
@@ -3525,6 +3532,7 @@ mod tests {
                 read_categories: HashMap::new(),
                 draft: None,
                 drafts: Vec::new(),
+                trash_retention_days: 0,
                 pending_uploads: Vec::new(),
                 pending_send: None,
                 subscribed_categories: Vec::new(),

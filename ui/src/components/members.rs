@@ -570,6 +570,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     read_categories: HashMap::new(),
                     draft: None,
                     drafts: Vec::new(),
+                    trash_retention_days: 0,
                     pending_uploads: Vec::new(),
                     pending_send: None,
                     subscribed_categories: Vec::new(),
