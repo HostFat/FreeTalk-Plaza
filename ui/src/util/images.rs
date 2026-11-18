@@ -626,7 +626,23 @@ pub fn handle_image_response(instance: [u8; 32], state: &[u8]) -> bool {
         start_chunk_load(instance, expected, blob);
         return true;
     }
+    let actual_public = if blob.nonce.is_none() {
+        Some(image_sha256(&blob.data))
+    } else {
+        None
+    };
+    let data_len = blob.data.len();
     let status = payload_status(blob.data, blob.nonce, blob.secret_version, expected);
+    if matches!(&status, ImageStatus::Failed(reason) if reason == "hash mismatch") {
+        dioxus::logger::tracing::warn!(
+            "Image hash mismatch for {:?}: expected {:?}, actual {:?}, data_len={}, sealed={}",
+            instance,
+            expected,
+            actual_public,
+            data_len,
+            blob.nonce.is_some()
+        );
+    }
     set_image_status(instance, status);
     true
 }

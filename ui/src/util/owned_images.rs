@@ -269,6 +269,22 @@ pub fn unreferenced(min_age_ms: i64) -> Vec<OwnedImage> {
         .collect()
 }
 
+/// Drop one entry from the index, for example after its contract was retired.
+pub fn forget(instance: [u8; 32]) {
+    BOARDS.with_mut(|boards| {
+        boards.owned_images.retain(|entry| {
+            entry.image.instance != instance
+                && entry
+                    .image
+                    .thumb
+                    .as_ref()
+                    .map_or(true, |thumb| thumb.instance != instance)
+        });
+    });
+    OWNED_IMAGES_DIRTY.store(true, Ordering::SeqCst);
+    persist();
+}
+
 /// Test hook: make the newest owned image look two hours old, so the
 /// "Retire unused" path can be exercised without waiting an hour.
 pub fn backdate_newest_image() -> bool {

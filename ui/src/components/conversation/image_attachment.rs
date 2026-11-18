@@ -112,6 +112,8 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
         spawn_local(async move {
             match crate::util::images::retire_in_contract(instance).await {
                 Ok(()) => {
+                    // Do not offer a retired blob again under "Your images".
+                    crate::util::owned_images::forget(instance);
                     crate::components::app::toasts::show(
                         "Contract retirement sent to the network.",
                     );
