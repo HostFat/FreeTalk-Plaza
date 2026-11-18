@@ -290,6 +290,10 @@ impl ResponseHandler {
                                                             loaded_boards.map.len(),
                                                             stored_pending
                                                         );
+                                                        crate::components::app::toasts::show(format!(
+                                                            "Load decoded: {} board(s)",
+                                                            loaded_boards.map.len()
+                                                        ));
                                                         // TODO: Remove legacy migration code after 2026-03-01
                                                         if is_legacy_delegate {
                                                             info!("Successfully loaded boards from LEGACY delegate - migrating to new delegate");
@@ -348,8 +352,15 @@ impl ResponseHandler {
                                                             BOARDS.with_mut(|current_boards| {
                                                             if let Err(e) = current_boards.merge(loaded_boards) {
                                                                 error!("Failed to merge boards: {}", e);
+                                                                crate::components::app::toasts::show_error(format!(
+                                                                    "Load merge failed: {e}"
+                                                                ));
                                                             } else {
                                                                 info!("Successfully merged boards from delegate");
+                                                                crate::components::app::toasts::show(format!(
+                                                                    "Load merged: {} board(s)",
+                                                                    current_boards.map.len()
+                                                                ));
 
                                                                 // Re-decrypt ALL secret versions for each board (secrets are #[serde(skip)])
                                                                 for board_data in current_boards.map.values_mut() {
@@ -423,6 +434,10 @@ impl ResponseHandler {
                                                             // Saves are refused until this is true, so set it only
                                                             // after the merge has placed the stored boards in BOARDS.
                                                             *BOARDS_LOADED.write() = true;
+                                                            crate::components::app::toasts::show(format!(
+                                                                "Load complete: {} board(s)",
+                                                                BOARDS.read().map.len()
+                                                            ));
                                                         });
 
                                                         // The board list is already usable; fetch the
