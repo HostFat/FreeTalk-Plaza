@@ -228,6 +228,39 @@ fn start_transfer(
                 crate::components::app::toasts::show(
                     "Ownership transferred. Syncing with the network…",
                 );
+                // A handover to the outgoing identity makes that identity the
+                // owner; its admin record is now redundant. The contract drops
+                // it during cleanup, but write the revocation too for states
+                // that have not been normalized yet.
+                if outgoing == OutgoingOwnerAction::KeepAdmin
+                    && outgoing_id == target
+                    && outgoing_is_admin
+                {
+                    if let Some(fresh) = ActionContext::from_current_board() {
+                        if fresh
+                            .board_state
+                            .admin
+                            .admins
+                            .iter()
+                            .any(|admin| admin.admin.id() == outgoing_id)
+                        {
+                            let revocation = AuthorizedAdminRevocation::new_at(
+                                outgoing_id,
+                                fresh.board_state.admin.next_generation(&outgoing_id),
+                                get_current_system_time()
+                                    + std::time::Duration::from_millis(2),
+                                &fresh.owner_sk,
+                            );
+                            let _ = apply_state_delta(
+                                &fresh,
+                                ChatBoardStateV1Delta {
+                                    admin: Some(AdminsDelta::revocation(vec![revocation])),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                    }
+                }
                 // A transfer is not something to lose on a quick reload: write
                 // it now instead of waiting for the periodic save.
                 if let Err(error) =

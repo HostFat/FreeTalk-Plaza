@@ -102,7 +102,19 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
         current_board_data
             .read()
             .as_ref()
-            .map(|board_data| board_data.board_state.admin.admins.clone())
+            .map(|board_data| {
+                // The current owner has every power implicitly; never show a
+                // redundant admin row for it.
+                let owner = board_data.current_owner_id();
+                board_data
+                    .board_state
+                    .admin
+                    .admins
+                    .iter()
+                    .filter(|admin| admin.admin.id() != owner)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default()
     });
 

@@ -384,6 +384,37 @@ impl ChatBoardStateV1 {
         // has revoked. Running it here keeps merged states normalized.
         self.admin.resolve_conflicts();
 
+        // The current owner has every admin power implicitly. A later signed
+        // revocation (written after a self-handover) makes the old admin
+        // record removable; ownership verification then reads the revocation
+        // instead. Keep the record until that tombstone exists, or a transfer
+        // would stop verifying.
+        let current_owner = self.ownership.current_owner(parameters);
+        if self
+            .admin
+            .admins
+            .iter()
+            .any(|admin| admin.admin.id() == current_owner)
+        {
+            let transfer_at = self
+                .ownership
+                .transfers
+                .last()
+                .map(|entry| entry.transfer.transferred_at);
+            let revoked_after = self.admin.revoked.iter().any(|revocation| {
+                revocation.id() == current_owner
+                    && match transfer_at {
+                        Some(at) => revocation.revocation.signed_at > at,
+                        None => true,
+                    }
+            });
+            if revoked_after {
+                self.admin
+                    .admins
+                    .retain(|admin| admin.admin.id() != current_owner);
+            }
+        }
+
         // 5c-bis. An admin proof stops vouching for records once the owner
         // revokes that admin. Drop those records instead of leaving a state
         // that every later verification rejects.
