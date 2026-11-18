@@ -281,7 +281,7 @@ pub fn App() -> Element {
             crate::util::safe_spawn_local(async {
                 crate::util::sleep(std::time::Duration::from_secs(60)).await;
                 if CURRENT_BOARD.read().owner_key.is_some() {
-                    crate::util::owned_images::retire_unused();
+                    crate::util::owned_images::retire_unused(false);
                 }
             });
         }

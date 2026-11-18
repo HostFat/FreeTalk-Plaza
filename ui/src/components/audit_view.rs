@@ -383,7 +383,7 @@ pub fn AuditView() -> Element {
                             button {
                                 r#type: "button",
                                 class: "px-3 py-1.5 bg-surface hover:bg-surface-hover border border-border rounded-lg text-xs text-red-300",
-                                onclick: move |_| crate::util::owned_images::retire_unused(),
+                                onclick: move |_| crate::util::owned_images::retire_unused(true),
                                 "Retire unused"
                             }
                         }

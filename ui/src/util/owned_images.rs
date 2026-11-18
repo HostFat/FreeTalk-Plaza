@@ -268,15 +268,24 @@ pub fn unreferenced(min_age_ms: i64) -> Vec<OwnedImage> {
 }
 
 /// Retire own uploads no board refers to and drop them from the index.
-pub fn retire_unused() {
+///
+/// `announce` is set for the manual action; the automatic pass after a page
+/// load only reports failures and the "nothing to do" case.
+pub fn retire_unused(announce: bool) {
     let entries = unreferenced(60 * 60 * 1000);
     if entries.is_empty() {
+        if announce {
+            crate::components::app::toasts::show("No unused images to retire.");
+        }
         return;
     }
     spawn_local(async move {
+        let mut retired = 0usize;
+        let mut failed = 0usize;
         for entry in entries {
             match crate::util::images::retire_in_contract(entry.image.instance).await {
                 Ok(()) => {
+                    retired += 1;
                     BOARDS.with_mut(|boards| {
                         boards
                             .owned_images
@@ -285,6 +294,7 @@ pub fn retire_unused() {
                     OWNED_IMAGES_DIRTY.store(true, Ordering::SeqCst);
                 }
                 Err(error) => {
+                    failed += 1;
                     warn!(
                         "Could not retire unused image {:?}: {error}",
                         entry.image.instance
@@ -293,6 +303,15 @@ pub fn retire_unused() {
             }
         }
         persist();
+        if failed > 0 {
+            crate::components::app::toasts::show_error(format!(
+                "Retired {retired} unused image(s); {failed} could not be retired."
+            ));
+        } else if announce && retired > 0 {
+            crate::components::app::toasts::show(format!(
+                "Retired {retired} unused image(s)."
+            ));
+        }
     });
 }
 
