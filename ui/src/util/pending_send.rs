@@ -127,6 +127,9 @@ pub fn resume_all() {
 }
 
 async fn resume_one(board_key: VerifyingKey, board: BoardData, mut draft: PendingSend) {
+    // The queue lives under its own key now; make sure it is in memory before
+    // waiting for the ids the draft points at.
+    crate::util::pending_uploads::ensure_loaded().await;
     let all_ids = draft.attachment_ids.clone();
     // Upload what is still queued, saving after each success so a second
     // interruption does not lose the images already stored.

@@ -16,9 +16,74 @@ use ed25519_dalek::VerifyingKey;
 use plaza_core::chat_delegate::{
     ChatDelegateKey, ChatDelegateRequestMsg, ChatDelegateResponseMsg,
 };
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex};
 use wasm_bindgen_futures::spawn_local;
+
+/// The stored value of `pending_uploads_data`.
+///
+/// `removed` are tombstones: the cross-tab merge must not re-add an upload a
+/// tab deleted. They are cheap and kept, so a tab that still has the record in
+/// memory cannot put it back after another tab removed it.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct PendingUploadsStoreV1 {
+    #[serde(default)]
+    pub queues: HashMap<VerifyingKey, Vec<PendingUpload>>,
+    #[serde(default)]
+    pub removed: HashMap<VerifyingKey, Vec<String>>,
+}
+
+/// Deleted ids, in memory, until they are written with the rest of the store.
+static REMOVED: LazyLock<Mutex<HashMap<VerifyingKey, HashSet<String>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn lock_removed() -> std::sync::MutexGuard<'static, HashMap<VerifyingKey, HashSet<String>>> {
+    REMOVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn is_removed(board: &VerifyingKey, id: &str) -> bool {
+    lock_removed()
+        .get(board)
+        .is_some_and(|ids| ids.contains(id))
+}
+
+fn note_removed(board: &VerifyingKey, id: &str) {
+    lock_removed()
+        .entry(*board)
+        .or_default()
+        .insert(id.to_string());
+}
+
+fn clear_removed(board: &VerifyingKey, id: &str) {
+    if let Some(ids) = lock_removed().get_mut(board) {
+        ids.remove(id);
+    }
+}
+
+/// Decode the current envelope, or the raw map written before tombstones.
+///
+/// Try the old raw map first: a struct decode accepts a map whose fields are
+/// missing because both fields default, so the envelope would silently swallow
+/// an old value.
+pub fn decode_store(bytes: &[u8]) -> Option<PendingUploadsStoreV1> {
+    if let Ok(queues) =
+        ciborium::from_reader::<HashMap<VerifyingKey, Vec<PendingUpload>>, _>(bytes)
+    {
+        return Some(PendingUploadsStoreV1 {
+            queues,
+            removed: HashMap::new(),
+        });
+    }
+    match ciborium::from_reader::<PendingUploadsStoreV1, _>(bytes) {
+        Ok(store) => Some(store),
+        Err(error) => {
+            warn!("Could not decode the pending uploads: {error}");
+            None
+        }
+    }
+}
 
 /// Bytes we keep in the delegate for pending uploads, per board. Larger
 /// uploads stay in memory only and are reported to the composer.
@@ -47,21 +112,33 @@ pub fn take_legacy() -> bool {
     LEGACY_PENDING.swap(false, Ordering::SeqCst)
 }
 
-/// Merge the queues loaded from their own key into the boards. Existing
-/// records win; entries from another tab are added when the cap allows.
-pub fn apply_loaded(loaded: Option<HashMap<VerifyingKey, Vec<PendingUpload>>>) {
+/// Merge the stored queues and tombstones into the boards. Existing records
+/// win; entries from another tab are added when the cap allows.
+pub fn apply_store(store: Option<PendingUploadsStoreV1>) {
     PENDING_LOADED.store(true, Ordering::SeqCst);
-    let Some(loaded) = loaded else { return };
-    let entry_count: usize = loaded.values().map(Vec::len).sum();
+    let Some(store) = store else { return };
+    let entry_count: usize = store.queues.values().map(Vec::len).sum();
     info!(
         "Loading {entry_count} pending upload(s) for {} board(s)",
-        loaded.len()
+        store.queues.len()
     );
+    // Remember the tombstones first, then use them to drop records that are
+    // still in this tab's memory.
+    {
+        let mut removed = lock_removed();
+        for (key, ids) in &store.removed {
+            let set = removed.entry(*key).or_default();
+            for id in ids {
+                set.insert(id.clone());
+            }
+        }
+    }
     BOARDS.with_mut(|boards| {
-        for (key, entries) in loaded {
-            let Some(board) = boards.map.get_mut(&key) else {
+        for (key, entries) in &store.queues {
+            let Some(board) = boards.map.get_mut(key) else {
                 continue;
             };
+            board.pending_uploads.retain(|pending| !is_removed(key, &pending.id));
             for entry in entries {
                 if board
                     .pending_uploads
@@ -70,9 +147,12 @@ pub fn apply_loaded(loaded: Option<HashMap<VerifyingKey, Vec<PendingUpload>>>) {
                 {
                     continue;
                 }
+                if is_removed(key, &entry.id) {
+                    continue;
+                }
                 let total: usize = board.pending_uploads.iter().map(|p| p.bytes.len()).sum();
                 if total + entry.bytes.len() <= MAX_PENDING_BYTES {
-                    board.pending_uploads.push(entry);
+                    board.pending_uploads.push(entry.clone());
                 }
             }
         }
@@ -99,18 +179,8 @@ pub async fn ensure_loaded() {
     .await
     {
         Ok(ChatDelegateResponseMsg::GetResponse { value, .. }) => {
-            let loaded = value.and_then(|bytes| {
-                match ciborium::from_reader::<HashMap<VerifyingKey, Vec<PendingUpload>>, _>(
-                    &bytes[..],
-                ) {
-                    Ok(queues) => Some(queues),
-                    Err(error) => {
-                        warn!("Could not decode the pending uploads: {error}");
-                        None
-                    }
-                }
-            });
-            apply_loaded(loaded);
+            let store = value.and_then(|bytes| decode_store(&bytes));
+            apply_store(store);
         }
         Ok(other) => warn!("Unexpected response for pending uploads: {other:?}"),
         Err(error) => warn!("Could not load the pending uploads: {error}"),
@@ -134,23 +204,40 @@ pub async fn save_if_dirty() -> Result<(), String> {
     {
         Ok(ChatDelegateResponseMsg::GetResponse {
             value: Some(bytes), ..
-        }) => ciborium::from_reader::<HashMap<VerifyingKey, Vec<PendingUpload>>, _>(&bytes[..]).ok(),
+        }) => decode_store(&bytes),
         _ => None,
     };
-    if let Some(stored) = stored {
-        apply_loaded(Some(stored));
+    if stored.is_some() {
+        apply_store(stored);
     }
 
     let value = {
+        let removed: HashMap<VerifyingKey, Vec<String>> = lock_removed()
+            .iter()
+            .map(|(key, ids)| (*key, ids.iter().cloned().collect()))
+            .collect();
         let queues: HashMap<VerifyingKey, Vec<PendingUpload>> = BOARDS
             .read()
             .map
             .iter()
-            .filter(|(_, board)| !board.pending_uploads.is_empty())
-            .map(|(key, board)| (*key, board.pending_uploads.clone()))
+            .filter_map(|(key, board)| {
+                let gone = removed.get(key);
+                let entries: Vec<PendingUpload> = board
+                    .pending_uploads
+                    .iter()
+                    .filter(|pending| gone.map_or(true, |ids| !ids.contains(&pending.id)))
+                    .cloned()
+                    .collect();
+                if entries.is_empty() {
+                    None
+                } else {
+                    Some((*key, entries))
+                }
+            })
             .collect();
+        let store = PendingUploadsStoreV1 { queues, removed };
         let mut buffer = Vec::new();
-        if let Err(error) = ciborium::ser::into_writer(&queues, &mut buffer) {
+        if let Err(error) = ciborium::ser::into_writer(&store, &mut buffer) {
             mark_dirty();
             return Err(format!("Failed to serialize pending uploads: {error}"));
         }
@@ -184,6 +271,7 @@ pub fn insert(record: PendingUpload) {
     let Some(key) = CURRENT_BOARD.read().owner_key else {
         return;
     };
+    clear_removed(&key, &record.id);
     BOARDS.with_mut(|boards| {
         let Some(board) = boards.map.get_mut(&key) else {
             return;
@@ -235,6 +323,7 @@ pub fn remove(id: &str) {
     let Some(key) = CURRENT_BOARD.read().owner_key else {
         return;
     };
+    note_removed(&key, id);
     BOARDS.with_mut(|boards| {
         if let Some(board) = boards.map.get_mut(&key) {
             board.pending_uploads.retain(|pending| pending.id != id);
@@ -249,6 +338,9 @@ pub fn remove_many(ids: &[String]) {
     let Some(key) = CURRENT_BOARD.read().owner_key else {
         return;
     };
+    for id in ids {
+        note_removed(&key, id);
+    }
     BOARDS.with_mut(|boards| {
         if let Some(board) = boards.map.get_mut(&key) {
             board
@@ -263,6 +355,7 @@ pub fn remove_many(ids: &[String]) {
 /// Drop one queued upload of a board that is not necessarily current, used by
 /// the background resume.
 pub fn remove_for(key: &ed25519_dalek::VerifyingKey, id: &str) {
+    note_removed(key, id);
     BOARDS.with_mut(|boards| {
         if let Some(board) = boards.map.get_mut(key) {
             board.pending_uploads.retain(|pending| pending.id != id);
@@ -323,4 +416,49 @@ fn persist() {
             warn!("Could not persist the pending image queue: {error}");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    fn entry(id: &str) -> PendingUpload {
+        PendingUpload {
+            id: id.to_string(),
+            name: "photo.png".to_string(),
+            alt: "photo".to_string(),
+            nsfw: false,
+            mime: "image/png".to_string(),
+            width: 2,
+            height: 2,
+            animated: false,
+            bytes: vec![1, 2, 3],
+            secret: None,
+            image: None,
+        }
+    }
+
+    #[test]
+    fn decode_reads_the_envelope_and_the_old_map() {
+        let board = SigningKey::generate(&mut rand::thread_rng()).verifying_key();
+        let envelope = PendingUploadsStoreV1 {
+            queues: HashMap::from([(board, vec![entry("queued")])]),
+            removed: HashMap::from([(board, vec!["gone".to_string()])]),
+        };
+        let mut buffer = Vec::new();
+        ciborium::ser::into_writer(&envelope, &mut buffer).unwrap();
+        let decoded = decode_store(&buffer).expect("envelope decodes");
+        assert_eq!(decoded.queues[&board].len(), 1);
+        assert_eq!(decoded.removed[&board], vec!["gone".to_string()]);
+
+        // Before tombstones the value was a raw board -> queue map.
+        let raw: HashMap<VerifyingKey, Vec<PendingUpload>> =
+            HashMap::from([(board, vec![entry("old")])]);
+        let mut raw_buffer = Vec::new();
+        ciborium::ser::into_writer(&raw, &mut raw_buffer).unwrap();
+        let decoded = decode_store(&raw_buffer).expect("old map decodes");
+        assert_eq!(decoded.queues[&board].len(), 1);
+        assert!(decoded.removed.is_empty());
+    }
 }

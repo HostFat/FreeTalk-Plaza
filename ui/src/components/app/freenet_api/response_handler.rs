@@ -6,7 +6,7 @@ mod update_response;
 
 use super::board_synchronizer::BoardSynchronizer;
 use super::error::SynchronizerError;
-use crate::board_data::{Boards, PendingUpload};
+use crate::board_data::Boards;
 use crate::components::app::chat_delegate::{
     complete_pending_public_key_request, complete_pending_request, complete_pending_sign_request,
     complete_pending_signing_key_request, is_legacy_delegate_key, mark_legacy_migration_done,
@@ -21,8 +21,6 @@ use crate::util::owner_vk_to_contract_key;
 use ciborium::de::from_reader;
 use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::ReadableExt;
-use ed25519_dalek::VerifyingKey;
-use std::collections::HashMap;
 
 use freenet_stdlib::client_api::{ContractResponse, HostResponse};
 use freenet_stdlib::prelude::OutboundDelegateMsg;
@@ -650,20 +648,8 @@ impl ResponseHandler {
                                         } else if key.as_bytes()
                                             == crate::components::app::chat_delegate::PENDING_UPLOADS_STORAGE_KEY
                                         {
-                                            let loaded = value.and_then(|bytes| {
-                                                match from_reader::<
-                                                    HashMap<VerifyingKey, Vec<PendingUpload>>,
-                                                    _,
-                                                >(&bytes[..])
-                                                {
-                                                    Ok(queues) => Some(queues),
-                                                    Err(error) => {
-                                                        error!(
-                                                            "Failed to deserialize the pending uploads: {error}"
-                                                        );
-                                                        None
-                                                    }
-                                                }
+                                            let store = value.and_then(|bytes| {
+                                                crate::util::pending_uploads::decode_store(&bytes)
                                             });
                                             let legacy =
                                                 crate::util::pending_uploads::take_legacy();
@@ -673,7 +659,7 @@ impl ResponseHandler {
                                             wasm_bindgen_futures::spawn_local(async move {
                                                 crate::util::sleep(std::time::Duration::from_millis(10))
                                                     .await;
-                                                crate::util::pending_uploads::apply_loaded(loaded);
+                                                crate::util::pending_uploads::apply_store(store);
                                                 let has_any = BOARDS
                                                     .read()
                                                     .map
