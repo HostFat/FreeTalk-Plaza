@@ -161,3 +161,10 @@ impl ContractInterface for Contract {
 
 #[cfg(test)]
 mod tests;
+
+/// Exported revision marker: a bump changes the wasm hash and therefore the
+/// board contract key, which is what exercises the rekey path.
+#[no_mangle]
+pub extern "C" fn plaza_contract_revision() -> u32 {
+    plaza_core::CONTRACT_REVISION
+}
