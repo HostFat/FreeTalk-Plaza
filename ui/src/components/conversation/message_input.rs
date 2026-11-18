@@ -483,6 +483,9 @@ pub fn PostInput(
     let mut crop_w = use_signal(|| 100.0f64);
     let mut crop_h = use_signal(|| 100.0f64);
     let mut crop_drag_start = use_signal(|| None::<(f64, f64)>);
+    // Click once to set the start corner, move, click again to close: no
+    // mouse button held down, so the browser cannot start an image drag.
+    let mut crop_selecting = use_signal(|| false);
     let mut crop_ratio = use_signal(|| 0.0f64);
     let mut crop_render = use_signal(|| (0.0f64, 0.0f64));
     let mut crop_natural = use_signal(|| (0u32, 0u32));
@@ -1639,6 +1642,7 @@ pub fn PostInput(
                                                                 crop_h.set(100.0);
                                                                 crop_ratio.set(0.0);
                                                                 crop_drag_start.set(None);
+                                                                crop_selecting.set(false);
                                                                 crop_render.set((0.0, 0.0));
                                                                 crop_natural.set((
                                                                     source.width,
@@ -1797,6 +1801,8 @@ pub fn PostInput(
                                                 src: "{url}",
                                                 class: "block max-h-[55vh] w-auto mx-auto select-none cursor-crosshair",
                                                 alt: "",
+                                                draggable: "false",
+                                                ondragstart: move |event| event.prevent_default(),
                                                 onload: move |_| {
                                                     if let Some(window) = web_sys::window() {
                                                         if let Some(element) = window
@@ -1808,9 +1814,20 @@ pub fn PostInput(
                                                         }
                                                     }
                                                 },
-                                                onmousedown: move |event: Event<dioxus::html::MouseData>| {
+                                                onclick: move |event: Event<dioxus::html::MouseData>| {
                                                     let (render_w, render_h) = *crop_render.read();
                                                     if render_w <= 0.0 || render_h <= 0.0 {
+                                                        return;
+                                                    }
+                                                    if *crop_selecting.read() {
+                                                        // Second click: close the rectangle.
+                                                        crop_selecting.set(false);
+                                                        if *crop_w.read() < 1.0 || *crop_h.read() < 1.0 {
+                                                            crop_x.set(0.0);
+                                                            crop_y.set(0.0);
+                                                            crop_w.set(100.0);
+                                                            crop_h.set(100.0);
+                                                        }
                                                         return;
                                                     }
                                                     let coordinates = event.element_coordinates();
@@ -1821,8 +1838,12 @@ pub fn PostInput(
                                                     crop_y.set(y);
                                                     crop_w.set(1.0);
                                                     crop_h.set(1.0);
+                                                    crop_selecting.set(true);
                                                 },
                                                 onmousemove: move |event: Event<dioxus::html::MouseData>| {
+                                                    if !*crop_selecting.read() {
+                                                        return;
+                                                    }
                                                     let Some((start_x, start_y)) = *crop_drag_start.read() else {
                                                         return;
                                                     };
@@ -1841,11 +1862,9 @@ pub fn PostInput(
                                                         );
                                                     crop_x.set(left);
                                                     crop_y.set(top);
-                                                    crop_w.set(width);
-                                                    crop_h.set(height);
+                                                    crop_w.set(width.max(1.0));
+                                                    crop_h.set(height.max(1.0));
                                                 },
-                                                onmouseup: move |_| crop_drag_start.set(None),
-                                                onmouseleave: move |_| crop_drag_start.set(None),
                                             }
                                         }
                                         div {
@@ -1854,7 +1873,7 @@ pub fn PostInput(
                                         }
                                     }
                                     p { class: "text-xs text-text-muted mt-2",
-                                        "Drag on the image to choose the area."
+                                        "Click the starting corner, move the mouse, then click again to close the rectangle."
                                     }
                                     div { class: "flex flex-wrap gap-2 mt-2",
                                         button {
@@ -1925,6 +1944,7 @@ pub fn PostInput(
                                                 }
                                                 crop_target.set(None);
                                                 crop_url.set(None);
+                                                crop_selecting.set(false);
                                             },
                                             "Cancel"
                                         }
@@ -1959,6 +1979,7 @@ pub fn PostInput(
                                                     crop_target.set(None);
                                                     crop_url.set(None);
                                                     crop_source.set(None);
+                                                    crop_selecting.set(false);
                                                 }
                                             },
                                             "Apply crop"
