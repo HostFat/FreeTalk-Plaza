@@ -1533,7 +1533,19 @@ fn MessageContentDisplay(
                                     }
                                 }
                             } else {
-                                rsx! {}
+                                // A tag that points at no attachment stays
+                                // visible instead of disappearing.
+                                let suffix = match align {
+                                    ImageAlign::Left => " left",
+                                    ImageAlign::Center => "",
+                                    ImageAlign::Right => " right",
+                                };
+                                rsx! {
+                                    span {
+                                        class: "text-text-muted",
+                                        "[img={index + 1}{suffix}]"
+                                    }
+                                }
                             }
                         }
                     }
