@@ -2002,9 +2002,9 @@ pub fn SinglePostView(post_id: String) -> Element {
                                             }
                                         }
                                         Err(error) => {
-                                            if let Some(window) = web_sys::window() {
-                                                let _ = window.alert_with_message(&error);
-                                            }
+                                            crate::components::app::toasts::show_error(format!(
+                                                "Could not hide the topic: {error}"
+                                            ));
                                         }
                                     }
                                 }

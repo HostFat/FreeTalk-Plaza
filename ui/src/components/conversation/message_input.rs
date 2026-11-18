@@ -364,16 +364,17 @@ fn edit_attachment_from_row(
     attachments: Signal<Vec<Attachment>>,
     next_id: Signal<u64>,
     reply_target: Option<MessageId>,
+    mut image_error: Signal<Option<String>>,
 ) {
     match attachment_source(&id, &state) {
-        Some(source) => edit_attachment(id, source, edit, attachments, next_id, reply_target),
-        None => {
-            if let Some(window) = web_sys::window() {
-                let _ = window.alert_with_message(
-                    "The original bytes of this image are not on this device. Re-upload the file to edit it.",
-                );
-            }
+        Some(source) => {
+            image_error.set(None);
+            edit_attachment(id, source, edit, attachments, next_id, reply_target);
         }
+        None => image_error.set(Some(
+            "The original bytes of this image are not on this device. Re-upload the file to edit it."
+                .to_string(),
+        )),
     }
 }
 
@@ -470,6 +471,7 @@ pub fn PostInput(
     let mut poll_days = use_signal(String::new);
     let mut poll_error = use_signal(|| None::<String>);
     let mut attachments = use_signal(Vec::<Attachment>::new);
+    let mut image_error = use_signal(|| None::<String>);
     let mut next_attachment_id = use_signal(|| 1u64);
     let mut auto_send = use_signal(|| false);
     let mut image_mode = use_signal(|| ImageMode::StripMetadata);
@@ -544,6 +546,7 @@ pub fn PostInput(
     // Open modal when replying_to changes to Some (from clicking reply button)
     use_effect(move || {
         if replying_to.read().is_some() && !show_modal() {
+            image_error.set(None);
             show_modal.set(true);
         }
     });
@@ -610,6 +613,7 @@ pub fn PostInput(
         }
         restore_draft();
         restore_pending_uploads(attachments);
+        image_error.set(None);
         show_modal.set(true);
         save_draft_now();
     });
@@ -628,6 +632,7 @@ pub fn PostInput(
             }
             restore_draft();
             restore_pending_uploads(attachments);
+            image_error.set(None);
             show_modal.set(true);
         }
     };
@@ -1274,6 +1279,9 @@ pub fn PostInput(
                         div { class: "mt-2 border border-dashed border-border rounded-lg px-3 py-2 text-center text-xs text-text-muted",
                             "Drag images here, or paste them with Ctrl+V."
                         }
+                        if let Some(error) = image_error.read().clone() {
+                            p { class: "mt-1 text-xs text-red-400", "{error}" }
+                        }
                         if *crate::components::app::PENDING_QUEUE_FULL.read() {
                             p { class: "mt-1 text-xs text-red-400",
                                 "The durable queue is full (24 MiB): this image will not survive a reload."
@@ -1503,6 +1511,7 @@ pub fn PostInput(
                                                             attachments,
                                                             next_attachment_id,
                                                             target.clone(),
+                                                            image_error,
                                                         )
                                                     }
                                                 },
@@ -1527,6 +1536,7 @@ pub fn PostInput(
                                                             attachments,
                                                             next_attachment_id,
                                                             target.clone(),
+                                                            image_error,
                                                         )
                                                     }
                                                 },
@@ -1551,6 +1561,7 @@ pub fn PostInput(
                                                             attachments,
                                                             next_attachment_id,
                                                             target.clone(),
+                                                            image_error,
                                                         )
                                                     }
                                                 },
@@ -1575,6 +1586,7 @@ pub fn PostInput(
                                                             attachments,
                                                             next_attachment_id,
                                                             target.clone(),
+                                                            image_error,
                                                         )
                                                     }
                                                 },
@@ -1599,6 +1611,7 @@ pub fn PostInput(
                                                             attachments,
                                                             next_attachment_id,
                                                             target.clone(),
+                                                            image_error,
                                                         )
                                                     }
                                                 },
@@ -1611,10 +1624,6 @@ pub fn PostInput(
                                                 onclick: {
                                                     let id = attachment.id.clone();
                                                     let state = attachment.state.clone();
-                                                    let target = replying_to
-                                                        .read()
-                                                        .as_ref()
-                                                        .map(|reply| reply.message_id.clone());
                                                     move |_| {
                                                         if let Some(source) = attachment_source(&id, &state) {
                                                             if let Some(url) = preview_url(&source.bytes, &source.mime) {
@@ -1636,10 +1645,11 @@ pub fn PostInput(
                                                                     source.height,
                                                                 ));
                                                             }
-                                                        } else if let Some(window) = web_sys::window() {
-                                                            let _ = window.alert_with_message(
-                                                                "The original bytes of this image are not on this device. Re-upload the file to edit it.",
-                                                            );
+                                                        } else {
+                                                            image_error.set(Some(
+                                                                "The original bytes of this image are not on this device. Re-upload the file to edit it."
+                                                                    .to_string(),
+                                                            ));
                                                         }
                                                     }
                                                 },

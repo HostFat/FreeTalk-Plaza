@@ -120,11 +120,9 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
                     crate::components::app::toasts::show_error(format!(
                         "Could not retire the contract: {error}"
                     ));
-                    if let Some(window) = web_sys::window() {
-                        let _ = window.alert_with_message(&format!(
-                            "Could not retire the contract: {error}"
-                        ));
-                    }
+                    crate::components::app::toasts::show_error(format!(
+                        "Could not retire the contract: {error}"
+                    ));
                 }
             }
         });
