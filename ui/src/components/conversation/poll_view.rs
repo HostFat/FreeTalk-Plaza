@@ -11,7 +11,14 @@ use plaza_core::board_state::message::MessageId;
 use wasm_bindgen_futures::spawn_local;
 
 #[component]
-pub fn PollView(poll: PollData, poll_id: MessageId, self_member_id: MemberId) -> Element {
+pub fn PollView(
+    poll: PollData,
+    poll_id: MessageId,
+    self_member_id: MemberId,
+    /// The current identity wrote this poll and no vote exists yet.
+    #[props(default)]
+    is_author: bool,
+) -> Element {
     let now = chrono::Utc::now().timestamp_millis();
     let closed = poll.is_closed(now);
     let initial = poll
@@ -25,6 +32,15 @@ pub fn PollView(poll: PollData, poll_id: MessageId, self_member_id: MemberId) ->
     let mut selected = use_signal(move || initial);
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
+    let mut editing = use_signal(|| false);
+    let mut edit_options = use_signal(|| poll.options.clone());
+    let mut edit_results = use_signal(|| poll.results_visibility);
+    let edit_results_value = match *edit_results.read() {
+        plaza_core::board_state::content::PollResultsVisibility::Always => "always",
+        plaza_core::board_state::content::PollResultsVisibility::AfterVote => "vote",
+        plaza_core::board_state::content::PollResultsVisibility::AfterClose => "close",
+    }
+    .to_string();
 
     let counts = poll.counts();
     let total = poll.counted().count();
@@ -38,6 +54,7 @@ pub fn PollView(poll: PollData, poll_id: MessageId, self_member_id: MemberId) ->
     };
     let polls = poll.clone();
     let multiselect = polls.multiselect;
+    let edit_start_options = polls.options.clone();
 
     let mut vote = move |_| {
         if *busy.peek() || closed {
@@ -103,7 +120,24 @@ pub fn PollView(poll: PollData, poll_id: MessageId, self_member_id: MemberId) ->
     rsx! {
         div { class: "mt-3 border border-border rounded-lg p-3 bg-surface/40 space-y-2",
             div { class: "flex flex-wrap items-center justify-between gap-2",
-                span { class: "text-sm font-medium text-text", "Poll" }
+                div { class: "flex items-center gap-2",
+                    span { class: "text-sm font-medium text-text", "Poll" }
+                    if is_author && total == 0 && !closed {
+                        button {
+                            r#type: "button",
+                            class: "text-xs text-accent hover:underline",
+                            onclick: {
+                                let options = edit_start_options.clone();
+                                move |_| {
+                                    edit_options.set(options.clone());
+                                    edit_results.set(polls.results_visibility);
+                                    editing.set(true);
+                                }
+                            },
+                            "Edit poll"
+                        }
+                    }
+                }
                 span { class: "text-xs text-text-muted",
                     if closed {
                         "Closed"
@@ -115,6 +149,106 @@ pub fn PollView(poll: PollData, poll_id: MessageId, self_member_id: MemberId) ->
                     if show_results {
                         " · {total} "
                         if total == 1 { "vote" } else { "votes" }
+                    }
+                }
+            }
+            if editing() {
+                div { class: "border-t border-border pt-2 space-y-2",
+                    p { class: "text-xs text-text-muted", "Edit the options before the first vote." }
+                    for (index, option) in edit_options.read().iter().enumerate() {
+                        div { key: "{index}", class: "flex items-center gap-2",
+                            input {
+                                r#type: "text",
+                                class: "flex-1 px-2 py-1 bg-panel border border-border rounded text-sm text-text",
+                                value: "{option}",
+                                oninput: move |event| {
+                                    edit_options.with_mut(|options| {
+                                        if let Some(slot) = options.get_mut(index) {
+                                            *slot = event.value();
+                                        }
+                                    });
+                                },
+                            }
+                            if edit_options.read().len() > 2 {
+                                button {
+                                    r#type: "button",
+                                    class: "px-2 text-text-muted hover:text-text",
+                                    onclick: move |_| {
+                                        edit_options.with_mut(|options| {
+                                            if index < options.len() {
+                                                options.remove(index);
+                                            }
+                                        });
+                                    },
+                                    "×"
+                                }
+                            }
+                        }
+                    }
+                    div { class: "flex flex-wrap items-center gap-2 text-xs",
+                        button {
+                            r#type: "button",
+                            class: "px-2 py-1 bg-panel border border-border rounded text-text",
+                            onclick: move |_| edit_options.with_mut(|options| options.push(String::new())),
+                            "+ Option"
+                        }
+                        label { class: "flex items-center gap-1 text-text-muted",
+                            "Results"
+                            select {
+                                class: "px-2 py-1 bg-panel border border-border rounded text-text",
+                                value: "{edit_results_value}",
+                                onchange: move |event| {
+                                    use plaza_core::board_state::content::PollResultsVisibility;
+                                    edit_results.set(match event.value().as_str() {
+                                        "vote" => PollResultsVisibility::AfterVote,
+                                        "close" => PollResultsVisibility::AfterClose,
+                                        _ => PollResultsVisibility::Always,
+                                    });
+                                },
+                                option { value: "always", "Always" }
+                                option { value: "vote", "After voting" }
+                                option { value: "close", "After close" }
+                            }
+                        }
+                    }
+                    div { class: "flex items-center gap-2",
+                        button {
+                            r#type: "button",
+                            class: "px-3 py-1.5 bg-accent hover:bg-accent-hover text-white text-xs rounded-lg",
+                            onclick: move |_| {
+                                use plaza_core::board_state::content::PollContentV1;
+                                let content = PollContentV1::new(
+                                    polls.title.clone(),
+                                    polls.description.clone(),
+                                    edit_options.read().clone(),
+                                    polls.closes_at,
+                                    polls.multiselect,
+                                )
+                                .with_results_visibility(*edit_results.read());
+                                if let Err(message) = content.validate() {
+                                    error.set(Some(message));
+                                    return;
+                                }
+                                let Some(ctx) = crate::util::message_actions::ActionContext::from_current_board() else {
+                                    return;
+                                };
+                                let id = poll_id.clone();
+                                spawn_local(async move {
+                                    crate::util::message_actions::edit_poll(ctx, id, content).await;
+                                });
+                                editing.set(false);
+                            },
+                            "Save"
+                        }
+                        button {
+                            r#type: "button",
+                            class: "px-3 py-1.5 bg-panel border border-border text-text text-xs rounded-lg",
+                            onclick: move |_| editing.set(false),
+                            "Cancel"
+                        }
+                    }
+                    if let Some(message) = error.read().as_ref() {
+                        p { class: "text-xs text-red-400", "{message}" }
                     }
                 }
             }

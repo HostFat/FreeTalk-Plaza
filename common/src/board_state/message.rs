@@ -162,6 +162,8 @@ pub struct MessageActionsState {
     pub edited_content: HashMap<MessageId, String>,
     /// Categories that have been edited: message_id -> edit payload
     pub edited_categories: HashMap<MessageId, CategoryEditPayload>,
+    /// Polls whose content was replaced by their author before any vote.
+    pub edited_polls: HashMap<MessageId, crate::board_state::content::PollContentV1>,
     /// Messages that have been deleted
     pub deleted: std::collections::HashSet<MessageId>,
     /// Reactions on messages: message_id -> (emoji -> list of reactors)
@@ -472,6 +474,7 @@ impl MessagesV1 {
     ) {
         use crate::board_state::content::{
             ActionContentV1, DecodedContent, ModerationActionV1, ACTION_TYPE_DELETE,
+            ACTION_TYPE_EDIT_POLL,
             ACTION_TYPE_EDIT, ACTION_TYPE_EDIT_CATEGORY, ACTION_TYPE_REACTION,
             ACTION_TYPE_REMOVE_REACTION,
         };
@@ -568,6 +571,26 @@ impl MessagesV1 {
                                 self.actions_state
                                     .edited_content
                                     .insert(target.clone(), payload.new_text);
+                            }
+                        }
+                    }
+                }
+                ACTION_TYPE_EDIT_POLL => {
+                    if target_closed {
+                        continue;
+                    }
+                    // Author only. The client hides the action once a vote
+                    // exists, so option indexes cannot move under a ballot.
+                    if let Some(&original_author) = message_authors.get(target) {
+                        if actor == original_author
+                            && !self.actions_state.deleted.contains(target)
+                        {
+                            if let Some(poll) = action.poll_edit_payload() {
+                                if poll.validate().is_ok() {
+                                    self.actions_state
+                                        .edited_polls
+                                        .insert(target.clone(), poll);
+                                }
                             }
                         }
                     }
@@ -673,6 +696,14 @@ impl MessagesV1 {
     /// Get the edited category payload if available
     pub fn edited_category(&self, message_id: &MessageId) -> Option<&CategoryEditPayload> {
         self.actions_state.edited_categories.get(message_id)
+    }
+
+    /// Poll content replaced by its author, if any.
+    pub fn edited_poll(
+        &self,
+        message_id: &MessageId,
+    ) -> Option<&crate::board_state::content::PollContentV1> {
+        self.actions_state.edited_polls.get(message_id)
     }
 
     /// Check if a message has been deleted

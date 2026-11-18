@@ -10,7 +10,8 @@ use dioxus::prelude::*;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use plaza_core::board_state::content::{
-    ActionContentV1, CategoryContentV1, CategoryEditPayload, ModerationActionV1, ReplyContentV1,
+    ActionContentV1, CategoryContentV1, CategoryEditPayload, ModerationActionV1, PollContentV1,
+    ReplyContentV1,
     ACTION_CONTENT_VERSION, CONTENT_TYPE_ACTION, CONTENT_TYPE_MODERATION_ACTION,
     CONTENT_TYPE_REPLY, REPLY_CONTENT_VERSION,
 };
@@ -328,6 +329,19 @@ pub async fn set_section_images(ctx: ActionContext, target: MessageId, allowed: 
         vec![action],
         Some("Section images updated"),
         "Could not update the section images",
+    )
+    .await;
+}
+
+/// Replace a poll's content. Only its author, and the caller hides the action
+/// once a vote exists.
+pub async fn edit_poll(ctx: ActionContext, poll_id: MessageId, poll: PollContentV1) {
+    let action = ActionContentV1::edit_poll(poll_id, poll);
+    send_actions(
+        ctx,
+        vec![action],
+        Some("Poll updated"),
+        "Could not update the poll",
     )
     .await;
 }

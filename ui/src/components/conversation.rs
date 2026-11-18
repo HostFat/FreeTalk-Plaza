@@ -40,6 +40,8 @@ pub struct PollBallot {
 /// Poll question data with the latest vote per member.
 #[derive(Clone, PartialEq, Debug)]
 pub struct PollData {
+    pub title: String,
+    pub description: String,
     pub options: Vec<String>,
     pub closes_at: Option<i64>,
     pub multiselect: bool,
@@ -417,19 +419,27 @@ pub fn get_all_messages(
         let edited = state.recent_messages.is_edited(&message_id)
             || state.recent_messages.is_category_edited(&message_id);
 
-        let poll = decrypt_poll(
-            &message.message.content,
-            secrets,
-            category_secrets,
-            old_category_secrets,
-        )
-        .map(|content| {
+        let poll = state
+            .recent_messages
+            .edited_poll(&message_id)
+            .cloned()
+            .or_else(|| {
+                decrypt_poll(
+                    &message.message.content,
+                    secrets,
+                    category_secrets,
+                    old_category_secrets,
+                )
+            })
+            .map(|content| {
             let mut votes: Vec<PollBallot> = ballots
                 .get(&message_id)
                 .map(|votes| votes.values().cloned().collect())
                 .unwrap_or_default();
             votes.sort_by_key(|ballot| ballot.voter);
             PollData {
+                title: content.title,
+                description: content.description,
                 options: content.options,
                 closes_at: content.closes_at,
                 multiselect: content.multiselect,
@@ -2585,6 +2595,7 @@ pub fn MessageCard(
                                                 poll: poll.clone(),
                                                 poll_id: msg_id,
                                                 self_member_id: self_member_id,
+                                                is_author: msg.is_self,
                                             }
                                         }
                                         if !after_images.is_empty() {

@@ -58,6 +58,8 @@ pub const ACTION_TYPE_EDIT_CATEGORY: u32 = 5;
 /// Turn images on or off for one section. The payload is
 /// `SectionImagesV1 { allowed }`.
 pub const ACTION_TYPE_SET_SECTION_IMAGES: u32 = 6;
+/// Replace the content of a poll, by its author and before any vote.
+pub const ACTION_TYPE_EDIT_POLL: u32 = 7;
 // Future: ACTION_TYPE_PIN = 6, ACTION_TYPE_REPLY = 7, etc.
 
 /// Text message content (content_type = 1)
@@ -307,6 +309,16 @@ impl ActionContentV1 {
         }
     }
 
+    /// Replace a poll's content. Only its author may apply this, and only
+    /// before the first vote, so option indexes cannot move under a ballot.
+    pub fn edit_poll(target: MessageId, poll: PollContentV1) -> Self {
+        Self {
+            action_type: ACTION_TYPE_EDIT_POLL,
+            target,
+            payload: poll.encode(),
+        }
+    }
+
     /// Create a delete action
     pub fn delete(target: MessageId) -> Self {
         Self {
@@ -477,6 +489,14 @@ impl ActionContentV1 {
     }
 
     /// Get the category edit payload if this is an edit_category action
+    pub fn poll_edit_payload(&self) -> Option<PollContentV1> {
+        if self.action_type == ACTION_TYPE_EDIT_POLL {
+            PollContentV1::decode(&self.payload).ok()
+        } else {
+            None
+        }
+    }
+
     pub fn category_edit_payload(&self) -> Option<CategoryEditPayload> {
         if self.action_type == ACTION_TYPE_EDIT_CATEGORY {
             ciborium::from_reader(&self.payload[..]).ok()
@@ -819,6 +839,7 @@ impl DecodedContent {
             Self::Reply(reply) => reply.content.clone(),
             Self::Action(action) => match action.action_type {
                 ACTION_TYPE_EDIT => format!("[Edit of message {}]", action.target),
+                ACTION_TYPE_EDIT_POLL => format!("[Edit of poll {}]", action.target),
                 ACTION_TYPE_DELETE => format!("[Delete of message {}]", action.target),
                 ACTION_TYPE_REACTION => {
                     let emoji = action
