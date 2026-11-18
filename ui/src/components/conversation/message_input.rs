@@ -412,9 +412,14 @@ fn open_image_picker() {
 /// Files chosen in the hidden input, clearing it so the same file can be
 /// picked again.
 fn selected_files() -> Option<Vec<web_sys::File>> {
+    selected_files_from("image-file-input")
+}
+
+/// Same as [`selected_files`] for the visible developer input.
+fn selected_files_from(input_id: &str) -> Option<Vec<web_sys::File>> {
     let document = web_sys::window()?.document()?;
     let input = document
-        .get_element_by_id("image-file-input")?
+        .get_element_by_id(input_id)?
         .dyn_into::<web_sys::HtmlInputElement>()
         .ok()?;
     let files = input.files()?;
@@ -1284,6 +1289,34 @@ pub fn PostInput(
                         }
                         if let Some(error) = image_error.read().clone() {
                             p { class: "mt-1 text-xs text-red-400", "{error}" }
+                        }
+                        details { class: "mt-1",
+                            summary { class: "text-xs text-text-muted cursor-pointer", "Developer: test a file" }
+                            p { class: "text-xs text-text-muted mt-1",
+                                "Loads a file through the same processing path as Attach image. Useful for HEIC and AVIF."
+                            }
+                            input {
+                                id: "image-file-input-test",
+                                r#type: "file",
+                                accept: "image/png,image/jpeg,image/webp,image/gif,image/heic,image/heif,image/avif",
+                                multiple: true,
+                                class: "mt-1 block w-full text-xs text-text-muted",
+                                onchange: move |_| {
+                                    if let Some(files) = selected_files_from("image-file-input-test") {
+                                        let reply_target = replying_to
+                                            .read()
+                                            .as_ref()
+                                            .map(|reply| reply.message_id.clone());
+                                        add_attachment_files(
+                                            files,
+                                            attachments,
+                                            next_attachment_id,
+                                            ImageMode::KeepOriginal,
+                                            reply_target,
+                                        );
+                                    }
+                                },
+                            }
                         }
                         if *crate::components::app::PENDING_QUEUE_FULL.read() {
                             p { class: "mt-1 text-xs text-red-400",
