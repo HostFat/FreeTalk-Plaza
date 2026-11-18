@@ -106,6 +106,29 @@ fn with_admin_board<T>(
     f(&data, signing_key, board_key, signer)
 }
 
+/// Sign an invite token with the key that holds access authority. The founding
+/// owner keeps the historical signer-less form; a transferred owner signs with
+/// its current member id, which the contract resolves from the embedded key.
+fn authorized_invite_token(
+    data: &BoardData,
+    token: InviteToken,
+    signing_key: &SigningKey,
+    signer: Option<MemberId>,
+) -> AuthorizedInviteToken {
+    match signer {
+        Some(signer_id) => AuthorizedInviteToken::signed_by(token, signer_id, signing_key)
+            .with_optional_authority(manager_authority_proof(&data.board_state, &signer_id)),
+        None if data.current_owner_id() == MemberId::from(&data.owner_vk) => {
+            AuthorizedInviteToken::new(token, signing_key)
+        }
+        None => {
+            let owner_id = data.current_owner_id();
+            AuthorizedInviteToken::signed_by(token, owner_id, signing_key)
+                .with_optional_authority(manager_authority_proof(&data.board_state, &owner_id))
+        }
+    }
+}
+
 /// Role definitions are owner-only: a manager must not be able to widen its own
 /// permissions.
 fn with_owner_board<T>(
@@ -471,11 +494,8 @@ pub fn rename_invite_link(token_id: TokenId, label: String) -> Result<(), String
                 .collect(),
             ..current
         };
-        let authorized = match signer_id {
-            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &signing_key)
-                .with_optional_authority(manager_authority_proof(&data.board_state, &signer)),
-            None => AuthorizedInviteToken::new(token, &signing_key),
-        };
+        let authorized =
+            authorized_invite_token(data, token, &signing_key, signer_id);
         let delta = ChatBoardStateV1Delta {
             invites: Some(InviteTokensDelta {
                 tokens: vec![authorized],
@@ -519,11 +539,8 @@ pub fn create_invite_link(
             created_at: Some(crate::util::get_current_system_time()),
             includes_category_keys: include_category_keys,
         };
-        let authorized = match signer_id {
-            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &signing_key)
-                .with_optional_authority(manager_authority_proof(&data.board_state, &signer)),
-            None => AuthorizedInviteToken::new(token, &signing_key),
-        };
+        let authorized =
+            authorized_invite_token(data, token, &signing_key, signer_id);
         let delta = ChatBoardStateV1Delta {
             invites: Some(InviteTokensDelta {
                 tokens: vec![authorized],
@@ -563,11 +580,8 @@ pub fn revoke_invite_link(token_id: TokenId) -> Result<(), String> {
             deleted: true,
             ..current
         };
-        let authorized = match signer_id {
-            Some(signer) => AuthorizedInviteToken::signed_by(token, signer, &signing_key)
-                .with_optional_authority(manager_authority_proof(&data.board_state, &signer)),
-            None => AuthorizedInviteToken::new(token, &signing_key),
-        };
+        let authorized =
+            authorized_invite_token(data, token, &signing_key, signer_id);
         let delta = ChatBoardStateV1Delta {
             invites: Some(InviteTokensDelta {
                 tokens: vec![authorized],

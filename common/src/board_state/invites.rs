@@ -267,7 +267,16 @@ impl ComposableState for InviteTokensV1 {
 
             for token in &delta.tokens {
                 let signer = token.signer_id(parameters);
-                if signer != parameters.owner_id() && !parent_state.roles.can_manage_access(&signer)
+                // The founding owner check is historical; after a handover the
+                // current owner may create links too. Use the token time.
+                let at = token
+                    .token
+                    .created_at
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                let owner_then = parent_state.ownership.owner_at(parameters, at);
+                if signer != parameters.owner_id()
+                    && signer != owner_then
+                    && !parent_state.roles.can_manage_access(&signer)
                 {
                     return Err("Invite link signer cannot manage access".to_string());
                 }

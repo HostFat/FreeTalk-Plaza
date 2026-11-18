@@ -480,13 +480,15 @@ pub fn JoinBoard(token: String) -> Element {
 fn ViewOnly(board_id: String) -> Element {
     let mut problem = use_signal(|| None::<String>);
     let mut started = use_signal(|| false);
+    let mut opened = use_signal(|| false);
+    let effect_board_id = board_id.clone();
 
     use_effect(move || {
         if *started.peek() {
             return;
         }
         started.set(true);
-        let board_id = board_id.clone();
+        let board_id = effect_board_id.clone();
         let Ok(bytes) = bs58::decode(&board_id).into_vec() else {
             problem.set(Some("This board link is not valid.".to_string()));
             return;
@@ -500,20 +502,22 @@ fn ViewOnly(board_id: String) -> Element {
             return;
         };
         match crate::util::spectator::open_spectator_board(owner_key) {
-            Ok(()) => {
-                if let Some(window) = web_sys::window() {
-                    let _ = window.location().set_hash(&format!("/board/{board_id}"));
-                }
-            }
+            // Stay on the /view route. Changing the hash made the app effect
+            // race the route and fall back to Home before the board rendered.
+            Ok(()) => opened.set(true),
             Err(error) => problem.set(Some(error)),
         }
     });
 
     rsx! {
-        div { class: "flex items-center justify-center min-h-screen p-6",
-            if let Some(error) = problem.read().as_ref() {
+        if let Some(error) = problem.read().as_ref() {
+            div { class: "flex items-center justify-center min-h-screen p-6",
                 p { class: "text-red-300", "{error}" }
-            } else {
+            }
+        } else if *opened.read() {
+            BoardGate { board_id: board_id.clone(), PostsView {} }
+        } else {
+            div { class: "flex items-center justify-center min-h-screen p-6",
                 p { class: "text-text-muted", "Opening the board in read-only mode..." }
             }
         }

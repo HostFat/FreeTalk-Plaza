@@ -1033,7 +1033,10 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                 .map(|board| {
                                     let self_id = MemberId::from(&board.self_sk.verifying_key());
                                     (
-                                        self_id == MemberId::from(&board.owner_vk),
+                                        // Follow the ownership chain, not the
+                                        // founding key: a spectator and a
+                                        // transferred owner differ here.
+                                        board.is_current_owner(),
                                         board
                                             .board_state
                                             .admin
