@@ -147,7 +147,7 @@ pub fn CategoryCreateModal() -> Element {
             return;
         }
 
-        if name_val.len() > 50 {
+        if name_val.chars().count() > 50 {
             error_msg.set(Some(
                 "Category name must be 50 characters or less".to_string(),
             ));

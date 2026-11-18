@@ -19,10 +19,24 @@ pub fn CreateBoardModal() -> Element {
             error_msg.set(Some("Board name cannot be empty".to_string()));
             return;
         }
+        if name.len() > 100 {
+            error_msg.set(Some(
+                "The board name must be at most 100 bytes; non-Latin text uses more bytes per character."
+                    .to_string(),
+            ));
+            return;
+        }
 
         let nick = nickname.read().clone();
         if nick.trim().is_empty() {
             error_msg.set(Some("Nickname cannot be empty".to_string()));
+            return;
+        }
+        if nick.len() > 50 {
+            error_msg.set(Some(
+                "The nickname must be at most 50 bytes; non-Latin text uses more bytes per character."
+                    .to_string(),
+            ));
             return;
         }
 
@@ -110,24 +124,36 @@ pub fn CreateBoardModal() -> Element {
                     }
 
                     div {
-                        label { class: "block text-sm font-medium text-text mb-1", "Board Name" }
+                        div { class: "flex items-center justify-between mb-1",
+                            label { class: "block text-sm font-medium text-text", "Board Name" }
+                            span {
+                                class: if board_name.read().len() > 100 { "text-xs text-red-400" } else { "text-xs text-text-muted" },
+                                "{board_name.read().len()}/100 bytes"
+                            }
+                        }
                         input {
                             class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent",
                             dir: "auto",
                             value: "{board_name}",
                             placeholder: "Enter board name",
-                            onchange: move |evt| board_name.set(evt.value().to_string())
+                            oninput: move |evt| board_name.set(evt.value().to_string())
                         }
                     }
 
                     div {
-                        label { class: "block text-sm font-medium text-text mb-1", "Your Nickname" }
+                        div { class: "flex items-center justify-between mb-1",
+                            label { class: "block text-sm font-medium text-text", "Your Nickname" }
+                            span {
+                                class: if nickname.read().len() > 50 { "text-xs text-red-400" } else { "text-xs text-text-muted" },
+                                "{nickname.read().len()}/50 bytes"
+                            }
+                        }
                         input {
                             class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent",
                             dir: "auto",
                             value: "{nickname}",
                             placeholder: "Enter your nickname",
-                            onchange: move |evt| nickname.set(evt.value().to_string())
+                            oninput: move |evt| nickname.set(evt.value().to_string())
                         }
                     }
 
