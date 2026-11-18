@@ -379,6 +379,19 @@ pub fn retry_board_sync(owner_key: VerifyingKey) {
     crate::components::app::mark_needs_sync(owner_key);
 }
 
+/// Test hook: put a board in the error state so the "Sync failed" chip and its
+/// Retry can be exercised without a node failure. Reachable from the
+/// Developer section of Board Settings.
+pub fn simulate_board_error(owner_key: VerifyingKey) {
+    SYNC_INFO.with_mut(|info| {
+        info.register_new_board(owner_key);
+        info.update_sync_status(
+            &owner_key,
+            BoardSyncStatus::Error("Simulated sync error".to_string()),
+        );
+    });
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum BoardSyncStatus {
     Disconnected,

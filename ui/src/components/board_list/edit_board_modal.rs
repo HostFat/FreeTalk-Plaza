@@ -329,6 +329,22 @@ pub fn EditBoardModal() -> Element {
                             "Reset all local data"
                         }
                     }
+                    details { class: "mt-4 pt-4 border-t border-border",
+                        summary { class: "text-xs text-text-muted cursor-pointer", "Developer" }
+                        p { class: "text-xs text-text-muted mt-2 mb-2",
+                            "Test hook: shows the Sync failed chip and its Retry without a network failure."
+                        }
+                        button {
+                            r#type: "button",
+                            class: "px-3 py-1.5 bg-surface border border-border rounded-lg text-xs text-amber-300 hover:bg-surface-hover transition-colors",
+                            onclick: move |_| {
+                                if let Some(board) = EDIT_BOARD_MODAL.read().board {
+                                    crate::components::app::sync_info::simulate_board_error(board);
+                                }
+                            },
+                            "Simulate sync error"
+                        }
+                    }
                     // Close button
                     button {
                         class: "absolute top-3 right-3 p-1 text-text-muted hover:text-text transition-colors",
