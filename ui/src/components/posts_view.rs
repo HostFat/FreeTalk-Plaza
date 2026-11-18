@@ -1021,9 +1021,11 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                     let self_member_id = MemberId::from(&bd.self_sk.verifying_key());
                                     // A split board can own and post with different
                                     // keys: owner powers follow the ownership chain.
-                                    let is_owner = bd.is_current_owner();
-                                    let is_admin = bd.board_state.admin.admins.iter()
-                                        .any(|a| a.admin.id() == self_member_id);
+                                    // A spectator never gets management controls.
+                                    let is_owner = !bd.spectator && bd.is_current_owner();
+                                    let is_admin = !bd.spectator
+                                        && bd.board_state.admin.admins.iter()
+                                            .any(|a| a.admin.id() == self_member_id);
                                     (self_member_id, is_owner, is_admin)
                                 });
 
@@ -1036,13 +1038,14 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                         // Follow the ownership chain, not the
                                         // founding key: a spectator and a
                                         // transferred owner differ here.
-                                        board.is_current_owner(),
-                                        board
-                                            .board_state
-                                            .admin
-                                            .admins
-                                            .iter()
-                                            .any(|admin| admin.admin.id() == self_id),
+                                        !board.spectator && board.is_current_owner(),
+                                        !board.spectator
+                                            && board
+                                                .board_state
+                                                .admin
+                                                .admins
+                                                .iter()
+                                                .any(|admin| admin.admin.id() == self_id),
                                     )
                                 })
                                 .unwrap_or((false, false));

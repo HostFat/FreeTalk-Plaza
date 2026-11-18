@@ -203,16 +203,18 @@ pub fn TopBar() -> Element {
     };
 
     let self_member_id = MemberId::from(&board_data.self_sk.verifying_key());
-    let is_owner = board_data.is_current_owner();
-    let is_admin = board_data
-        .board_state
-        .admin
-        .admins
-        .iter()
-        .any(|a| a.admin.id() == self_member_id);
+    // A spectator has no management surface, whatever the board state says.
+    let is_owner = !board_data.spectator && board_data.is_current_owner();
+    let is_admin = !board_data.spectator
+        && board_data
+            .board_state
+            .admin
+            .admins
+            .iter()
+            .any(|a| a.admin.id() == self_member_id);
     let can_participate = board_data.can_participate();
-    let can_manage_trash =
-        crate::board_data::can_manage_trash(&board_data.board_state, self_member_id);
+    let can_manage_trash = !board_data.spectator
+        && crate::board_data::can_manage_trash(&board_data.board_state, self_member_id);
     let can_open_manage = is_owner || is_admin || can_manage_trash;
 
     let self_nickname = if board_data.spectator {
