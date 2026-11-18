@@ -66,6 +66,17 @@ pub fn image_sha256(bytes: &[u8]) -> [u8; 32] {
     plaza_blob_core::sha256(bytes)
 }
 
+/// Object URL for image bytes. The caller revokes it when the image changes.
+pub fn image_object_url(bytes: &[u8], mime: &str) -> Option<String> {
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::new();
+    parts.push(&array.buffer());
+    let options = web_sys::BlobPropertyBag::new();
+    options.set_type(mime);
+    let blob = web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &options).ok()?;
+    web_sys::Url::create_object_url_with_blob(&blob).ok()
+}
+
 /// Prepared images already uploaded in this page session, keyed by the
 /// plaintext hash. Reusing one avoids a second set of PUTs.
 static UPLOADED_IMAGES: LazyLock<Mutex<HashMap<[u8; 32], ([u8; 32], u32)>>> =

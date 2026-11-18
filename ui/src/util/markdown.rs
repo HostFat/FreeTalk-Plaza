@@ -24,8 +24,66 @@ pub fn text_to_html(text: &str) -> String {
     // headings, so cap what the content can produce.
     let html = clamp_headings(&html);
 
+    // Colour fenced code blocks whose language is known.
+    let html = highlight_code_blocks(&html);
+
     // Add target="_blank" and rel="noopener noreferrer" to all links
     make_links_open_in_new_tab(&html)
+}
+
+fn unescape_html(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Post-process markdown's `<pre><code class="language-x">` blocks. The code
+/// text is escaped by markdown; the highlighter receives the plain form and
+/// escapes it again in its own spans.
+fn highlight_code_blocks(html: &str) -> String {
+    const CLOSE: &str = "</code></pre>";
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find("<pre><code") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        // Close on the `<code ...>` tag, not on the `<pre>` tag.
+        let Some(code_tag) = after.find("<code") else {
+            out.push_str(after);
+            return out;
+        };
+        let Some(open_end) = after[code_tag..].find('>').map(|offset| code_tag + offset) else {
+            out.push_str(after);
+            return out;
+        };
+        let open = &after[..=open_end];
+        let Some(close) = after.find(CLOSE) else {
+            out.push_str(after);
+            return out;
+        };
+        let inner = &after[open_end + 1..close];
+        let lang = open
+            .split("language-")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split(|ch: char| ch == '"' || ch == ' ' || ch == '>')
+                    .next()
+            })
+            .unwrap_or("");
+        out.push_str(&open.replacen("<pre>", "<pre class=\"code-block\">", 1));
+        if let Some(highlighted) = crate::util::highlight::highlight_html(lang, &unescape_html(inner))
+        {
+            out.push_str(&highlighted);
+        } else {
+            out.push_str(inner);
+        }
+        out.push_str(CLOSE);
+        rest = &after[close + CLOSE.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Cap heading levels in rendered content: h1/h2/h3 become h3, h4-h6 become h4.
@@ -79,6 +137,21 @@ mod tests {
             !html.contains("<a "),
             "URL in code block should NOT be linkified: {html}"
         );
+    }
+
+    #[test]
+    fn fenced_code_gets_syntax_classes() {
+        let html = text_to_html("```rust\nlet x = 1; // note\n```");
+        assert!(html.contains("code-block"), "{html}");
+        assert!(html.contains("tok-keyword"), "{html}");
+        assert!(html.contains("tok-comment"), "{html}");
+    }
+
+    #[test]
+    fn unknown_fence_stays_plain_code() {
+        let html = text_to_html("```brainfuck\n+++\n```");
+        assert!(html.contains("<code"), "{html}");
+        assert!(!html.contains("tok-"), "{html}");
     }
 
     #[test]

@@ -262,3 +262,19 @@ button, a, input, textarea, select, [role="button"] {
 ::-webkit-scrollbar-thumb:hover {
   background: #55555a;
 }
+
+/* Fenced code blocks: token colours are emitted by util/highlight.rs. */
+.code-block {
+  border: 1px solid var(--color-border, #3a3a3e);
+  border-radius: 0.5rem;
+  padding: 0.75rem 0.9rem;
+  overflow-x: auto;
+  background: rgba(0, 0, 0, 0.25);
+}
+.tok-keyword { color: #c792ea; }
+.tok-string { color: #c3e88d; }
+.tok-comment { color: #7a7f8a; font-style: italic; }
+.tok-number { color: #f78c6c; }
+.tok-function { color: #82aaff; }
+.tok-type { color: #ffcb6b; }
+.tok-punct { color: #89ddff; }

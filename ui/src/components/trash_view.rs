@@ -25,6 +25,31 @@ pub fn TrashView() -> Element {
         return rsx! { p { class: "text-text-muted", "Select a board." } };
     };
 
+    // Make sure the owner key has a KEM key before a rotation removes the last
+    // profile manager: the new trash key has to be sealed to someone.
+    let mut pq_checked = use_signal(|| false);
+    use_effect({
+        let board_key = CURRENT_BOARD.read().owner_key;
+        move || {
+            if *pq_checked.peek() {
+                return;
+            }
+            *pq_checked.write() = true;
+            let Some(board_key) = board_key else {
+                return;
+            };
+            let changed = BOARDS.with_mut(|boards| {
+                boards
+                    .map
+                    .get_mut(&board_key)
+                    .is_some_and(|board| board.ensure_pq_key())
+            });
+            if changed {
+                crate::components::app::mark_needs_sync(board_key);
+            }
+        }
+    });
+
     // Apply the retention setting when the page opens, once per mount.
     let mut retention_ran = use_signal(|| false);
     use_effect({
@@ -222,7 +247,7 @@ pub fn TrashView() -> Element {
                             for member in key_holders {
                                 span { class: "flex items-center gap-1 bg-surface rounded px-2 py-0.5 text-xs text-text-muted",
                                     "{member_name(&data, member)}"
-                                    if member != owner_id && is_owner_or_admin {
+                                    if member != owner_id && member != self_id && is_owner_or_admin {
                                         button {
                                             r#type: "button",
                                             class: "text-red-400",

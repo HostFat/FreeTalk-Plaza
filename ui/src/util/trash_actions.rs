@@ -833,6 +833,11 @@ fn latest_trash_set(state: &plaza_core::ChatBoardStateV1) -> Option<&AuthorizedP
 fn trash_managers(ctx: &ActionContext) -> std::collections::BTreeSet<MemberId> {
     let mut managers = std::collections::BTreeSet::new();
     managers.insert(trash_owner_id(ctx));
+    // The owner works through its profile. Keep that profile in the set even
+    // when it is not an admin, or a rotation could lock the owner's own UI out.
+    if ctx.is_current_owner() {
+        managers.insert(MemberId::from(&ctx.self_sk.verifying_key()));
+    }
     for admin in &ctx.board_state.admin.admins {
         managers.insert(admin.admin.id());
     }

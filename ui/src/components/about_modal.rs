@@ -1,7 +1,8 @@
 //! "About FreeTalk Plaza" panel: name, what the app is, and the build/deployment
 //! details a user needs when reporting a problem.
 
-use crate::components::app::{ABOUT_MODAL, BOARDS};
+use crate::components::app::{ABOUT_MODAL, BOARDS, CURRENT_BOARD};
+use crate::util::ecies::unseal_bytes_with_secrets;
 use dioxus::prelude::*;
 use web_sys::window;
 
@@ -36,6 +37,80 @@ fn persist_profiles() {
             crate::components::app::toasts::show_error(format!(
                 "Could not save the profile: {error}"
             ));
+        }
+    });
+}
+
+fn board_display_name(board: &crate::board_data::BoardData) -> String {
+    unseal_bytes_with_secrets(
+        &board.board_state.configuration.configuration.display.name,
+        &board.secrets,
+    )
+    .ok()
+    .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+    .filter(|name| !name.trim().is_empty())
+    .unwrap_or_else(|| {
+        format!(
+            "{}…",
+            bs58::encode(board.owner_vk.as_bytes())
+                .into_string()
+                .chars()
+                .take(8)
+                .collect::<String>()
+        )
+    })
+}
+
+/// Board names where this profile is the posting identity on this device.
+fn profile_boards(profile: &crate::board_data::IdentityProfile) -> Vec<String> {
+    let profiles_key = profile.signing_key.verifying_key();
+    BOARDS
+        .read()
+        .map
+        .values()
+        .filter(|board| board.self_sk.verifying_key() == profiles_key)
+        .map(board_display_name)
+        .collect()
+}
+
+/// Whether the profile can be selected on the board that is open now.
+fn switch_state(profile: &crate::board_data::IdentityProfile) -> (bool, bool) {
+    let Some(current) = CURRENT_BOARD.read().owner_key else {
+        return (false, false);
+    };
+    let boards = BOARDS.read();
+    let Some(board) = boards.map.get(&current) else {
+        return (false, false);
+    };
+    let vk = profile.signing_key.verifying_key();
+    let is_current = board.self_sk.verifying_key() == vk;
+    let is_member = board
+        .board_state
+        .members
+        .members
+        .iter()
+        .any(|member| {
+            member.member.member_vk == vk
+                && !board
+                    .board_state
+                    .ownership
+                    .is_deactivated_now(&member.member.id())
+        });
+    (is_member && !is_current, is_current)
+}
+
+fn persist_and_reload() {
+    crate::util::safe_spawn_local(async {
+        if let Err(error) =
+            crate::components::app::chat_delegate::save_boards_and_wait().await
+        {
+            crate::components::app::toasts::show_error(format!(
+                "Could not save the new identity: {error}"
+            ));
+            return;
+        }
+        if let Some(window) = web_sys::window() {
+            let _ = window.location().reload();
         }
     });
 }
@@ -113,6 +188,9 @@ pub fn AboutModal() -> Element {
                         p { class: "text-xs",
                             "A profile is a local key. Reusing it on several boards shows the same member id on each; a separate profile keeps them unlinked. Keys never leave this device."
                         }
+                        p { class: "text-xs",
+                            "Two different profiles cannot be merged: merging would link their keys and defeat the separation. To use one identity on another board, join or rejoin that board with it."
+                        }
                         for profile in BOARDS.read().profiles.clone() {
                             div { key: "{profile.id}", class: "flex items-center gap-2 flex-wrap",
                                 if renaming.read().as_deref() == Some(profile.id.as_str()) {
@@ -151,6 +229,51 @@ pub fn AboutModal() -> Element {
                                     span { class: "text-text-muted text-[10px] font-mono",
                                         "{profile.id.chars().take(8).collect::<String>()}"
                                     }
+                                    div { class: "w-full text-[10px] text-text-muted",
+                                        {
+                                            let boards = profile_boards(&profile);
+                                            if boards.is_empty() {
+                                                "Not used by any board on this device.".to_string()
+                                            } else {
+                                                format!("Used by: {}", boards.join(", "))
+                                            }
+                                        }
+                                    }
+                                    if switch_state(&profile).0 {
+                                        button {
+                                            r#type: "button",
+                                            class: "px-2 py-1 bg-accent/20 hover:bg-accent/30 text-accent text-xs rounded",
+                                            onclick: {
+                                                let key = profile.signing_key.clone();
+                                                move |_| {
+                                                    let current = CURRENT_BOARD.read().owner_key;
+                                                    let switched = current.is_some_and(|current| {
+                                                        BOARDS.with_mut(|boards| {
+                                                            boards
+                                                                .map
+                                                                .get_mut(&current)
+                                                                .is_some_and(|board| {
+                                                                    board
+                                                                        .switch_profile(&key)
+                                                                        .is_ok()
+                                                                })
+                                                        })
+                                                    });
+                                                    if switched {
+                                                        persist_and_reload();
+                                                    } else {
+                                                        crate::components::app::toasts::show_error(
+                                                            "Could not switch to that profile on this board.",
+                                                        );
+                                                    }
+                                                }
+                                            },
+                                            "Use on this board"
+                                        }
+                                    }
+                                    if switch_state(&profile).1 {
+                                        span { class: "text-[10px] text-accent", "current here" }
+                                    }
                                     button {
                                         r#type: "button",
                                         class: "px-2 py-1 bg-surface hover:bg-surface-hover text-text text-xs rounded",
@@ -181,6 +304,27 @@ pub fn AboutModal() -> Element {
                         }
                         if BOARDS.read().profiles.is_empty() {
                             p { class: "text-xs", "No profiles yet. Create one with a board or an invite." }
+                        }
+                    }
+                    details { class: "border-t border-border pt-3",
+                        summary { class: "text-sm text-text cursor-pointer",
+                            "Contract versions and rekey"
+                        }
+                        div { class: "mt-2 space-y-2 text-xs text-text-muted",
+                            p {
+                                "The app bundle and each board contract are separate. A new build updates the web container state, so the site id above stays the same while the version and commit change."
+                            }
+                            ul { class: "list-disc pl-4 space-y-1",
+                                li {
+                                    "A board contract key comes from its wasm plus the board owner. Changing the board contract creates a new key; this client records the migration and the owner sends a signed upgrade pointer to the old contract."
+                                }
+                                li {
+                                    "Profile and owner keys are local and are not part of the contract key, so they survive a rekey."
+                                }
+                                li {
+                                    "Download a backup before deploying. After deploying, open the app once as the owner, let the sync chip settle, and check that the board opens from the new key."
+                                }
+                            }
                         }
                     }
                     div { class: "border-t border-border pt-3 space-y-2",

@@ -1716,7 +1716,7 @@ fn MessageContentDisplay(
                                             ImageAlign::Center => "flex justify-center my-2",
                                             ImageAlign::Right => "flex justify-end my-2",
                                         },
-                                        ImageAttachment { image: image.clone(), auto_load: auto_load_images }
+                                        ImageAttachment { image: image.clone(), auto_load: auto_load_images, gallery: images.clone() }
                                     }
                                 }
                             } else {
@@ -2373,7 +2373,7 @@ pub fn MessageCard(
                                             ImageAlign::Center => "flex justify-center",
                                             ImageAlign::Right => "flex justify-end",
                                         },
-                                        ImageAttachment { image: image.clone(), auto_load: auto_load_images }
+                                        ImageAttachment { image: image.clone(), auto_load: auto_load_images, gallery: images.clone() }
                                     }
                                 }
                             }
@@ -2414,7 +2414,7 @@ pub fn MessageCard(
                                             ImageAlign::Center => "flex justify-center",
                                             ImageAlign::Right => "flex justify-end",
                                         },
-                                        ImageAttachment { image: image.clone(), auto_load: auto_load_images }
+                                        ImageAttachment { image: image.clone(), auto_load: auto_load_images, gallery: images.clone() }
                                     }
                                 }
                             }
@@ -2558,7 +2558,7 @@ pub fn MessageCard(
                                                     ImageAlign::Center => "flex justify-center",
                                                     ImageAlign::Right => "flex justify-end",
                                                 },
-                                                ImageAttachment { image: image.clone(), auto_load: auto_load_images }
+                                                ImageAttachment { image: image.clone(), auto_load: auto_load_images, gallery: images.clone() }
                                             }
                                         }
                                     }
@@ -2607,7 +2607,7 @@ pub fn MessageCard(
                                                             ImageAlign::Center => "flex justify-center",
                                                             ImageAlign::Right => "flex justify-end",
                                                         },
-                                                        ImageAttachment { image: image.clone(), auto_load: auto_load_images }
+                                                        ImageAttachment { image: image.clone(), auto_load: auto_load_images, gallery: images.clone() }
                                                     }
                                                 }
                                             }

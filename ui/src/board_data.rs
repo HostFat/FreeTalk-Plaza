@@ -339,6 +339,40 @@ impl BoardData {
         }
     }
 
+    /// Use another stored profile for this board without leaving it. The
+    /// profile must already be a member and must not be deactivated here.
+    pub fn switch_profile(&mut self, signing_key: &SigningKey) -> Result<(), String> {
+        let vk = signing_key.verifying_key();
+        let member = self
+            .board_state
+            .members
+            .members
+            .iter()
+            .find(|member| member.member.member_vk == vk)
+            .cloned()
+            .ok_or("That profile is not a member of this board")?;
+        if self
+            .board_state
+            .ownership
+            .is_deactivated_now(&member.member.id())
+        {
+            return Err("That profile is deactivated on this board".to_string());
+        }
+        self.self_sk = signing_key.clone();
+        self.self_authorized_member = Some(member.clone());
+        self.self_member_info = self
+            .board_state
+            .member_info
+            .member_info
+            .iter()
+            .filter(|info| info.member_info.member_id == member.member.id())
+            .max_by_key(|info| info.member_info.version)
+            .cloned();
+        let parameters = self.board_parameters();
+        self.capture_self_membership_data(&parameters);
+        Ok(())
+    }
+
     /// Whether this client is suspended right now.
     pub fn is_suspended_now(&self) -> bool {
         is_suspended_now(
@@ -1011,19 +1045,35 @@ impl BoardData {
         {
             return false;
         }
-        let ek = crate::util::pq::encapsulation_key(&self.self_sk);
-        let existing = self.board_state.pq_secrets.key_for(self_id);
+        let self_key = self.self_sk.clone();
+        let mut changed = self.publish_pq_key(&self_key, self_id);
+        // The owner key never posts, but it manages the trash. Publish its KEM
+        // key too, or a key rotation after removing the last profile manager
+        // finds nobody to seal the new trash key to.
+        if is_owner {
+            let owner_key = self.owner_key().clone();
+            let owner_id = self.current_owner_id();
+            if owner_key.verifying_key() != self.self_sk.verifying_key() {
+                changed |= self.publish_pq_key(&owner_key, owner_id);
+            }
+        }
+        changed
+    }
+
+    fn publish_pq_key(&mut self, signing_key: &SigningKey, member_id: MemberId) -> bool {
+        let ek = crate::util::pq::encapsulation_key(signing_key);
+        let existing = self.board_state.pq_secrets.key_for(member_id);
         if existing.map(|key| key.ek == ek).unwrap_or(false) {
             return false;
         }
         let version = existing.map(|key| key.version + 1).unwrap_or(1);
         let entry = plaza_core::board_state::pq_secrets::AuthorizedPqMemberKey::new(
             plaza_core::board_state::pq_secrets::PqMemberKey {
-                member_id: self_id,
+                member_id,
                 ek,
                 version,
             },
-            &self.self_sk,
+            signing_key,
         );
         self.apply_pq_delta(plaza_core::board_state::pq_secrets::PqSecretsDelta {
             keys: vec![entry],
@@ -1130,17 +1180,25 @@ impl BoardData {
         else {
             return;
         };
-        match latest
-            .set
-            .secrets
-            .iter()
-            .find(|secret| secret.member_id == self_id)
-        {
-            Some(secret) => {
-                if let Ok(key) = crate::util::pq::open_secret(&self.self_sk, secret) {
-                    self.trash_secret = Some((latest.set.secret_version, key));
-                    self.trash_secrets.insert(latest.set.secret_version, key);
-                }
+        // The visible profile is the normal key holder. The owner key also
+        // holds the trash key on a split board, and the owner must keep access
+        // even after removing its profile from the list.
+        let mut candidates = vec![(self_id, self.self_sk.clone())];
+        if self.is_current_owner() {
+            candidates.push((self.current_owner_id(), self.owner_key().clone()));
+        }
+        let opened = candidates.iter().find_map(|(id, key)| {
+            latest
+                .set
+                .secrets
+                .iter()
+                .find(|secret| secret.member_id == *id)
+                .and_then(|secret| crate::util::pq::open_secret(key, secret).ok())
+        });
+        match opened {
+            Some(key) => {
+                self.trash_secret = Some((latest.set.secret_version, key));
+                self.trash_secrets.insert(latest.set.secret_version, key);
             }
             None => {
                 // A newer set without our record means access was revoked. Older
@@ -2115,6 +2173,10 @@ pub struct IdentityProfile {
     pub id: String,
     pub name: String,
     pub signing_key: SigningKey,
+    /// Last local rename, in milliseconds since the epoch. The merge keeps the
+    /// newest name when two tabs saved different ones.
+    #[serde(default)]
+    pub updated_at: u64,
 }
 
 impl IdentityProfile {
@@ -2124,8 +2186,16 @@ impl IdentityProfile {
             id,
             name,
             signing_key,
+            updated_at: profile_stamp(),
         }
     }
+}
+
+fn profile_stamp() -> u64 {
+    crate::util::get_current_system_time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -2254,16 +2324,25 @@ impl Boards {
         self.create_new_board_with_identity(self_sk, profile, name, nickname, is_private)
     }
 
-    /// Store a profile once, keyed by its verifying key.
+    /// Store a profile once, keyed by its verifying key. When two tabs know
+    /// the same key, the newer rename wins; a tie is broken by the name so
+    /// both tabs converge.
     pub fn remember_profile(&mut self, profile: IdentityProfile) {
         let vk = profile.signing_key.verifying_key();
-        if !self
+        if let Some(existing) = self
             .profiles
-            .iter()
-            .any(|existing| existing.signing_key.verifying_key() == vk)
+            .iter_mut()
+            .find(|existing| existing.signing_key.verifying_key() == vk)
         {
-            self.profiles.push(profile);
+            let newer = profile.updated_at > existing.updated_at
+                || (profile.updated_at == existing.updated_at && profile.name > existing.name);
+            if newer {
+                existing.name = profile.name;
+                existing.updated_at = profile.updated_at;
+            }
+            return;
         }
+        self.profiles.push(profile);
     }
 
     /// Rename a stored profile. Signing keys do not change, so the member id
@@ -2273,6 +2352,7 @@ impl Boards {
             return false;
         };
         profile.name = name;
+        profile.updated_at = profile_stamp();
         true
     }
 
@@ -2451,13 +2531,7 @@ impl Boards {
         };
 
         // Remember the profile so it can be reused on another board.
-        if !self
-            .profiles
-            .iter()
-            .any(|existing| existing.signing_key.verifying_key() == profile_vk)
-        {
-            self.profiles.push(profile.clone());
-        }
+        self.remember_profile(profile.clone());
 
         // Generate contract key for the board
         info!("🟢 Generating contract key...");
@@ -2539,15 +2613,9 @@ impl Boards {
                 self.blocked_image_hashes.push(hash);
             }
         }
-        // Profiles are local and follow the union rule by signing key.
+        // Profiles are local and merge by signing key, newest rename first.
         for profile in other.profiles {
-            if !self
-                .profiles
-                .iter()
-                .any(|existing| existing.signing_key.verifying_key() == profile.signing_key.verifying_key())
-            {
-                self.profiles.push(profile);
-            }
+            self.remember_profile(profile);
         }
         // Own uploads follow the union rule too; keep the fresher copy when
         // both sides know the same blob.
@@ -3071,6 +3139,112 @@ mod tests {
             .board_state
             .verify(&board.board_state, &params)
             .expect("the board verifies after the deactivations");
+    }
+
+    /// Two tabs renamed the same profile: the newer name wins on merge.
+    #[test]
+    fn a_newer_profile_rename_wins_on_merge() {
+        let mut rng = rand::thread_rng();
+        let profile = IdentityProfile::new(
+            "Old".to_string(),
+            SigningKey::generate(&mut rng),
+        );
+        let mut local = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            profiles: vec![profile.clone()],
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
+            owned_images: Vec::new(),
+        };
+        local.profiles[0].updated_at = 10;
+        let mut other = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            profiles: vec![profile],
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
+            owned_images: Vec::new(),
+        };
+        other.profiles[0].name = "New".to_string();
+        other.profiles[0].updated_at = 20;
+
+        local.merge(other).expect("the profiles merge");
+        assert_eq!(local.profiles.len(), 1);
+        assert_eq!(local.profiles[0].name, "New");
+        assert_eq!(local.profiles[0].updated_at, 20);
+    }
+
+    /// A profile that is already a member can take over posting on the open
+    /// board without leaving it.
+    #[test]
+    fn switch_profile_uses_an_existing_member() {
+        use plaza_core::board_state::member::AuthorizedMember;
+        use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
+        use plaza_core::board_state::privacy::SealedBytes;
+
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let profile_sk = SigningKey::generate(&mut rng);
+        let second_sk = SigningKey::generate(&mut rng);
+        let second_vk = second_sk.verifying_key();
+        let second_id = MemberId::from(&second_vk);
+        let mut boards = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            profiles: Vec::new(),
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
+            owned_images: Vec::new(),
+        };
+        let key = boards.create_new_board_with_identity(
+            owner_sk.clone(),
+            IdentityProfile::new("First".to_string(), profile_sk),
+            "Board".to_string(),
+            "First".to_string(),
+            false,
+        );
+        let board = boards.map.get_mut(&key).unwrap();
+        board
+            .board_state
+            .members
+            .members
+            .push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: MemberId::from(key),
+                    invited_by: MemberId::from(key),
+                    member_vk: second_vk,
+                    join_proof: None,
+                },
+                &owner_sk,
+            ));
+        board
+            .board_state
+            .member_info
+            .member_info
+            .push(AuthorizedMemberInfo::new_with_member_key(
+                MemberInfo {
+                    member_id: second_id,
+                    version: 0,
+                    preferred_nickname: SealedBytes::public(b"Second".to_vec()),
+                },
+                &second_sk,
+            ));
+
+        assert!(board.switch_profile(&second_sk).is_ok());
+        assert_eq!(board.self_sk.verifying_key(), second_vk);
+        assert!(board.self_authorized_member.is_some());
+        assert!(board.can_participate().is_ok());
+        assert!(board.switch_profile(&SigningKey::generate(&mut rng)).is_err());
     }
 
     #[test]

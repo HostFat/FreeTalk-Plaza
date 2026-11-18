@@ -147,11 +147,11 @@ pub static NEEDS_SYNC: GlobalSignal<std::collections::HashSet<VerifyingKey>> =
 /// its timeout even when no board state changed.
 pub static SYNC_TICK: GlobalSignal<u64> = Global::new(|| 0);
 
-/// Image shown in the full-screen viewer, if any.
+/// Images of one message in the full-screen viewer, and the open index.
 #[derive(Clone, PartialEq)]
 pub struct LightboxState {
-    pub src: String,
-    pub alt: String,
+    pub images: Vec<plaza_core::board_state::images::ImageRef>,
+    pub index: usize,
 }
 
 pub static LIGHTBOX: GlobalSignal<Option<LightboxState>> = Global::new(|| None);
@@ -221,6 +221,13 @@ pub fn mark_needs_sync(board_key: ed25519_dalek::VerifyingKey) {
         // Count the change so the sync chip can wait for the node's answer.
         sync_info::SYNC_INFO.with_mut(|info| info.mark_local_change(&board_key));
         NEEDS_SYNC.write().insert(board_key);
+        // Persist the change now. The periodic tick can be up to a minute
+        // away, and a reload in that window used to lose the action.
+        crate::util::safe_spawn_local(async {
+            if let Err(error) = chat_delegate::save_boards_and_wait().await {
+                dioxus::logger::tracing::warn!("Could not save boards: {error}");
+            }
+        });
     });
 }
 

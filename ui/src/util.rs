@@ -5,6 +5,7 @@ pub mod avatar;
 pub mod crop_math;
 pub mod drafts;
 pub mod feedback;
+pub mod highlight;
 pub mod ecies;
 pub mod image_meta;
 pub mod image_processing;

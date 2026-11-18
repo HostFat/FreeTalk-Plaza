@@ -5,7 +5,7 @@
 //! download. The bytes are verified against the hash before being shown.
 
 use crate::components::app::{BOARDS, CURRENT_BOARD};
-use crate::util::images::{request_image, ImageStatus, IMAGES};
+use crate::util::images::{image_object_url, request_image, ImageStatus, IMAGES};
 use dioxus::prelude::*;
 use plaza_core::board_state::images::ImageRef;
 use wasm_bindgen_futures::spawn_local;
@@ -18,18 +18,13 @@ fn kilobytes(bytes: u32) -> String {
     }
 }
 
-fn object_url(bytes: &[u8], mime: &str) -> Option<String> {
-    let array = js_sys::Uint8Array::from(bytes);
-    let parts = js_sys::Array::new();
-    parts.push(&array.buffer());
-    let options = web_sys::BlobPropertyBag::new();
-    options.set_type(mime);
-    let blob = web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &options).ok()?;
-    web_sys::Url::create_object_url_with_blob(&blob).ok()
-}
-
 #[component]
-pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> Element {
+pub fn ImageAttachment(
+    image: ImageRef,
+    #[props(default)] auto_load: bool,
+    /// Every image of the message, so the viewer can move between them.
+    #[props(default)] gallery: Vec<ImageRef>,
+) -> Element {
     let mut opened = use_signal(|| false);
     let mut url = use_signal(|| None::<String>);
     let instance = image.instance;
@@ -182,7 +177,7 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
     use_effect(move || {
         if let Some(bytes) = ready_bytes_for(&instance) {
             if url.peek().is_none() {
-                if let Some(created) = object_url(&bytes, &mime_for_url) {
+                if let Some(created) = image_object_url(&bytes, &mime_for_url) {
                     url.set(Some(created));
                 }
             }
@@ -228,16 +223,22 @@ pub fn ImageAttachment(image: ImageRef, #[props(default)] auto_load: bool) -> El
                             class: "rounded-md max-h-[70vh] object-contain mx-auto cursor-zoom-in",
                             style: "width: {display}%",
                             onclick: {
-                                let src = created.clone();
-                                let alt = alt.clone();
+                                let gallery = if gallery.is_empty() {
+                                    vec![image.clone()]
+                                } else {
+                                    gallery.clone()
+                                };
+                                let index = gallery
+                                    .iter()
+                                    .position(|item| item.instance == instance)
+                                    .unwrap_or(0);
                                 move |event: MouseEvent| {
                                     event.stop_propagation();
-                                    *crate::components::app::LIGHTBOX.write() = Some(
-                                        crate::components::app::LightboxState {
-                                            src: src.clone(),
-                                            alt: alt.clone(),
-                                        },
-                                    );
+                                    *crate::components::app::LIGHTBOX.write() =
+                                        Some(crate::components::app::LightboxState {
+                                            images: gallery.clone(),
+                                            index,
+                                        });
                                 }
                             },
                         }
