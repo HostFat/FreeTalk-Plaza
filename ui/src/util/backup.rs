@@ -60,6 +60,14 @@ pub async fn import_bytes(bytes: &[u8]) -> Result<usize, String> {
         backup.boards.map.len(),
         *crate::components::app::BOARDS_LOADED.read()
     );
+    // The initial delegate load replaces BOARDS when it finishes. Importing
+    // before that point would be wiped by the load; wait briefly for it.
+    let deadline = crate::util::get_current_system_time() + std::time::Duration::from_secs(3);
+    while !*crate::components::app::BOARDS_LOADED.read()
+        && crate::util::get_current_system_time() < deadline
+    {
+        crate::util::sleep(std::time::Duration::from_millis(50)).await;
+    }
     let imported_keys: Vec<VerifyingKey> = backup.boards.map.keys().copied().collect();
     let mut imported = 0usize;
     BOARDS.with_mut(|boards| {

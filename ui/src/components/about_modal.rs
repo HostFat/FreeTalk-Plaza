@@ -99,6 +99,31 @@ fn switch_state(profile: &crate::board_data::IdentityProfile) -> (bool, bool) {
     (is_member && !is_current, is_current)
 }
 
+/// Read one selected file and merge it into the local store, then reload.
+async fn restore_file(file: web_sys::File) {
+    let Ok(buffer) = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await else {
+        crate::components::app::toasts::show_error("Could not read the backup file.");
+        return;
+    };
+    let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+    match crate::util::backup::import_bytes(&bytes).await {
+        Ok(count) => {
+            crate::components::app::toasts::show(format!(
+                "Restored {count} board(s). Reloading…"
+            ));
+            crate::util::sleep(std::time::Duration::from_millis(800)).await;
+            if let Some(window) = window() {
+                let _ = window.location().reload();
+            }
+        }
+        Err(error) => {
+            crate::components::app::toasts::show_error(format!(
+                "Could not restore: {error}"
+            ));
+        }
+    }
+}
+
 fn persist_and_reload() {
     crate::util::safe_spawn_local(async {
         if let Err(error) =
@@ -353,42 +378,26 @@ pub fn AboutModal() -> Element {
                                     r#type: "file",
                                     accept: ".cbor",
                                     class: "block w-full text-xs text-text-muted",
-                                    onchange: move |_| {
-                                        wasm_bindgen_futures::spawn_local(async move {
-                                            let Some(file) = crate::util::backup::selected_file() else {
-                                                return;
-                                            };
-                                            let Ok(buffer) = wasm_bindgen_futures::JsFuture::from(
-                                                file.array_buffer(),
-                                            )
-                                            .await
-                                            else {
-                                                crate::components::app::toasts::show_error(
-                                                    "Could not read the backup file.",
-                                                );
-                                                return;
-                                            };
-                                            let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-                                            match crate::util::backup::import_bytes(&bytes).await {
-                                                Ok(count) => {
-                                                    crate::components::app::toasts::show(format!(
-                                                        "Restored {count} board(s). Reloading…"
-                                                    ));
-                                                    crate::util::sleep(std::time::Duration::from_millis(800)).await;
-                                                    if let Some(window) = window() {
-                                                        let _ = window.location().reload();
-                                                    }
-                                                }
-                                                Err(error) => {
-                                                    crate::components::app::toasts::show_error(format!(
-                                                        "Could not restore: {error}"
-                                                    ));
-                                                }
-                                            }
-                                        });
-                                    },
+                                    // Selection only; "Restore now" applies it.
+                                    // Importing on change made a second attempt
+                                    // impossible and raced the button.
                                 }
                                 "Restore backup"
+                            }
+                            button {
+                                r#type: "button",
+                                class: "px-3 py-1.5 bg-accent hover:bg-accent-hover text-white text-xs rounded-lg transition-colors",
+                                onclick: move |_| {
+                                    wasm_bindgen_futures::spawn_local(async move {
+                                        match crate::util::backup::selected_file() {
+                                            Some(file) => restore_file(file).await,
+                                            None => crate::components::app::toasts::show_error(
+                                                "Choose a backup file first.",
+                                            ),
+                                        }
+                                    });
+                                },
+                                "Restore now"
                             }
                         }
                     }
