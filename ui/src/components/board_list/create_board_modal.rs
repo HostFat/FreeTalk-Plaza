@@ -113,6 +113,7 @@ pub fn CreateBoardModal() -> Element {
                         label { class: "block text-sm font-medium text-text mb-1", "Board Name" }
                         input {
                             class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent",
+                            dir: "auto",
                             value: "{board_name}",
                             placeholder: "Enter board name",
                             onchange: move |evt| board_name.set(evt.value().to_string())
@@ -123,6 +124,7 @@ pub fn CreateBoardModal() -> Element {
                         label { class: "block text-sm font-medium text-text mb-1", "Your Nickname" }
                         input {
                             class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent",
+                            dir: "auto",
                             value: "{nickname}",
                             placeholder: "Enter your nickname",
                             onchange: move |evt| nickname.set(evt.value().to_string())

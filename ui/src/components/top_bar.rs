@@ -215,22 +215,26 @@ pub fn TopBar() -> Element {
         crate::board_data::can_manage_trash(&board_data.board_state, self_member_id);
     let can_open_manage = is_owner || is_admin || can_manage_trash;
 
-    let self_nickname = board_data
-        .board_state
-        .member_info
-        .member_info
-        .iter()
-        .find(|ami| ami.member_info.member_id == self_member_id)
-        .map(|ami| {
-            match unseal_bytes_with_secrets(
-                &ami.member_info.preferred_nickname,
-                &board_data.secrets,
-            ) {
-                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                Err(_) => ami.member_info.preferred_nickname.to_string_lossy(),
-            }
-        })
-        .unwrap_or_else(|| "You".to_string());
+    let self_nickname = if board_data.spectator {
+        "Spectator".to_string()
+    } else {
+        board_data
+            .board_state
+            .member_info
+            .member_info
+            .iter()
+            .find(|ami| ami.member_info.member_id == self_member_id)
+            .map(|ami| {
+                match unseal_bytes_with_secrets(
+                    &ami.member_info.preferred_nickname,
+                    &board_data.secrets,
+                ) {
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                    Err(_) => ami.member_info.preferred_nickname.to_string_lossy(),
+                }
+            })
+            .unwrap_or_else(|| "You".to_string())
+    };
 
     let self_avatar = get_avatar(&self_member_id);
     let suspended_until = board_data

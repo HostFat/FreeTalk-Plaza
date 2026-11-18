@@ -123,13 +123,21 @@ pub fn BoardList() -> Element {
                     .configuration
                     .display
                     .name;
-                let board_name = match unseal_bytes_with_secrets(sealed_name, &board_data.secrets) {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                    // The name is sealed and this client has no board key. Point
-                    // at the board instead of showing raw ciphertext.
-                    Err(_) => {
-                        let short = bs58::encode(board_key.as_bytes()).into_string();
-                        format!("Private board — key missing ({}…)", &short[..6])
+                let board_name = if board_data.spectator
+                    && board_data.is_awaiting_initial_sync()
+                {
+                    // A cold read-only contract has no state yet: do not show
+                    // the default placeholder name as if it were the board.
+                    "Read-only board — loading…".to_string()
+                } else {
+                    match unseal_bytes_with_secrets(sealed_name, &board_data.secrets) {
+                        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                        // The name is sealed and this client has no board key. Point
+                        // at the board instead of showing raw ciphertext.
+                        Err(_) => {
+                            let short = bs58::encode(board_key.as_bytes()).into_string();
+                            format!("Private board — key missing ({}…)", &short[..6])
+                        }
                     }
                 };
                 let is_current = current_board_key == Some(board_key);
@@ -165,7 +173,7 @@ pub fn BoardList() -> Element {
                         class: "w-9 h-9 sm:w-12 sm:h-12 flex-shrink-0",
                         alt: "",
                     }
-                    span { class: "flex-1 text-left text-lg sm:text-2xl md:text-4xl font-medium leading-tight whitespace-normal break-words", "{current_board_name}" }
+                    span { class: "flex-1 text-left text-lg sm:text-2xl md:text-4xl font-medium leading-tight whitespace-normal break-words", dir: "auto", "{current_board_name}" }
                     if let Some(board_key) = CURRENT_BOARD.read().owner_key {
                         button {
                             r#type: "button",
@@ -252,11 +260,11 @@ pub fn BoardList() -> Element {
                                         }
                                         if awaiting_sync {
                                             div { class: "flex-1 flex items-center gap-2",
-                                                span { class: "text-left text-2xl truncate", "{board_name}" }
+                                                span { class: "text-left text-2xl truncate", dir: "auto", "{board_name}" }
                                                 div { class: "animate-spin w-4 h-4 border-2 border-text-muted border-t-transparent rounded-full flex-shrink-0" }
                                             }
                                         } else {
-                                            span { class: "flex-1 text-left text-2xl truncate", "{board_name}" }
+                                            span { class: "flex-1 text-left text-2xl truncate", dir: "auto", "{board_name}" }
                                         }
                                         }
                                         button {

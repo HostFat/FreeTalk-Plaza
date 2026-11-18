@@ -947,6 +947,7 @@ pub fn PostInput(
                             input {
                                 r#type: "text",
                                 class: "w-full px-4 py-2.5 bg-surface border border-border rounded-lg text-text placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-colors",
+                                dir: "auto",
                                 placeholder: "Add a title...",
                                 maxlength: max_title_size as i64,
                                 value: "{title_text}",
@@ -1102,6 +1103,7 @@ pub fn PostInput(
                                     textarea {
                                         id: "message-input",
                                         class: "flex-1 px-4 py-2.5 bg-surface border border-border rounded-lg text-text placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-colors resize-none min-h-[120px]",
+                                        dir: "auto",
                                         placeholder: "Type your message...",
                                         value: "{message_text}",
                                         rows: "5",

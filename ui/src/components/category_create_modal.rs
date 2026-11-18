@@ -296,6 +296,7 @@ pub fn CategoryCreateModal() -> Element {
                         label { class: "block text-sm font-medium text-text mb-1", "Name *" }
                         input {
                             class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent",
+                            dir: "auto",
                             value: "{name}",
                             placeholder: "Category name",
                             maxlength: 50,
@@ -308,6 +309,7 @@ pub fn CategoryCreateModal() -> Element {
                         label { class: "block text-sm font-medium text-text mb-1", "Description" }
                         textarea {
                             class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text placeholder-text-muted focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent resize-y min-h-[80px]",
+                            dir: "auto",
                             value: "{description}",
                             placeholder: "Optional description",
                             oninput: move |evt| description.set(evt.value())

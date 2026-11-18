@@ -1507,19 +1507,20 @@ fn MessageContentDisplay(
         // Title
         if show_title && !display_title.is_empty() {
             match size {
-                MessageSize::Large if expanded => rsx! { h1 { class: "{title_class}", "{display_title}" } },
-                MessageSize::Compact => rsx! { h4 { class: "{title_class}", "{display_title}" } },
-                _ => rsx! { h2 { class: "{title_class}", "{display_title}" } },
+                MessageSize::Large if expanded => rsx! { h1 { class: "{title_class}", dir: "auto", "{display_title}" } },
+                MessageSize::Compact => rsx! { h4 { class: "{title_class}", dir: "auto", "{display_title}" } },
+                _ => rsx! { h2 { class: "{title_class}", dir: "auto", "{display_title}" } },
             }
         }
         // Content
-        div { class: "{text_class}",
+        div { class: "{text_class}", dir: "auto",
             if expanded && content_text.contains("[img=") {
                 for segment in crate::util::image_tags::parse(&content_text) {
                     match segment {
                         crate::util::image_tags::Segment::Text(text) => rsx! {
                             div {
                                 class: "{content_class}",
+                                dir: "auto",
                                 dangerous_inner_html: "{text_to_html(&text)}"
                             }
                         },
@@ -1556,6 +1557,7 @@ fn MessageContentDisplay(
             } else {
                 div {
                     class: "{content_class}",
+                    dir: "auto",
                     dangerous_inner_html: "{display_content_html}"
                 }
                 if content_truncated {
