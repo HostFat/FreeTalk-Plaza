@@ -29,6 +29,7 @@ fn start_transfer(
     mut error: Signal<Option<String>>,
     mut confirmed_signal: Signal<bool>,
     mut busy: Signal<bool>,
+    mut revision: Signal<u32>,
 ) {
     if *busy.peek() {
         return;
@@ -104,18 +105,41 @@ fn start_transfer(
 
         let generation = ctx.board_state.ownership.transfers.len() as u64 + 1;
 
+        let owner_key = ctx.owner_sk.verifying_key();
+        let profile_key = ctx.self_sk.verifying_key();
+        let split_profile = profile_key != owner_key;
+        let profile_id = MemberId::from(&profile_key);
+        // The identity that stays visible on the board after the handover.
+        let outgoing_id = if split_profile { profile_id } else { owner_id };
+        // A handover to this client's own profile makes that profile the owner;
+        // it must not be deactivated in the same bundle.
+        let deactivate_profile = split_profile && target != profile_id;
+
         let mut delta = ChatBoardStateV1Delta::default();
         let mut deactivations = Vec::new();
         if outgoing == OutgoingOwnerAction::Deactivate {
             deactivations.push(AuthorizedKeyDeactivation::new(
                 KeyDeactivationV1 {
                     member: owner_id,
-                    key: ctx.owner_sk.verifying_key(),
+                    key: owner_key,
                     generation: 1,
                     deactivated_at: signed_at,
                 },
                 &ctx.owner_sk,
             ));
+            // The owner key never posts on a split board: retire the visible
+            // profile too. The contract wants each key to sign its own record.
+            if deactivate_profile {
+                deactivations.push(AuthorizedKeyDeactivation::new(
+                    KeyDeactivationV1 {
+                        member: profile_id,
+                        key: profile_key,
+                        generation: 1,
+                        deactivated_at: signed_at,
+                    },
+                    &ctx.self_sk,
+                ));
+            }
         }
         delta.ownership = Some(OwnershipDelta {
             transfers: vec![AuthorizedOwnerTransfer::new(
@@ -132,50 +156,60 @@ fn start_transfer(
             deactivations,
         });
 
-        // The outgoing owner rejoins as a member (and optionally an admin).
-        // A later handover finds it already on the list: publishing a
-        // self-invitation again is rejected as such.
+        // The outgoing identity rejoins as a member (and optionally an admin).
+        // On a split board that identity is the profile, which is usually
+        // already a member; the owner key never posts. A later handover finds
+        // it already on the list: publishing a self-invitation again is
+        // rejected as such.
+        let membership_key = if split_profile { profile_key } else { owner_key };
+        let membership_id = MemberId::from(&membership_key);
         let already_member = ctx
             .board_state
             .members
             .members
             .iter()
-            .any(|member| member.member.id() == owner_id);
-        if !already_member {
+            .any(|member| member.member.id() == membership_id);
+        let deactivating = outgoing == OutgoingOwnerAction::Deactivate;
+        if !already_member && !(split_profile && deactivating) {
             delta.members = Some(MembersDelta::new(vec![AuthorizedMember::new(
                 Member {
                     owner_member_id: parameters.owner_id(),
                     invited_by: owner_id,
-                    member_vk: ctx.owner_sk.verifying_key(),
+                    member_vk: membership_key,
                     join_proof: None,
                 },
                 &ctx.owner_sk,
             )]));
         }
-        let next_admin_generation = ctx.board_state.admin.next_generation(&owner_id);
-        let owner_is_admin = ctx
+        let next_admin_generation =
+            ctx.board_state.admin.next_generation(&outgoing_id);
+        let outgoing_is_admin = ctx
             .board_state
             .admin
             .admins
             .iter()
-            .any(|admin| admin.admin.id() == owner_id);
+            .any(|admin| admin.admin.id() == outgoing_id);
         if outgoing == OutgoingOwnerAction::KeepAdmin {
             // Adding a newer record would move its signed time past an earlier
             // transfer that names this owner as the target, which makes that
             // transfer invalid. Keep the record that is already there.
-            if !owner_is_admin {
+            if !outgoing_is_admin {
                 delta.admin = Some(AdminsDelta::new(vec![AuthorizedAdmin::new(
                     Admin {
-                        member_id: owner_id,
+                        member_id: outgoing_id,
                         generation: next_admin_generation,
                         signed_at,
                     },
                     &ctx.owner_sk,
                 )]));
             }
-        } else if owner_is_admin {
+        } else if outgoing_is_admin && outgoing_id != target {
+            // Revoking the target's admin record in the same bundle would make
+            // the transfer invalid: the successor must still be an admin at
+            // the transfer time. A handover to the outgoing identity itself
+            // needs no revocation.
             let revocation = AdminRevocation {
-                member_id: owner_id,
+                member_id: outgoing_id,
                 generation: next_admin_generation,
                 signed_at,
             };
@@ -190,9 +224,19 @@ fn start_transfer(
             Ok(()) => {
                 error.set(None);
                 confirmed_signal.set(false);
+                revision.set(revision() + 1);
                 crate::components::app::toasts::show(
                     "Ownership transferred. Syncing with the network…",
                 );
+                // A transfer is not something to lose on a quick reload: write
+                // it now instead of waiting for the periodic save.
+                if let Err(error) =
+                    crate::components::app::chat_delegate::save_boards_and_wait().await
+                {
+                    dioxus::logger::tracing::warn!(
+                        "Could not save the ownership transfer: {error}"
+                    );
+                }
             }
             Err(e) => {
                 crate::components::app::toasts::show_error(format!(
@@ -212,6 +256,10 @@ pub fn OwnershipView() -> Element {
     let mut confirmed = use_signal(|| false);
     let busy = use_signal(|| false);
 
+    // Re-read the board when a transfer lands: the component is not otherwise
+    // subscribed to the board state it copies here.
+    let revision = use_signal(|| 0u32);
+    let _ = revision.read();
     let board = ActionContext::from_current_board();
     let Some(ctx) = board else {
         return rsx! {
@@ -373,6 +421,7 @@ pub fn OwnershipView() -> Element {
                                                 error,
                                                 confirmed,
                                                 busy,
+                                                revision,
                                             ),
                                             if *is_admin { "Transfer to {name} (admin)" } else { "Transfer to {name}" }
                                         }

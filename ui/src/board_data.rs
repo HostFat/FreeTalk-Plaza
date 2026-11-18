@@ -307,8 +307,18 @@ impl BoardData {
 
     /// Whether this client holds the owner powers right now.
     /// Key that signs ownership and configuration. Older boards use the same
-    /// key for ownership and posting.
+    /// key for ownership and posting. After a handover to this client's own
+    /// profile, prefer the key that the signed ownership chain names.
     pub fn owner_key(&self) -> &SigningKey {
+        let current = self.current_owner_key();
+        if let Some(owner) = &self.owner_sk {
+            if owner.verifying_key() == current {
+                return owner;
+            }
+        }
+        if self.self_sk.verifying_key() == current {
+            return &self.self_sk;
+        }
         self.owner_sk.as_ref().unwrap_or(&self.self_sk)
     }
 
@@ -2834,6 +2844,233 @@ mod tests {
 
         assert!(board.board_state.admin.admins.is_empty());
         assert!(board.board_state.admin.is_revoked(&profile_id));
+    }
+
+    /// A handover to this client's own profile must make the profile the
+    /// owner even though `owner_sk` still holds the old owner key.
+    #[test]
+    fn a_handover_to_the_own_profile_makes_the_profile_the_owner() {
+        use plaza_core::board_state::ownership::{
+            AuthorizedOwnerTransfer, OutgoingOwnerAction, OwnerTransferV1, OwnershipDelta,
+        };
+
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let profile_sk = SigningKey::generate(&mut rng);
+        let profile_vk = profile_sk.verifying_key();
+        let profile_id = MemberId::from(&profile_vk);
+        let mut boards = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            profiles: Vec::new(),
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
+            owned_images: Vec::new(),
+        };
+        let key = boards.create_new_board_with_identity(
+            owner_sk.clone(),
+            IdentityProfile::new("Profile".to_string(), profile_sk),
+            "Board".to_string(),
+            "Profile".to_string(),
+            false,
+        );
+        let board = boards.map.get_mut(&key).unwrap();
+        let params = ChatBoardParametersV1 { owner: key };
+        let now = get_current_system_time();
+        let transfer = AuthorizedOwnerTransfer::new(
+            OwnerTransferV1 {
+                from: MemberId::from(key),
+                to: profile_id,
+                to_key: profile_vk,
+                generation: 1,
+                transferred_at: now + std::time::Duration::from_millis(2),
+                outgoing: OutgoingOwnerAction::KeepAdmin,
+            },
+            &owner_sk,
+        );
+
+        let before = board.board_state.clone();
+        board
+            .board_state
+            .apply_delta(
+                &before,
+                &params,
+                &Some(plaza_core::board_state::ChatBoardStateV1Delta {
+                    ownership: Some(OwnershipDelta {
+                        transfers: vec![transfer],
+                        deactivations: Vec::new(),
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .expect("the handover to the profile applies");
+
+        assert_eq!(board.current_owner_key(), profile_vk);
+        assert!(board.is_current_owner());
+        assert_eq!(board.owner_key().verifying_key(), profile_vk);
+        board
+            .board_state
+            .verify(&board.board_state, &params)
+            .expect("the board verifies after the handover");
+    }
+
+    /// Deactivating both the owner key and the visible profile is accepted
+    /// when the board goes to a third member.
+    #[test]
+    fn deactivating_both_keys_on_handover_verifies() {
+        use plaza_core::board_state::admin::{Admin, AuthorizedAdmin};
+        use plaza_core::board_state::ownership::{
+            AuthorizedKeyDeactivation, AuthorizedOwnerTransfer, KeyDeactivationV1,
+            OutgoingOwnerAction, OwnerTransferV1, OwnershipDelta,
+        };
+
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let owner_vk = owner_sk.verifying_key();
+        let profile_sk = SigningKey::generate(&mut rng);
+        let profile_vk = profile_sk.verifying_key();
+        let profile_id = MemberId::from(&profile_vk);
+        let third_sk = SigningKey::generate(&mut rng);
+        let third_vk = third_sk.verifying_key();
+        let third_id = MemberId::from(&third_vk);
+        let mut boards = Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            profiles: Vec::new(),
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
+            owned_images: Vec::new(),
+        };
+        let key = boards.create_new_board_with_identity(
+            owner_sk.clone(),
+            IdentityProfile::new("Profile".to_string(), profile_sk.clone()),
+            "Board".to_string(),
+            "Profile".to_string(),
+            false,
+        );
+        let board = boards.map.get_mut(&key).unwrap();
+        let params = ChatBoardParametersV1 { owner: key };
+        let now = get_current_system_time();
+
+        // A third member, promoted to admin so it can receive the board.
+        let member = Member {
+            owner_member_id: MemberId::from(key),
+            invited_by: MemberId::from(key),
+            member_vk: third_vk,
+            join_proof: None,
+        };
+        let admin = Admin {
+            member_id: third_id,
+            generation: 0,
+            signed_at: now,
+        };
+        board
+            .board_state
+            .members
+            .members
+            .push(plaza_core::board_state::member::AuthorizedMember::new(
+                member, &owner_sk,
+            ));
+        board
+            .board_state
+            .admin
+            .admins
+            .push(AuthorizedAdmin::new(admin, &owner_sk));
+        // Cleanup keeps an owner-invited member that has a nickname.
+        board
+            .board_state
+            .member_info
+            .member_info
+            .push(plaza_core::board_state::member_info::AuthorizedMemberInfo::new_with_member_key(
+                plaza_core::board_state::member_info::MemberInfo {
+                    member_id: third_id,
+                    version: 0,
+                    preferred_nickname: plaza_core::board_state::privacy::SealedBytes::public(
+                        b"Third".to_vec(),
+                    ),
+                },
+                &third_sk,
+            ));
+
+        let transfer = AuthorizedOwnerTransfer::new(
+            OwnerTransferV1 {
+                from: MemberId::from(key),
+                to: third_id,
+                to_key: third_vk,
+                generation: 1,
+                transferred_at: now + std::time::Duration::from_millis(2),
+                outgoing: OutgoingOwnerAction::Deactivate,
+            },
+            &owner_sk,
+        );
+        let deactivations = vec![
+            AuthorizedKeyDeactivation::new(
+                KeyDeactivationV1 {
+                    member: MemberId::from(key),
+                    key: owner_vk,
+                    generation: 1,
+                    deactivated_at: now,
+                },
+                &owner_sk,
+            ),
+            AuthorizedKeyDeactivation::new(
+                KeyDeactivationV1 {
+                    member: profile_id,
+                    key: profile_vk,
+                    generation: 1,
+                    deactivated_at: now,
+                },
+                &profile_sk,
+            ),
+        ];
+        let mut trial = board.board_state.ownership.clone();
+        trial.transfers.push(transfer.clone());
+        trial.deactivations.extend(deactivations.clone());
+        trial
+            .verify(&board.board_state, &params)
+            .expect("the test transfer verifies");
+
+        let before = board.board_state.clone();
+        board
+            .board_state
+            .apply_delta(
+                &before,
+                &params,
+                &Some(plaza_core::board_state::ChatBoardStateV1Delta {
+                    ownership: Some(OwnershipDelta {
+                        transfers: vec![transfer],
+                        deactivations,
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .expect("the handover with both deactivations applies");
+
+        assert_eq!(board.current_owner_key(), third_vk);
+        assert!(
+            board
+                .board_state
+                .members
+                .members
+                .iter()
+                .any(|member| member.member.id() == third_id),
+            "the new owner stays in the members list"
+        );
+        assert!(board
+            .board_state
+            .ownership
+            .is_deactivated_now(&MemberId::from(key)));
+        assert!(board.board_state.ownership.is_deactivated_now(&profile_id));
+        board
+            .board_state
+            .verify(&board.board_state, &params)
+            .expect("the board verifies after the deactivations");
     }
 
     #[test]
