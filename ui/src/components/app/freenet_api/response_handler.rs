@@ -427,6 +427,10 @@ impl ResponseHandler {
                                                             // Saves are refused until this is true, so set it only
                                                             // after the merge has placed the stored boards in BOARDS.
                                                             *BOARDS_LOADED.write() = true;
+                                                            // Send any upgrade pointer now,
+                                                            // before a reload can drop the
+                                                            // non-persisted migration record.
+                                                            crate::components::app::flush_pending_sync();
                                                         });
 
                                                         // The board list is already usable; fetch the

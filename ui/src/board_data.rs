@@ -2256,11 +2256,31 @@ impl Boards {
         self.removed.retain(|key| !self.map.contains_key(key));
     }
 
+    /// Recompute each board contract key from the bundled wasm. A mismatch
+    /// means the board was built with an older contract: remember the old key
+    /// for the upgrade pointer and use the new key from now on.
+    pub fn refresh_contract_keys(&mut self) {
+        let expected: Vec<(VerifyingKey, ContractKey)> = self
+            .map
+            .keys()
+            .map(|owner| (*owner, crate::util::owner_vk_to_contract_key(owner)))
+            .collect();
+        for (owner, expected) in expected {
+            if let Some(board) = self.map.get_mut(&owner) {
+                if board.contract_key != expected {
+                    self.migrated_boards.push((owner, board.contract_key));
+                    board.contract_key = expected;
+                }
+            }
+        }
+    }
+
     pub fn decode(bytes: &[u8]) -> Option<Boards> {
         use dioxus::logger::tracing::warn;
 
         if let Ok(mut boards) = ciborium::de::from_reader::<Boards, _>(bytes) {
             boards.clear_removed_for_present();
+            boards.refresh_contract_keys();
             return Some(boards);
         }
         let value: ciborium::value::Value = ciborium::de::from_reader(bytes).ok()?;
@@ -2316,6 +2336,7 @@ impl Boards {
             warn!("Dropped {dropped} stored board(s) written by an incompatible version");
         }
         boards.clear_removed_for_present();
+        boards.refresh_contract_keys();
         Some(boards)
     }
 
