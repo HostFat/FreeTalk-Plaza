@@ -72,7 +72,13 @@ full build; later runs reuse compiled dependencies (about 20 seconds for the
 UI build instead of two minutes).
 
 Options: `-Version N` to force the version, `-SkipCss` when the CSS is already
-built, `-StateDir` and `-TargetDir` to override the defaults.
+built, `-StateDir` and `-TargetDir` to override the defaults. Use
+`-ExtraApiPorts 7511` to publish the same signed bundle to a second node through
+a WebSocket tunnel (for example the Oracle node):
+
+```powershell
+pwsh ./deploy-fast.ps1 -ExtraApiPorts 7511
+```
 
 ## Publish only
 
@@ -88,6 +94,13 @@ The script reads the signed artifacts from `%APPDATA%\freetalk`, finds `fdev`,
 prints the build time, warns if sources changed after that build, and runs
 `fdev publish`. Use it for a retry after a stuck publish or for a deliberate
 re-publish. For code changes, run `deploy-tool deploy`.
+
+Pass `-ApiPort 7511` to publish to a node reached through a tunnel; the port is
+passed to `fdev` before the `publish` subcommand.
+
+```powershell
+pwsh ./publish-only.ps1 -ApiPort 7511
+```
 
 # Contract v2 prototype (post-quantum KEM)
 
