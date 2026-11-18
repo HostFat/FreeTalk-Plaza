@@ -132,6 +132,15 @@ impl ModerationActionV1 {
     }
 }
 
+/// When the tally of a poll is shown to readers.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PollResultsVisibility {
+    #[default]
+    Always,
+    AfterVote,
+    AfterClose,
+}
+
 /// Poll post content (content_type = 6). Votes are separate messages.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct PollContentV1 {
@@ -141,6 +150,9 @@ pub struct PollContentV1 {
     /// Unix milliseconds after which votes are ignored.
     pub closes_at: Option<i64>,
     pub multiselect: bool,
+    /// Older polls omit the field and keep showing results.
+    #[serde(default)]
+    pub results_visibility: PollResultsVisibility,
 }
 
 impl PollContentV1 {
@@ -157,7 +169,13 @@ impl PollContentV1 {
             options,
             closes_at,
             multiselect,
+            results_visibility: PollResultsVisibility::Always,
         }
+    }
+
+    pub fn with_results_visibility(mut self, visibility: PollResultsVisibility) -> Self {
+        self.results_visibility = visibility;
+        self
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -1049,6 +1067,21 @@ mod poll_tests {
             None,
             multiselect,
         )
+    }
+
+    #[test]
+    fn poll_visibility_roundtrips() {
+        let visible = poll(false).with_results_visibility(PollResultsVisibility::AfterVote);
+        assert_eq!(
+            PollContentV1::decode(&visible.encode())
+                .unwrap()
+                .results_visibility,
+            PollResultsVisibility::AfterVote
+        );
+        assert_eq!(
+            poll(false).results_visibility,
+            PollResultsVisibility::Always
+        );
     }
 
     #[test]

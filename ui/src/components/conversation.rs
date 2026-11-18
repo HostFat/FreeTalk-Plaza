@@ -43,6 +43,7 @@ pub struct PollData {
     pub options: Vec<String>,
     pub closes_at: Option<i64>,
     pub multiselect: bool,
+    pub results_visibility: plaza_core::board_state::content::PollResultsVisibility,
     pub votes: Vec<PollBallot>,
 }
 
@@ -432,6 +433,7 @@ pub fn get_all_messages(
                 options: content.options,
                 closes_at: content.closes_at,
                 multiselect: content.multiselect,
+                results_visibility: content.results_visibility,
                 votes,
             }
         });

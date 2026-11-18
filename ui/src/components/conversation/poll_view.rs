@@ -29,6 +29,13 @@ pub fn PollView(poll: PollData, poll_id: MessageId, self_member_id: MemberId) ->
     let counts = poll.counts();
     let total = poll.counted().count();
     let has_voted = poll.my_ballot(self_member_id).is_some();
+    let show_results = match poll.results_visibility {
+        plaza_core::board_state::content::PollResultsVisibility::Always => true,
+        plaza_core::board_state::content::PollResultsVisibility::AfterVote => {
+            has_voted || closed
+        }
+        plaza_core::board_state::content::PollResultsVisibility::AfterClose => closed,
+    };
     let polls = poll.clone();
     let multiselect = polls.multiselect;
 
@@ -105,8 +112,10 @@ pub fn PollView(poll: PollData, poll_id: MessageId, self_member_id: MemberId) ->
                     } else {
                         "No deadline"
                     }
-                    " · {total} "
-                    if total == 1 { "vote" } else { "votes" }
+                    if show_results {
+                        " · {total} "
+                        if total == 1 { "vote" } else { "votes" }
+                    }
                 }
             }
             for (index, option) in polls.options.iter().enumerate() {
@@ -142,12 +151,16 @@ pub fn PollView(poll: PollData, poll_id: MessageId, self_member_id: MemberId) ->
                             },
                             div { class: "flex items-center justify-between text-sm",
                                 span { class: "text-text", "{option}" }
-                                span { class: "text-xs text-text-muted", "{count} · {percent}%" }
+                                if show_results {
+                                    span { class: "text-xs text-text-muted", "{count} · {percent}%" }
+                                }
                             }
-                            div { class: "mt-1 h-1.5 bg-panel rounded overflow-hidden",
-                                div {
-                                    class: "h-full bg-accent/70",
-                                    style: "width: {percent}%",
+                            if show_results {
+                                div { class: "mt-1 h-1.5 bg-panel rounded overflow-hidden",
+                                    div {
+                                        class: "h-full bg-accent/70",
+                                        style: "width: {percent}%",
+                                    }
                                 }
                             }
                         }
@@ -167,6 +180,18 @@ pub fn PollView(poll: PollData, poll_id: MessageId, self_member_id: MemberId) ->
                     }
                     if polls.multiselect {
                         span { class: "text-xs text-text-muted", "Multiple answers allowed" }
+                    }
+                }
+                if !show_results {
+                    span { class: "text-xs text-text-muted",
+                        if matches!(
+                            poll.results_visibility,
+                            plaza_core::board_state::content::PollResultsVisibility::AfterVote
+                        ) {
+                            "Results appear after you vote."
+                        } else {
+                            "Results appear when the poll closes."
+                        }
                     }
                 }
                 if let Some(message) = error.read().as_ref() {

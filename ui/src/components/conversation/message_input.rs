@@ -474,6 +474,15 @@ pub fn PostInput(
     let mut poll_options = use_signal(|| vec![String::new(), String::new()]);
     let mut poll_multiselect = use_signal(|| false);
     let mut poll_days = use_signal(String::new);
+    let mut poll_results = use_signal(
+        || plaza_core::board_state::content::PollResultsVisibility::Always,
+    );
+    let poll_results_value = match *poll_results.read() {
+        plaza_core::board_state::content::PollResultsVisibility::Always => "always",
+        plaza_core::board_state::content::PollResultsVisibility::AfterVote => "vote",
+        plaza_core::board_state::content::PollResultsVisibility::AfterClose => "close",
+    }
+    .to_string();
     let mut poll_error = use_signal(|| None::<String>);
     let mut attachments = use_signal(Vec::<Attachment>::new);
     let mut image_error = use_signal(|| None::<String>);
@@ -721,6 +730,7 @@ pub fn PostInput(
                 options,
                 closes_at,
                 multiselect: *poll_multiselect.peek(),
+                results_visibility: *poll_results.peek(),
             };
             let poll_content = plaza_core::board_state::content::PollContentV1::new(
                 title.clone(),
@@ -774,6 +784,7 @@ pub fn PostInput(
             poll_options.set(vec![String::new(), String::new()]);
             poll_days.set(String::new());
             poll_multiselect.set(false);
+            poll_results.set(plaza_core::board_state::content::PollResultsVisibility::Always);
             poll_error.set(None);
             let published_ids: Vec<String> = attachments
                 .read()
@@ -1313,6 +1324,24 @@ pub fn PostInput(
                                         oninput: move |evt| poll_days.set(evt.value()),
                                     }
                                     "days (0 = never)"
+                                }
+                                label { class: "flex items-center gap-1 text-text-muted",
+                                    "Results"
+                                    select {
+                                        class: "px-2 py-1 bg-surface border border-border rounded text-text",
+                                        value: "{poll_results_value}",
+                                        onchange: move |evt| {
+                                            use plaza_core::board_state::content::PollResultsVisibility;
+                                            poll_results.set(match evt.value().as_str() {
+                                                "vote" => PollResultsVisibility::AfterVote,
+                                                "close" => PollResultsVisibility::AfterClose,
+                                                _ => PollResultsVisibility::Always,
+                                            });
+                                        },
+                                        option { value: "always", "Always" }
+                                        option { value: "vote", "After voting" }
+                                        option { value: "close", "After close" }
+                                    }
                                 }
                             }
                             if let Some(error) = poll_error.read().as_ref() {

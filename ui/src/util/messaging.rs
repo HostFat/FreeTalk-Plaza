@@ -48,6 +48,7 @@ pub struct PollDraft {
     pub options: Vec<String>,
     pub closes_at: Option<i64>,
     pub multiselect: bool,
+    pub results_visibility: plaza_core::board_state::content::PollResultsVisibility,
 }
 
 /// A message that passed every local check, sealed and ready to publish.
@@ -197,6 +198,7 @@ pub fn prepare_message(
             poll.closes_at,
             poll.multiselect,
         )
+        .with_results_visibility(poll.results_visibility)
     });
     if let Some(poll) = &poll_content {
         if let Err(error) = poll.validate() {
