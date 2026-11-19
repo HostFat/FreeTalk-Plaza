@@ -799,12 +799,31 @@ fn sync_board_from_url(board_id: &str) {
     if let Ok(bytes) = bs58::decode(board_id).into_vec() {
         if bytes.len() == 32 {
             if let Ok(vk) = VerifyingKey::from_bytes(&bytes.try_into().unwrap()) {
+                // A URL may carry the current owner key or the visible profile
+                // instead of the founding board key. Resolve it to the map key
+                // (BoardData.owner_vk) before looking the board up.
+                let resolved = BOARDS
+                    .read()
+                    .map
+                    .iter()
+                    .find(|(map_key, board)| {
+                        **map_key == vk
+                            || board.owner_key().verifying_key() == vk
+                            || board.current_owner_key() == vk
+                            || board.self_sk.verifying_key() == vk
+                    })
+                    .map(|(map_key, _)| *map_key)
+                    .unwrap_or(vk);
                 // Only update if different to avoid infinite loops
                 let current = CURRENT_BOARD.read().owner_key;
-                if current != Some(vk) {
-                    debug!("Syncing CURRENT_BOARD from URL: {}", board_id);
+                if current != Some(resolved) {
+                    debug!(
+                        "Syncing CURRENT_BOARD from URL: {} (resolved {})",
+                        board_id,
+                        bs58::encode(resolved.as_bytes()).into_string()
+                    );
                     *CURRENT_BOARD.write() = CurrentBoard {
-                        owner_key: Some(vk),
+                        owner_key: Some(resolved),
                     };
                 }
             }
