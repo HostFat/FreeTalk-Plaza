@@ -430,7 +430,16 @@ impl ResponseHandler {
                                                             // Send any upgrade pointer now,
                                                             // before a reload can drop the
                                                             // non-persisted migration record.
-                                                            crate::components::app::flush_pending_sync();
+                                                            wasm_bindgen_futures::spawn_local(async {
+                                                                futures_timer::Delay::new(
+                                                                    std::time::Duration::from_secs(2),
+                                                                )
+                                                                .await;
+                                                                let sent = crate::components::app::freenet_api::board_synchronizer::send_upgrade_pointers().await;
+                                                                crate::components::app::toasts::show(format!(
+                                                                    "Upgrade pointers sent: {sent}"
+                                                                ));
+                                                            });
                                                         });
 
                                                         // The board list is already usable; fetch the

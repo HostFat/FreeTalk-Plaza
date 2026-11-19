@@ -2646,6 +2646,17 @@ impl Boards {
         for profile in other.profiles {
             self.remember_profile(profile);
         }
+        // Carry contract-key migrations found while decoding; otherwise the
+        // upgrade pointer is lost between the load and the synchronizer.
+        for entry in other.migrated_boards {
+            if !self
+                .migrated_boards
+                .iter()
+                .any(|(owner, key)| *owner == entry.0 && key.id() == entry.1.id())
+            {
+                self.migrated_boards.push(entry);
+            }
+        }
         // Own uploads follow the union rule too; keep the fresher copy when
         // both sides know the same blob.
         for entry in other.owned_images {

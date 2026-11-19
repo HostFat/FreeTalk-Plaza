@@ -1077,3 +1077,62 @@ impl BoardSynchronizer {
 pub struct ContractSyncInfo {
     pub owner_vk: VerifyingKey,
 }
+
+/// Send upgrade pointers for boards whose contract key changed. Called right
+/// after the board load, so the pointer does not wait for a sync tick or a
+/// reload that would drop the non-persisted migration list.
+pub async fn send_upgrade_pointers() -> usize {
+    use plaza_core::board_state::upgrade::{
+        AuthorizedUpgradeV1, OptionalUpgradeV1, UpgradeV1,
+    };
+    let migrated: Vec<(VerifyingKey, freenet_stdlib::prelude::ContractKey)> =
+        BOARDS.with_mut(|boards| std::mem::take(&mut boards.migrated_boards));
+    let mut sent = 0usize;
+    for (owner_vk, old_contract_key) in migrated {
+        let snapshot = {
+            let boards = BOARDS.read();
+            match boards.map.get(&owner_vk) {
+                Some(board) if board.is_current_owner() => {
+                    let new_id = board.contract_key.id().as_bytes().to_vec();
+                    let owner_id = board.owner_id();
+                    let owner_key = board.owner_key().clone();
+                    Some((new_id, owner_id, owner_key))
+                }
+                _ => None,
+            }
+        };
+        let Some((new_id, owner_id, owner_key)) = snapshot else {
+            continue;
+        };
+        let mut id_bytes = [0u8; 32];
+        id_bytes.copy_from_slice(&new_id);
+        let upgrade = UpgradeV1 {
+            owner_member_id: owner_id,
+            version: 1,
+            new_chatboard_address: blake3::Hash::from(id_bytes),
+        };
+        let authorized = AuthorizedUpgradeV1::new(upgrade, &owner_key);
+        let upgrade_state = plaza_core::board_state::ChatBoardStateV1 {
+            upgrade: OptionalUpgradeV1(Some(authorized)),
+            ..Default::default()
+        };
+        let update_request = freenet_stdlib::client_api::ContractRequest::Update {
+            key: old_contract_key,
+            data: freenet_stdlib::prelude::UpdateData::State(
+                to_cbor_vec(&upgrade_state).into(),
+            ),
+        };
+        if let Some(web_api) = WEB_API.write().as_mut() {
+            if web_api
+                .send(freenet_stdlib::client_api::ClientRequest::ContractOp(
+                    update_request,
+                ))
+                .await
+                .is_ok()
+            {
+                sent += 1;
+            }
+        }
+    }
+    sent
+}
