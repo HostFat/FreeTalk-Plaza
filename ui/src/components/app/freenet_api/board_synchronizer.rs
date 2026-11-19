@@ -1087,6 +1087,7 @@ pub async fn send_upgrade_pointers() -> usize {
     };
     let migrated: Vec<(VerifyingKey, freenet_stdlib::prelude::ContractKey)> =
         BOARDS.with_mut(|boards| std::mem::take(&mut boards.migrated_boards));
+    let queued = migrated.len();
     let mut sent = 0usize;
     for (owner_vk, old_contract_key) in migrated {
         let snapshot = {
@@ -1134,5 +1135,8 @@ pub async fn send_upgrade_pointers() -> usize {
             }
         }
     }
+    crate::components::app::toasts::show(format!(
+        "Upgrade pointers: {queued} queued, {sent} sent"
+    ));
     sent
 }

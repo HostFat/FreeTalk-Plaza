@@ -435,10 +435,7 @@ impl ResponseHandler {
                                                                     std::time::Duration::from_secs(2),
                                                                 )
                                                                 .await;
-                                                                let sent = crate::components::app::freenet_api::board_synchronizer::send_upgrade_pointers().await;
-                                                                crate::components::app::toasts::show(format!(
-                                                                    "Upgrade pointers sent: {sent}"
-                                                                ));
+                                                                let _ = crate::components::app::freenet_api::board_synchronizer::send_upgrade_pointers().await;
                                                             });
                                                         });
 

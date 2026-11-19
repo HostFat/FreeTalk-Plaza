@@ -390,11 +390,14 @@ pub async fn load_boards_direct() -> Result<usize, String> {
         }
     });
     *crate::components::app::BOARDS_LOADED.write() = true;
+    let migrations = crate::components::app::BOARDS.read().migrated_boards.len();
+    crate::components::app::toasts::show(format!(
+        "Load: {count} board(s), {migrations} migration(s)"
+    ));
     wasm_bindgen_futures::spawn_local(async {
         futures_timer::Delay::new(std::time::Duration::from_millis(1500)).await;
-        let sent = crate::components::app::freenet_api::board_synchronizer::send_upgrade_pointers()
+        let _ = crate::components::app::freenet_api::board_synchronizer::send_upgrade_pointers()
             .await;
-        crate::components::app::toasts::show(format!("Upgrade pointers sent: {sent}"));
     });
     Ok(count)
 }
