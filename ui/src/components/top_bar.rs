@@ -182,6 +182,7 @@ pub fn TopBar() -> Element {
             images,
             poll,
             auto_moderated,
+            None,
         )?;
         spawn(async move {
             match publish_prepared(prepared).await {

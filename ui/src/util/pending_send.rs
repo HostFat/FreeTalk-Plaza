@@ -44,7 +44,22 @@ static RESUME_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Store the intent to publish and persist it. The uploads stay in the regular
 /// queue and the draft points at them by id.
-pub fn queue(board_key: VerifyingKey, draft: PendingSend) {
+pub fn queue(board_key: VerifyingKey, mut draft: PendingSend) {
+    // Keep the topic capability key with the draft so the resume can prove
+    // reply membership without waiting for a fresh board merge.
+    if draft.topic_proof_key.is_none() {
+        draft.topic_proof_key = BOARDS
+            .read()
+            .map
+            .get(&board_key)
+            .and_then(|board| {
+                draft
+                    .reply_to
+                    .as_ref()
+                    .and_then(|target| board.topic_proof_key_for(target))
+            })
+            .map(|(_, key)| key);
+    }
     // The uploaded records stay in the regular queue; the draft only points at
     // them, so the delegate does not store the same bytes twice.
     store(board_key, &draft);
@@ -212,6 +227,7 @@ async fn resume_one(board_key: VerifyingKey, board: BoardData, mut draft: Pendin
         draft.images.clone(),
         None,
         draft.auto_moderated,
+        draft.topic_proof_key.clone(),
     )
     .await
     {

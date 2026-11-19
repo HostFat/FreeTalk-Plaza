@@ -31,6 +31,32 @@ use tracing::{debug, info};
 // Load the board contract WASM copied by build.rs
 const BOARD_CONTRACT_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/plaza_contract.wasm"));
 
+/// Topic membership key published in readable text or poll content.
+fn topic_membership_key(
+    state: &ChatBoardStateV1,
+    topic: &plaza_core::board_state::message::MessageId,
+) -> Option<SigningKey> {
+    use plaza_core::board_state::content::{
+        PollContentV1, TextContentV1, CONTENT_TYPE_POLL, CONTENT_TYPE_TEXT,
+    };
+    use plaza_core::board_state::message::BoardMessageBody;
+    let message = state
+        .recent_messages
+        .messages
+        .iter()
+        .find(|message| message.id() == *topic)?;
+    let data = match &message.message.content {
+        BoardMessageBody::Public { data, .. } => data,
+        _ => return None,
+    };
+    let key = match message.message.content.content_type() {
+        CONTENT_TYPE_TEXT => TextContentV1::decode(data).ok()?.topic_membership_key?,
+        CONTENT_TYPE_POLL => PollContentV1::decode(data).ok()?.topic_membership_key?,
+        _ => return None,
+    };
+    (message.message.topic_public_key == Some(key.verifying_key())).then_some(key)
+}
+
 /// Compute the contract key for a board from its owner verifying key.
 /// This uses the current bundled WASM to ensure consistency.
 pub fn compute_contract_key(owner_vk: &VerifyingKey) -> ContractKey {
@@ -958,6 +984,10 @@ impl ApiClient {
             time: std::time::SystemTime::now(),
             reply_to: None,
             topic_id: None,
+            topic_public_key: None,
+            topic_proof: None,
+            section_id: None,
+            section_auto_moderated: None,
             auto_moderated: false,
         };
 
@@ -1056,6 +1086,10 @@ impl ApiClient {
             time: std::time::SystemTime::now(),
             reply_to: None,
             topic_id: None,
+            topic_public_key: None,
+            topic_proof: None,
+            section_id: None,
+            section_auto_moderated: None,
             auto_moderated: false,
         };
 
@@ -1164,6 +1198,10 @@ impl ApiClient {
             time: std::time::SystemTime::now(),
             reply_to: None,
             topic_id: None,
+            topic_public_key: None,
+            topic_proof: None,
+            section_id: None,
+            section_auto_moderated: None,
             auto_moderated: false,
         };
 
@@ -1225,6 +1263,10 @@ impl ApiClient {
             time: std::time::SystemTime::now(),
             reply_to: None,
             topic_id: None,
+            topic_public_key: None,
+            topic_proof: None,
+            section_id: None,
+            section_auto_moderated: None,
             auto_moderated: false,
         };
 
@@ -1291,6 +1333,10 @@ impl ApiClient {
             time: std::time::SystemTime::now(),
             reply_to: None,
             topic_id: None,
+            topic_public_key: None,
+            topic_proof: None,
+            section_id: None,
+            section_auto_moderated: None,
             auto_moderated: false,
         };
 
@@ -1357,6 +1403,10 @@ impl ApiClient {
             time: std::time::SystemTime::now(),
             reply_to: None,
             topic_id: None,
+            topic_public_key: None,
+            topic_proof: None,
+            section_id: None,
+            section_auto_moderated: None,
             auto_moderated: false,
         };
 
@@ -1435,14 +1485,22 @@ impl ApiClient {
             .take(100)
             .collect();
 
-        // Create the reply message. The public topic link names the root; the
-        // body keeps the direct target for display.
-        let topic_root = target_msg
-            .message
-            .topic_id
-            .clone()
-            .unwrap_or_else(|| target_message_id.clone());
-        let message = plaza_core::board_state::message::MessageV1 {
+        // Create the reply message. The public topic link names the root and
+        // carries a proof from the topic's membership key; without a key the
+        // reply is sent without the link rather than with an unprovable one.
+        let topic_root = target_msg.message.topic_id.clone().or_else(|| {
+            use plaza_core::board_state::content::{CONTENT_TYPE_POLL, CONTENT_TYPE_TEXT};
+            matches!(
+                target_msg.message.content.content_type(),
+                CONTENT_TYPE_TEXT | CONTENT_TYPE_POLL
+            )
+            .then(|| target_msg.id())
+        });
+        let topic_key = topic_root
+            .as_ref()
+            .and_then(|root| topic_membership_key(&board_state, root));
+        let topic_id = topic_key.as_ref().and(topic_root);
+        let mut message = plaza_core::board_state::message::MessageV1 {
             images: Vec::new(),
             board_owner: MemberId::from(*board_owner_key),
             author: MemberId::from(&signing_key.verifying_key()),
@@ -1455,9 +1513,17 @@ impl ApiClient {
             ),
             time: std::time::SystemTime::now(),
             reply_to: None,
-            topic_id: Some(topic_root),
+            topic_id,
+            topic_public_key: None,
+            topic_proof: None,
+            section_id: None,
+            section_auto_moderated: None,
             auto_moderated: false,
         };
+        if let Some(key) = &topic_key {
+            use ed25519_dalek::Signer;
+            message.topic_proof = Some(key.sign(&message.topic_proof_hash()));
+        }
 
         // Sign the message
         let auth_message =

@@ -149,6 +149,10 @@ fn test_message_validation_after_invitation_acceptance() -> Result<()> {
         time: SystemTime::now(),
         reply_to: None,
         topic_id: None,
+        topic_public_key: None,
+        topic_proof: None,
+        section_id: None,
+        section_auto_moderated: None,
         auto_moderated: false,
     };
     let auth_message = AuthorizedMessageV1::new(message, &invitee_sk);
@@ -219,6 +223,10 @@ fn test_uninvited_user_messages_are_filtered() -> Result<()> {
         time: SystemTime::now(),
         reply_to: None,
         topic_id: None,
+        topic_public_key: None,
+        topic_proof: None,
+        section_id: None,
+        section_auto_moderated: None,
         auto_moderated: false,
     };
     let auth_message = AuthorizedMessageV1::new(message, &uninvited_sk);

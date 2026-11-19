@@ -6,7 +6,7 @@ use crate::util::ecies::encrypt_with_symmetric_key;
 use crate::util::get_current_system_time;
 use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::ReadableExt;
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use plaza_core::board_state::admin::{AdminsDelta, AuthorizedAdminRevocation};
 use plaza_core::board_state::category_secrets::CategorySecretsDelta;
@@ -65,6 +65,9 @@ pub struct PreparedMessage {
     images: Vec<plaza_core::board_state::images::ImageRef>,
     reply_target: Option<MessageId>,
     topic_id: Option<MessageId>,
+    /// Membership key of a new topic, or the proof key of a reply.
+    topic_capability_key: Option<SigningKey>,
+    section_id: Option<MessageId>,
     auto_moderated: bool,
     category_id: Option<MessageId>,
 }
@@ -89,6 +92,8 @@ pub async fn send_message(
     images: Vec<plaza_core::board_state::images::ImageRef>,
     poll: Option<PollDraft>,
     auto_moderated: bool,
+    // Membership key carried over from a queued post. `None` looks it up.
+    topic_proof_key: Option<SigningKey>,
 ) -> Result<(), String> {
     let prepared = prepare_message(
         current_board,
@@ -105,6 +110,7 @@ pub async fn send_message(
         images,
         poll,
         auto_moderated,
+        topic_proof_key,
     )?;
     publish_prepared(prepared).await
 }
@@ -120,6 +126,8 @@ pub async fn publish_prepared(prepared: PreparedMessage) -> Result<(), String> {
         prepared.images,
         prepared.reply_target,
         prepared.topic_id,
+        prepared.topic_capability_key,
+        prepared.section_id,
         prepared.auto_moderated,
         prepared.category_id,
     )
@@ -146,6 +154,7 @@ pub fn prepare_message(
     images: Vec<plaza_core::board_state::images::ImageRef>,
     poll: Option<PollDraft>,
     auto_moderated: bool,
+    topic_proof_key_override: Option<SigningKey>,
 ) -> Result<PreparedMessage, String> {
     if message_text.is_empty() && poll.is_none() {
         warn!("Message is empty");
@@ -195,19 +204,32 @@ pub fn prepare_message(
         .max_message_size;
 
     let reply_target = reply_ctx.as_ref().map(|reply| reply.message_id.clone());
-    // The public topic link names the root a reply belongs to. A topic has
-    // none. Without board data the target itself is used, which grants no
-    // delete power beyond the reply's own author.
-    let topic_id = reply_ctx.as_ref().map(|reply| {
-        BOARDS
-            .read()
-            .map
-            .get(&current_board)
-            .and_then(|board| board.topic_root_for(&reply.message_id))
-            .unwrap_or_else(|| reply.message_id.clone())
-    });
+    // A new topic gets a membership key; replies prove membership with the
+    // root topic's key. Without a key a reply is sent without a public topic
+    // link rather than with an unprovable one.
+    let reply_topic: Option<(MessageId, SigningKey)> =
+        reply_ctx.as_ref().and_then(|reply| {
+            BOARDS.read().map.get(&current_board).and_then(|board| {
+                let root = board.topic_root_for(&reply.message_id)?;
+                let key = board
+                    .topic_membership_key(&root)
+                    .or_else(|| topic_proof_key_override.clone())?;
+                Some((root, key))
+            })
+        });
+    let (topic_id, topic_key) = if reply_ctx.is_some() {
+        match reply_topic {
+            Some((root, key)) => (Some(root), Some(key)),
+            None => (None, None),
+        }
+    } else {
+        (None, Some(SigningKey::generate(&mut rand::rngs::OsRng)))
+    };
     // Only a new topic is auto-moderated; a reply never is.
     let auto_moderated = auto_moderated && reply_ctx.is_none();
+    // The section travels in clear on a topic so the contract can read its
+    // policy even when the content is sealed.
+    let section_id = category_id.clone().filter(|_| reply_ctx.is_none());
 
     // Build the typed payload once, then seal it with the right key.
     let poll_content = poll.filter(|_| reply_ctx.is_none()).map(|poll| {
@@ -221,6 +243,7 @@ pub fn prepare_message(
         .with_results_visibility(poll.results_visibility)
         .with_category(category_id.clone())
         .with_auto_moderated(auto_moderated)
+        .with_topic_membership_key(topic_key.clone())
     });
     if let Some(poll) = &poll_content {
         if let Err(error) = poll.validate() {
@@ -250,6 +273,7 @@ pub fn prepare_message(
             TextContentV1::new(title_text.clone(), message_text.clone())
                 .with_category(category_id.clone())
                 .with_auto_moderated(auto_moderated)
+                .with_topic_membership_key(topic_key.clone())
                 .encode(),
         )
     };
@@ -305,6 +329,8 @@ pub fn prepare_message(
         images,
         reply_target,
         topic_id,
+        topic_capability_key: topic_key,
+        section_id,
         auto_moderated,
         category_id,
     })
@@ -385,6 +411,9 @@ pub(crate) async fn publish_message(
     images: Vec<plaza_core::board_state::images::ImageRef>,
     reply_target: Option<MessageId>,
     topic_id: Option<MessageId>,
+    // Membership key of a new topic, or the proof key of a reply.
+    topic_capability_key: Option<SigningKey>,
+    section_id: Option<MessageId>,
     auto_moderated: bool,
     category_id: Option<MessageId>,
 ) -> Option<MessageId> {
@@ -394,7 +423,7 @@ pub(crate) async fn publish_message(
             return None;
         }
     }
-    let message = MessageV1 {
+    let mut message = MessageV1 {
         images,
         board_owner: MemberId::from(current_board),
         author: MemberId::from(&self_sk.verifying_key()),
@@ -403,9 +432,21 @@ pub(crate) async fn publish_message(
         // `reply_to` stays unset for new messages: topic membership is the
         // only public reply graph the contract keeps.
         reply_to: None,
-        topic_id,
+        topic_id: topic_id.clone(),
+        topic_public_key: topic_capability_key
+            .as_ref()
+            .filter(|_| topic_id.is_none())
+            .map(|key| key.verifying_key()),
+        topic_proof: None,
+        section_id,
+        section_auto_moderated: None,
         auto_moderated,
     };
+    // A reply proves it belongs to the topic with the topic's membership key.
+    if let (Some(_), Some(key)) = (&topic_id, &topic_capability_key) {
+        let proof = key.sign(&message.topic_proof_hash());
+        message.topic_proof = Some(proof);
+    }
 
     // Serialize message to CBOR for signing
     let mut message_bytes = Vec::new();
@@ -560,6 +601,8 @@ pub async fn send_poll_vote(
         Vec::new(),
         None,
         None,
+        None,
+        None,
         false,
         category_id,
     )
@@ -643,6 +686,7 @@ pub async fn send_category(
     parent_category_id: Option<MessageId>,
     restricted_roles: Vec<RoleId>,
     hidden: bool,
+    section_auto_moderated: Option<bool>,
 ) -> Result<(), String> {
     use crate::components::app::CURRENT_BOARD;
 
@@ -693,7 +737,8 @@ pub async fn send_category(
     }
 
     let parent_for_route = parent_category_id.clone();
-    let mut category = CategoryContentV1::new(name.clone(), description, color);
+    let mut category = CategoryContentV1::new(name.clone(), description, color)
+        .with_auto_moderated_topics(section_auto_moderated);
     if let Some(i) = icon {
         category = category.with_icon(i);
     }
@@ -744,6 +789,10 @@ pub async fn send_category(
         time: get_current_system_time(),
         reply_to: None,
         topic_id: None,
+        topic_public_key: None,
+        topic_proof: None,
+        section_id: None,
+        section_auto_moderated,
         auto_moderated: false,
     };
 
@@ -907,6 +956,10 @@ pub async fn send_group(
         time: get_current_system_time(),
         reply_to: None,
         topic_id: None,
+        topic_public_key: None,
+        topic_proof: None,
+        section_id: None,
+        section_auto_moderated: None,
         auto_moderated: false,
     };
     let mut message_bytes = Vec::new();

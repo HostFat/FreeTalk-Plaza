@@ -77,6 +77,12 @@ pub struct TextContentV1 {
     /// never changed by an edit; omitted at false so old posts keep verifying.
     #[serde(default, skip_serializing_if = "is_false")]
     pub auto_moderated: bool,
+    /// Topic membership key, generated with the topic. Sealed with the rest of
+    /// the content on a private board; public on a public board. Replies prove
+    /// membership with it, so the topic author's delete power cannot be evaded
+    /// by omitting the public topic link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_membership_key: Option<ed25519_dalek::SigningKey>,
 }
 
 impl TextContentV1 {
@@ -86,7 +92,18 @@ impl TextContentV1 {
             content,
             category_id: None,
             auto_moderated: false,
+            topic_membership_key: None,
         }
+    }
+
+    /// Attach the topic capability key. Its public half is published on the
+    /// topic message.
+    pub fn with_topic_membership_key(
+        mut self,
+        key: Option<ed25519_dalek::SigningKey>,
+    ) -> Self {
+        self.topic_membership_key = key;
+        self
     }
 
     pub fn with_category(mut self, category_id: Option<MessageId>) -> Self {
@@ -176,6 +193,9 @@ pub struct PollContentV1 {
     /// keep their bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category_id: Option<MessageId>,
+    /// Topic membership key, generated with the poll. See `TextContentV1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_membership_key: Option<ed25519_dalek::SigningKey>,
 }
 
 impl PollContentV1 {
@@ -195,11 +215,22 @@ impl PollContentV1 {
             results_visibility: PollResultsVisibility::Always,
             auto_moderated: false,
             category_id: None,
+            topic_membership_key: None,
         }
     }
 
     pub fn with_category(mut self, category_id: Option<MessageId>) -> Self {
         self.category_id = category_id;
+        self
+    }
+
+    /// Attach the topic capability key. Its public half is published on the
+    /// poll message.
+    pub fn with_topic_membership_key(
+        mut self,
+        key: Option<ed25519_dalek::SigningKey>,
+    ) -> Self {
+        self.topic_membership_key = key;
         self
     }
 
@@ -1114,6 +1145,38 @@ mod tests {
         let open = section.with_auto_moderated_topics(Some(true));
         let decoded = CategoryContentV1::decode(&open.encode()).unwrap();
         assert_eq!(decoded.auto_moderated_topics, Some(true));
+    }
+
+    /// The topic membership key rides with the content and stays out of the
+    /// bytes when unset, so old signed content keeps verifying.
+    #[test]
+    fn topic_membership_key_roundtrips_and_is_omitted_when_unset() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let text = TextContentV1::new("Title".to_string(), "Body".to_string());
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&text, &mut bytes).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("topic_membership_key"));
+
+        let with_key = text.with_topic_membership_key(Some(key.clone()));
+        let decoded = TextContentV1::decode(&with_key.encode()).unwrap();
+        assert_eq!(
+            decoded.topic_membership_key.map(|key| key.verifying_key()),
+            Some(key.verifying_key())
+        );
+
+        let poll = PollContentV1::new(
+            "Question".to_string(),
+            "Body".to_string(),
+            vec!["A".to_string(), "B".to_string()],
+            None,
+            false,
+        )
+        .with_topic_membership_key(Some(key.clone()));
+        let decoded = PollContentV1::decode(&poll.encode()).unwrap();
+        assert_eq!(
+            decoded.topic_membership_key.map(|key| key.verifying_key()),
+            Some(key.verifying_key())
+        );
     }
 
     #[test]

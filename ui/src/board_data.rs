@@ -153,6 +153,10 @@ pub struct PendingSend {
     /// The topic author moderates replies; queued with the rest of the intent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_moderated: bool,
+    /// Topic membership key for the queued reply, kept so a resume can prove
+    /// membership even before the board state is merged again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_proof_key: Option<SigningKey>,
     #[serde(default)]
     pub queued_at: i64,
 }
@@ -613,9 +617,9 @@ impl BoardData {
         Some((category_id, secret, version))
     }
 
-    /// Root topic a message belongs to. The public `topic_id` wins; a message
-    /// without one is treated as a topic unless its readable reply body names
-    /// a target. A sealed old reply without the public field gives no root.
+    /// Root topic a message belongs to. A public `topic_id` counts only with a
+    /// valid membership proof; otherwise the readable reply body is followed.
+    /// A message with neither is its own root.
     pub fn topic_root_for(&self, target: &MessageId) -> Option<MessageId> {
         let mut current = target.clone();
         for _ in 0..64 {
@@ -626,7 +630,13 @@ impl BoardData {
                 .iter()
                 .find(|message| message.id() == current)?;
             if let Some(root) = &message.message.topic_id {
-                return Some(root.clone());
+                let valid = self
+                    .topic_public_key(root)
+                    .map(|key| message.message.has_valid_topic_proof(&key))
+                    .unwrap_or(false);
+                if valid {
+                    return Some(root.clone());
+                }
             }
             match self.readable_reply_target(&message.message.content) {
                 Some(parent) => current = parent,
@@ -634,6 +644,67 @@ impl BoardData {
             }
         }
         None
+    }
+
+    /// Public membership key of a topic, when it published one.
+    pub fn topic_public_key(&self, topic: &MessageId) -> Option<VerifyingKey> {
+        self.board_state
+            .recent_messages
+            .messages
+            .iter()
+            .find(|message| message.id() == *topic)
+            .and_then(|message| message.message.topic_public_key)
+    }
+
+    /// Topic membership private key, opened from the topic content when this
+    /// client holds the key that sealed it.
+    pub fn topic_membership_key(&self, topic: &MessageId) -> Option<SigningKey> {
+        use plaza_core::board_state::content::{
+            PollContentV1, TextContentV1, CONTENT_TYPE_POLL, CONTENT_TYPE_TEXT,
+        };
+        let message = self
+            .board_state
+            .recent_messages
+            .messages
+            .iter()
+            .find(|message| message.id() == *topic)?;
+        let plaintext = self.content_plaintext(&message.message.content)?;
+        let key = match message.message.content.content_type() {
+            CONTENT_TYPE_TEXT => TextContentV1::decode(&plaintext)
+                .ok()?
+                .topic_membership_key?,
+            CONTENT_TYPE_POLL => PollContentV1::decode(&plaintext)
+                .ok()?
+                .topic_membership_key?,
+            _ => return None,
+        };
+        let public = message.message.topic_public_key?;
+        (public == key.verifying_key()).then_some(key)
+    }
+
+    /// Root topic of `target` and the key a reply must use to prove membership.
+    pub fn topic_proof_key_for(&self, target: &MessageId) -> Option<(MessageId, SigningKey)> {
+        let root = self.topic_root_for(target)?;
+        let key = self.topic_membership_key(&root)?;
+        Some((root, key))
+    }
+
+    /// Plaintext of a content body, public or sealed with a key we hold.
+    fn content_plaintext(&self, content: &BoardMessageBody) -> Option<Vec<u8>> {
+        match content {
+            BoardMessageBody::Public { data, .. } => Some(data.clone()),
+            BoardMessageBody::Private {
+                ciphertext,
+                nonce,
+                ..
+            } => {
+                let (secret, version) = self.body_secret(content)?;
+                crate::util::ecies::decrypt_with_symmetric_key(
+                    &secret, ciphertext, nonce, version,
+                )
+                .ok()
+            }
+        }
     }
 
     /// Reply target the body names, public or sealed with a key we hold.
@@ -1778,7 +1849,7 @@ impl BoardData {
     pub fn auto_moderated_topics_enabled(&self, section: Option<&MessageId>) -> bool {
         self.board_state
             .recent_messages
-            .section_auto_moderated_topics(&self.board_state, section)
+            .section_auto_moderated_topics(&self.board_state, &self.board_parameters(), section)
     }
 
     /// Whether the owner enabled reactions for this board.
@@ -4069,6 +4140,10 @@ mod tests {
                     ),
                     reply_to: None,
                     topic_id: None,
+                    topic_public_key: None,
+                    topic_proof: None,
+                    section_id: None,
+                    section_auto_moderated: None,
                     auto_moderated: false,
                 },
                 &invitee_sk,
@@ -4286,6 +4361,10 @@ mod tests {
                             time: get_current_system_time(),
                             reply_to: None,
                             topic_id: None,
+                            topic_public_key: None,
+                            topic_proof: None,
+                            section_id: None,
+                            section_auto_moderated: None,
                             auto_moderated: false,
                         },
                         &invitee_sk,
@@ -4316,6 +4395,10 @@ mod tests {
             time: get_current_system_time(),
             reply_to: None,
             topic_id: None,
+            topic_public_key: None,
+            topic_proof: None,
+            section_id: None,
+            section_auto_moderated: None,
             auto_moderated: false,
         };
         let authorized = AuthorizedMessageV1::new(message, &owner_sk);
@@ -4487,6 +4570,10 @@ mod tests {
                             time: get_current_system_time(),
                             reply_to: None,
                             topic_id: None,
+                            topic_public_key: None,
+                            topic_proof: None,
+                            section_id: None,
+                            section_auto_moderated: None,
                             auto_moderated: false,
                         },
                         &outsider_sk,
@@ -4811,6 +4898,10 @@ mod tests {
                 time: std::time::SystemTime::UNIX_EPOCH,
                 reply_to: None,
                 topic_id: None,
+                topic_public_key: None,
+                topic_proof: None,
+                section_id: None,
+                section_auto_moderated: None,
                 auto_moderated: false,
             },
             signature: ed25519_dalek::Signature::from_bytes(&[0u8; 64]),

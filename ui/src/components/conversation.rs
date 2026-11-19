@@ -20,6 +20,7 @@ use crate::board_data::SendMessageError;
 use crate::components::conversation::message_input::PostInput;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
+use ed25519_dalek::VerifyingKey;
 use plaza_core::board_state::content::CategoryContentV1;
 use plaza_core::board_state::images::{ImageAlign, ImagePlacement, ImageRef};
 use plaza_core::board_state::member::MemberId;
@@ -189,6 +190,39 @@ pub fn get_all_messages(
     let mut messages = Vec::new();
     let owner_id = state.configuration.configuration.owner_member_id;
     let routes = state.moderation.routes_map();
+    // Public topic membership keys. A claimed topic link counts only when the
+    // reply proves it with the matching key.
+    let topic_keys: HashMap<MessageId, VerifyingKey> = state
+        .recent_messages
+        .messages
+        .iter()
+        .filter_map(|message| {
+            message
+                .message
+                .topic_public_key
+                .map(|key| (message.id(), key))
+        })
+        .collect();
+    // Messages that claim a topic link even when the proof is missing, so a
+    // bad link never falls back to the reply body for the delete rule.
+    let claimed_topic_links: std::collections::HashSet<MessageId> = state
+        .recent_messages
+        .messages
+        .iter()
+        .filter(|message| message.message.topic_id.is_some())
+        .map(|message| message.id())
+        .collect();
+    // Older sealed replies have no public link the contract could follow, so
+    // they carry no auto-moderation rule.
+    let sealed_legacy_replies: std::collections::HashSet<MessageId> = state
+        .recent_messages
+        .messages
+        .iter()
+        .filter(|message| {
+            message.message.topic_id.is_none() && message.message.content.is_private()
+        })
+        .map(|message| message.id())
+        .collect();
     let is_admin = state
         .admin
         .admins
@@ -360,6 +394,31 @@ pub fn get_all_messages(
         // The signed public link is authoritative; the body is the fallback
         // for replies written before the field existed.
         let reply_to_message_id = message.message.reply_to.or(body_reply_target);
+        // On a private board a sealed body target without a topic membership
+        // proof must not be displayed as a reply: otherwise a modified client
+        // could evade the topic author's moderation by omitting topic_id.
+        let category_ids: std::collections::HashSet<MessageId> = state
+            .recent_messages
+            .messages
+            .iter()
+            .filter(|m| {
+                m.message.content.content_type()
+                    == plaza_core::board_state::content::CONTENT_TYPE_CATEGORY
+            })
+            .map(|m| m.id())
+            .collect();
+        let private_board = state.configuration.configuration.privacy_mode
+            == plaza_core::board_state::privacy::PrivacyMode::Private;
+        let reply_to_message_id = if private_board
+            && message.message.topic_id.is_none()
+            && reply_to_message_id
+                .as_ref()
+                .is_some_and(|target| !category_ids.contains(target))
+        {
+            None
+        } else {
+            reply_to_message_id
+        };
         let moved_parent = state.moderation.moved_to(&message_id).copied().flatten();
         let reply_to_message_id = moved_parent.or(reply_to_message_id);
         let merged_into = state.moderation.is_merged_into(&message_id);
@@ -512,7 +571,13 @@ pub fn get_all_messages(
             edit_history,
             reactions,
             reply_to_message_id,
-            topic_id: message.message.topic_id.clone(),
+            // Only a link backed by a valid membership proof is a topic reply.
+            topic_id: message.message.topic_id.clone().filter(|root| {
+                topic_keys
+                    .get(root)
+                    .map(|key| message.message.has_valid_topic_proof(key))
+                    .unwrap_or(false)
+            }),
             reply_to_author,
             reply_to_preview,
             receive_delay_secs,
@@ -527,7 +592,19 @@ pub fn get_all_messages(
             category_hidden,
             category_locked,
             is_group: category_is_group,
-            category_auto_moderated_topics,
+            // The public section policy is the fallback when the content
+            // cannot be read; an edit payload wins once one exists.
+            category_auto_moderated_topics: if state
+                .recent_messages
+                .is_category_edited(&message_id)
+            {
+                category_auto_moderated_topics
+            } else {
+                message
+                    .message
+                    .section_auto_moderated
+                    .or(category_auto_moderated_topics)
+            },
             is_pinned: state.moderation.is_pinned(&message_id),
             is_closed: state.moderation.is_closed(&message_id),
             is_pending,
@@ -570,7 +647,12 @@ pub fn get_all_messages(
     // topic link names the root directly; old messages walk their reply
     // target instead. Both links ride in public metadata, so sealed
     // private-board posts count.
-    let by_id: HashMap<MessageId, (Option<MessageId>, Option<MessageId>, bool, MemberId)> = messages
+    // A message that claims a topic link without a valid proof is not a reply
+    // for this rule, so its body link is not followed either.
+    let by_id: HashMap<
+        MessageId,
+        (Option<MessageId>, Option<MessageId>, bool, bool, bool, MemberId),
+    > = messages
         .iter()
         .map(|message| {
             (
@@ -579,6 +661,8 @@ pub fn get_all_messages(
                     message.reply_to_message_id.clone(),
                     message.topic_id.clone(),
                     message.is_auto_moderated,
+                    claimed_topic_links.contains(&message.message_id),
+                    sealed_legacy_replies.contains(&message.message_id),
                     message.author_id,
                 ),
             )
@@ -588,11 +672,16 @@ pub fn get_all_messages(
         let mut current = message.message_id.clone();
         let mut root = None;
         for _ in 0..64 {
-            let Some((parent, topic_id, _, _)) = by_id.get(&current) else {
+            let Some((parent, topic_id, _, claimed_link, sealed_legacy, _)) =
+                by_id.get(&current)
+            else {
                 break;
             };
-            if let Some(topic_id) = topic_id {
-                root = Some(topic_id.clone());
+            if *claimed_link {
+                root = topic_id.clone();
+                break;
+            }
+            if *sealed_legacy {
                 break;
             }
             match parent {
@@ -605,7 +694,7 @@ pub fn get_all_messages(
         }
         if let Some(root) = root {
             if root != message.message_id {
-                if let Some((_, _, true, author)) = by_id.get(&root) {
+                if let Some((_, _, true, _, _, author)) = by_id.get(&root) {
                     message.can_delete_as_topic_author = *author == self_member_id;
                 }
             }
@@ -1353,6 +1442,7 @@ pub fn Conversation(
                 images,
                 poll,
                 auto_moderated,
+                None,
             )?;
             spawn_local(async move {
                 match publish_prepared(prepared).await {

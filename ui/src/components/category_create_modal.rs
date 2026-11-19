@@ -49,6 +49,7 @@ pub fn CategoryCreateModal() -> Element {
     let mut selected_roles = use_signal(Vec::<RoleId>::new);
     let mut hidden = use_signal(|| false);
     let mut selected_group = use_signal(|| None::<MessageId>);
+    let mut section_auto_moderated = use_signal(|| None::<bool>);
 
     let modal_state = CREATE_CATEGORY_MODAL.read();
     let is_open = modal_state.show;
@@ -189,6 +190,7 @@ pub fn CategoryCreateModal() -> Element {
         };
         let roles_val = selected_roles.read().clone();
         let hidden_val = *hidden.read();
+        let section_policy = *section_auto_moderated.read();
         let creating_group = is_group;
 
         spawn_local(async move {
@@ -203,6 +205,7 @@ pub fn CategoryCreateModal() -> Element {
                     parent_id_val,
                     roles_val,
                     hidden_val,
+                    section_policy,
                 )
                 .await
             };
@@ -362,6 +365,36 @@ pub fn CategoryCreateModal() -> Element {
                                         "{group_name}"
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    // Auto-moderated topics for this section
+                    if !is_group {
+                        div {
+                            label { class: "block text-sm font-medium text-text mb-1",
+                                "Auto-moderated topics"
+                            }
+                            select {
+                                class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text text-sm",
+                                value: match *section_auto_moderated.read() {
+                                    Some(true) => "on",
+                                    Some(false) => "off",
+                                    None => "inherit",
+                                },
+                                onchange: move |evt| {
+                                    section_auto_moderated.set(match evt.value().as_str() {
+                                        "on" => Some(true),
+                                        "off" => Some(false),
+                                        _ => None,
+                                    });
+                                },
+                                option { value: "inherit", "Inherit board" }
+                                option { value: "on", "On" }
+                                option { value: "off", "Off" }
+                            }
+                            p { class: "mt-1 text-xs text-text-muted",
+                                "Off removes the option from the composer. The contract rejects an auto-moderated topic here."
                             }
                         }
                     }

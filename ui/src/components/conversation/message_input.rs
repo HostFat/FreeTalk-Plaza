@@ -716,6 +716,7 @@ pub fn PostInput(
                         auto_moderated: *auto_moderated.peek()
                             && reply.is_none()
                             && *auto_moderated_available.peek(),
+                        topic_proof_key: None,
                         queued_at: chrono::Utc::now().timestamp_millis(),
                     };
                     crate::util::pending_send::queue(board_key, draft);

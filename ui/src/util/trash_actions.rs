@@ -714,6 +714,10 @@ pub async fn purge_illegal(
             content,
             reply_to: None,
             topic_id: None,
+            topic_public_key: None,
+            topic_proof: None,
+            section_id: None,
+            section_auto_moderated: None,
             auto_moderated: false,
         };
         // In debug mode skip signing entirely: a dummy signature lets us see

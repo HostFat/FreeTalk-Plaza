@@ -456,6 +456,10 @@ mod tests {
             time: std::time::SystemTime::UNIX_EPOCH,
             reply_to: None,
             topic_id: None,
+            topic_public_key: None,
+            topic_proof: None,
+            section_id: None,
+            section_auto_moderated: None,
             auto_moderated: false,
         };
         let mut msg_bytes = Vec::new();

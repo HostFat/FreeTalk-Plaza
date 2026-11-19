@@ -500,9 +500,10 @@ pub async fn edit_category(
         }
     };
 
-    send_action_messages(
+    send_action_messages_with_policy(
         ctx,
         vec![content],
+        auto_moderated_topics,
         Some("Section updated"),
         "Could not update the section",
     )
@@ -848,6 +849,8 @@ pub async fn split_reply(
         Vec::new(),
         Some(category),
         None,
+        None,
+        None,
         false,
         Some(category),
     )
@@ -992,6 +995,18 @@ async fn send_action_messages(
     label: Option<&'static str>,
     failure_label: &'static str,
 ) {
+    send_action_messages_with_policy(ctx, contents, None, label, failure_label).await;
+}
+
+/// Send actions, publishing a section policy in clear on the messages. The
+/// contract reads it even when the section content is sealed.
+async fn send_action_messages_with_policy(
+    ctx: ActionContext,
+    contents: Vec<BoardMessageBody>,
+    section_auto_moderated: Option<bool>,
+    label: Option<&'static str>,
+    failure_label: &'static str,
+) {
     if contents.is_empty() {
         return;
     }
@@ -1006,6 +1021,10 @@ async fn send_action_messages(
             time: get_current_system_time(),
             reply_to: None,
             topic_id: None,
+            topic_public_key: None,
+            topic_proof: None,
+            section_id: None,
+            section_auto_moderated,
             auto_moderated: false,
         };
 
