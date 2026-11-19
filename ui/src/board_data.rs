@@ -357,6 +357,28 @@ impl BoardData {
         }
     }
 
+    /// Legacy boards stored no owner profile. The creator profile is the first
+    /// admin; when the visible profile is that admin, record it as the owner.
+    /// A member profile never matches, so it cannot inherit the crown.
+    pub fn backfill_owner_profile(&mut self) {
+        if self.owner_profile_id.is_some() {
+            return;
+        }
+        let Some(profile_id) = self.profile_id.clone() else {
+            return;
+        };
+        let self_id = MemberId::from(&self.self_sk.verifying_key());
+        let creator_is_visible = self
+            .board_state
+            .admin
+            .admins
+            .first()
+            .is_some_and(|admin| admin.admin.id() == self_id);
+        if creator_is_visible {
+            self.owner_profile_id = Some(profile_id);
+        }
+    }
+
     /// Whether this board signs as the profile's root key. A derived board
     /// signs with another key and is not linked to the profile's other boards.
     pub fn uses_same_identity_as(&self, profile: &IdentityProfile) -> bool {
@@ -2596,6 +2618,7 @@ impl Boards {
             .collect();
         for (owner, expected) in expected {
             if let Some(board) = self.map.get_mut(&owner) {
+                board.backfill_owner_profile();
                 if board.contract_key != expected {
                     changed += 1;
                     // Only the owner can sign the upgrade pointer; other
@@ -3825,6 +3848,35 @@ mod tests {
 
         board.profile_id = Some(owner_profile_id);
         assert!(board.is_active_owner(), "switching back restores the crown");
+    }
+
+    /// Boards written before `owner_profile_id` existed can still recover the
+    /// owner profile from the first admin when that admin is visible.
+    #[test]
+    fn a_legacy_board_backfills_the_first_admin_as_owner_profile() {
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let profile = IdentityProfile::new("Owner".to_string(), SigningKey::generate(&mut rng));
+        let mut boards = empty_boards();
+        let key = boards.create_new_board_with_identity(
+            owner_sk,
+            profile.clone(),
+            BoardIdentityMode::Same,
+            "Board".to_string(),
+            "Owner".to_string(),
+            false,
+        );
+        let board = boards.map.get_mut(&key).unwrap();
+        board.owner_profile_id = None;
+        board.profile_id = Some(profile.id.clone());
+
+        board.backfill_owner_profile();
+
+        assert_eq!(
+            board.owner_profile_id.as_deref(),
+            Some(profile.id.as_str())
+        );
+        assert!(board.is_active_owner());
     }
 
     /// A profile switch changes `self_sk`; the save merge must accept it and

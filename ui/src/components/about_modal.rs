@@ -348,6 +348,7 @@ pub fn AboutModal() -> Element {
                                                                     }
                                                                     board.profile_id =
                                                                         Some(profile_id);
+                                                                    board.backfill_owner_profile();
                                                                     true
                                                                 })
                                                         })
