@@ -3,7 +3,6 @@
 
 use crate::board_data::BoardData;
 use crate::components::conversation::{get_all_messages, MessageData};
-use crate::util::ecies::unseal_bytes_with_secrets;
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
 use std::collections::{HashMap, HashSet};
@@ -22,19 +21,7 @@ pub struct Notice<'a> {
 
 /// The nickname other members see, unsealed when the board is private.
 pub fn self_nickname(board: &BoardData, self_id: MemberId) -> String {
-    board
-        .board_state
-        .member_info
-        .member_info
-        .iter()
-        .find(|info| info.member_info.member_id == self_id)
-        .map(|info| {
-            match unseal_bytes_with_secrets(&info.member_info.preferred_nickname, &board.secrets) {
-                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                Err(_) => info.member_info.preferred_nickname.to_string_lossy(),
-            }
-        })
-        .unwrap_or_default()
+    board.display_nickname(self_id).unwrap_or_default()
 }
 
 /// Every unread notice, newest first.
@@ -198,6 +185,7 @@ mod tests {
             category_hidden: false,
             category_locked: false,
             is_group: false,
+            category_auto_moderated_topics: None,
             is_pinned: false,
             is_closed: false,
             is_pending: false,
@@ -205,6 +193,8 @@ mod tests {
             poll: None,
             merged_into: None,
             images: Vec::new(),
+            is_auto_moderated: false,
+            can_delete_as_topic_author: false,
         }
     }
 

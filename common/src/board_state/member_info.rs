@@ -119,6 +119,19 @@ impl ComposableState for MemberInfoV1 {
                     member_info.verify_signature_with_key(&member.member.member_vk)?;
                 }
 
+                // A member cannot rewrite its own published nickname: only the
+                // owner and admins can, through a nickname override action.
+                // Ignore the update instead of failing the whole delta so a
+                // rejoin still applies.
+                if *member_id != parameters.owner_id()
+                    && self
+                        .member_info
+                        .iter()
+                        .any(|info| info.member_info.member_id == *member_id)
+                {
+                    continue;
+                }
+
                 // Update or add the member info
                 if let Some(existing_info) = self
                     .member_info
@@ -245,6 +258,71 @@ mod tests {
 
     fn create_test_member_info(member_id: MemberId) -> MemberInfo {
         MemberInfo::new_public(member_id, 1, "TestUser".to_string())
+    }
+
+    #[test]
+    fn a_member_cannot_change_its_own_nickname() {
+        let owner_sk = SigningKey::from_bytes(&[61u8; 32]);
+        let member_sk = SigningKey::from_bytes(&[62u8; 32]);
+        let owner_id = MemberId::from(&owner_sk.verifying_key());
+        let member_id = MemberId::from(&member_sk.verifying_key());
+        let mut state = ChatBoardStateV1::default();
+        state.members.members.push(AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk: member_sk.verifying_key(),
+                join_proof: None,
+            },
+            &owner_sk,
+        ));
+        let parameters = ChatBoardParametersV1 {
+            owner: owner_sk.verifying_key(),
+        };
+
+        let mut info = MemberInfoV1::default();
+        info.apply_delta(
+            &state,
+            &parameters,
+            &Some(vec![AuthorizedMemberInfo::new_with_member_key(
+                MemberInfo::new_public(member_id, 1, "First".to_string()),
+                &member_sk,
+            )]),
+        )
+        .unwrap();
+        assert_eq!(info.member_info[0].member_info.version, 1);
+
+        // A later self-signed rewrite is ignored.
+        info.apply_delta(
+            &state,
+            &parameters,
+            &Some(vec![AuthorizedMemberInfo::new_with_member_key(
+                MemberInfo::new_public(member_id, 2, "Second".to_string()),
+                &member_sk,
+            )]),
+        )
+        .unwrap();
+        assert_eq!(info.member_info[0].member_info.version, 1);
+        assert_eq!(
+            info.member_info[0].member_info.preferred_nickname.to_string_lossy(),
+            "First"
+        );
+
+        // The owner still publishes its own name.
+        let mut owner_info = MemberInfoV1::default();
+        for version in 1..=2 {
+            owner_info
+                .apply_delta(
+                    &state,
+                    &parameters,
+                    &Some(vec![AuthorizedMemberInfo::new_with_member_key(
+                        MemberInfo::new_public(owner_id, version, format!("Owner {version}")),
+                        &owner_sk,
+                    )]),
+                )
+                .unwrap();
+        }
+        assert_eq!(owner_info.member_info[0].member_info.version, 2);
     }
 
     #[test]
@@ -432,8 +510,8 @@ mod tests {
         assert_eq!(member_info_v1.member_info.len(), 1);
         assert_eq!(member_info_v1.member_info[0], authorized_member_info);
 
-        // Test applying delta with an existing member (update)
-        println!("Applying delta with an existing member (update)");
+        // A member cannot rewrite its own name after joining.
+        println!("Applying a self-signed nickname update (ignored)");
         let updated_member_info =
             MemberInfo::new_public(member_id, 2, "UpdatedNickname".to_string());
         let updated_authorized_member_info =
@@ -441,17 +519,13 @@ mod tests {
         let update_delta = vec![updated_authorized_member_info.clone()];
 
         let result = member_info_v1.apply_delta(&parent_state, &parameters, &Some(update_delta));
-        println!("Result: {:?}", result);
         assert!(
             result.is_ok(),
             "Failed to apply update delta: {:?}",
             result.err()
         );
         assert_eq!(member_info_v1.member_info.len(), 1);
-        assert_eq!(
-            member_info_v1.member_info[0],
-            updated_authorized_member_info
-        );
+        assert_eq!(member_info_v1.member_info[0], authorized_member_info);
 
         // Test applying delta with a non-existent member (should succeed, entry silently dropped)
         println!("Applying delta with a non-existent member");
@@ -492,7 +566,7 @@ mod tests {
             result.err()
         );
         assert_eq!(member_info_v1.member_info.len(), 1);
-        assert_eq!(member_info_v1.member_info[0].member_info.version, 2);
+        assert_eq!(member_info_v1.member_info[0].member_info.version, 1);
 
         // Test applying delta with multiple members
         println!("Applying delta with multiple members");
@@ -531,7 +605,7 @@ mod tests {
         assert_eq!(member_info_v1.member_info.len(), 2);
         assert!(member_info_v1
             .member_info
-            .contains(&updated_authorized_member_info));
+            .contains(&authorized_member_info));
         assert!(member_info_v1
             .member_info
             .contains(&new_authorized_member_info));
@@ -666,18 +740,13 @@ mod tests {
         assert_eq!(delta.as_ref().unwrap().len(), 1);
         assert_eq!(delta.as_ref().unwrap()[0].member_info.version, 2);
 
-        // Apply delta and verify version is updated
+        // A self-signed update is dropped: only a moderator override changes
+        // the displayed name.
         member_info_state
             .apply_delta(&parent_state, &parameters, &delta)
             .unwrap();
         assert_eq!(member_info_state.member_info.len(), 1);
-        assert_eq!(member_info_state.member_info[0].member_info.version, 2);
-        assert_eq!(
-            member_info_state.member_info[0]
-                .member_info
-                .preferred_nickname,
-            SealedBytes::public("UpdatedNickname".to_string().into_bytes())
-        );
+        assert_eq!(member_info_state.member_info[0].member_info.version, 1);
     }
 
     #[test]

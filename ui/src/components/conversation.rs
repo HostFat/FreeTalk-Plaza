@@ -134,6 +134,8 @@ pub struct MessageData {
     pub category_locked: bool,
     /// Category is a homepage group containing sections
     pub is_group: bool,
+    /// Section override for auto-moderated topics; `None` inherits the board.
+    pub category_auto_moderated_topics: Option<bool>,
     /// Post is pinned in its section
     pub is_pinned: bool,
     /// Post is closed: readable but not editable, deletable or reactable
@@ -148,6 +150,11 @@ pub struct MessageData {
     pub merged_into: Option<MessageId>,
     /// Images attached to this post.
     pub images: Vec<plaza_core::board_state::images::ImageRef>,
+    /// The topic was created with the auto-moderated flag.
+    pub is_auto_moderated: bool,
+    /// The viewer wrote the auto-moderated topic this message replies under,
+    /// so they may delete it (never the topic itself).
+    pub can_delete_as_topic_author: bool,
 }
 
 /// A message with its nested replies
@@ -214,6 +221,9 @@ pub fn get_all_messages(
     }
 
     let name_of = |author: MemberId| -> String {
+        if let Some(override_name) = state.recent_messages.nickname_override(&author) {
+            return override_name.nickname.clone();
+        }
         state
             .member_info
             .member_info
@@ -292,18 +302,24 @@ pub fn get_all_messages(
             }
         }
 
-        let author_name = state
-            .member_info
-            .member_info
-            .iter()
-            .find(|ami| ami.member_info.member_id == author_id)
-            .map(|ami| {
-                match unseal_bytes_with_secrets(&ami.member_info.preferred_nickname, secrets) {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                    Err(_) => ami.member_info.preferred_nickname.to_string_lossy(),
-                }
-            })
-            .unwrap_or_else(|| "Unknown".to_string());
+        let author_name = if let Some(override_name) =
+            state.recent_messages.nickname_override(&author_id)
+        {
+            override_name.nickname.clone()
+        } else {
+            state
+                .member_info
+                .member_info
+                .iter()
+                .find(|ami| ami.member_info.member_id == author_id)
+                .map(|ami| {
+                    match unseal_bytes_with_secrets(&ami.member_info.preferred_nickname, secrets) {
+                        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                        Err(_) => ami.member_info.preferred_nickname.to_string_lossy(),
+                    }
+                })
+                .unwrap_or_else(|| "Unknown".to_string())
+        };
 
         let content_text = state
             .recent_messages
@@ -365,6 +381,7 @@ pub fn get_all_messages(
             category_hidden,
             category_locked,
             category_is_group,
+            category_auto_moderated_topics,
         ) = match category_info {
             Some(mut info) => {
                 if let Some(edit) = state.recent_messages.edited_category(&message_id) {
@@ -384,6 +401,7 @@ pub fn get_all_messages(
                     info.description = edit.new_description.clone();
                     info.icon = edit.new_icon.clone();
                     info.color = Some(edit.new_color.clone());
+                    info.auto_moderated_topics = edit.auto_moderated_topics;
                     if edit.set_parent {
                         info.parent = edit.new_parent.clone();
                     }
@@ -399,6 +417,7 @@ pub fn get_all_messages(
                     info.hidden,
                     info.locked,
                     info.is_group,
+                    info.auto_moderated_topics,
                 )
             }
             None => (
@@ -412,6 +431,7 @@ pub fn get_all_messages(
                 false,
                 false,
                 false,
+                None,
             ),
         };
 
@@ -501,6 +521,7 @@ pub fn get_all_messages(
             category_hidden,
             category_locked,
             is_group: category_is_group,
+            category_auto_moderated_topics,
             is_pinned: state.moderation.is_pinned(&message_id),
             is_closed: state.moderation.is_closed(&message_id),
             is_pending,
@@ -508,6 +529,13 @@ pub fn get_all_messages(
             poll,
             merged_into,
             images: message.message.images.clone(),
+            is_auto_moderated: decrypt_auto_moderated(
+                &message.message.content,
+                secrets,
+                category_secrets,
+                old_category_secrets,
+            ),
+            can_delete_as_topic_author: false,
         });
     }
 
@@ -525,6 +553,59 @@ pub fn get_all_messages(
         if let Some(parent) = message.parent_category_id.clone() {
             if !live_categories.contains(&parent) {
                 message.parent_category_id = None;
+            }
+        }
+    }
+
+    // Auto-moderated topics: mark replies their author may delete. The walk
+    // stops at the first message without a parent, which is the topic.
+    let public_bodies: HashMap<MessageId, bool> = state
+        .recent_messages
+        .messages
+        .iter()
+        .map(|message| (message.id(), message.message.content.is_public()))
+        .collect();
+    let by_id: HashMap<MessageId, (Option<MessageId>, bool, MemberId)> = messages
+        .iter()
+        .map(|message| {
+            (
+                message.message_id.clone(),
+                (
+                    message.reply_to_message_id.clone(),
+                    message.is_auto_moderated,
+                    message.author_id,
+                ),
+            )
+        })
+        .collect();
+    for message in messages.iter_mut() {
+        let mut current = message.message_id.clone();
+        let mut root = None;
+        for _ in 0..64 {
+            let Some((parent, _, _)) = by_id.get(&current) else {
+                break;
+            };
+            match parent {
+                Some(parent) => current = parent.clone(),
+                None => {
+                    root = Some(current.clone());
+                    break;
+                }
+            }
+        }
+        if let Some(root) = root {
+            if root != message.message_id {
+                // The contract needs both bodies in the clear to enforce the
+                // permission; sealed ones would leave a dead action here.
+                let readable = public_bodies.get(&root).copied().unwrap_or(false)
+                    && public_bodies
+                        .get(&message.message_id)
+                        .copied()
+                        .unwrap_or(false);
+                if let Some((_, true, author)) = by_id.get(&root) {
+                    message.can_delete_as_topic_author =
+                        readable && *author == self_member_id;
+                }
             }
         }
     }
@@ -702,6 +783,64 @@ fn decrypt_poll(
             PollContentV1::decode(&bytes).ok()
         }
         _ => None,
+    }
+}
+
+fn decrypt_auto_moderated(
+    content: &BoardMessageBody,
+    secrets: &HashMap<u32, [u8; 32]>,
+    category_secrets: &HashMap<MessageId, (u32, [u8; 32])>,
+    old_category_secrets: &HashMap<MessageId, HashMap<u32, [u8; 32]>>,
+) -> bool {
+    use plaza_core::board_state::content::{
+        PollContentV1, TextContentV1, CONTENT_TYPE_POLL, CONTENT_TYPE_TEXT,
+    };
+    match content {
+        BoardMessageBody::Public {
+            content_type, data, ..
+        } => match *content_type {
+            CONTENT_TYPE_TEXT => TextContentV1::decode(data)
+                .ok()
+                .map(|text| text.auto_moderated)
+                .unwrap_or(false),
+            CONTENT_TYPE_POLL => PollContentV1::decode(data)
+                .ok()
+                .map(|poll| poll.auto_moderated)
+                .unwrap_or(false),
+            _ => false,
+        },
+        BoardMessageBody::Private {
+            content_type,
+            ciphertext,
+            nonce,
+            secret_version,
+            ..
+        } => {
+            let Some(secret) =
+                body_secret(content, secrets, category_secrets, old_category_secrets)
+            else {
+                return false;
+            };
+            let Ok(bytes) = crate::util::ecies::decrypt_with_symmetric_key(
+                &secret,
+                ciphertext,
+                nonce,
+                *secret_version,
+            ) else {
+                return false;
+            };
+            match *content_type {
+                CONTENT_TYPE_TEXT => TextContentV1::decode(&bytes)
+                    .ok()
+                    .map(|text| text.auto_moderated)
+                    .unwrap_or(false),
+                CONTENT_TYPE_POLL => PollContentV1::decode(&bytes)
+                    .ok()
+                    .map(|poll| poll.auto_moderated)
+                    .unwrap_or(false),
+                _ => false,
+            }
+        }
     }
 }
 
@@ -961,6 +1100,8 @@ pub struct CategoryInfo {
     pub is_group: bool,
     /// Restricted category whose key this client does not hold.
     pub locked: bool,
+    /// Section override for auto-moderated topics; `None` inherits the board.
+    pub auto_moderated_topics: Option<bool>,
 }
 
 /// Open a category's sealed name when its key is available.
@@ -1037,6 +1178,7 @@ fn extract_category_info(
         hidden: category.hidden,
         is_group: category.is_group,
         locked,
+        auto_moderated_topics: category.auto_moderated_topics,
     })
 }
 
@@ -1090,12 +1232,22 @@ pub fn Conversation(
                         .member_info
                         .iter()
                         .map(|ami| {
-                            let name = match unseal_bytes_with_secrets(
-                                &ami.member_info.preferred_nickname,
-                                &board_data.secrets,
-                            ) {
-                                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                                Err(_) => ami.member_info.preferred_nickname.to_string_lossy(),
+                            let name = if let Some(override_name) = board_data
+                                .board_state
+                                .recent_messages
+                                .nickname_override(&ami.member_info.member_id)
+                            {
+                                override_name.nickname.clone()
+                            } else {
+                                match unseal_bytes_with_secrets(
+                                    &ami.member_info.preferred_nickname,
+                                    &board_data.secrets,
+                                ) {
+                                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                                    Err(_) => {
+                                        ami.member_info.preferred_nickname.to_string_lossy()
+                                    }
+                                }
                             };
                             (ami.member_info.member_id, name)
                         })
@@ -1154,12 +1306,13 @@ pub fn Conversation(
     // spawned task.
     let handle_send_message = {
         let current_board_data = current_board_data.clone();
-        move |(title_text, message_text, reply_ctx, poll, images): (
+        move |(title_text, message_text, reply_ctx, poll, images, auto_moderated): (
             String,
             String,
             Option<ReplyContext>,
             Option<crate::util::messaging::PollDraft>,
             Vec<plaza_core::board_state::images::ImageRef>,
+            bool,
         )| -> Result<(), String> {
             let (Some(current_board), Some(current_board_data)) =
                 (CURRENT_BOARD.read().owner_key, current_board_data.clone())
@@ -1197,6 +1350,7 @@ pub fn Conversation(
                 reply_ctx,
                 images,
                 poll,
+                auto_moderated,
             )?;
             spawn_local(async move {
                 match publish_prepared(prepared).await {
@@ -1316,6 +1470,7 @@ pub fn Conversation(
                                                 Option<ReplyContext>,
                                                 Option<crate::util::messaging::PollDraft>,
                                                 Vec<plaza_core::board_state::images::ImageRef>,
+                                                bool,
                                             )| {
                                                 let handle = handle_send_message.clone();
                                                 handle(msg)
@@ -1362,10 +1517,10 @@ pub fn Conversation(
                         class: "bg-panel rounded-lg shadow-xl p-6 max-w-sm mx-4",
                         onclick: move |e| e.stop_propagation(),
                         h3 { class: "text-lg font-semibold text-text mb-2",
-                            "Delete Message?"
+                            "Delete permanently?"
                         }
                         p { class: "text-text-muted text-sm mb-4",
-                            "This action cannot be undone."
+                            "This message is removed for everyone and cannot be undone. It does not go to the trash."
                         }
                         div { class: "flex gap-3 justify-end",
                             button {
@@ -1382,7 +1537,7 @@ pub fn Conversation(
                                     }
                                     pending_delete.set(None);
                                 },
-                                "Delete"
+                                "Delete permanently"
                             }
                         }
                     }
@@ -2042,6 +2197,9 @@ fn ActionButtons(
     on_edit: Option<EventHandler<(MessageId, String, String)>>,
     on_request_delete: Option<EventHandler<MessageId>>,
     #[props(default)] can_moderate: bool,
+    /// The viewer may delete this message without other moderation powers
+    /// (the author of an auto-moderated topic, on its replies).
+    #[props(default)] can_delete: bool,
     size: MessageSize,
 ) -> Element {
     // Create emoji picker state locally to ensure it's element-specific
@@ -2049,7 +2207,8 @@ fn ActionButtons(
 
     let has_actions = on_react.is_some()
         || on_reply.is_some()
-        || ((is_self || can_moderate) && (on_edit.is_some() || on_request_delete.is_some()));
+        || ((is_self || can_moderate || can_delete)
+            && (on_edit.is_some() || on_request_delete.is_some()));
 
     if !has_actions || !*is_hovered.read() {
         return rsx! {};
@@ -2141,23 +2300,25 @@ fn ActionButtons(
                 }
             }
 
-            // Edit/Delete buttons (own messages, or moderators)
-            if is_self || can_moderate {
-                if on_edit.is_some() {
-                    button {
-                        class: if matches!(size, MessageSize::Compact) { "text-xs text-text-muted hover:text-text px-1" } else { "text-sm text-text-muted hover:text-text px-2" },
-                        onclick: {
-                            let title = title_text.clone();
-                            let text = content_text.clone();
-                            move |_| {
-                                edit_title.set(title.clone());
-                                edit_text.set(text.clone());
-                                editing.set(true);
-                            }
-                        },
-                        "edit"
-                    }
+            // Edit button (own messages, or moderators)
+            if (is_self || can_moderate) && on_edit.is_some() {
+                button {
+                    class: if matches!(size, MessageSize::Compact) { "text-xs text-text-muted hover:text-text px-1" } else { "text-sm text-text-muted hover:text-text px-2" },
+                    onclick: {
+                        let title = title_text.clone();
+                        let text = content_text.clone();
+                        move |_| {
+                            edit_title.set(title.clone());
+                            edit_text.set(text.clone());
+                            editing.set(true);
+                        }
+                    },
+                    "edit"
                 }
+            }
+            // Delete button: the message author, moderators, and the author
+            // of an auto-moderated topic acting on its replies.
+            if is_self || can_moderate || can_delete {
                 if let Some(ref delete_handler) = on_request_delete {
                     button {
                         class: if matches!(size, MessageSize::Compact) { "text-xs text-text-muted hover:text-red-500 px-1" } else { "text-sm text-text-muted hover:text-red-500 px-2" },
@@ -2244,8 +2405,24 @@ pub fn MessageCard(
     let msg = message.clone();
     let is_self = msg.is_self;
 
+    // The owner can turn reactions off for the whole board.
+    let reactions_enabled = use_memo(move || {
+        let Some(key) = CURRENT_BOARD.read().owner_key else {
+            return true;
+        };
+        BOARDS
+            .read()
+            .map
+            .get(&key)
+            .map(|board| board.reactions_enabled())
+            .unwrap_or(true)
+    });
     // A reader of a demo board sees existing reactions but cannot add one.
-    let on_react = if can_react { on_react } else { None };
+    let on_react = if can_react && *reactions_enabled.read() {
+        on_react
+    } else {
+        None
+    };
 
     let timestamp_ms = msg.time.timestamp_millis();
     let time_str = format_utc_as_local_time(timestamp_ms);
@@ -2319,6 +2496,11 @@ pub fn MessageCard(
         (true, false) => format!("📌 {header_title}"),
         (false, true) => format!("🔒 {header_title}"),
         _ => header_title,
+    };
+    let header_title = if msg.is_auto_moderated {
+        format!("🛡️ {header_title}")
+    } else {
+        header_title
     };
 
     // Determine size based on variant and expanded state
@@ -2425,13 +2607,15 @@ pub fn MessageCard(
                         }
 
                         // Reactions
-                        ReactionDisplay {
-                            reactions: reactions.clone(),
-                            self_member_id: self_member_id,
-                            member_names: member_names.clone(),
-                            msg_id: msg_id.clone(),
-                            on_react: on_react.clone(),
-                            size: size,
+                        if *reactions_enabled.read() {
+                            ReactionDisplay {
+                                reactions: reactions.clone(),
+                                self_member_id: self_member_id,
+                                member_names: member_names.clone(),
+                                msg_id: msg_id.clone(),
+                                on_react: on_react.clone(),
+                                size: size,
+                            }
                         }
 
                         // Action buttons
@@ -2451,6 +2635,7 @@ pub fn MessageCard(
                             on_edit: on_edit.clone(),
                             on_request_delete: on_request_delete.clone(),
                             can_moderate: can_moderate,
+                            can_delete: can_moderate || msg.can_delete_as_topic_author,
                             size: size,
                         }
                     }
@@ -2473,6 +2658,8 @@ pub fn MessageCard(
                                             max_title_size: max_title_size,
                                             max_message_size: max_message_size,
                                             auto_load_images: auto_load_images,
+                                            can_moderate: can_moderate,
+                                            can_react: can_react,
                                             on_react: on_react.clone(),
                                             on_request_delete: on_request_delete.clone(),
                                             on_edit: on_edit.clone(),
@@ -2553,6 +2740,11 @@ pub fn MessageCard(
                         // title in the header.
                         if !hide_content {
                             div { class: "{content_padding}",
+                                if msg.is_auto_moderated {
+                                    p { class: "mb-2 text-xs text-text-muted",
+                                        "🛡️ Auto-moderated: the author can delete replies. They never delete the topic this way."
+                                    }
+                                }
                                 if !before_images.is_empty() {
                                     div { class: "mb-1 space-y-1",
                                         for image in before_images.iter() {
@@ -2627,13 +2819,15 @@ pub fn MessageCard(
 
                         if !msg.is_closed {
                             // Reactions
-                            ReactionDisplay {
-                                reactions: reactions.clone(),
-                                self_member_id: self_member_id,
-                                member_names: member_names.clone(),
-                                msg_id: msg_id.clone(),
-                                on_react: on_react.clone(),
-                                size: size,
+                            if *reactions_enabled.read() {
+                                ReactionDisplay {
+                                    reactions: reactions.clone(),
+                                    self_member_id: self_member_id,
+                                    member_names: member_names.clone(),
+                                    msg_id: msg_id.clone(),
+                                    on_react: on_react.clone(),
+                                    size: size,
+                                }
                             }
 
                             // Action buttons
@@ -2653,6 +2847,7 @@ pub fn MessageCard(
                                 on_edit: on_edit.clone(),
                                 on_request_delete: on_request_delete.clone(),
                                 can_moderate: can_moderate,
+                                can_delete: can_moderate || msg.can_delete_as_topic_author,
                                 size: size,
                             }
                         }

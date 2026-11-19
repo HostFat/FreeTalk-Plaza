@@ -60,6 +60,8 @@ pub const ACTION_TYPE_EDIT_CATEGORY: u32 = 5;
 pub const ACTION_TYPE_SET_SECTION_IMAGES: u32 = 6;
 /// Replace the content of a poll, by its author and before any vote.
 pub const ACTION_TYPE_EDIT_POLL: u32 = 7;
+/// Replace a member's displayed nickname with a moderator override.
+pub const ACTION_TYPE_SET_NICKNAME: u32 = 8;
 // Future: ACTION_TYPE_PIN = 6, ACTION_TYPE_REPLY = 7, etc.
 
 /// Text message content (content_type = 1)
@@ -71,6 +73,10 @@ pub struct TextContentV1 {
     /// so posts written before sections existed keep verifying byte for byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category_id: Option<MessageId>,
+    /// The author moderates replies to this topic. Chosen at creation and
+    /// never changed by an edit; omitted at false so old posts keep verifying.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_moderated: bool,
 }
 
 impl TextContentV1 {
@@ -79,11 +85,18 @@ impl TextContentV1 {
             title,
             content,
             category_id: None,
+            auto_moderated: false,
         }
     }
 
     pub fn with_category(mut self, category_id: Option<MessageId>) -> Self {
         self.category_id = category_id;
+        self
+    }
+
+    /// Let the topic author delete replies.
+    pub fn with_auto_moderated(mut self, auto_moderated: bool) -> Self {
+        self.auto_moderated = auto_moderated;
         self
     }
 
@@ -155,6 +168,14 @@ pub struct PollContentV1 {
     /// Older polls omit the field and keep showing results.
     #[serde(default)]
     pub results_visibility: PollResultsVisibility,
+    /// The author moderates replies to this topic. Omitted at false so older
+    /// polls keep their bytes.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_moderated: bool,
+    /// Section this poll belongs to. Omitted at the board root so old polls
+    /// keep their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<MessageId>,
 }
 
 impl PollContentV1 {
@@ -172,11 +193,24 @@ impl PollContentV1 {
             closes_at,
             multiselect,
             results_visibility: PollResultsVisibility::Always,
+            auto_moderated: false,
+            category_id: None,
         }
+    }
+
+    pub fn with_category(mut self, category_id: Option<MessageId>) -> Self {
+        self.category_id = category_id;
+        self
     }
 
     pub fn with_results_visibility(mut self, visibility: PollResultsVisibility) -> Self {
         self.results_visibility = visibility;
+        self
+    }
+
+    /// Let the topic author delete replies.
+    pub fn with_auto_moderated(mut self, auto_moderated: bool) -> Self {
+        self.auto_moderated = auto_moderated;
         self
     }
 
@@ -353,6 +387,7 @@ impl ActionContentV1 {
         new_description: Option<String>,
         new_icon: Option<String>,
         new_color: String,
+        auto_moderated_topics: Option<bool>,
     ) -> Self {
         Self {
             action_type: ACTION_TYPE_EDIT_CATEGORY,
@@ -367,6 +402,7 @@ impl ActionContentV1 {
                 hidden: false,
                 set_parent: false,
                 new_parent: None,
+                auto_moderated_topics,
             }),
         }
     }
@@ -380,6 +416,7 @@ impl ActionContentV1 {
         new_icon: Option<String>,
         new_color: String,
         new_parent: Option<MessageId>,
+        auto_moderated_topics: Option<bool>,
     ) -> Self {
         Self {
             action_type: ACTION_TYPE_EDIT_CATEGORY,
@@ -394,6 +431,7 @@ impl ActionContentV1 {
                 hidden: false,
                 set_parent: true,
                 new_parent,
+                auto_moderated_topics,
             }),
         }
     }
@@ -410,6 +448,7 @@ impl ActionContentV1 {
         sealed_name: crate::board_state::privacy::SealedBytes,
         allowed_roles: Vec<crate::board_state::roles::RoleId>,
         hidden: bool,
+        auto_moderated_topics: Option<bool>,
     ) -> Self {
         Self {
             action_type: ACTION_TYPE_EDIT_CATEGORY,
@@ -424,6 +463,7 @@ impl ActionContentV1 {
                 hidden,
                 set_parent: false,
                 new_parent: None,
+                auto_moderated_topics,
             }),
         }
     }
@@ -440,6 +480,7 @@ impl ActionContentV1 {
         allowed_roles: Vec<crate::board_state::roles::RoleId>,
         hidden: bool,
         new_parent: Option<MessageId>,
+        auto_moderated_topics: Option<bool>,
     ) -> Self {
         Self {
             action_type: ACTION_TYPE_EDIT_CATEGORY,
@@ -454,6 +495,7 @@ impl ActionContentV1 {
                 hidden,
                 set_parent: true,
                 new_parent,
+                auto_moderated_topics,
             }),
         }
     }
@@ -524,6 +566,28 @@ impl ActionContentV1 {
             None
         }
     }
+
+    /// Build an action that overrides the displayed nickname of a member.
+    /// The moderation envelope needs a target; the member id doubles as one.
+    pub fn set_nickname(member_id: crate::board_state::member::MemberId, nickname: String) -> Self {
+        Self {
+            action_type: ACTION_TYPE_SET_NICKNAME,
+            target: MessageId::from_bytes(*member_id.as_bytes()),
+            payload: encode_cbor(&SetNicknamePayload {
+                member_id,
+                nickname,
+            }),
+        }
+    }
+
+    /// Get the nickname override payload if this is a set_nickname action.
+    pub fn set_nickname_payload(&self) -> Option<SetNicknamePayload> {
+        if self.action_type == ACTION_TYPE_SET_NICKNAME {
+            ciborium::from_reader(&self.payload[..]).ok()
+        } else {
+            None
+        }
+    }
 }
 
 /// Payload for edit actions
@@ -564,12 +628,24 @@ pub struct CategoryEditPayload {
     /// when `set_parent` is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_parent: Option<MessageId>,
+    /// Section override for auto-moderated topics. `None` inherits the board
+    /// setting; omitted when unset so old payloads keep their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_moderated_topics: Option<bool>,
 }
 
 /// Payload for `ACTION_TYPE_SET_SECTION_IMAGES`.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct SectionImagesV1 {
     pub allowed: bool,
+}
+
+/// Payload for `ACTION_TYPE_SET_NICKNAME`. A moderator publishes the name the
+/// board shows for a member without rewriting that member's own record.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct SetNicknamePayload {
+    pub member_id: crate::board_state::member::MemberId,
+    pub nickname: String,
 }
 
 /// Keeps new default fields out of the bytes that signatures cover.
@@ -675,6 +751,10 @@ pub struct CategoryContentV1 {
     /// disables it; omitted at true so old categories keep their bytes.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub images_allowed: bool,
+    /// Section override for auto-moderated topics. `None` inherits the board
+    /// configuration; omitted when unset so old categories keep their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_moderated_topics: Option<bool>,
 }
 
 impl CategoryContentV1 {
@@ -691,12 +771,19 @@ impl CategoryContentV1 {
             hidden: false,
             is_group: false,
             images_allowed: true,
+            auto_moderated_topics: None,
         }
     }
 
     /// Turn image attachments on or off for this section.
     pub fn with_images_allowed(mut self, allowed: bool) -> Self {
         self.images_allowed = allowed;
+        self
+    }
+
+    /// Override the board's auto-moderated topic capability for this section.
+    pub fn with_auto_moderated_topics(mut self, allowed: Option<bool>) -> Self {
+        self.auto_moderated_topics = allowed;
         self
     }
 
@@ -855,6 +942,13 @@ impl DecodedContent {
                         .unwrap_or_else(|| "?".to_string());
                     format!("[Remove reaction {} from {}]", emoji, action.target)
                 }
+                ACTION_TYPE_SET_NICKNAME => {
+                    let name = action
+                        .set_nickname_payload()
+                        .map(|p| p.nickname)
+                        .unwrap_or_else(|| "?".to_string());
+                    format!("[Nickname set to {}]", name)
+                }
                 _ => format!(
                     "[Unknown action type {} on {}]",
                     action.action_type, action.target
@@ -982,6 +1076,46 @@ mod tests {
         assert_eq!(decoded.color, "#6366f1".to_string());
     }
 
+    /// The new flags stay out of the bytes at their defaults, so old signed
+    /// posts and sections keep verifying.
+    #[test]
+    fn auto_moderation_fields_are_omitted_at_their_defaults() {
+        let text = TextContentV1::new("Title".to_string(), "Body".to_string());
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&text, &mut bytes).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("auto_moderated"));
+
+        let flagged = text.clone().with_auto_moderated(true);
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&flagged, &mut bytes).unwrap();
+        let decoded: TextContentV1 = ciborium::from_reader(&bytes[..]).unwrap();
+        assert!(decoded.auto_moderated);
+
+        let poll = PollContentV1::new(
+            "Question".to_string(),
+            "Body".to_string(),
+            vec!["A".to_string(), "B".to_string()],
+            None,
+            false,
+        );
+        assert!(!poll.auto_moderated);
+        assert!(poll.clone().with_auto_moderated(true).auto_moderated);
+
+        let section = CategoryContentV1::new(
+            "General".to_string(),
+            None,
+            "#6366f1".to_string(),
+        );
+        assert_eq!(section.auto_moderated_topics, None);
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&section, &mut bytes).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("auto_moderated_topics"));
+
+        let open = section.with_auto_moderated_topics(Some(true));
+        let decoded = CategoryContentV1::decode(&open.encode()).unwrap();
+        assert_eq!(decoded.auto_moderated_topics, Some(true));
+    }
+
     #[test]
     fn test_category_with_parent() {
         let parent_id = test_message_id();
@@ -1033,6 +1167,7 @@ mod tests {
             None,
             None,
             "#6366f1".to_string(),
+            None,
         );
         let payload = action.category_edit_payload().unwrap();
         assert!(!payload.set_parent);
@@ -1055,6 +1190,7 @@ mod tests {
             None,
             "#6366f1".to_string(),
             Some(parent.clone()),
+            None,
         );
         let payload = action.category_edit_payload().unwrap();
         assert!(payload.set_parent);

@@ -28,6 +28,8 @@ pub struct CategoryEditData {
     pub new_color: String,
     /// `Some(parent)` moves the section; `None` keeps the current parent.
     pub new_parent: Option<Option<MessageId>>,
+    /// `None` inherits the board; `Some` overrides the section.
+    pub auto_moderated_topics: Option<bool>,
 }
 
 /// A card component for displaying a category in a grid
@@ -84,6 +86,9 @@ pub fn CategoryCard(
     /// Owner/admin switch for the section image rule
     #[props(default)]
     on_set_images: Option<EventHandler<bool>>,
+    /// Section override for auto-moderated topics; `None` inherits the board.
+    #[props(default)]
+    auto_moderated_topics: Option<bool>,
     /// Delete handler
     #[props(default)]
     on_request_delete: Option<EventHandler<MessageId>>,
@@ -95,6 +100,7 @@ pub fn CategoryCard(
     let mut edit_icon = use_signal(String::new);
     let mut edit_color = use_signal(String::new);
     let mut edit_group = use_signal(|| None::<MessageId>);
+    let mut edit_auto_moderated = use_signal(|| auto_moderated_topics);
     let mut error_msg = use_signal(|| None::<String>);
 
     let icon = category.category_icon.as_deref().unwrap_or("📁");
@@ -338,6 +344,36 @@ pub fn CategoryCard(
                         }
                     }
 
+                    // Auto-moderated topics for this section
+                    div { class: "mb-2",
+                        label { class: "block text-xs font-medium text-text-muted mb-1",
+                            "Auto-moderated topics"
+                        }
+                        select {
+                            class: "w-full px-2 py-1 bg-surface border border-border rounded text-sm text-text",
+                            value: match *edit_auto_moderated.read() {
+                                Some(true) => "on",
+                                Some(false) => "off",
+                                None => "inherit",
+                            }.to_string(),
+                            onclick: move |e| e.stop_propagation(),
+                            onchange: move |e| {
+                                e.stop_propagation();
+                                edit_auto_moderated.set(match e.value().as_str() {
+                                    "on" => Some(true),
+                                    "off" => Some(false),
+                                    _ => None,
+                                });
+                            },
+                            option { value: "inherit", "Inherit board" }
+                            option { value: "on", "On" }
+                            option { value: "off", "Off" }
+                        }
+                        p { class: "mt-1 text-xs text-text-muted",
+                            "Off removes the option from the composer. The contract rejects an auto-moderated topic here."
+                        }
+                    }
+
                     // Images switch for the whole section
                     if let Some(handler) = on_set_images.as_ref() {
                         label {
@@ -402,6 +438,7 @@ pub fn CategoryCard(
                                             message_id: msg_id.clone(),
                                             new_name: name_val,
                                             new_description: if desc.is_empty() { None } else { Some(desc) },
+                                            auto_moderated_topics: *edit_auto_moderated.read(),
                                             new_icon: if icon_val.is_empty() { None } else { Some(icon_val) },
                                             new_color: edit_color.read().clone(),
                                             new_parent,

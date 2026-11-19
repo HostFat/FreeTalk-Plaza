@@ -441,6 +441,7 @@ pub fn PostInput(
             Option<ReplyContext>,
             Option<crate::util::messaging::PollDraft>,
             Vec<ImageRef>,
+            bool,
         ),
         Result<(), String>,
     >,
@@ -484,6 +485,19 @@ pub fn PostInput(
     }
     .to_string();
     let mut poll_error = use_signal(|| None::<String>);
+    let mut auto_moderated = use_signal(|| false);
+    let auto_moderated_available = use_memo(move || {
+        let Some(key) = CURRENT_BOARD.read().owner_key else {
+            return false;
+        };
+        let section = CURRENT_CATEGORY.read().category_id.clone();
+        BOARDS
+            .read()
+            .map
+            .get(&key)
+            .map(|board| board.auto_moderated_topics_enabled(section.as_ref()))
+            .unwrap_or(false)
+    });
     let mut attachments = use_signal(Vec::<Attachment>::new);
     let mut image_error = use_signal(|| None::<String>);
     let mut next_attachment_id = use_signal(|| 1u64);
@@ -699,6 +713,9 @@ pub fn PostInput(
                         category_id: CURRENT_CATEGORY.read().category_id.clone(),
                         attachment_ids,
                         images,
+                        auto_moderated: *auto_moderated.peek()
+                            && reply.is_none()
+                            && *auto_moderated_available.peek(),
                         queued_at: chrono::Utc::now().timestamp_millis(),
                     };
                     crate::util::pending_send::queue(board_key, draft);
@@ -770,8 +787,11 @@ pub fn PostInput(
 
             // The handler rejects a send that cannot be prepared (not a
             // member, cooldown, size limit): keep the text so nothing is lost.
+            let auto = *auto_moderated.peek()
+                && reply_ctx.is_none()
+                && *auto_moderated_available.peek();
             if let Err(error) =
-                handle_send_message.call((title, content, reply_ctx, poll, images))
+                handle_send_message.call((title, content, reply_ctx, poll, images, auto))
             {
                 crate::components::app::toasts::show_error(format!("Could not send: {error}"));
                 return;
@@ -786,6 +806,7 @@ pub fn PostInput(
             poll_multiselect.set(false);
             poll_results.set(plaza_core::board_state::content::PollResultsVisibility::Always);
             poll_error.set(None);
+            auto_moderated.set(false);
             let published_ids: Vec<String> = attachments
                 .read()
                 .iter()
@@ -1147,6 +1168,18 @@ pub fn PostInput(
                                         poll_error.set(None);
                                     },
                                     "Poll"
+                                }
+                                if *auto_moderated_available.read() && replying_to.read().is_none() {
+                                    label {
+                                        class: "flex items-center gap-1 text-xs text-text-muted ml-2 cursor-pointer",
+                                        title: "Let this topic's author delete replies. Off by default.",
+                                        input {
+                                            r#type: "checkbox",
+                                            checked: *auto_moderated.read(),
+                                            onchange: move |event| auto_moderated.set(event.checked()),
+                                        }
+                                        "Moderate replies"
+                                    }
                                 }
                                 button {
                                     r#type: "button",

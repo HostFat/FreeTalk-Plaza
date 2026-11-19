@@ -8,13 +8,7 @@ use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::roles::RoleId;
 
 fn nickname_of(data: &BoardData, id: MemberId) -> String {
-    data.board_state
-        .member_info
-        .member_info
-        .iter()
-        .find(|info| info.member_info.member_id == id)
-        .map(|info| info.member_info.preferred_nickname.to_string_lossy())
-        .unwrap_or_else(|| format!("{id}"))
+    data.display_nickname(id).unwrap_or_else(|| format!("{id}"))
 }
 
 /// Full pasteable invite URL: current page base plus the join route.

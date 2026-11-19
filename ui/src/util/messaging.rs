@@ -86,6 +86,7 @@ pub async fn send_message(
     reply_ctx: Option<ReplyContext>,
     images: Vec<plaza_core::board_state::images::ImageRef>,
     poll: Option<PollDraft>,
+    auto_moderated: bool,
 ) -> Result<(), String> {
     let prepared = prepare_message(
         current_board,
@@ -101,6 +102,7 @@ pub async fn send_message(
         reply_ctx,
         images,
         poll,
+        auto_moderated,
     )?;
     publish_prepared(prepared).await
 }
@@ -139,6 +141,7 @@ pub fn prepare_message(
     reply_ctx: Option<ReplyContext>,
     images: Vec<plaza_core::board_state::images::ImageRef>,
     poll: Option<PollDraft>,
+    auto_moderated: bool,
 ) -> Result<PreparedMessage, String> {
     if message_text.is_empty() && poll.is_none() {
         warn!("Message is empty");
@@ -199,6 +202,8 @@ pub fn prepare_message(
             poll.multiselect,
         )
         .with_results_visibility(poll.results_visibility)
+        .with_category(category_id.clone())
+        .with_auto_moderated(auto_moderated && reply_ctx.is_none())
     });
     if let Some(poll) = &poll_content {
         if let Err(error) = poll.validate() {
@@ -227,6 +232,7 @@ pub fn prepare_message(
             TEXT_CONTENT_VERSION,
             TextContentV1::new(title_text.clone(), message_text.clone())
                 .with_category(category_id.clone())
+                .with_auto_moderated(auto_moderated && reply_ctx.is_none())
                 .encode(),
         )
     };

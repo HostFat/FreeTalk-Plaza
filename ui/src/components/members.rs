@@ -207,20 +207,26 @@ pub fn MembersView() -> Element {
             let is_admin = admin_ids.contains(&member_id);
             let is_deactivated = board_state.ownership.is_deactivated_now(&member_id);
 
-            let nickname = member_info
-                .member_info
-                .iter()
-                .find(|mi| mi.member_info.member_id == member_id)
-                .map(|mi| {
-                    match unseal_bytes_with_secrets(
-                        &mi.member_info.preferred_nickname,
-                        board_secrets,
-                    ) {
-                        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                        Err(_) => mi.member_info.preferred_nickname.to_string_lossy(),
-                    }
-                })
-                .unwrap_or_else(|| "Unknown".to_string());
+            let nickname = if let Some(override_name) =
+                board_state.recent_messages.nickname_override(&member_id)
+            {
+                override_name.nickname.clone()
+            } else {
+                member_info
+                    .member_info
+                    .iter()
+                    .find(|mi| mi.member_info.member_id == member_id)
+                    .map(|mi| {
+                        match unseal_bytes_with_secrets(
+                            &mi.member_info.preferred_nickname,
+                            board_secrets,
+                        ) {
+                            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                            Err(_) => mi.member_info.preferred_nickname.to_string_lossy(),
+                        }
+                    })
+                    .unwrap_or_else(|| "Unknown".to_string())
+            };
 
             let member_display = MemberDisplay {
                 nickname,

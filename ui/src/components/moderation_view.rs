@@ -5,7 +5,6 @@ use crate::components::app::{BOARDS, CURRENT_BOARD};
 use crate::components::conversation::image_attachment::ImageAttachment;
 use crate::components::conversation::{get_all_messages, MessageData};
 use crate::components::members::member_info_modal::ban_button::BanButton;
-use crate::util::ecies::unseal_bytes_with_secrets;
 use crate::util::format_utc_as_local_time;
 use crate::util::message_actions::ActionContext;
 use crate::util::moderation_queue;
@@ -18,17 +17,7 @@ use wasm_bindgen_futures::spawn_local;
 
 fn nickname(board: &BoardData, member_id: MemberId) -> String {
     board
-        .board_state
-        .member_info
-        .member_info
-        .iter()
-        .find(|info| info.member_info.member_id == member_id)
-        .map(|info| {
-            match unseal_bytes_with_secrets(&info.member_info.preferred_nickname, &board.secrets) {
-                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                Err(_) => info.member_info.preferred_nickname.to_string_lossy(),
-            }
-        })
+        .display_nickname(member_id)
         .unwrap_or_else(|| "Unknown".to_string())
 }
 

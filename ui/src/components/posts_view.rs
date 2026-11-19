@@ -295,6 +295,9 @@ fn PostRow(
                     if post.is_announced {
                         span { title: "Announcement", "📢" }
                     }
+                    if post.is_auto_moderated {
+                        span { title: "Auto-moderated: the author can delete replies", "🛡️" }
+                    }
                     if post.is_pending {
                         span { class: "text-amber-400", title: "Waiting for a moderator", "Pending" }
                     }
@@ -478,6 +481,7 @@ fn SectionRow(
             .unwrap_or(true)
     });
     let section_for_switch = category.message_id.clone();
+    let section_auto_moderated_topics = category.category_auto_moderated_topics;
     let can_switch_images = is_owner || is_admin;
     let set_section_images = move |allowed: bool| {
         let section = section_for_switch.clone();
@@ -517,6 +521,7 @@ fn SectionRow(
             },
             on_edit: move |data| on_edit.call(data),
             images_allowed: *images_allowed.read(),
+            auto_moderated_topics: section_auto_moderated_topics,
             on_set_images: if can_switch_images {
                 Some(EventHandler::new(set_section_images))
             } else {
@@ -814,6 +819,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                     edit_data.new_icon,
                     edit_data.new_color,
                     edit_data.new_parent,
+                    edit_data.auto_moderated_topics,
                 )
                 .await;
             });
@@ -1701,7 +1707,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                 if *pending_delete_group.read() {
                                     "The group is removed and its sections are moved to Ungrouped."
                                 } else {
-                                    "This action cannot be undone."
+                                    "The topic is removed for everyone and cannot be undone. It does not go to the trash."
                                 }
                             }
                             div { class: "flex gap-3 justify-end",
@@ -2117,10 +2123,10 @@ pub fn SinglePostView(post_id: String) -> Element {
                         class: "bg-panel rounded-lg shadow-xl p-6 max-w-sm mx-4",
                         onclick: move |e| e.stop_propagation(),
                         h3 { class: "text-lg font-semibold text-text mb-2",
-                            "Delete Topic?"
+                            "Delete topic permanently?"
                         }
                         p { class: "text-text-muted text-sm mb-4",
-                            "This action cannot be undone."
+                            "The topic and its replies are removed for everyone and cannot be undone. It does not go to the trash."
                         }
                         div { class: "flex gap-3 justify-end",
                             button {
@@ -2137,7 +2143,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                                     }
                                     pending_delete.set(None);
                                 },
-                                "Delete"
+                                "Delete permanently"
                             }
                         }
                     }

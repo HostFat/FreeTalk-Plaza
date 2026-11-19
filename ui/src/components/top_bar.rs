@@ -8,7 +8,6 @@ use crate::components::app::{
 use crate::components::board_sync_chip::BoardSyncChip;
 use crate::components::conversation::message_input::PostInput;
 use crate::util::avatar::get_avatar;
-use crate::util::ecies::unseal_bytes_with_secrets;
 use crate::util::messaging::{prepare_message, publish_prepared, PollDraft, ReplyContext};
 use dioxus::prelude::*;
 use dioxus_free_icons::{icons::fa_solid_icons::FaBars, Icon};
@@ -101,12 +100,13 @@ pub fn TopBar() -> Element {
     // Message sending handler. The result covers the local checks, so the
     // composer can keep the text; the publish outcome is reported from the
     // spawned task.
-    let handle_send_message = move |(title_text, message_text, reply_ctx, poll, images): (
+    let handle_send_message = move |(title_text, message_text, reply_ctx, poll, images, auto_moderated): (
         String,
         String,
         Option<ReplyContext>,
         Option<PollDraft>,
         Vec<plaza_core::board_state::images::ImageRef>,
+        bool,
     )| -> Result<(), String> {
         if message_text.is_empty() && poll.is_none() {
             return Err("The message is empty".to_string());
@@ -181,6 +181,7 @@ pub fn TopBar() -> Element {
             reply_ctx,
             images,
             poll,
+            auto_moderated,
         )?;
         spawn(async move {
             match publish_prepared(prepared).await {
@@ -221,20 +222,7 @@ pub fn TopBar() -> Element {
         "Spectator".to_string()
     } else {
         board_data
-            .board_state
-            .member_info
-            .member_info
-            .iter()
-            .find(|ami| ami.member_info.member_id == self_member_id)
-            .map(|ami| {
-                match unseal_bytes_with_secrets(
-                    &ami.member_info.preferred_nickname,
-                    &board_data.secrets,
-                ) {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                    Err(_) => ami.member_info.preferred_nickname.to_string_lossy(),
-                }
-            })
+            .display_nickname(self_member_id)
             .unwrap_or_else(|| "You".to_string())
     };
 
@@ -516,6 +504,7 @@ pub fn TopBar() -> Element {
                                         Option<ReplyContext>,
                                         Option<PollDraft>,
                                         Vec<plaza_core::board_state::images::ImageRef>,
+                                        bool,
                                     )| { handle_send_message(msg) },
                                     replying_to: replying_to,
                                     on_request_edit_last: move |_| {},

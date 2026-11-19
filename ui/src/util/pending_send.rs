@@ -211,6 +211,7 @@ async fn resume_one(board_key: VerifyingKey, board: BoardData, mut draft: Pendin
         reply_ctx,
         draft.images.clone(),
         None,
+        draft.auto_moderated,
     )
     .await
     {

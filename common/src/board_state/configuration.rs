@@ -199,6 +199,8 @@ impl Default for Configuration {
             max_images_per_message: DEFAULT_MAX_IMAGES_PER_MESSAGE,
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             max_animated_image_bytes: DEFAULT_MAX_ANIMATED_IMAGE_BYTES,
+            reactions_enabled: true,
+            auto_moderated_topics: true,
             updated_at: std::time::SystemTime::UNIX_EPOCH,
         }
     }
@@ -256,6 +258,14 @@ pub struct Configuration {
     /// Bytes allowed for one animated image. Zero means the default (8 MiB).
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub max_animated_image_bytes: u32,
+    /// Reactions on posts and replies. Omitted at true so configurations
+    /// signed before the field existed keep verifying byte for byte.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub reactions_enabled: bool,
+    /// Sections allow auto-moderated topics unless they override this.
+    /// Omitted at true so old signed configurations keep verifying.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub auto_moderated_topics: bool,
     /// Signed time of this configuration, used to resolve which owner key had
     /// the right to sign it. Omitted at the epoch for older configs.
     #[serde(
@@ -332,6 +342,14 @@ fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -340,6 +358,37 @@ fn is_false(value: &bool) -> bool {
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
+
+    #[test]
+    fn new_feature_defaults_are_true_and_omitted_from_the_signed_bytes() {
+        let configuration = Configuration::default();
+        assert!(configuration.reactions_enabled);
+        assert!(configuration.auto_moderated_topics);
+
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&configuration, &mut bytes).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("reactions_enabled"));
+        assert!(!text.contains("auto_moderated_topics"));
+
+        // A configuration signed before the fields existed decodes with the
+        // feature on.
+        let decoded: Configuration = ciborium::from_reader(&bytes[..]).unwrap();
+        assert!(decoded.reactions_enabled);
+        assert!(decoded.auto_moderated_topics);
+
+        let mut disabled = configuration.clone();
+        disabled.reactions_enabled = false;
+        disabled.auto_moderated_topics = false;
+        let mut disabled_bytes = Vec::new();
+        ciborium::into_writer(&disabled, &mut disabled_bytes).unwrap();
+        let disabled_text = String::from_utf8_lossy(&disabled_bytes);
+        assert!(disabled_text.contains("reactions_enabled"));
+        assert!(disabled_text.contains("auto_moderated_topics"));
+        let decoded: Configuration = ciborium::from_reader(&disabled_bytes[..]).unwrap();
+        assert!(!decoded.reactions_enabled);
+        assert!(!decoded.auto_moderated_topics);
+    }
 
     #[test]
     fn test_verify() {

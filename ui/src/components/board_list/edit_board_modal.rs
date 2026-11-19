@@ -75,6 +75,11 @@ pub fn EditBoardModal() -> Element {
                             is_owner: *user_is_owner.read()
                         }
 
+                        super::board_features_field::BoardFeaturesField {
+                            config: config.clone(),
+                            is_owner: *user_is_owner.read()
+                        }
+
                         super::image_limits_field::ImageLimitsField {
                             config: config.clone(),
                             is_owner: *user_is_owner.read()

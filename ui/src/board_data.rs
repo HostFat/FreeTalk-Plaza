@@ -150,6 +150,9 @@ pub struct PendingSend {
     /// Attachments already uploaded, kept so a crash mid-resume loses nothing.
     #[serde(default)]
     pub images: Vec<plaza_core::board_state::images::ImageRef>,
+    /// The topic author moderates replies; queued with the rest of the intent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_moderated: bool,
     #[serde(default)]
     pub queued_at: i64,
 }
@@ -864,6 +867,18 @@ impl BoardData {
             grants,
             scope_chains,
         };
+        let member_ids: HashSet<MemberId> = self
+            .board_state
+            .members
+            .members
+            .iter()
+            .map(|member| member.member.id())
+            .collect();
+        let reactions_enabled = self
+            .board_state
+            .configuration
+            .configuration
+            .reactions_enabled;
         self.board_state
             .recent_messages
             .rebuild_actions_state_with_permissions(
@@ -871,6 +886,8 @@ impl BoardData {
                 Some(owner_id),
                 Some(&admin_ids),
                 Some(&moderation),
+                reactions_enabled,
+                Some(&member_ids),
             );
     }
 
@@ -1677,6 +1694,55 @@ impl BoardData {
         self.board_state
             .recent_messages
             .section_allows_images(&self.board_state, &parameters, section)
+    }
+
+    /// Whether the composer may offer the auto-moderated topic option here.
+    /// The section override wins over the board configuration. Sealed bodies
+    /// (private boards, restricted sections) are refused because the contract
+    /// cannot read the flag or the reply links there.
+    pub fn auto_moderated_topics_enabled(&self, section: Option<&MessageId>) -> bool {
+        if self.is_private() {
+            return false;
+        }
+        if let Some(section) = section {
+            if self.category_secret(section).is_some() {
+                return false;
+            }
+        }
+        self.board_state
+            .recent_messages
+            .section_auto_moderated_topics(&self.board_state, section)
+    }
+
+    /// Whether the owner enabled reactions for this board.
+    pub fn reactions_enabled(&self) -> bool {
+        self.board_state.configuration.configuration.reactions_enabled
+    }
+
+    /// The nickname to show for a member: a moderator override first, then the
+    /// member's own published name.
+    pub fn display_nickname(&self, member_id: MemberId) -> Option<String> {
+        if let Some(override_name) = self
+            .board_state
+            .recent_messages
+            .nickname_override(&member_id)
+        {
+            return Some(override_name.nickname.clone());
+        }
+        self.board_state
+            .member_info
+            .member_info
+            .iter()
+            .find(|info| info.member_info.member_id == member_id)
+            .map(|info| {
+                match crate::util::ecies::unseal_bytes_with_secrets(
+                    &info.member_info.preferred_nickname,
+                    &self.secrets,
+                ) {
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                    Err(_) => info.member_info.preferred_nickname.to_string_lossy(),
+                }
+            })
     }
 
     /// Every secret that could have sealed an image this client may read: the

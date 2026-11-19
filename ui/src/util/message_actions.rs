@@ -336,6 +336,7 @@ pub async fn reseal_category_name(category_id: MessageId) {
         sealed_name,
         category.allowed_roles.clone(),
         category.hidden,
+        category.auto_moderated_topics,
     );
     send_actions(
         ctx,
@@ -355,6 +356,22 @@ pub async fn set_section_images(ctx: ActionContext, target: MessageId, allowed: 
         vec![action],
         Some("Section images updated"),
         "Could not update the section images",
+    )
+    .await;
+}
+
+/// Override the nickname shown for a member. The contract accepts this only
+/// from the owner or a board admin, and the member's own record is untouched.
+pub async fn set_nickname(ctx: ActionContext, member_id: MemberId, nickname: String) {
+    if nickname.trim().is_empty() {
+        return;
+    }
+    let action = ActionContentV1::set_nickname(member_id, nickname.trim().to_string());
+    send_actions(
+        ctx,
+        vec![action],
+        Some("Nickname updated"),
+        "Could not update the nickname",
     )
     .await;
 }
@@ -414,6 +431,7 @@ pub async fn edit_category(
     new_icon: Option<String>,
     new_color: String,
     new_parent: Option<Option<MessageId>>,
+    auto_moderated_topics: Option<bool>,
 ) {
     if new_name.is_empty() {
         return;
@@ -439,6 +457,7 @@ pub async fn edit_category(
                     category.allowed_roles.clone(),
                     category.hidden,
                     parent,
+                    auto_moderated_topics,
                 ),
                 None => ActionContentV1::edit_category_sealed(
                     target_message_id.clone(),
@@ -449,6 +468,7 @@ pub async fn edit_category(
                     sealed_name,
                     category.allowed_roles.clone(),
                     category.hidden,
+                    auto_moderated_topics,
                 ),
             };
             seal_action_with(action, SecretScope::Category(category_id), &key, version)
@@ -462,6 +482,7 @@ pub async fn edit_category(
                     new_icon,
                     new_color,
                     parent,
+                    auto_moderated_topics,
                 ),
                 None => ActionContentV1::edit_category(
                     target_message_id.clone(),
@@ -469,6 +490,7 @@ pub async fn edit_category(
                     new_description,
                     new_icon,
                     new_color,
+                    auto_moderated_topics,
                 ),
             };
             match seal_action(&ctx, action, &target_message_id) {
@@ -852,6 +874,7 @@ fn move_category_action(
             category.allowed_roles.clone(),
             category.hidden,
             new_parent,
+            category.auto_moderated_topics,
         )
     } else {
         ActionContentV1::edit_category_with_parent(
@@ -861,6 +884,7 @@ fn move_category_action(
             category.icon.clone(),
             category.color.clone(),
             new_parent,
+            category.auto_moderated_topics,
         )
     };
     seal_action(ctx, action, category_id)

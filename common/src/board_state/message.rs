@@ -45,6 +45,13 @@ fn body_section(content: &BoardMessageBody) -> Option<MessageId> {
         } if *content_type == CONTENT_TYPE_TEXT => {
             TextContentV1::decode(data).ok().and_then(|text| text.category_id)
         }
+        BoardMessageBody::Public {
+            content_type, data, ..
+        } if *content_type == crate::board_state::content::CONTENT_TYPE_POLL => {
+            crate::board_state::content::PollContentV1::decode(data)
+                .ok()
+                .and_then(|poll| poll.category_id)
+        }
         BoardMessageBody::Private { secret_scope, .. } => match secret_scope {
             crate::board_state::message::SecretScope::Category(id) => Some(id.clone()),
             crate::board_state::message::SecretScope::Board => None,
@@ -60,6 +67,24 @@ fn body_reply_target(content: &BoardMessageBody) -> Option<MessageId> {
         } if *content_type == CONTENT_TYPE_REPLY => {
             ReplyContentV1::decode(data).ok().map(|reply| reply.target_message_id)
         }
+        _ => None,
+    }
+}
+
+/// The creation-time auto-moderated flag of a topic, when the contract can
+/// read the body. Sealed posts on private boards return `None`.
+fn body_auto_moderated(content: &BoardMessageBody) -> Option<bool> {
+    use crate::board_state::content::{
+        PollContentV1, TextContentV1, CONTENT_TYPE_POLL, CONTENT_TYPE_TEXT,
+    };
+    match content {
+        BoardMessageBody::Public {
+            content_type, data, ..
+        } => match *content_type {
+            CONTENT_TYPE_TEXT => TextContentV1::decode(data).ok().map(|text| text.auto_moderated),
+            CONTENT_TYPE_POLL => PollContentV1::decode(data).ok().map(|poll| poll.auto_moderated),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -154,6 +179,24 @@ pub fn author_may_write(
         .any(|admin| admin.admin.id() == author)
 }
 
+/// Author of the auto-moderated topic a reply descends from, if any. The
+/// topic itself returns `None`: its author may delete replies, not the root.
+fn auto_moderated_root_author(
+    target: &MessageId,
+    reply_parent: &HashMap<MessageId, MessageId>,
+    roots: &HashMap<MessageId, MemberId>,
+) -> Option<MemberId> {
+    let mut current = target.clone();
+    for _ in 0..64 {
+        let parent = reply_parent.get(&current)?.clone();
+        if let Some(author) = roots.get(&parent) {
+            return Some(*author);
+        }
+        current = parent;
+    }
+    None
+}
+
 /// Computed state for message actions (edits, deletes, reactions)
 /// This is rebuilt from action messages and not serialized
 #[derive(Clone, PartialEq, Debug, Default)]
@@ -168,6 +211,19 @@ pub struct MessageActionsState {
     pub deleted: std::collections::HashSet<MessageId>,
     /// Reactions on messages: message_id -> (emoji -> list of reactors)
     pub reactions: HashMap<MessageId, HashMap<String, Vec<MemberId>>>,
+    /// Moderator overrides of a member's displayed nickname.
+    pub nickname_overrides: HashMap<MemberId, NicknameOverride>,
+}
+
+/// The last signed nickname override for one member. The member's own
+/// `MemberInfo` record stays untouched, so the override is reversible.
+#[derive(Clone, PartialEq, Debug)]
+pub struct NicknameOverride {
+    pub nickname: String,
+    /// Signed time in milliseconds; the highest version wins.
+    pub version: u64,
+    pub set_by: MemberId,
+    pub set_at: SystemTime,
 }
 
 /// Moderation grants used while rebuilding edits/deletes locally.
@@ -321,6 +377,9 @@ impl ComposableState for MessagesV1 {
                     ));
                 }
                 self.validate_images(parent_state, parameters, msg)?;
+                if !self.messages.iter().any(|existing| existing.id() == msg.id()) {
+                    self.validate_auto_moderated(parent_state, msg)?;
+                }
                 let content = &msg.message.content;
 
                 // Validate title constraints (for public text/reply messages)
@@ -438,7 +497,22 @@ impl ComposableState for MessagesV1 {
         });
 
         // Rebuild computed state from action messages
-        self.rebuild_actions_state();
+        let owner_id = parameters.owner_id();
+        let admin_ids: std::collections::HashSet<MemberId> = parent_state
+            .admin
+            .admins
+            .iter()
+            .map(|admin| admin.admin.id())
+            .collect();
+        let member_ids: std::collections::HashSet<MemberId> = members_by_id.keys().copied().collect();
+        self.rebuild_actions_state_with_permissions(
+            &HashMap::new(),
+            Some(owner_id),
+            Some(&admin_ids),
+            None,
+            parent_state.configuration.configuration.reactions_enabled,
+            Some(&member_ids),
+        );
 
         Ok(())
     }
@@ -451,7 +525,7 @@ impl MessagesV1 {
     /// use `rebuild_actions_state_with_decrypted` and provide the decrypted
     /// content for each private action message.
     pub fn rebuild_actions_state(&mut self) {
-        self.rebuild_actions_state_with_permissions(&HashMap::new(), None, None, None);
+        self.rebuild_actions_state_with_permissions(&HashMap::new(), None, None, None, true, None);
     }
 
     /// Rebuild actions state with decrypted content (for private boards).
@@ -461,22 +535,36 @@ impl MessagesV1 {
         &mut self,
         decrypted_content: &HashMap<MessageId, Vec<u8>>,
     ) {
-        self.rebuild_actions_state_with_permissions(decrypted_content, None, None, None);
+        self.rebuild_actions_state_with_permissions(
+            decrypted_content,
+            None,
+            None,
+            None,
+            true,
+            None,
+        );
     }
 
     /// Rebuild actions state with owner/admin permissions for category edits.
+    ///
+    /// `reactions_enabled` comes from the board configuration: when it is off,
+    /// reaction actions are ignored (history included). `members` bounds the
+    /// nickname override to current members.
+    #[allow(clippy::too_many_arguments)]
     pub fn rebuild_actions_state_with_permissions(
         &mut self,
         decrypted_content: &HashMap<MessageId, Vec<u8>>,
         owner_id: Option<MemberId>,
         admin_ids: Option<&std::collections::HashSet<MemberId>>,
         moderation: Option<&ModerationPermissions>,
+        reactions_enabled: bool,
+        members: Option<&std::collections::HashSet<MemberId>>,
     ) {
         use crate::board_state::content::{
             ActionContentV1, DecodedContent, ModerationActionV1, ACTION_TYPE_DELETE,
             ACTION_TYPE_EDIT_POLL,
             ACTION_TYPE_EDIT, ACTION_TYPE_EDIT_CATEGORY, ACTION_TYPE_REACTION,
-            ACTION_TYPE_REMOVE_REACTION,
+            ACTION_TYPE_REMOVE_REACTION, ACTION_TYPE_SET_NICKNAME,
         };
         use crate::board_state::privacy::SealedBytes;
 
@@ -490,6 +578,22 @@ impl MessagesV1 {
             .filter(|m| !m.message.content.is_action())
             .map(|m| (m.id(), m.message.author))
             .collect();
+
+        // Reply links and the topics whose authors may moderate descendants.
+        let mut reply_parent: HashMap<MessageId, MessageId> = HashMap::new();
+        let mut auto_moderated_roots: HashMap<MessageId, MemberId> = HashMap::new();
+        for message in self.messages.iter() {
+            let content = &message.message.content;
+            if content.is_action() || content.is_category() {
+                continue;
+            }
+            if let Some(target) = body_reply_target(content) {
+                reply_parent.insert(message.id(), target);
+            }
+            if body_auto_moderated(content) == Some(true) {
+                auto_moderated_roots.insert(message.id(), message.message.author);
+            }
+        }
 
         // Build a set of category message IDs for type checking
         let category_ids: std::collections::HashSet<MessageId> = self
@@ -587,6 +691,18 @@ impl MessagesV1 {
                         {
                             if let Some(poll) = action.poll_edit_payload() {
                                 if poll.validate().is_ok() {
+                                    let mut poll = poll;
+                                    // The auto-moderated choice is made once,
+                                    // at creation; an edit cannot change it.
+                                    if let Some(original) =
+                                        self.messages.iter().find(|m| m.id() == *target)
+                                    {
+                                        if let Some(created) =
+                                            body_auto_moderated(&original.message.content)
+                                        {
+                                            poll.auto_moderated = created;
+                                        }
+                                    }
                                     self.actions_state
                                         .edited_polls
                                         .insert(target.clone(), poll);
@@ -600,11 +716,21 @@ impl MessagesV1 {
                         continue;
                     }
                     if let Some(&original_author) = message_authors.get(target) {
+                        // The author of an auto-moderated topic deletes replies
+                        // under it, never the topic itself.
+                        let topic_author = auto_moderated_root_author(
+                            target,
+                            &reply_parent,
+                            &auto_moderated_roots,
+                        );
                         let allowed = actor == original_author
                             || is_privileged
                             || moderation
                                 .map(|moderation| moderation.can(actor, false, target))
-                                .unwrap_or(false);
+                                .unwrap_or(false)
+                            || (actor != original_author
+                                && topic_author == Some(actor)
+                                && !auto_moderated_roots.contains_key(target));
                         if allowed {
                             self.actions_state.deleted.insert(target.clone());
                             // Also remove any edited content for deleted messages
@@ -614,6 +740,9 @@ impl MessagesV1 {
                     }
                 }
                 ACTION_TYPE_REACTION => {
+                    if !reactions_enabled {
+                        continue;
+                    }
                     // Anyone can add reactions to open, non-deleted messages
                     if !target_closed
                         && message_authors.contains_key(target)
@@ -634,6 +763,9 @@ impl MessagesV1 {
                     }
                 }
                 ACTION_TYPE_REMOVE_REACTION => {
+                    if !reactions_enabled {
+                        continue;
+                    }
                     // Users can only remove their own reactions
                     if target_closed {
                         continue;
@@ -672,6 +804,41 @@ impl MessagesV1 {
                                     .insert(target.clone(), payload);
                             }
                         }
+                    }
+                }
+                ACTION_TYPE_SET_NICKNAME => {
+                    if !is_privileged {
+                        continue;
+                    }
+                    let Some(payload) = action.set_nickname_payload() else {
+                        continue;
+                    };
+                    let target_is_member = owner_id == Some(payload.member_id)
+                        || members
+                            .map(|members| members.contains(&payload.member_id))
+                            .unwrap_or(true);
+                    if !target_is_member {
+                        continue;
+                    }
+                    let version = crate::board_state::rate_limit::system_time_ms(
+                        msg.message.time,
+                    ) as u64;
+                    let replace = self
+                        .actions_state
+                        .nickname_overrides
+                        .get(&payload.member_id)
+                        .map(|old| version >= old.version)
+                        .unwrap_or(true);
+                    if replace {
+                        self.actions_state.nickname_overrides.insert(
+                            payload.member_id,
+                            NicknameOverride {
+                                nickname: payload.nickname,
+                                version,
+                                set_by: actor,
+                                set_at: msg.message.time,
+                            },
+                        );
                     }
                 }
                 _ => {
@@ -726,6 +893,52 @@ impl MessagesV1 {
     /// Get reactions for a message
     pub fn reactions(&self, message_id: &MessageId) -> Option<&HashMap<String, Vec<MemberId>>> {
         self.actions_state.reactions.get(message_id)
+    }
+
+    /// Moderator nickname override for a member, if one was published.
+    pub fn nickname_override(&self, member_id: &MemberId) -> Option<&NicknameOverride> {
+        self.actions_state.nickname_overrides.get(member_id)
+    }
+
+    /// Whether a section lets authors moderate replies. The section override
+    /// wins; without one the board configuration decides.
+    pub fn section_auto_moderated_topics(
+        &self,
+        state: &ChatBoardStateV1,
+        section: Option<&MessageId>,
+    ) -> bool {
+        let board_default = state.configuration.configuration.auto_moderated_topics;
+        let Some(section) = section else {
+            return board_default;
+        };
+        if let Some(edit) = self.actions_state.edited_categories.get(section) {
+            if let Some(setting) = edit.auto_moderated_topics {
+                return setting;
+            }
+        }
+        self.category_content(section)
+            .and_then(|category| category.auto_moderated_topics)
+            .unwrap_or(board_default)
+    }
+
+    /// Only a topic with the creation-time flag set, inside a section whose
+    /// effective capability is on, may enter the state.
+    fn validate_auto_moderated(
+        &self,
+        state: &ChatBoardStateV1,
+        message: &AuthorizedMessageV1,
+    ) -> Result<(), String> {
+        if body_auto_moderated(&message.message.content) != Some(true) {
+            return Ok(());
+        }
+        // The incoming message is not in `self.messages` yet.
+        let section = body_section(&message.message.content)
+            .or_else(|| self.section_of_message(state, message));
+        if self.section_auto_moderated_topics(state, section.as_ref()) {
+            Ok(())
+        } else {
+            Err("This section does not allow auto-moderated topics".to_string())
+        }
     }
 
     /// Get all non-deleted, non-action messages for display
@@ -1049,8 +1262,14 @@ impl BoardMessageBody {
         use crate::board_state::content::{
             ActionContentV1, ACTION_CONTENT_VERSION, CONTENT_TYPE_ACTION,
         };
-        let action =
-            ActionContentV1::edit_category(target, new_name, new_description, new_icon, new_color);
+        let action = ActionContentV1::edit_category(
+            target,
+            new_name,
+            new_description,
+            new_icon,
+            new_color,
+            None,
+        );
         Self::Public {
             content_type: CONTENT_TYPE_ACTION,
             content_version: ACTION_CONTENT_VERSION,
@@ -3000,5 +3219,876 @@ mod tests {
 
         // Edit should be ignored - message should NOT appear as category-edited
         assert!(!messages.is_category_edited(&text_id));
+    }
+
+    fn at(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    fn topic(
+        signer: &SigningKey,
+        author: MemberId,
+        owner_id: MemberId,
+        section: Option<MessageId>,
+        auto_moderated: bool,
+        time: SystemTime,
+    ) -> AuthorizedMessageV1 {
+        use crate::board_state::content::{TEXT_CONTENT_VERSION, CONTENT_TYPE_TEXT};
+        let text = TextContentV1::new("Topic".to_string(), "Body".to_string())
+            .with_category(section)
+            .with_auto_moderated(auto_moderated);
+        AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author,
+                time,
+                content: BoardMessageBody::public_raw(
+                    CONTENT_TYPE_TEXT,
+                    TEXT_CONTENT_VERSION,
+                    text.encode(),
+                ),
+                images: Vec::new(),
+            },
+            signer,
+        )
+    }
+
+    fn poll_topic(
+        signer: &SigningKey,
+        author: MemberId,
+        owner_id: MemberId,
+        section: Option<MessageId>,
+        auto_moderated: bool,
+        time: SystemTime,
+    ) -> AuthorizedMessageV1 {
+        use crate::board_state::content::{
+            PollContentV1, CONTENT_TYPE_POLL, POLL_CONTENT_VERSION,
+        };
+        let poll = PollContentV1::new(
+            "Question".to_string(),
+            "Body".to_string(),
+            vec!["A".to_string(), "B".to_string()],
+            None,
+            false,
+        )
+        .with_category(section)
+        .with_auto_moderated(auto_moderated);
+        AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author,
+                time,
+                content: BoardMessageBody::public_raw(
+                    CONTENT_TYPE_POLL,
+                    POLL_CONTENT_VERSION,
+                    poll.encode(),
+                ),
+                images: Vec::new(),
+            },
+            signer,
+        )
+    }
+
+    fn reply_to(
+        signer: &SigningKey,
+        author: MemberId,
+        owner_id: MemberId,
+        target: MessageId,
+        time: SystemTime,
+    ) -> AuthorizedMessageV1 {
+        AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author,
+                time,
+                content: BoardMessageBody::reply(
+                    String::new(),
+                    "Reply".to_string(),
+                    target,
+                    "Someone".to_string(),
+                    "Preview".to_string(),
+                ),
+                images: Vec::new(),
+            },
+            signer,
+        )
+    }
+
+    fn delete_by(
+        signer: &SigningKey,
+        author: MemberId,
+        owner_id: MemberId,
+        target: MessageId,
+        time: SystemTime,
+    ) -> AuthorizedMessageV1 {
+        AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author,
+                time,
+                content: BoardMessageBody::delete(target),
+                images: Vec::new(),
+            },
+            signer,
+        )
+    }
+
+    fn reaction_by(
+        signer: &SigningKey,
+        author: MemberId,
+        owner_id: MemberId,
+        target: MessageId,
+        time: SystemTime,
+    ) -> AuthorizedMessageV1 {
+        AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author,
+                time,
+                content: BoardMessageBody::reaction(target, "👍".to_string()),
+                images: Vec::new(),
+            },
+            signer,
+        )
+    }
+
+    fn nickname_by(
+        signer: &SigningKey,
+        author: MemberId,
+        owner_id: MemberId,
+        target: MemberId,
+        nickname: &str,
+        time: SystemTime,
+    ) -> AuthorizedMessageV1 {
+        use crate::board_state::content::{
+            ActionContentV1, ACTION_CONTENT_VERSION, ACTION_TYPE_SET_NICKNAME,
+            CONTENT_TYPE_MODERATION_ACTION,
+        };
+        let action = ActionContentV1::set_nickname(target, nickname.to_string());
+        let envelope = crate::board_state::content::ModerationActionV1::new(
+            ACTION_TYPE_SET_NICKNAME,
+            action.target.clone(),
+            crate::board_state::privacy::SealedBytes::public(action.encode()),
+        );
+        AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author,
+                time,
+                content: BoardMessageBody::public_raw(
+                    CONTENT_TYPE_MODERATION_ACTION,
+                    ACTION_CONTENT_VERSION,
+                    envelope.encode(),
+                ),
+                images: Vec::new(),
+            },
+            signer,
+        )
+    }
+
+    fn category_with_auto(
+        owner: &SigningKey,
+        owner_id: MemberId,
+        auto_moderated_topics: Option<bool>,
+        time: SystemTime,
+    ) -> (AuthorizedMessageV1, MessageId) {
+        use crate::board_state::content::{
+            CategoryContentV1, CATEGORY_CONTENT_VERSION, CONTENT_TYPE_CATEGORY,
+        };
+        let category = CategoryContentV1::new(
+            "General".to_string(),
+            None,
+            crate::board_state::content::DEFAULT_CATEGORY_COLOR.to_string(),
+        )
+        .with_auto_moderated_topics(auto_moderated_topics);
+        let message = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author: owner_id,
+                time,
+                content: BoardMessageBody::public_raw(
+                    CONTENT_TYPE_CATEGORY,
+                    CATEGORY_CONTENT_VERSION,
+                    category.encode(),
+                ),
+                images: Vec::new(),
+            },
+            owner,
+        );
+        let id = message.id();
+        (message, id)
+    }
+
+    struct Fixture {
+        owner: SigningKey,
+        author: SigningKey,
+        stranger: SigningKey,
+        state: ChatBoardStateV1,
+        parameters: ChatBoardParametersV1,
+        owner_id: MemberId,
+        author_id: MemberId,
+        stranger_id: MemberId,
+    }
+
+    /// The owner plus two invited members.
+    fn board_fixture() -> Fixture {
+        let owner = SigningKey::from_bytes(&[51u8; 32]);
+        let author = SigningKey::from_bytes(&[52u8; 32]);
+        let stranger = SigningKey::from_bytes(&[53u8; 32]);
+        let owner_id = MemberId::from(&owner.verifying_key());
+        let author_id = MemberId::from(&author.verifying_key());
+        let stranger_id = MemberId::from(&stranger.verifying_key());
+        let mut configuration = Configuration::default();
+        configuration.owner_member_id = owner_id;
+        let mut state = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(configuration, &owner),
+            ..Default::default()
+        };
+        for signer in [&author, &stranger] {
+            state.members.members.push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: owner_id,
+                    invited_by: owner_id,
+                    member_vk: signer.verifying_key(),
+                    join_proof: None,
+                },
+                &owner,
+            ));
+        }
+        let parameters = ChatBoardParametersV1 {
+            owner: owner.verifying_key(),
+        };
+        Fixture {
+            owner,
+            author,
+            stranger,
+            state,
+            parameters,
+            owner_id,
+            author_id,
+            stranger_id,
+        }
+    }
+
+    fn apply_topic(
+        state: &ChatBoardStateV1,
+        parameters: &ChatBoardParametersV1,
+        messages: &mut MessagesV1,
+        message: AuthorizedMessageV1,
+    ) -> Result<(), String> {
+        messages.apply_delta(state, parameters, &Some(vec![message]))
+    }
+
+    fn rebuild(
+        state: &ChatBoardStateV1,
+        parameters: &ChatBoardParametersV1,
+        messages: &mut MessagesV1,
+        reactions: bool,
+    ) {
+        use std::collections::HashSet;
+        let admins: HashSet<MemberId> = state
+            .admin
+            .admins
+            .iter()
+            .map(|admin| admin.admin.id())
+            .collect();
+        let members: HashSet<MemberId> = state
+            .members
+            .members
+            .iter()
+            .map(|member| member.member.id())
+            .collect();
+        messages.rebuild_actions_state_with_permissions(
+            &HashMap::new(),
+            Some(parameters.owner_id()),
+            Some(&admins),
+            None,
+            reactions,
+            Some(&members),
+        );
+    }
+
+    #[test]
+    fn auto_moderated_topics_follow_the_section_capability() {
+        let fixture = board_fixture();
+        let (open_message, open) =
+            category_with_auto(&fixture.owner, fixture.owner_id, Some(true), at(1));
+        let (closed_message, closed) =
+            category_with_auto(&fixture.owner, fixture.owner_id, Some(false), at(2));
+        let (inherited_message, inherited) =
+            category_with_auto(&fixture.owner, fixture.owner_id, None, at(3));
+
+        let base = |categories: Vec<AuthorizedMessageV1>| MessagesV1 {
+            messages: categories,
+            ..Default::default()
+        };
+
+        let mut messages = base(vec![
+            open_message.clone(),
+            closed_message.clone(),
+            inherited_message.clone(),
+        ]);
+        apply_topic(
+            &fixture.state,
+            &fixture.parameters,
+            &mut messages,
+            topic(
+                &fixture.author,
+                fixture.author_id,
+                fixture.owner_id,
+                Some(open.clone()),
+                true,
+                at(10),
+            ),
+        )
+        .expect("an open section accepts an auto-moderated topic");
+
+        let mut messages = base(vec![
+            open_message.clone(),
+            closed_message.clone(),
+            inherited_message.clone(),
+        ]);
+        let error = apply_topic(
+            &fixture.state,
+            &fixture.parameters,
+            &mut messages,
+            topic(
+                &fixture.author,
+                fixture.author_id,
+                fixture.owner_id,
+                Some(closed.clone()),
+                true,
+                at(11),
+            ),
+        )
+        .expect_err("a closed section rejects the flag");
+        assert!(error.contains("auto-moderated"), "{error}");
+
+        // Polls carry the section too, so the same rule applies.
+        let mut messages = base(vec![
+            open_message.clone(),
+            closed_message.clone(),
+            inherited_message.clone(),
+        ]);
+        apply_topic(
+            &fixture.state,
+            &fixture.parameters,
+            &mut messages,
+            poll_topic(
+                &fixture.author,
+                fixture.author_id,
+                fixture.owner_id,
+                Some(closed.clone()),
+                true,
+                at(11),
+            ),
+        )
+        .expect_err("a closed section rejects an auto-moderated poll");
+
+        let mut messages = base(vec![
+            open_message.clone(),
+            closed_message.clone(),
+            inherited_message.clone(),
+        ]);
+        apply_topic(
+            &fixture.state,
+            &fixture.parameters,
+            &mut messages,
+            topic(
+                &fixture.author,
+                fixture.author_id,
+                fixture.owner_id,
+                Some(inherited.clone()),
+                true,
+                at(12),
+            ),
+        )
+        .expect("the section inherits the board setting");
+
+        let mut messages = base(vec![
+            open_message.clone(),
+            closed_message.clone(),
+            inherited_message.clone(),
+        ]);
+        apply_topic(
+            &fixture.state,
+            &fixture.parameters,
+            &mut messages,
+            topic(
+                &fixture.author,
+                fixture.author_id,
+                fixture.owner_id,
+                Some(closed.clone()),
+                false,
+                at(13),
+            ),
+        )
+        .expect("a normal topic is always accepted");
+
+        // Turning the board default off closes the root and inherited sections;
+        // an explicit section override stays open.
+        let mut state = fixture.state.clone();
+        let mut config = state.configuration.configuration.clone();
+        config.configuration_version += 1;
+        config.auto_moderated_topics = false;
+        state.configuration = AuthorizedConfigurationV1::new(config, &fixture.owner);
+
+        let mut messages = base(vec![
+            open_message.clone(),
+            closed_message.clone(),
+            inherited_message.clone(),
+        ]);
+        let error = apply_topic(
+            &state,
+            &fixture.parameters,
+            &mut messages,
+            topic(
+                &fixture.author,
+                fixture.author_id,
+                fixture.owner_id,
+                None,
+                true,
+                at(14),
+            ),
+        )
+        .expect_err("the board root follows the board default");
+        assert!(error.contains("auto-moderated"), "{error}");
+
+        let mut messages = base(vec![
+            open_message.clone(),
+            closed_message.clone(),
+            inherited_message.clone(),
+        ]);
+        apply_topic(
+            &state,
+            &fixture.parameters,
+            &mut messages,
+            topic(
+                &fixture.author,
+                fixture.author_id,
+                fixture.owner_id,
+                Some(inherited),
+                true,
+                at(15),
+            ),
+        )
+        .expect_err("an inherited section follows the board default");
+
+        let mut messages = base(vec![open_message, closed_message, inherited_message]);
+        apply_topic(
+            &state,
+            &fixture.parameters,
+            &mut messages,
+            topic(
+                &fixture.author,
+                fixture.author_id,
+                fixture.owner_id,
+                Some(open),
+                true,
+                at(16),
+            ),
+        )
+        .expect("an explicit section override wins");
+    }
+
+    #[test]
+    fn an_auto_moderated_topic_author_deletes_replies_but_not_the_topic() {
+        let fixture = board_fixture();
+        let topic = topic(
+            &fixture.author,
+            fixture.author_id,
+            fixture.owner_id,
+            None,
+            true,
+            at(10),
+        );
+        let topic_id = topic.id();
+        let reply = reply_to(
+            &fixture.stranger,
+            fixture.stranger_id,
+            fixture.owner_id,
+            topic_id.clone(),
+            at(11),
+        );
+        let reply_id = reply.id();
+        let nested = reply_to(
+            &fixture.stranger,
+            fixture.stranger_id,
+            fixture.owner_id,
+            reply_id.clone(),
+            at(12),
+        );
+        let nested_id = nested.id();
+
+        let mut messages = MessagesV1 {
+            messages: vec![
+                topic,
+                reply,
+                nested,
+                delete_by(
+                    &fixture.author,
+                    fixture.author_id,
+                    fixture.owner_id,
+                    reply_id.clone(),
+                    at(20),
+                ),
+                delete_by(
+                    &fixture.author,
+                    fixture.author_id,
+                    fixture.owner_id,
+                    nested_id.clone(),
+                    at(21),
+                ),
+                // The auto-moderated privilege stops at the root; the author's
+                // ordinary right to delete its own topic is unchanged.
+                delete_by(
+                    &fixture.stranger,
+                    fixture.stranger_id,
+                    fixture.owner_id,
+                    topic_id.clone(),
+                    at(22),
+                ),
+            ],
+            ..Default::default()
+        };
+        rebuild(&fixture.state, &fixture.parameters, &mut messages, true);
+
+        assert!(messages.is_deleted(&reply_id), "the reply is removed");
+        assert!(messages.is_deleted(&nested_id), "a nested reply follows");
+        assert!(
+            !messages.is_deleted(&topic_id),
+            "a stranger cannot delete the topic itself"
+        );
+    }
+
+    #[test]
+    fn a_stranger_cannot_delete_replies_on_an_auto_moderated_topic() {
+        let fixture = board_fixture();
+        let topic = topic(
+            &fixture.author,
+            fixture.author_id,
+            fixture.owner_id,
+            None,
+            true,
+            at(10),
+        );
+        let topic_id = topic.id();
+        let reply = reply_to(
+            &fixture.author,
+            fixture.author_id,
+            fixture.owner_id,
+            topic_id.clone(),
+            at(11),
+        );
+        let reply_id = reply.id();
+        let mut messages = MessagesV1 {
+            messages: vec![
+                topic,
+                reply,
+                delete_by(
+                    &fixture.stranger,
+                    fixture.stranger_id,
+                    fixture.owner_id,
+                    reply_id.clone(),
+                    at(20),
+                ),
+            ],
+            ..Default::default()
+        };
+        rebuild(&fixture.state, &fixture.parameters, &mut messages, true);
+        assert!(!messages.is_deleted(&reply_id));
+    }
+
+    #[test]
+    fn a_normal_topic_does_not_grant_delete_power_to_its_author() {
+        let fixture = board_fixture();
+        let topic = topic(
+            &fixture.author,
+            fixture.author_id,
+            fixture.owner_id,
+            None,
+            false,
+            at(10),
+        );
+        let topic_id = topic.id();
+        let reply = reply_to(
+            &fixture.stranger,
+            fixture.stranger_id,
+            fixture.owner_id,
+            topic_id.clone(),
+            at(11),
+        );
+        let reply_id = reply.id();
+        let mut messages = MessagesV1 {
+            messages: vec![
+                topic,
+                reply,
+                delete_by(
+                    &fixture.author,
+                    fixture.author_id,
+                    fixture.owner_id,
+                    reply_id.clone(),
+                    at(20),
+                ),
+            ],
+            ..Default::default()
+        };
+        rebuild(&fixture.state, &fixture.parameters, &mut messages, true);
+        assert!(!messages.is_deleted(&reply_id));
+    }
+
+    #[test]
+    fn only_owners_and_admins_set_nickname_overrides() {
+        let mut fixture = board_fixture();
+        fixture.state.admin.admins.push(AuthorizedAdmin::new(
+            Admin {
+                member_id: fixture.stranger_id,
+                generation: 1,
+                signed_at: SystemTime::UNIX_EPOCH,
+            },
+            &fixture.owner,
+        ));
+
+        let mut messages = MessagesV1 {
+            messages: vec![
+                // A plain member cannot override anyone, including itself.
+                nickname_by(
+                    &fixture.author,
+                    fixture.author_id,
+                    fixture.owner_id,
+                    fixture.author_id,
+                    "Self",
+                    at(10),
+                ),
+                // The owner and an admin can.
+                nickname_by(
+                    &fixture.owner,
+                    fixture.owner_id,
+                    fixture.owner_id,
+                    fixture.author_id,
+                    "Owner name",
+                    at(11),
+                ),
+                nickname_by(
+                    &fixture.stranger,
+                    fixture.stranger_id,
+                    fixture.owner_id,
+                    fixture.author_id,
+                    "Admin name",
+                    at(12),
+                ),
+                // A non-member is not a valid target.
+                nickname_by(
+                    &fixture.owner,
+                    fixture.owner_id,
+                    fixture.owner_id,
+                    MemberId::from_bytes([99u8; 32]),
+                    "Nobody",
+                    at(13),
+                ),
+            ],
+            ..Default::default()
+        };
+        rebuild(&fixture.state, &fixture.parameters, &mut messages, true);
+
+        let applied = messages.nickname_override(&fixture.author_id).unwrap();
+        assert_eq!(applied.nickname, "Admin name", "the highest version wins");
+        assert_eq!(applied.set_by, fixture.stranger_id);
+        assert!(
+            messages
+                .nickname_override(&MemberId::from_bytes([99u8; 32]))
+                .is_none(),
+            "a non-member gets no override"
+        );
+    }
+
+    #[test]
+    fn the_reaction_gate_ignores_history_and_new_reactions() {
+        let fixture = board_fixture();
+        let post = topic(
+            &fixture.owner,
+            fixture.owner_id,
+            fixture.owner_id,
+            None,
+            false,
+            at(1),
+        );
+        let post_id = post.id();
+        let mut messages = MessagesV1 {
+            messages: vec![
+                post,
+                reaction_by(
+                    &fixture.stranger,
+                    fixture.stranger_id,
+                    fixture.owner_id,
+                    post_id.clone(),
+                    at(2),
+                ),
+            ],
+            ..Default::default()
+        };
+        rebuild(&fixture.state, &fixture.parameters, &mut messages, true);
+        assert!(messages.reactions(&post_id).is_some());
+
+        rebuild(&fixture.state, &fixture.parameters, &mut messages, false);
+        assert!(
+            messages.reactions(&post_id).is_none(),
+            "disabled reactions disappear, history included"
+        );
+
+        rebuild(&fixture.state, &fixture.parameters, &mut messages, true);
+        assert_eq!(
+            messages.reactions(&post_id).unwrap().get("👍").unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_sealed_nickname_action_applies_only_with_the_decrypted_payload() {
+        let fixture = board_fixture();
+        use crate::board_state::content::{
+            ActionContentV1, ACTION_CONTENT_VERSION, ACTION_TYPE_SET_NICKNAME,
+            CONTENT_TYPE_MODERATION_ACTION,
+        };
+        use crate::board_state::privacy::SealedBytes;
+
+        let action = ActionContentV1::set_nickname(fixture.author_id, "Sealed name".to_string());
+        let plaintext = action.encode();
+        let envelope = crate::board_state::content::ModerationActionV1::new(
+            ACTION_TYPE_SET_NICKNAME,
+            action.target.clone(),
+            SealedBytes::private(plaintext.clone(), [0u8; 12], 0, plaintext.len() as u32),
+        );
+        let message = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: fixture.owner_id,
+                author: fixture.owner_id,
+                time: at(10),
+                content: BoardMessageBody::public_raw(
+                    CONTENT_TYPE_MODERATION_ACTION,
+                    ACTION_CONTENT_VERSION,
+                    envelope.encode(),
+                ),
+                images: Vec::new(),
+            },
+            &fixture.owner,
+        );
+        let message_id = message.id();
+        let mut messages = MessagesV1 {
+            messages: vec![message],
+            ..Default::default()
+        };
+
+        rebuild(&fixture.state, &fixture.parameters, &mut messages, true);
+        assert!(
+            messages.nickname_override(&fixture.author_id).is_none(),
+            "a sealed payload needs the client key"
+        );
+
+        let mut decrypted = HashMap::new();
+        decrypted.insert(message_id, plaintext);
+        use std::collections::HashSet;
+        let admins: HashSet<MemberId> = HashSet::new();
+        let members: HashSet<MemberId> = fixture
+            .state
+            .members
+            .members
+            .iter()
+            .map(|member| member.member.id())
+            .collect();
+        messages.rebuild_actions_state_with_permissions(
+            &decrypted,
+            Some(fixture.owner_id),
+            Some(&admins),
+            None,
+            true,
+            Some(&members),
+        );
+        assert_eq!(
+            messages
+                .nickname_override(&fixture.author_id)
+                .map(|entry| entry.nickname.as_str()),
+            Some("Sealed name")
+        );
+    }
+
+    #[test]
+    fn a_poll_edit_cannot_change_the_auto_moderated_flag() {
+        use crate::board_state::content::{
+            ActionContentV1, PollContentV1, ACTION_CONTENT_VERSION, CONTENT_TYPE_ACTION,
+            CONTENT_TYPE_POLL, POLL_CONTENT_VERSION,
+        };
+        let fixture = board_fixture();
+        let poll = PollContentV1::new(
+            "Question".to_string(),
+            "Body".to_string(),
+            vec!["A".to_string(), "B".to_string()],
+            None,
+            false,
+        )
+        .with_auto_moderated(true);
+        let original = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: fixture.owner_id,
+                author: fixture.author_id,
+                time: at(10),
+                content: BoardMessageBody::public_raw(
+                    CONTENT_TYPE_POLL,
+                    POLL_CONTENT_VERSION,
+                    poll.encode(),
+                ),
+                images: Vec::new(),
+            },
+            &fixture.author,
+        );
+        let poll_id = original.id();
+        let mut replacement = poll.clone();
+        replacement.auto_moderated = false;
+        replacement.description = "Edited".to_string();
+        let edit = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: fixture.owner_id,
+                author: fixture.author_id,
+                time: at(11),
+                content: BoardMessageBody::public_raw(
+                    CONTENT_TYPE_ACTION,
+                    ACTION_CONTENT_VERSION,
+                    ActionContentV1::edit_poll(poll_id.clone(), replacement).encode(),
+                ),
+                images: Vec::new(),
+            },
+            &fixture.author,
+        );
+        let mut messages = MessagesV1 {
+            messages: vec![original, edit],
+            ..Default::default()
+        };
+        rebuild(&fixture.state, &fixture.parameters, &mut messages, true);
+        let edited = messages.edited_poll(&poll_id).expect("the edit applies");
+        assert_eq!(edited.description, "Edited");
+        assert!(edited.auto_moderated, "the creation-time flag is preserved");
+    }
+
+    #[test]
+    fn a_section_override_wins_over_the_board_setting() {
+        let mut fixture = board_fixture();
+        let (closed_message, closed) =
+            category_with_auto(&fixture.owner, fixture.owner_id, Some(false), at(1));
+        let (open_message, open) =
+            category_with_auto(&fixture.owner, fixture.owner_id, Some(true), at(2));
+        let mut messages = MessagesV1 {
+            messages: vec![closed_message, open_message],
+            ..Default::default()
+        };
+        assert!(!messages.section_auto_moderated_topics(&fixture.state, Some(&closed)));
+        assert!(messages.section_auto_moderated_topics(&fixture.state, None));
+
+        let mut config = fixture.state.configuration.configuration.clone();
+        config.configuration_version += 1;
+        config.auto_moderated_topics = false;
+        fixture.state.configuration = AuthorizedConfigurationV1::new(config, &fixture.owner);
+
+        assert!(messages.section_auto_moderated_topics(&fixture.state, Some(&open)));
+        assert!(!messages.section_auto_moderated_topics(&fixture.state, None));
     }
 }
