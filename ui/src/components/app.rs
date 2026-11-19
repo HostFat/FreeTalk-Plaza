@@ -597,19 +597,34 @@ fn BoardGate(board_id: String, children: Element) -> Element {
     // Resolve the route id (which may be the current owner or the visible
     // profile) to the BOARDS map key after render.
     use_effect(move || {
+        // Subscribe to the map explicitly: the route may be resolved before
+        // the delegate load finishes, and the effect must run again once the
+        // board data arrives.
+        let _ = BOARDS.read().map.len();
         if let Some(key) = parsed {
             select_board(Some(key));
         }
     });
 
-    // The existence check must use the resolved CURRENT_BOARD, not the raw
-    // route id: the route can name the owner key while the map is keyed by
-    // the founding board key.
+    // The route may name the founding board key, the current owner key or the
+    // visible profile key. Check the route against the map directly as well as
+    // CURRENT_BOARD so a selection made before the delegate load finishes does
+    // not leave the gate on "Loading board…".
     let exists = use_memo(move || {
-        CURRENT_BOARD
-            .read()
-            .owner_key
-            .is_some_and(|key| BOARDS.read().map.contains_key(&key))
+        let Some(route_key) = parsed else {
+            return false;
+        };
+        let boards = BOARDS.read();
+        if let Some(key) = CURRENT_BOARD.read().owner_key {
+            if boards.map.contains_key(&key) {
+                return true;
+            }
+        }
+        boards.map.iter().any(|(map_key, board)| {
+            *map_key == route_key
+                || board.owner_vk == route_key
+                || board.current_owner_key() == route_key
+        })
     });
     let boards_loaded = *crate::components::app::BOARDS_LOADED.read();
     // A private board can be in the map with no usable key after a reload if
@@ -675,7 +690,17 @@ fn BoardGate(board_id: String, children: Element) -> Element {
             }
             button {
                 r#type: "button",
-                class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text rounded-lg transition-colors inline-block",
+                class: "px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-lg transition-colors inline-block",
+                onclick: move |_| {
+                    if let Some(win) = web_sys::window() {
+                        let _ = win.location().reload();
+                    }
+                },
+                "Reload"
+            }
+            button {
+                r#type: "button",
+                class: "mt-2 px-4 py-2 bg-surface hover:bg-surface-hover text-text rounded-lg transition-colors inline-block",
                 onclick: move |_| {
                     if let Some(win) = web_sys::window() {
                         let _ = win.location().set_hash("/");
