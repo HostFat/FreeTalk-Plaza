@@ -384,6 +384,10 @@ pub async fn load_boards_direct() -> Result<usize, String> {
     let boards = crate::board_data::Boards::decode(bytes.as_slice())
         .ok_or("The stored board map does not decode")?;
     let count = boards.map.len();
+    if count == 0 && !crate::components::app::BOARDS.read().map.is_empty() {
+        info!("Ignoring an empty direct board load over a non-empty map");
+        return Ok(0);
+    }
     crate::components::app::toasts::show(format!(
         "Direct board load: {count} board(s)"
     ));

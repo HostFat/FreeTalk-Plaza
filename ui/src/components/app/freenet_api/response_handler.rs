@@ -345,7 +345,13 @@ impl ResponseHandler {
                                                             .collect();
 
                                                         // Merge the loaded boards with the current boards
+                                                        let loaded_is_empty = loaded_boards.map.is_empty();
+                                                        let current_is_empty = BOARDS.read().map.is_empty();
                                                         crate::util::defer(move || {
+                                                            if loaded_is_empty && !current_is_empty {
+                                                                info!("Ignoring an empty delegate board load over a non-empty map");
+                                                                return;
+                                                            }
                                                             BOARDS.with_mut(|current_boards| {
                                                             if let Err(e) = current_boards.merge(loaded_boards) {
                                                                 error!("Failed to merge boards: {}", e);
