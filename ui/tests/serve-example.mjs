@@ -31,6 +31,33 @@ if (
   }
 }
 
+// chat_delegate.rs include_bytes!s the release delegate WASM from target/.
+const delegateWasm = path.resolve(
+  "..",
+  "target",
+  "wasm32-unknown-unknown",
+  "release",
+  "plaza_delegate.wasm",
+);
+if (!existsSync(delegateWasm)) {
+  console.log("Building the delegate WASM...");
+  const step = spawnSync(
+    "cargo",
+    [
+      "run",
+      "--quiet",
+      "--manifest-path",
+      "tools/wasm-tool/Cargo.toml",
+      "--",
+      "sync",
+    ],
+    { cwd: path.resolve(".."), stdio: "inherit" },
+  );
+  if (step.status !== 0) {
+    process.exit(step.status ?? 1);
+  }
+}
+
 const build = spawnSync(
   dx,
   ["build", "--package", "plaza-ui", "--features", "example-data,no-sync"],

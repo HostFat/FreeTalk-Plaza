@@ -60,6 +60,10 @@ jobs:
         key: e2e-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}
         restore-keys: e2e-${{ runner.os }}-
 
+    # chat_delegate.rs includes target/wasm32-unknown-unknown/release/plaza_delegate.wasm.
+    - name: Build contract and delegate WASMs
+      run: nix develop --command cargo run --quiet --manifest-path tools/wasm-tool/Cargo.toml -- sync
+
     - name: Run Playwright
       working-directory: ui/tests
       env:
