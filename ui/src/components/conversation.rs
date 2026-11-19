@@ -2142,8 +2142,18 @@ fn ReactionDisplay(
                 let emoji_click = emoji.clone();
                 let msg_id_click = msg_id.clone();
                 let names: Vec<String> = reactors.iter().map(|id| {
-                    if *id == self_member_id { "You".to_string() }
-                    else { member_names.get(id).cloned().unwrap_or("Unknown".to_string()) }
+                    if *id == self_member_id {
+                        "You".to_string()
+                    } else if let Some(name) = member_names.get(id) {
+                        name.clone()
+                    } else {
+                        let short: String = id.to_string().chars().take(8).collect();
+                        dioxus::logger::tracing::info!(
+                            "reaction {emoji}: actor {id} not in member_names; keys={:?}",
+                            member_names.keys().map(|key| key.to_string()).collect::<Vec<_>>()
+                        );
+                        format!("Unknown({short})")
+                    }
                 }).collect();
                 let tooltip = if is_user {
                     format!("{} (click to remove)", names.join(", "))

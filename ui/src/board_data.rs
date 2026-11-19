@@ -372,10 +372,21 @@ impl BoardData {
         {
             return Err("That profile is deactivated on this board".to_string());
         }
+        dioxus::logger::tracing::info!(
+            "switch_profile before: self={} owner_sk={:?} owner={} current={} profile={:?}",
+            MemberId::from(&self.self_sk.verifying_key()),
+            self.owner_sk.as_ref().map(|key| MemberId::from(&key.verifying_key())),
+            MemberId::from(&self.owner_key().verifying_key()),
+            MemberId::from(self.current_owner_key()),
+            self.profile_id
+        );
         // Keep owner authority when switching away from the owner profile;
         // otherwise settings and trash actions sign with the new member key.
+        // Store the real owner key, never the visible profile (which may be a
+        // member with the same permissions but a different key).
         if self.is_current_owner() {
-            self.owner_sk = Some(self.self_sk.clone());
+            let owner_key = self.owner_key().clone();
+            self.owner_sk = Some(owner_key);
         }
         self.self_sk = signing_key.clone();
         // The old root profile no longer explains `self_sk`; callers that know
@@ -392,6 +403,15 @@ impl BoardData {
             .cloned();
         let parameters = self.board_parameters();
         self.capture_self_membership_data(&parameters);
+        dioxus::logger::tracing::info!(
+            "switch_profile after: self={} owner_sk={:?} owner={} current={} is_owner={} profile={:?}",
+            MemberId::from(&self.self_sk.verifying_key()),
+            self.owner_sk.as_ref().map(|key| MemberId::from(&key.verifying_key())),
+            MemberId::from(&self.owner_key().verifying_key()),
+            MemberId::from(self.current_owner_key()),
+            self.is_current_owner(),
+            self.profile_id
+        );
         Ok(())
     }
 

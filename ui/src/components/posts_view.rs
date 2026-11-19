@@ -1806,6 +1806,34 @@ pub fn SinglePostView(post_id: String) -> Element {
                 let category = post
                     .as_ref()
                     .and_then(|post| category_of(post, &all_messages));
+                // The topic card needs the same member-name map as replies;
+                // without it reaction tooltips show Unknown.
+                let member_names: std::collections::HashMap<MemberId, String> = board_data
+                    .board_state
+                    .member_info
+                    .member_info
+                    .iter()
+                    .map(|ami| {
+                        let name = if let Some(override_name) = board_data
+                            .board_state
+                            .recent_messages
+                            .nickname_override(&ami.member_info.member_id)
+                        {
+                            override_name.nickname.clone()
+                        } else {
+                            match crate::util::ecies::unseal_bytes_with_secrets(
+                                &ami.member_info.preferred_nickname,
+                                &board_data.secrets,
+                            ) {
+                                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                                Err(_) => {
+                                    ami.member_info.preferred_nickname.to_string_lossy()
+                                }
+                            }
+                        };
+                        (ami.member_info.member_id, name)
+                    })
+                    .collect();
                 let can_moderate = post
                     .as_ref()
                     .map(|_post| {
@@ -1852,6 +1880,7 @@ pub fn SinglePostView(post_id: String) -> Element {
                         max_message_size,
                         category,
                         can_moderate,
+                        member_names,
                     )
                 });
             }
@@ -1914,7 +1943,7 @@ pub fn SinglePostView(post_id: String) -> Element {
     let category_id = post_data
         .read()
         .as_ref()
-        .and_then(|(_, _, _, _, category, _)| category.clone());
+        .and_then(|(_, _, _, _, category, _, _)| category.clone());
     let has_category = category_id.is_some();
     let can_purge_illegal = use_memo(move || {
         CURRENT_BOARD
@@ -2057,13 +2086,14 @@ pub fn SinglePostView(post_id: String) -> Element {
             div { class: "flex-1 overflow-y-auto",
                 {
                     match post_data.read().as_ref() {
-                        Some((post, self_member_id, max_title_size, max_message_size, _, can_moderate)) => {
+                        Some((post, self_member_id, max_title_size, max_message_size, _, can_moderate, member_names)) => {
                             rsx! {
                                 div { class: "max-w-5xl mx-auto px-4 py-6",
                                     MessageCard {
                                         message: post.clone(),
                                         variant: MessageCardVariant::Card,
                                         self_member_id: *self_member_id,
+                                        member_names: member_names.clone(),
                                         expanded: true,
                                         show_replies: true,
                                         max_title_size: *max_title_size,

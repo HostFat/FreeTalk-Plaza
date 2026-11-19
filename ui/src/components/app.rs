@@ -593,6 +593,15 @@ fn BoardGate(board_id: String, children: Element) -> Element {
                 p { class: "text-text-muted mb-6 text-sm",
                     "Waiting for the board state. It appears in the list above as soon as it is loaded."
                 }
+                if let Some(key) = CURRENT_BOARD.read().owner_key {
+                    p { class: "text-[10px] font-mono text-text-muted mb-4",
+                        {format!(
+                            "diag key={} map={}",
+                            MemberId::from(key),
+                            BOARDS.read().map.len()
+                        )}
+                    }
+                }
             }
             button {
                 r#type: "button",
