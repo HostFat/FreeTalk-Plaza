@@ -64,13 +64,22 @@ jobs:
     - name: Build contract and delegate WASMs
       run: nix develop --command cargo run --quiet --manifest-path tools/wasm-tool/Cargo.toml -- sync
 
+    # Run the Node process outside Nix: WebKit crashes when it inherits the
+    # Nix dev shell's library paths. Only dx needs the shell.
+    - name: Create the dx wrapper
+      run: |
+        cat > "$RUNNER_TEMP/dx-nix" <<'EOF'
+        #!/usr/bin/env bash
+        exec nix develop "$GITHUB_WORKSPACE" --command dx "$@"
+        EOF
+        chmod +x "$RUNNER_TEMP/dx-nix"
+
     - name: Run Playwright
       working-directory: ui/tests
       env:
         CI: "true"
-      # dx comes from the Nix dev shell; the Playwright webServer builds and
-      # serves the static example-data bundle.
-      run: nix develop ../.. --command npx playwright test
+        DX_BIN: ${{ runner.temp }}/dx-nix
+      run: npx playwright test
 
     - name: Upload Playwright report
       if: failure()
