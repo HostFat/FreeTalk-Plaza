@@ -38,11 +38,10 @@ pub fn EditBoardModal() -> Element {
 
     // Memoize if the current user is the owner of the board being edited
     let user_is_owner = use_memo(move || {
-        editing_board.read().as_ref().is_some_and(|board_data| {
-            let user_vk = board_data.owner_key().verifying_key();
-            let board_vk = EDIT_BOARD_MODAL.read().board.unwrap();
-            user_vk == board_vk
-        })
+        editing_board
+            .read()
+            .as_ref()
+            .is_some_and(|board_data| board_data.is_current_owner())
     });
 
     // Render the modal if board configuration is available
