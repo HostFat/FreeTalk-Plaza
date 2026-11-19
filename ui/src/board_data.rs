@@ -591,6 +591,58 @@ impl BoardData {
         Some((category_id, secret, version))
     }
 
+    /// Root topic a message belongs to. The public `topic_id` wins; a message
+    /// without one is treated as a topic unless its readable reply body names
+    /// a target. A sealed old reply without the public field gives no root.
+    pub fn topic_root_for(&self, target: &MessageId) -> Option<MessageId> {
+        let mut current = target.clone();
+        for _ in 0..64 {
+            let message = self
+                .board_state
+                .recent_messages
+                .messages
+                .iter()
+                .find(|message| message.id() == current)?;
+            if let Some(root) = &message.message.topic_id {
+                return Some(root.clone());
+            }
+            match self.readable_reply_target(&message.message.content) {
+                Some(parent) => current = parent,
+                None => return Some(current),
+            }
+        }
+        None
+    }
+
+    /// Reply target the body names, public or sealed with a key we hold.
+    fn readable_reply_target(&self, content: &BoardMessageBody) -> Option<MessageId> {
+        use plaza_core::board_state::content::{ReplyContentV1, CONTENT_TYPE_REPLY};
+        match content {
+            BoardMessageBody::Public {
+                content_type, data, ..
+            } if *content_type == CONTENT_TYPE_REPLY => {
+                ReplyContentV1::decode(data).ok().map(|reply| reply.target_message_id)
+            }
+            BoardMessageBody::Private {
+                content_type,
+                ciphertext,
+                nonce,
+                ..
+            } if *content_type == CONTENT_TYPE_REPLY => {
+                let (secret, version) = self.body_secret(content)?;
+                let bytes = crate::util::ecies::decrypt_with_symmetric_key(
+                    &secret,
+                    ciphertext,
+                    nonce,
+                    version,
+                )
+                .ok()?;
+                ReplyContentV1::decode(&bytes).ok().map(|reply| reply.target_message_id)
+            }
+            _ => None,
+        }
+    }
+
     /// Every restricted category this client can decode, with its content.
     pub fn restricted_categories(&self) -> Vec<(MessageId, CategoryContentV1)> {
         self.board_state
@@ -3840,6 +3892,7 @@ mod tests {
                         String::new(),
                     ),
                     reply_to: None,
+                    topic_id: None,
                     auto_moderated: false,
                 },
                 &invitee_sk,
@@ -4056,6 +4109,7 @@ mod tests {
                             content: BoardMessageBody::public(String::new(), "hello".to_string()),
                             time: get_current_system_time(),
                             reply_to: None,
+                            topic_id: None,
                             auto_moderated: false,
                         },
                         &invitee_sk,
@@ -4085,6 +4139,7 @@ mod tests {
             ),
             time: get_current_system_time(),
             reply_to: None,
+            topic_id: None,
             auto_moderated: false,
         };
         let authorized = AuthorizedMessageV1::new(message, &owner_sk);
@@ -4255,6 +4310,7 @@ mod tests {
                             ),
                             time: get_current_system_time(),
                             reply_to: None,
+                            topic_id: None,
                             auto_moderated: false,
                         },
                         &outsider_sk,
@@ -4575,6 +4631,7 @@ mod tests {
                 content: BoardMessageBody::public(String::new(), "test".to_string()),
                 time: std::time::SystemTime::UNIX_EPOCH,
                 reply_to: None,
+                topic_id: None,
                 auto_moderated: false,
             },
             signature: ed25519_dalek::Signature::from_bytes(&[0u8; 64]),

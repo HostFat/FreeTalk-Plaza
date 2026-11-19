@@ -957,6 +957,7 @@ impl ApiClient {
             ),
             time: std::time::SystemTime::now(),
             reply_to: None,
+            topic_id: None,
             auto_moderated: false,
         };
 
@@ -1054,6 +1055,7 @@ impl ApiClient {
             ),
             time: std::time::SystemTime::now(),
             reply_to: None,
+            topic_id: None,
             auto_moderated: false,
         };
 
@@ -1161,6 +1163,7 @@ impl ApiClient {
             ),
             time: std::time::SystemTime::now(),
             reply_to: None,
+            topic_id: None,
             auto_moderated: false,
         };
 
@@ -1221,6 +1224,7 @@ impl ApiClient {
             content: plaza_core::board_state::message::BoardMessageBody::delete(target_message_id),
             time: std::time::SystemTime::now(),
             reply_to: None,
+            topic_id: None,
             auto_moderated: false,
         };
 
@@ -1286,6 +1290,7 @@ impl ApiClient {
             ),
             time: std::time::SystemTime::now(),
             reply_to: None,
+            topic_id: None,
             auto_moderated: false,
         };
 
@@ -1351,6 +1356,7 @@ impl ApiClient {
             ),
             time: std::time::SystemTime::now(),
             reply_to: None,
+            topic_id: None,
             auto_moderated: false,
         };
 
@@ -1429,7 +1435,13 @@ impl ApiClient {
             .take(100)
             .collect();
 
-        // Create the reply message
+        // Create the reply message. The public topic link names the root; the
+        // body keeps the direct target for display.
+        let topic_root = target_msg
+            .message
+            .topic_id
+            .clone()
+            .unwrap_or_else(|| target_message_id.clone());
         let message = plaza_core::board_state::message::MessageV1 {
             images: Vec::new(),
             board_owner: MemberId::from(*board_owner_key),
@@ -1442,7 +1454,8 @@ impl ApiClient {
                 target_content_preview,
             ),
             time: std::time::SystemTime::now(),
-            reply_to: Some(target_message_id.clone()),
+            reply_to: None,
+            topic_id: Some(topic_root),
             auto_moderated: false,
         };
 

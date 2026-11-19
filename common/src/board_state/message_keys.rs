@@ -324,6 +324,7 @@ mod tests {
                 time: std::time::SystemTime::now(),
                 content: BoardMessageBody::public("t".to_string(), "body".to_string()),
                 reply_to: None,
+                topic_id: None,
                 auto_moderated: false,
             },
             sk,

@@ -1636,6 +1636,7 @@ mod revocation_tests {
                         time: SystemTime::now(),
                         content: BoardMessageBody::public("t".to_string(), "b".to_string()),
                         reply_to: None,
+                        topic_id: None,
                         auto_moderated: false,
                     },
                     sk,

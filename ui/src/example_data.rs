@@ -320,6 +320,7 @@ fn add_example_messages(
                 time: get_time_from_millis(current_time_ms),
                 content: BoardMessageBody::public(title, body),
                 reply_to: None,
+                topic_id: None,
                 auto_moderated: false,
             },
             signing_key,

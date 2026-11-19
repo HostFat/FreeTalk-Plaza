@@ -713,6 +713,7 @@ pub async fn purge_illegal(
             time: chrono::Utc::now().into(),
             content,
             reply_to: None,
+            topic_id: None,
             auto_moderated: false,
         };
         // In debug mode skip signing entirely: a dummy signature lets us see

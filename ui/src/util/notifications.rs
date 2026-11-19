@@ -171,6 +171,7 @@ mod tests {
             edit_history: Vec::new(),
             reactions: HashMap::new(),
             reply_to_message_id: reply_to,
+            topic_id: None,
             reply_to_author: None,
             reply_to_preview: None,
             receive_delay_secs: None,

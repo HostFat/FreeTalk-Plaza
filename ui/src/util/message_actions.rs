@@ -847,6 +847,7 @@ pub async fn split_reply(
         content,
         Vec::new(),
         Some(category),
+        None,
         false,
         Some(category),
     )
@@ -1004,6 +1005,7 @@ async fn send_action_messages(
             content,
             time: get_current_system_time(),
             reply_to: None,
+            topic_id: None,
             auto_moderated: false,
         };
 

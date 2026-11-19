@@ -665,6 +665,7 @@ fn test_encrypted_messages_in_private_board() {
         ),
         time: SystemTime::now(),
         reply_to: None,
+        topic_id: None,
         auto_moderated: false,
     };
 

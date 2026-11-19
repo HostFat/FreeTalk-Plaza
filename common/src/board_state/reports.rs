@@ -529,6 +529,7 @@ mod tests {
                 time: SystemTime::now(),
                 content: BoardMessageBody::public("Post".into(), "Body".into()),
                 reply_to: None,
+                topic_id: None,
                 auto_moderated: false,
             },
             &member_sk,

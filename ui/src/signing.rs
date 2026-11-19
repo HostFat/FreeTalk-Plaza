@@ -455,6 +455,7 @@ mod tests {
             content: BoardMessageBody::public(String::new(), "test".to_string()),
             time: std::time::SystemTime::UNIX_EPOCH,
             reply_to: None,
+            topic_id: None,
             auto_moderated: false,
         };
         let mut msg_bytes = Vec::new();

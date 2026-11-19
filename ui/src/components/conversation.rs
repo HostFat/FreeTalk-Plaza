@@ -109,6 +109,8 @@ pub struct MessageData {
     pub edit_history: Vec<EditVersion>,
     pub reactions: HashMap<String, Vec<MemberId>>,
     pub reply_to_message_id: Option<MessageId>,
+    /// Root topic this message belongs to, when the author published it.
+    pub topic_id: Option<MessageId>,
     pub reply_to_author: Option<String>,
     pub reply_to_preview: Option<String>,
     pub receive_delay_secs: Option<i64>,
@@ -510,6 +512,7 @@ pub fn get_all_messages(
             edit_history,
             reactions,
             reply_to_message_id,
+            topic_id: message.message.topic_id.clone(),
             reply_to_author,
             reply_to_preview,
             receive_delay_secs,
@@ -563,16 +566,18 @@ pub fn get_all_messages(
         }
     }
 
-    // Auto-moderated topics: mark replies their author may delete. The walk
-    // stops at the first message without a parent, which is the topic. Both
-    // links ride in the public fields, so sealed private-board topics count.
-    let by_id: HashMap<MessageId, (Option<MessageId>, bool, MemberId)> = messages
+    // Auto-moderated topics: mark replies their author may delete. The public
+    // topic link names the root directly; old messages walk their reply
+    // target instead. Both links ride in public metadata, so sealed
+    // private-board posts count.
+    let by_id: HashMap<MessageId, (Option<MessageId>, Option<MessageId>, bool, MemberId)> = messages
         .iter()
         .map(|message| {
             (
                 message.message_id.clone(),
                 (
                     message.reply_to_message_id.clone(),
+                    message.topic_id.clone(),
                     message.is_auto_moderated,
                     message.author_id,
                 ),
@@ -583,9 +588,13 @@ pub fn get_all_messages(
         let mut current = message.message_id.clone();
         let mut root = None;
         for _ in 0..64 {
-            let Some((parent, _, _)) = by_id.get(&current) else {
+            let Some((parent, topic_id, _, _)) = by_id.get(&current) else {
                 break;
             };
+            if let Some(topic_id) = topic_id {
+                root = Some(topic_id.clone());
+                break;
+            }
             match parent {
                 Some(parent) => current = parent.clone(),
                 None => {
@@ -596,7 +605,7 @@ pub fn get_all_messages(
         }
         if let Some(root) = root {
             if root != message.message_id {
-                if let Some((_, true, author)) = by_id.get(&root) {
+                if let Some((_, _, true, author)) = by_id.get(&root) {
                     message.can_delete_as_topic_author = *author == self_member_id;
                 }
             }

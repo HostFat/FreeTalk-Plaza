@@ -64,6 +64,7 @@ pub struct PreparedMessage {
     content: BoardMessageBody,
     images: Vec<plaza_core::board_state::images::ImageRef>,
     reply_target: Option<MessageId>,
+    topic_id: Option<MessageId>,
     auto_moderated: bool,
     category_id: Option<MessageId>,
 }
@@ -118,6 +119,7 @@ pub async fn publish_prepared(prepared: PreparedMessage) -> Result<(), String> {
         prepared.content,
         prepared.images,
         prepared.reply_target,
+        prepared.topic_id,
         prepared.auto_moderated,
         prepared.category_id,
     )
@@ -193,6 +195,17 @@ pub fn prepare_message(
         .max_message_size;
 
     let reply_target = reply_ctx.as_ref().map(|reply| reply.message_id.clone());
+    // The public topic link names the root a reply belongs to. A topic has
+    // none. Without board data the target itself is used, which grants no
+    // delete power beyond the reply's own author.
+    let topic_id = reply_ctx.as_ref().map(|reply| {
+        BOARDS
+            .read()
+            .map
+            .get(&current_board)
+            .and_then(|board| board.topic_root_for(&reply.message_id))
+            .unwrap_or_else(|| reply.message_id.clone())
+    });
     // Only a new topic is auto-moderated; a reply never is.
     let auto_moderated = auto_moderated && reply_ctx.is_none();
 
@@ -291,6 +304,7 @@ pub fn prepare_message(
         content,
         images,
         reply_target,
+        topic_id,
         auto_moderated,
         category_id,
     })
@@ -370,6 +384,7 @@ pub(crate) async fn publish_message(
     content: BoardMessageBody,
     images: Vec<plaza_core::board_state::images::ImageRef>,
     reply_target: Option<MessageId>,
+    topic_id: Option<MessageId>,
     auto_moderated: bool,
     category_id: Option<MessageId>,
 ) -> Option<MessageId> {
@@ -385,9 +400,10 @@ pub(crate) async fn publish_message(
         author: MemberId::from(&self_sk.verifying_key()),
         content,
         time: get_current_system_time(),
-        // The signed public fields carry the thread link and the topic flag
-        // outside the body, so the contract sees them on private boards too.
-        reply_to: reply_target,
+        // `reply_to` stays unset for new messages: topic membership is the
+        // only public reply graph the contract keeps.
+        reply_to: None,
+        topic_id,
         auto_moderated,
     };
 
@@ -542,6 +558,7 @@ pub async fn send_poll_vote(
         board_state_clone,
         content,
         Vec::new(),
+        None,
         None,
         false,
         category_id,
@@ -726,6 +743,7 @@ pub async fn send_category(
         content,
         time: get_current_system_time(),
         reply_to: None,
+        topic_id: None,
         auto_moderated: false,
     };
 
@@ -888,6 +906,7 @@ pub async fn send_group(
         content,
         time: get_current_system_time(),
         reply_to: None,
+        topic_id: None,
         auto_moderated: false,
     };
     let mut message_bytes = Vec::new();

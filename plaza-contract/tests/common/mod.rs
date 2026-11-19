@@ -425,6 +425,7 @@ pub async fn send_test_message(
         ),
         time: std::time::SystemTime::now(),
         reply_to: None,
+        topic_id: None,
         auto_moderated: false,
     };
 
