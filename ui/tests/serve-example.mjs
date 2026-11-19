@@ -12,6 +12,25 @@ const dx = process.env.DX_BIN || "dx";
 const port = Number(process.env.PORT ?? 8082);
 const host = process.env.HOST ?? "127.0.0.1";
 
+// A clean checkout has no ui/node_modules and no generated styles.css.
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+if (
+  !existsSync(path.resolve("node_modules")) ||
+  !existsSync(path.resolve("assets", "styles.css"))
+) {
+  console.log("Installing UI dependencies and building Tailwind CSS...");
+  let step = spawnSync(npm, ["install", "--no-audit", "--no-fund"], {
+    stdio: "inherit",
+  });
+  if (step.status !== 0) {
+    process.exit(step.status ?? 1);
+  }
+  step = spawnSync(npm, ["run", "build:css"], { stdio: "inherit" });
+  if (step.status !== 0) {
+    process.exit(step.status ?? 1);
+  }
+}
+
 const build = spawnSync(
   dx,
   ["build", "--package", "plaza-ui", "--features", "example-data,no-sync"],

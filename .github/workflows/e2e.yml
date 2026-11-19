@@ -28,7 +28,14 @@ jobs:
       with:
         node-version: 22
         cache: npm
-        cache-dependency-path: ui/tests/package-lock.json
+        cache-dependency-path: |
+          ui/package-lock.json
+          ui/tests/package-lock.json
+
+    - name: Build Tailwind CSS
+      run: |
+        npm --prefix ui ci
+        npm --prefix ui run build:css
 
     - name: Cache Playwright browsers
       uses: actions/cache@v4
