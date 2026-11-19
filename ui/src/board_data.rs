@@ -2260,6 +2260,8 @@ impl Boards {
     /// means the board was built with an older contract: remember the old key
     /// for the upgrade pointer and use the new key from now on.
     pub fn refresh_contract_keys(&mut self) {
+        let mut changed = 0usize;
+        let mut queued = 0usize;
         let expected: Vec<(VerifyingKey, ContractKey)> = self
             .map
             .keys()
@@ -2268,14 +2270,21 @@ impl Boards {
         for (owner, expected) in expected {
             if let Some(board) = self.map.get_mut(&owner) {
                 if board.contract_key != expected {
+                    changed += 1;
                     // Only the owner can sign the upgrade pointer; other
                     // clients update the key silently.
                     if board.is_current_owner() {
                         self.migrated_boards.push((owner, board.contract_key));
+                        queued += 1;
                     }
                     board.contract_key = expected;
                 }
             }
+        }
+        if changed > 0 {
+            dioxus::logger::tracing::info!(
+                "Rekey refresh: {changed} changed, {queued} queued"
+            );
         }
     }
 
@@ -2652,6 +2661,7 @@ impl Boards {
         }
         // Carry contract-key migrations found while decoding; otherwise the
         // upgrade pointer is lost between the load and the synchronizer.
+        let incoming_migrations = other.migrated_boards.len();
         for entry in other.migrated_boards {
             if !self
                 .migrated_boards
@@ -2724,6 +2734,10 @@ impl Boards {
             if old_contract_key != board_data.contract_key {
                 if board_data.is_current_owner() {
                     self.migrated_boards.push((vk, old_contract_key));
+                    dioxus::logger::tracing::info!(
+                        "Rekey merge: board +1, {} total queued",
+                        self.migrated_boards.len()
+                    );
                 }
             }
 
