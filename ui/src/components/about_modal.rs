@@ -198,7 +198,7 @@ pub fn AboutModal() -> Element {
                 onclick: move |_| *ABOUT_MODAL.write() = false,
             }
             div {
-                class: "relative bg-panel rounded-xl shadow-xl max-w-md w-full",
+                class: "relative bg-panel rounded-xl shadow-xl max-w-md w-full max-h-[90vh] overflow-y-auto",
                 onclick: move |e| e.stop_propagation(),
 
                 div { class: "flex items-center gap-3 px-6 py-5 border-b border-border",

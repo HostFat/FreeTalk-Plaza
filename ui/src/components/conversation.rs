@@ -2160,7 +2160,7 @@ fn ReactionDisplay(
                 rsx! {
                     span {
                         key: "{emoji}",
-                        class: format!("{} {}", badge_class, highlight_class),
+                        class: format!("{} {} reaction-chip", badge_class, highlight_class),
                         title: "{tooltip}",
                         onclick: move |e| {
                             e.stop_propagation();
@@ -2174,6 +2174,7 @@ fn ReactionDisplay(
                         if count > 1 {
                             span { class: "{count_class}", "{count}" }
                         }
+                        span { class: "reaction-tooltip", "{tooltip}" }
                     }
                 }
             })}

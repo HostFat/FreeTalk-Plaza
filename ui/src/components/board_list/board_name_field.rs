@@ -52,7 +52,6 @@ pub fn BoardNameField(config: Configuration, is_owner: bool) -> Element {
             let signing_data = BOARDS.with(|boards| {
                 if let Some(board_data) = boards.map.get(&owner_key) {
                     Some((
-                        board_data.board_key(),
                         board_data.owner_key().clone(),
                         board_data.board_state.clone(),
                         board_data.get_secret().map(|(s, v)| (*s, v)),
@@ -63,7 +62,7 @@ pub fn BoardNameField(config: Configuration, is_owner: bool) -> Element {
                 }
             });
 
-            let Some((board_key, self_sk, board_state_clone, board_secret_opt)) = signing_data
+            let Some((self_sk, board_state_clone, board_secret_opt)) = signing_data
             else {
                 return;
             };
@@ -82,23 +81,10 @@ pub fn BoardNameField(config: Configuration, is_owner: bool) -> Element {
             new_config.configuration_version += 1;
 
             spawn_local(async move {
-                // Serialize config to CBOR for signing
-                let mut config_bytes = Vec::new();
-                if let Err(e) = ciborium::ser::into_writer(&new_config, &mut config_bytes) {
-                    error!("Failed to serialize config for signing: {:?}", e);
-                    crate::components::app::toasts::show_error(
-                        "Board name: the update could not be built",
-                    );
-                    return;
-                }
-
-                // Sign using delegate with fallback to local signing
-                let signature =
-                    crate::signing::sign_config_with_fallback(board_key, config_bytes, &self_sk)
-                        .await;
-
+                // Sign locally with the owner key; the delegate may hold a
+                // profile key, which the contract rejects.
                 let new_authorized_config =
-                    AuthorizedConfigurationV1::with_signature(new_config, signature);
+                    AuthorizedConfigurationV1::new(new_config, &self_sk);
 
                 let delta = ChatBoardStateV1Delta {
                     configuration: Some(new_authorized_config),

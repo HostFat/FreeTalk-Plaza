@@ -372,6 +372,11 @@ impl BoardData {
         {
             return Err("That profile is deactivated on this board".to_string());
         }
+        // Keep owner authority when switching away from the owner profile;
+        // otherwise settings and trash actions sign with the new member key.
+        if self.is_current_owner() {
+            self.owner_sk = Some(self.self_sk.clone());
+        }
         self.self_sk = signing_key.clone();
         // The old root profile no longer explains `self_sk`; callers that know
         // the selected profile write the new id.

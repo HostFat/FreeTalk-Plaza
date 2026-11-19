@@ -22,14 +22,10 @@ pub fn BoardFeaturesField(config: Configuration, is_owner: bool) -> Element {
         };
         let signing_data = BOARDS.with(|boards| {
             boards.map.get(&owner_key).map(|board| {
-                (
-                    board.board_key(),
-                    board.owner_key().clone(),
-                    board.board_state.clone(),
-                )
+                (board.owner_key().clone(), board.board_state.clone())
             })
         });
-        let Some((board_key, self_sk, parent_state)) = signing_data else {
+        let Some((self_sk, parent_state)) = signing_data else {
             error!("Board state not found for current board");
             return;
         };
@@ -40,15 +36,9 @@ pub fn BoardFeaturesField(config: Configuration, is_owner: bool) -> Element {
         busy.set(true);
 
         spawn_local(async move {
-            let mut config_bytes = Vec::new();
-            if let Err(error) = ciborium::ser::into_writer(&new_config, &mut config_bytes) {
-                error!("Failed to serialize config for signing: {error:?}");
-                busy.set(false);
-                return;
-            }
-            let signature =
-                crate::signing::sign_config_with_fallback(board_key, config_bytes, &self_sk).await;
-            let authorized = AuthorizedConfigurationV1::with_signature(new_config, signature);
+            // Sign locally with the owner key. The delegate may hold the
+            // profile key after a reload, which fails verification.
+            let authorized = AuthorizedConfigurationV1::new(new_config, &self_sk);
             let delta = ChatBoardStateV1Delta {
                 configuration: Some(authorized),
                 ..Default::default()

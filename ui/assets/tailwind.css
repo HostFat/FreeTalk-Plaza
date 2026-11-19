@@ -278,3 +278,23 @@ button, a, input, textarea, select, [role="button"] {
 .tok-function { color: #82aaff; }
 .tok-type { color: #ffcb6b; }
 .tok-punct { color: #89ddff; }
+
+/* Reaction names tooltip (custom, so it works in screenshots and a11y). */
+.reaction-chip { position: relative; }
+.reaction-tooltip {
+  display: none;
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(20, 20, 24, 0.96);
+  color: #fff;
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 60;
+}
+.reaction-chip:hover .reaction-tooltip { display: block; }
