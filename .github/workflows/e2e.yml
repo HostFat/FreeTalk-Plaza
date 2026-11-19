@@ -1,0 +1,72 @@
+name: E2E
+
+on:
+  push:
+    branches: [ "trunk" ]
+  pull_request:
+    branches: [ "trunk" ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  playwright:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # Nix supplies dx, the pinned Rust toolchain and wasm-bindgen.
+    - uses: cachix/install-nix-action@v31
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+
+    # Playwright itself runs on the runner's Node; only dx comes from Nix.
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: ui/tests/package-lock.json
+
+    - name: Cache Playwright browsers
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ hashFiles('ui/tests/package-lock.json') }}
+        restore-keys: playwright-${{ runner.os }}-
+
+    - name: Install test dependencies and browsers
+      working-directory: ui/tests
+      run: |
+        npm ci
+        npx playwright install --with-deps chromium firefox webkit
+
+    - name: Cache the Dioxus build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: e2e-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}
+        restore-keys: e2e-${{ runner.os }}-
+
+    - name: Run Playwright
+      working-directory: ui/tests
+      env:
+        CI: "true"
+      # dx comes from the Nix dev shell; the Playwright webServer builds and
+      # serves the static example-data bundle.
+      run: nix develop ../.. --command npx playwright test
+
+    - name: Upload Playwright report
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: playwright-report
+        path: |
+          ui/tests/playwright-report
+          ui/tests/test-results
+        retention-days: 7
