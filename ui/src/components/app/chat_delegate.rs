@@ -384,6 +384,9 @@ pub async fn load_boards_direct() -> Result<usize, String> {
     let boards = crate::board_data::Boards::decode(bytes.as_slice())
         .ok_or("The stored board map does not decode")?;
     let count = boards.map.len();
+    crate::components::app::toasts::show(format!(
+        "Direct board load: {count} board(s)"
+    ));
     BOARDS.with_mut(|current| {
         if let Err(error) = current.merge(boards) {
             warn!("Could not merge the direct board load: {error}");
@@ -462,6 +465,13 @@ async fn save_boards_once() -> Result<(), String> {
     // A reset is deleting the stores; a save now would put them back.
     if LOCAL_RESET.load(Ordering::SeqCst) {
         info!("Skipping delegate save during reset");
+        return Ok(());
+    }
+    if BOARDS.read().map.is_empty() {
+        // An empty map is never a valid incremental state: it is either the
+        // result of a load race or a reset. Writing it would wipe the board
+        // store (seen after a profile switch).
+        info!("Skipping delegate save of an empty board map");
         return Ok(());
     }
     if IMPORT_IN_PROGRESS.load(Ordering::SeqCst) {
