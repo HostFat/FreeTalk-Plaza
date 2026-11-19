@@ -2268,7 +2268,11 @@ impl Boards {
         for (owner, expected) in expected {
             if let Some(board) = self.map.get_mut(&owner) {
                 if board.contract_key != expected {
-                    self.migrated_boards.push((owner, board.contract_key));
+                    // Only the owner can sign the upgrade pointer; other
+                    // clients update the key silently.
+                    if board.is_current_owner() {
+                        self.migrated_boards.push((owner, board.contract_key));
+                    }
                     board.contract_key = expected;
                 }
             }
@@ -2718,7 +2722,9 @@ impl Boards {
 
             // If the contract key changed (WASM was updated), track for upgrade pointer
             if old_contract_key != board_data.contract_key {
-                self.migrated_boards.push((vk, old_contract_key));
+                if board_data.is_current_owner() {
+                    self.migrated_boards.push((vk, old_contract_key));
+                }
             }
 
             // If not already in the map, add the board

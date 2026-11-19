@@ -1089,6 +1089,8 @@ pub async fn send_upgrade_pointers() -> usize {
         BOARDS.with_mut(|boards| std::mem::take(&mut boards.migrated_boards));
     let queued = migrated.len();
     let mut sent = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
     for (owner_vk, old_contract_key) in migrated {
         let snapshot = {
             let boards = BOARDS.read();
@@ -1103,6 +1105,9 @@ pub async fn send_upgrade_pointers() -> usize {
             }
         };
         let Some((new_id, owner_id, owner_key)) = snapshot else {
+            // Only the owner can sign the pointer. Other clients should not
+            // report this as a failure.
+            skipped += 1;
             continue;
         };
         let mut id_bytes = [0u8; 32];
@@ -1123,20 +1128,25 @@ pub async fn send_upgrade_pointers() -> usize {
                 to_cbor_vec(&upgrade_state).into(),
             ),
         };
-        if let Some(web_api) = WEB_API.write().as_mut() {
-            if web_api
-                .send(freenet_stdlib::client_api::ClientRequest::ContractOp(
-                    update_request,
-                ))
-                .await
-                .is_ok()
-            {
-                sent += 1;
+        match WEB_API.write().as_mut() {
+            Some(web_api) => {
+                if web_api
+                    .send(freenet_stdlib::client_api::ClientRequest::ContractOp(
+                        update_request,
+                    ))
+                    .await
+                    .is_ok()
+                {
+                    sent += 1;
+                } else {
+                    failed += 1;
+                }
             }
+            None => failed += 1,
         }
     }
     crate::components::app::toasts::show(format!(
-        "Upgrade pointers: {queued} queued, {sent} sent"
+        "Upgrade pointers: {queued} queued, {sent} sent, {skipped} not owner, {failed} failed"
     ));
     sent
 }
