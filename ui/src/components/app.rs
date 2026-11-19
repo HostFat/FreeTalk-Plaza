@@ -830,18 +830,21 @@ pub fn select_board(board_id: Option<VerifyingKey>) {
         *CURRENT_BOARD.write() = CurrentBoard { owner_key: None };
         return;
     };
+    // Resolve only identities that unambiguously name a board. A profile key
+    // can be shared by several boards and resolving it arbitrarily caused
+    // selection loops; the founding/current owner keys are unique.
     let resolved = BOARDS
         .read()
         .map
         .iter()
-        .find(|(map_key, board)| {
+        .filter(|(map_key, board)| {
             **map_key == vk
                 || board.owner_key().verifying_key() == vk
                 || board.current_owner_key() == vk
-                || board.self_sk.verifying_key() == vk
                 || board.owner_vk == vk
         })
         .map(|(map_key, _)| *map_key)
+        .min_by(|a, b| a.as_bytes().cmp(b.as_bytes()))
         .unwrap_or(vk);
     if CURRENT_BOARD.read().owner_key != Some(resolved) {
         *CURRENT_BOARD.write() = CurrentBoard {

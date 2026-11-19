@@ -711,21 +711,41 @@ pub fn build_reply_tree(
     all_messages: &[MessageData],
     parent_id: Option<&MessageId>,
 ) -> Vec<MessageWithReplies> {
-    // Find messages that reply to the given parent
+    let mut visited = std::collections::HashSet::new();
+    build_reply_tree_inner(all_messages, parent_id, &mut visited, 0)
+}
+
+fn build_reply_tree_inner(
+    all_messages: &[MessageData],
+    parent_id: Option<&MessageId>,
+    visited: &mut std::collections::HashSet<MessageId>,
+    depth: usize,
+) -> Vec<MessageWithReplies> {
+    // A malformed or hostile reply cycle must not recurse forever.
+    if depth > 64 {
+        return Vec::new();
+    }
     let direct_replies: Vec<&MessageData> = all_messages
         .iter()
-        .filter(|m| m.reply_to_message_id.as_ref() == parent_id)
+        .filter(|m| {
+            m.reply_to_message_id.as_ref() == parent_id
+                && !visited.contains(&m.message_id)
+        })
         .collect();
 
-    // Sort by time
     let mut sorted_replies: Vec<_> = direct_replies.into_iter().cloned().collect();
     sorted_replies.sort_by_key(|m| m.time);
 
-    // Recursively build replies for each message
     sorted_replies
         .into_iter()
         .map(|message| {
-            let nested_replies = build_reply_tree(all_messages, Some(&message.message_id));
+            visited.insert(message.message_id.clone());
+            let nested_replies = build_reply_tree_inner(
+                all_messages,
+                Some(&message.message_id),
+                visited,
+                depth + 1,
+            );
             MessageWithReplies {
                 message,
                 replies: nested_replies,
