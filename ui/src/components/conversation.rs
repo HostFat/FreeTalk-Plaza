@@ -1988,7 +1988,11 @@ fn ReactionDisplay(
                     if *id == self_member_id { "You".to_string() }
                     else { member_names.get(id).cloned().unwrap_or("Unknown".to_string()) }
                 }).collect();
-                let tooltip = names.join(", ");
+                let tooltip = if is_user {
+                    format!("{} (click to remove)", names.join(", "))
+                } else {
+                    format!("{} (click to add)", names.join(", "))
+                };
 
                 let highlight_class = if matches!(size, MessageSize::Compact) {
                     if is_user { "cursor-pointer underline decoration-accent" } else { "" }
@@ -2003,10 +2007,10 @@ fn ReactionDisplay(
                         title: "{tooltip}",
                         onclick: move |e| {
                             e.stop_propagation();
-                            if is_user {
-                                if let Some(ref handler) = on_react {
-                                    handler.call((msg_id_click.clone(), emoji_click.clone()));
-                                }
+                            // Clicking an existing chip either adds this user
+                            // or removes their own reaction.
+                            if let Some(ref handler) = on_react {
+                                handler.call((msg_id_click.clone(), emoji_click.clone()));
                             }
                         },
                         "{emoji}"
