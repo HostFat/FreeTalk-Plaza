@@ -1288,12 +1288,82 @@ impl BoardData {
         self.decrypt_pq_trash_secret();
     }
 
+    /// Recover the board key with any identity this device holds.
+    ///
+    /// `secrets` is skipped when the delegate blob is loaded, so a reload
+    /// starts with no board key. The active profile may have no recipient
+    /// blob, for example after joining as a new identity, while the owner key
+    /// or another stored profile can still open the board. Try all of them
+    /// before reporting the board as "key missing".
+    pub fn decrypt_board_secrets_with_extra_keys(&mut self, extra_keys: &[SigningKey]) {
+        if !self.is_private() {
+            return;
+        }
+        use crate::util::ecies::decrypt_secret_from_member_blob;
+        use x25519_dalek::PublicKey as X25519PublicKey;
+
+        let mut candidates: Vec<SigningKey> = Vec::new();
+        let mut add = |key: &SigningKey| {
+            if !candidates
+                .iter()
+                .any(|known| known.verifying_key() == key.verifying_key())
+            {
+                candidates.push(key.clone());
+            }
+        };
+        add(&self.self_sk);
+        if let Some(owner) = &self.owner_sk {
+            add(owner);
+        }
+        for key in extra_keys {
+            add(key);
+        }
+
+        let current_version = self.board_state.secrets.current_version;
+        for key in &candidates {
+            let member_id = MemberId::from(&key.verifying_key());
+            let member_secrets: Vec<(u32, Vec<u8>, [u8; 12], [u8; 32])> = self
+                .board_state
+                .secrets
+                .encrypted_secrets
+                .iter()
+                .filter(|secret| secret.secret.member_id == member_id)
+                .map(|secret| {
+                    (
+                        secret.secret.secret_version,
+                        secret.secret.ciphertext.clone(),
+                        secret.secret.nonce,
+                        secret.secret.sender_ephemeral_public_key,
+                    )
+                })
+                .collect();
+            for (version, ciphertext, nonce, ephemeral_key_bytes) in member_secrets {
+                let ephemeral = X25519PublicKey::from(ephemeral_key_bytes);
+                if let Ok(secret) =
+                    decrypt_secret_from_member_blob(&ciphertext, &nonce, &ephemeral, key)
+                {
+                    self.set_secret(secret, version);
+                }
+            }
+        }
+        self.current_secret_version = Some(current_version);
+        for key in &candidates {
+            self.decrypt_pq_board_secrets_for_key(key);
+        }
+        self.decrypt_pq_trash_secret();
+    }
+
     /// Try the PQ sets for the board secret. Old versions stay in `secrets`.
     pub fn decrypt_pq_board_secrets(&mut self) {
         if !self.is_private() {
             return;
         }
-        let self_id = MemberId::from(&self.self_sk.verifying_key());
+        let self_sk = self.self_sk.clone();
+        self.decrypt_pq_board_secrets_for_key(&self_sk);
+    }
+
+    fn decrypt_pq_board_secrets_for_key(&mut self, signing_key: &SigningKey) {
+        let member_id = MemberId::from(&signing_key.verifying_key());
         let sets: Vec<(u32, plaza_core::board_state::pq_secrets::PqSealedSecret)> = self
             .board_state
             .pq_secrets
@@ -1310,12 +1380,12 @@ impl BoardData {
                     .set
                     .secrets
                     .iter()
-                    .filter(|secret| secret.member_id == self_id)
+                    .filter(|secret| secret.member_id == member_id)
                     .map(|secret| (entry.set.secret_version, secret.clone()))
             })
             .collect();
         for (version, sealed) in sets {
-            match crate::util::pq::open_secret(&self.self_sk, &sealed) {
+            match crate::util::pq::open_secret(signing_key, &sealed) {
                 Ok(secret) => self.set_secret(secret, version),
                 Err(error) => {
                     dioxus::logger::tracing::warn!(
@@ -4033,6 +4103,71 @@ mod tests {
     /// and both read the encrypted board name and a private post while an
     /// outsider cannot. This is the data path the "Private board" checkbox
     /// drives.
+    /// A reload drops the in-memory secrets. The owner key stored with the
+    /// board still opens the private board, even when the active profile is a
+    /// member with no recipient blob.
+    #[test]
+    fn the_owner_key_recovers_a_private_board_key_after_a_reload() {
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let mut boards = empty_boards();
+        let key = boards.create_new_board_with_name(
+            owner_sk.clone(),
+            "Private".to_string(),
+            "Owner".to_string(),
+            true,
+        );
+        let mut board = boards.map.get(&key).unwrap().clone();
+        let secret = *board.get_secret().expect("the owner holds the key").0;
+
+        board.secrets.clear();
+        board.current_secret_version = None;
+        board.self_sk = SigningKey::generate(&mut rng);
+        board.owner_sk = Some(owner_sk);
+
+        board.decrypt_board_secrets_with_extra_keys(&[]);
+
+        assert_eq!(
+            board.get_secret().map(|(secret, _)| *secret),
+            Some(secret),
+            "the owner key restores the board secret"
+        );
+    }
+
+    /// A stored profile key can also recover a private board after a reload,
+    /// for a board whose owner key is not on this device.
+    #[test]
+    fn a_stored_profile_recovers_a_private_board_key_after_a_reload() {
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let profile = IdentityProfile::new("Reader".to_string(), SigningKey::generate(&mut rng));
+        let mut boards = empty_boards();
+        let key = boards.create_new_board_with_identity(
+            owner_sk,
+            profile.clone(),
+            BoardIdentityMode::Derived,
+            "Private".to_string(),
+            "Reader".to_string(),
+            true,
+        );
+        let mut board = boards.map.get(&key).unwrap().clone();
+        let secret = *board.get_secret().expect("the profile holds the key").0;
+
+        board.secrets.clear();
+        board.current_secret_version = None;
+        board.self_sk = SigningKey::generate(&mut rng);
+        board.owner_sk = None;
+
+        let derived = profile.derive_for_board(&key);
+        board.decrypt_board_secrets_with_extra_keys(&[profile.signing_key.clone(), derived]);
+
+        assert_eq!(
+            board.get_secret().map(|(secret, _)| *secret),
+            Some(secret),
+            "the stored profile restores the board secret"
+        );
+    }
+
     #[test]
     fn test_private_board_is_readable_by_members_only() {
         use crate::util::ecies::{

@@ -16,7 +16,6 @@ use crate::components::app::document_title::{mark_current_board_as_read, update_
 use crate::components::app::notifications::mark_initial_sync_complete;
 use crate::components::app::sync_info::{BoardSyncStatus, SYNC_INFO};
 use crate::components::app::{BOARDS, BOARDS_LOADED, DELEGATE_HAD_BOARDS};
-use crate::util::ecies::decrypt_secret_from_member_blob;
 use crate::util::owner_vk_to_contract_key;
 use ciborium::de::from_reader;
 use dioxus::logger::tracing::{error, info, warn};
@@ -25,7 +24,6 @@ use dioxus::prelude::ReadableExt;
 use freenet_stdlib::client_api::{ContractResponse, HostResponse};
 use freenet_stdlib::prelude::OutboundDelegateMsg;
 pub use get_response::handle_get_response;
-use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::privacy::PrivacyMode;
 use plaza_core::board_state::ChatBoardParametersV1;
 use plaza_core::chat_delegate::{ChatDelegateRequestMsg, ChatDelegateResponseMsg};
@@ -33,7 +31,6 @@ pub use put_response::handle_put_response;
 pub use subscribe_response::handle_subscribe_response;
 pub use update_notification::handle_update_notification;
 pub use update_response::handle_update_response;
-use x25519_dalek::PublicKey as X25519PublicKey;
 
 /// Handles responses from the Freenet API
 pub struct ResponseHandler {
@@ -361,54 +358,24 @@ impl ResponseHandler {
                                                             } else {
                                                                 info!("Successfully merged boards from delegate");
 
-                                                                // Re-decrypt ALL secret versions for each board (secrets are #[serde(skip)])
+                                                                // Re-decrypt ALL secret versions for each board (secrets are #[serde(skip)]).
+                                                                // The active profile may have no recipient blob after a join or a
+                                                                // profile switch; the owner key and every stored profile are tried too,
+                                                                // so a reload does not leave the board on "key missing".
+                                                                let profiles = current_boards.profiles.clone();
                                                                 for board_data in current_boards.map.values_mut() {
                                                                     if board_data.board_state.configuration.configuration.privacy_mode == PrivacyMode::Private {
-                                                                        let member_id = MemberId::from(&board_data.self_sk.verifying_key());
-                                                                        let current_version = board_data.board_state.secrets.current_version;
-                                                                        let self_sk = board_data.self_sk.clone();
-
-                                                                        // Extract encrypted secret data to avoid borrow issues
-                                                                        let member_secrets: Vec<_> = board_data
-                                                                            .board_state
-                                                                            .secrets
-                                                                            .encrypted_secrets
+                                                                        let owner_vk = board_data.owner_vk;
+                                                                        let extra_keys: Vec<ed25519_dalek::SigningKey> = profiles
                                                                             .iter()
-                                                                            .filter(|s| s.secret.member_id == member_id)
-                                                                            .map(|s| (
-                                                                                s.secret.secret_version,
-                                                                                s.secret.ciphertext.clone(),
-                                                                                s.secret.nonce,
-                                                                                s.secret.sender_ephemeral_public_key,
-                                                                            ))
+                                                                            .flat_map(|profile| {
+                                                                                [
+                                                                                    profile.signing_key.clone(),
+                                                                                    profile.derive_for_board(&owner_vk),
+                                                                                ]
+                                                                            })
                                                                             .collect();
-
-                                                                        if member_secrets.is_empty() {
-                                                                            warn!("No encrypted secrets found for member {:?}", member_id);
-                                                                        } else {
-                                                                            info!("Found {} encrypted secrets for member {:?}", member_secrets.len(), member_id);
-                                                                            for (version, ciphertext, nonce, ephemeral_key_bytes) in member_secrets {
-                                                                                let ephemeral_key = X25519PublicKey::from(ephemeral_key_bytes);
-                                                                                match decrypt_secret_from_member_blob(
-                                                                                    &ciphertext,
-                                                                                    &nonce,
-                                                                                    &ephemeral_key,
-                                                                                    &self_sk,
-                                                                                ) {
-                                                                                    Ok(decrypted_secret) => {
-                                                                                        info!("Re-decrypted board secret version {} for member {:?}", version, member_id);
-                                                                                        board_data.set_secret(decrypted_secret, version);
-                                                                                    }
-                                                                                    Err(e) => {
-                                                                                        warn!("Failed to re-decrypt board secret version {}: {}", version, e);
-                                                                                    }
-                                                                                }
-                                                                            }
-                                                                        }
-
-                                                                        // Ensure current_secret_version is set to the actual current version
-                                                                        board_data.current_secret_version = Some(current_version);
-                                                                        board_data.decrypt_pq_board_secrets();
+                                                                        board_data.decrypt_board_secrets_with_extra_keys(&extra_keys);
                                                                     }
                                                                 }
 

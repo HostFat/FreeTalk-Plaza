@@ -612,8 +612,50 @@ fn BoardGate(board_id: String, children: Element) -> Element {
             .is_some_and(|key| BOARDS.read().map.contains_key(&key))
     });
     let boards_loaded = *crate::components::app::BOARDS_LOADED.read();
+    // A private board can be in the map with no usable key after a reload if
+    // the active profile has no recipient blob. Showing the board would render
+    // sealed content as empty; offer a way to switch profile instead.
+    let key_missing = use_memo(move || {
+        let Some(key) = CURRENT_BOARD.read().owner_key else {
+            return false;
+        };
+        BOARDS.read()
+            .map
+            .get(&key)
+            .is_some_and(|board| board.is_private() && board.get_secret().is_none())
+    });
 
     if exists() {
+        if key_missing() {
+            return rsx! {
+                div { class: "flex-1 flex flex-col items-center justify-center p-8 text-center",
+                    p { class: "text-xl text-text-muted mb-2", "Board key missing" }
+                    p { class: "text-text-muted mb-6 text-sm max-w-md",
+                        "This private board is stored on this device, but the active profile cannot open it. Switch to a profile that joined this board, or ask a key holder to share the key."
+                    }
+                    div { class: "flex gap-2",
+                        button {
+                            r#type: "button",
+                            class: "px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-lg",
+                            onclick: move |_| {
+                                *ABOUT_MODAL.write() = true;
+                            },
+                            "Open About"
+                        }
+                        button {
+                            r#type: "button",
+                            class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text rounded-lg",
+                            onclick: move |_| {
+                                if let Some(window) = window() {
+                                    let _ = window.location().set_hash("/");
+                                }
+                            },
+                            "Go to Home"
+                        }
+                    }
+                }
+            };
+        }
         return children;
     }
 
