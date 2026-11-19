@@ -121,6 +121,7 @@ pub fn NotificationsView() -> Element {
                         option { value: "mentions", "Mentions & replies" }
                         option { value: "muted", "Muted" }
                     }
+                    NotificationPermissionStatus {}
                     button {
                         r#type: "button",
                         class: "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg",
@@ -220,4 +221,52 @@ pub fn NotificationsView() -> Element {
             }
         }
     }
+}
+
+#[component]
+fn NotificationPermissionStatus() -> Element {
+    let mut label = use_signal(current_permission_label);
+    let request = move |_| {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Ok(promise) = web_sys::Notification::request_permission() {
+                spawn_local(async move {
+                    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+                    label.set(current_permission_label());
+                });
+            }
+        }
+    };
+
+    rsx! {
+        div { class: "flex items-center gap-2",
+            span { class: "text-[11px] text-text-muted", "{label}" }
+            if label() == "System notifications not enabled" {
+                button {
+                    r#type: "button",
+                    class: "px-2 py-1 text-[11px] rounded-md bg-accent/10 text-accent hover:bg-accent/20",
+                    onclick: request,
+                    "Enable"
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn current_permission_label() -> String {
+    match web_sys::Notification::permission() {
+        web_sys::NotificationPermission::Granted => {
+            "System notifications allowed".to_string()
+        }
+        web_sys::NotificationPermission::Denied => {
+            "System notifications blocked by the browser".to_string()
+        }
+        _ => "System notifications not enabled".to_string(),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn current_permission_label() -> String {
+    "System notifications unavailable".to_string()
 }

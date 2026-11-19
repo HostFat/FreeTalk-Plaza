@@ -86,6 +86,18 @@ pub fn install() {
     let _ = Reflect::set(&api, &"moveBoard".into(), reorder.as_ref());
     reorder.forget();
 
+    let notify = Closure::wrap(Box::new(|title: JsValue, body: JsValue| {
+        crate::components::system_notifications::show_notification(
+            &title.as_string().unwrap_or_default(),
+            &body.as_string().unwrap_or_default(),
+            "plaza-test",
+            "test-board",
+            "test-post",
+        );
+    }) as Box<dyn FnMut(JsValue, JsValue)>);
+    let _ = Reflect::set(&api, &"notify".into(), notify.as_ref());
+    notify.forget();
+
     let names = Closure::wrap(Box::new(|| -> JsValue {
         let boards = BOARDS.read();
         let result = js_sys::Array::new();

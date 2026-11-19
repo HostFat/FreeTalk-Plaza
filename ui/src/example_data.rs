@@ -289,6 +289,7 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
             pending_send: None,
             subscribed_categories: Vec::new(),
             notification_mode: crate::board_data::NotificationMode::All,
+            nickname_requests: Vec::new(),
             spectator: false,
         },
     }

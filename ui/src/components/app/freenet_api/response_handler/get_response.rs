@@ -169,6 +169,7 @@ pub async fn handle_get_response(
         pending_send: None,
                         subscribed_categories: Vec::new(),
                         notification_mode: crate::board_data::NotificationMode::All,
+                        nickname_requests: Vec::new(),
                         current_secret_version: None,
                         last_secret_rotation: None,
                         key_migrated_to_delegate: false, // Will be checked/migrated on startup

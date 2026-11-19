@@ -100,8 +100,9 @@ pub fn SystemNotificationsBridge() -> Element {
             if !hidden {
                 return;
             }
+            let board_id = bs58::encode(key.as_bytes()).into_string();
             for (title, body, id) in pending {
-                show_notification(&title, &body, &id.to_string());
+                show_notification(&title, &body, &id.to_string(), &board_id, &id.to_string());
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -114,7 +115,13 @@ pub fn SystemNotificationsBridge() -> Element {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn show_notification(title: &str, body: &str, tag: &str) {
+pub(crate) fn show_notification(
+    title: &str,
+    body: &str,
+    tag: &str,
+    board_id: &str,
+    post_id: &str,
+) {
     use wasm_bindgen::JsCast;
 
     if web_sys::Notification::permission() != web_sys::NotificationPermission::Granted {
@@ -126,10 +133,28 @@ fn show_notification(title: &str, body: &str, tag: &str) {
     let Ok(notification) = web_sys::Notification::new_with_options(title, &options) else {
         return;
     };
+    let board_id = board_id.to_string();
+    let post_id = post_id.to_string();
     let callback = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
-        if let Some(window) = web_sys::window() {
-            let _ = window.focus();
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let base = window
+            .location()
+            .href()
+            .ok()
+            .and_then(|href| href.split('#').next().map(str::to_string))
+            .unwrap_or_default();
+        if base.is_empty() {
+            return;
         }
+        let href = format!("{base}#/board/{board_id}/post/{post_id}");
+        if !crate::util::navigate_in_shell(&href) {
+            let location = window.location();
+            let _ = location.set_hash(&format!("/board/{board_id}/post/{post_id}"));
+            let _ = location.reload();
+        }
+        let _ = window.focus();
     }) as Box<dyn FnMut()>);
     notification.set_onclick(Some(callback.as_ref().unchecked_ref()));
     callback.forget();

@@ -209,6 +209,25 @@ impl NotificationMode {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub enum NicknameRequestStatus {
+    #[default]
+    Pending,
+    Approved,
+    Rejected,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NicknameRequest {
+    pub id: String,
+    pub member_id: MemberId,
+    pub current_name: String,
+    pub requested_name: String,
+    pub created_at: i64,
+    #[serde(default)]
+    pub status: NicknameRequestStatus,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardData {
     pub owner_vk: VerifyingKey,
@@ -256,6 +275,10 @@ pub struct BoardData {
     /// What this device wants to be notified about on this board.
     #[serde(default)]
     pub notification_mode: NotificationMode,
+
+    /// Structured nickname change requests awaiting an owner/admin decision.
+    #[serde(default)]
+    pub nickname_requests: Vec<NicknameRequest>,
 
     /// The composer's unsent post. Local UI state, never shared with the board.
     #[serde(default)]
@@ -2024,6 +2047,44 @@ impl BoardData {
             })
     }
 
+    /// The newest nickname request for a member, whatever its status.
+    pub fn latest_nickname_request(&self, member_id: MemberId) -> Option<&NicknameRequest> {
+        self.nickname_requests
+            .iter()
+            .filter(|request| request.member_id == member_id)
+            .max_by_key(|request| request.created_at)
+    }
+
+    pub fn pending_nickname_request(&self, member_id: MemberId) -> Option<&NicknameRequest> {
+        self.nickname_requests.iter().rev().find(|request| {
+            request.member_id == member_id
+                && request.status == NicknameRequestStatus::Pending
+        })
+    }
+
+    pub fn add_nickname_request(
+        &mut self,
+        member_id: MemberId,
+        current_name: String,
+        requested_name: String,
+    ) {
+        let created_at = chrono::Utc::now().timestamp_millis();
+        self.nickname_requests.push(NicknameRequest {
+            id: format!("{created_at}-{member_id}"),
+            member_id,
+            current_name,
+            requested_name,
+            created_at,
+            status: NicknameRequestStatus::Pending,
+        });
+    }
+
+    pub fn decide_nickname_request(&mut self, id: &str, status: NicknameRequestStatus) {
+        if let Some(request) = self.nickname_requests.iter_mut().find(|request| request.id == id) {
+            request.status = status;
+        }
+    }
+
     /// Every secret that could have sealed an image this client may read: the
     /// board secret and each restricted section key.
     pub fn image_secret_candidates(&self) -> Vec<([u8; 32], u32)> {
@@ -3165,6 +3226,7 @@ impl Boards {
             pending_send: None,
             subscribed_categories: Vec::new(),
             notification_mode: NotificationMode::All,
+            nickname_requests: Vec::new(),
         };
 
         if board_data.is_private() {
@@ -4430,6 +4492,67 @@ mod tests {
     }
 
     #[test]
+    fn board_order_archive_and_notification_mode_survive_serialization() {
+        let mut rng = rand::thread_rng();
+        let mut boards = empty_boards();
+        let first = boards.create_new_board_with_name(
+            SigningKey::generate(&mut rng),
+            "First".to_string(),
+            "Owner".to_string(),
+            false,
+        );
+        let second = boards.create_new_board_with_name(
+            SigningKey::generate(&mut rng),
+            "Second".to_string(),
+            "Owner".to_string(),
+            false,
+        );
+        boards.move_board(second, -1);
+        boards.set_archived(first, true);
+        boards.map.get_mut(&first).unwrap().notification_mode =
+            NotificationMode::Muted;
+
+        let mut buffer = Vec::new();
+        ciborium::ser::into_writer(&boards, &mut buffer).unwrap();
+        let decoded: Boards = ciborium::from_reader(&buffer[..]).unwrap();
+
+        assert!(decoded.ordered_keys().iter().position(|key| *key == second) <
+            decoded.ordered_keys().iter().position(|key| *key == first));
+        assert!(decoded.is_archived(first));
+        assert_eq!(
+            decoded.map.get(&first).unwrap().notification_mode,
+            NotificationMode::Muted
+        );
+    }
+
+    #[test]
+    fn nickname_requests_move_from_pending_to_approved() {
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let mut boards = empty_boards();
+        let key = boards.create_new_board_with_name(
+            owner_sk,
+            "Board".to_string(),
+            "Owner".to_string(),
+            false,
+        );
+        let member = MemberId::from_bytes([9; 32]);
+        let board = boards.map.get_mut(&key).unwrap();
+        board.add_nickname_request(member, "Old".to_string(), "New".to_string());
+
+        let pending = board.pending_nickname_request(member).unwrap().clone();
+        assert_eq!(pending.requested_name, "New");
+        assert_eq!(pending.status, NicknameRequestStatus::Pending);
+
+        board.decide_nickname_request(&pending.id, NicknameRequestStatus::Approved);
+        assert!(board.pending_nickname_request(member).is_none());
+        assert_eq!(
+            board.latest_nickname_request(member).unwrap().status,
+            NicknameRequestStatus::Approved
+        );
+    }
+
+    #[test]
     fn test_private_board_is_readable_by_members_only() {
         use crate::util::ecies::{
             decrypt_secret_from_member_blob, decrypt_with_symmetric_key, seal_bytes, unseal_bytes,
@@ -5093,6 +5216,7 @@ mod tests {
             pending_send: None,
             subscribed_categories: Vec::new(),
             notification_mode: NotificationMode::All,
+            nickname_requests: Vec::new(),
             current_secret_version: None,
             last_secret_rotation: None,
             key_migrated_to_delegate: false,
@@ -5182,6 +5306,7 @@ mod tests {
             pending_send: None,
             subscribed_categories: Vec::new(),
             notification_mode: NotificationMode::All,
+            nickname_requests: Vec::new(),
             current_secret_version: None,
             last_secret_rotation: None,
             key_migrated_to_delegate: false,
@@ -5263,6 +5388,7 @@ mod tests {
                 pending_send: None,
                 subscribed_categories: Vec::new(),
             notification_mode: NotificationMode::All,
+            nickname_requests: Vec::new(),
                 current_secret_version: None,
                 last_secret_rotation: None,
                 key_migrated_to_delegate: false,

@@ -22,6 +22,12 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
     };
     board_data.ensure_can_write()?;
 
+    let self_id = MemberId::from(&board_data.self_sk.verifying_key());
+    let owner_id = MemberId::from(&current_board);
+    if member_to_ban == self_id || member_to_ban == owner_id {
+        return Err("You cannot ban yourself.".to_string());
+    }
+
     // The owner signs with the owner key; an admin signs as its profile.
     let (signing_key, signer) = board_data.management_signer();
     let board_state_clone = board_data.board_state.clone();

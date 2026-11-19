@@ -663,9 +663,13 @@ pub(crate) fn apply_state_delta_unchecked(
     ctx: &ActionContext,
     delta: ChatBoardStateV1Delta,
 ) -> Result<(), String> {
-    let parent = ctx.board_state.clone();
+    let mut parent = ctx.board_state.clone();
     let owner = ctx.current_board;
     let parameters = ChatBoardParametersV1 { owner };
+    // A stale optimistic message with a bad signature must not block every
+    // later management delta (trash key, roles, bans). The contract never had
+    // it; drop it locally before applying the new state.
+    prune_invalid_local_messages(&mut parent, &parameters);
 
     // Apply to a copy and keep it only when the result verifies, exactly as
     // the contract does. `apply_delta` writes field by field, so a late
@@ -688,6 +692,31 @@ pub(crate) fn apply_state_delta_unchecked(
     });
     mark_needs_sync(owner);
     Ok(())
+}
+
+fn prune_invalid_local_messages(
+    state: &mut plaza_core::ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+) {
+    let owner_id = parameters.owner_id();
+    let members = state.members.members_by_member_id();
+    state.recent_messages.messages.retain(|message| {
+        let author = message.message.author;
+        let key = if author == owner_id {
+            Some(&parameters.owner)
+        } else {
+            members.get(&author).map(|member| &member.member.member_vk)
+        };
+        let Some(key) = key else {
+            warn!("Dropping local message from unknown author {author:?}");
+            return false;
+        };
+        if message.validate(key).is_err() {
+            warn!("Dropping local message with invalid signature: {:?}", message.id());
+            return false;
+        }
+        true
+    });
 }
 
 /// Move a topic to another section, or a reply under another topic.

@@ -1,14 +1,6 @@
 import { expect, test, Page } from "@playwright/test";
 import { openApp, openBoard } from "./helpers";
 
-declare global {
-  interface Window {
-    __plazaTest: {
-      boardNames: () => [string, boolean][];
-    };
-  }
-}
-
 async function boardNames(page: Page): Promise<[string, boolean][]> {
   await page.waitForFunction(() => Boolean(window.__plazaTest), null, {
     timeout: 10_000,

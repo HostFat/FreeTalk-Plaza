@@ -31,6 +31,20 @@ test("a private board recovers its key after a reload", async ({ page }) => {
   });
 });
 
+test("the notification mode survives a reload", async ({ page }) => {
+  await page.goto(`${BASE}#/board/${BOARD_KEY}/notifications`);
+  const app = page.frameLocator("iframe");
+  const mode = app.locator("#notification-mode");
+  await expect(mode).toBeVisible({ timeout: 30_000 });
+
+  await mode.selectOption("muted");
+  await page.waitForTimeout(1_000);
+  await page.reload();
+  await expect(mode).toHaveValue("muted", { timeout: 30_000 });
+
+  await mode.selectOption("all");
+});
+
 test("a valid invite opens the join and a new identity joins", async ({
   page,
 }) => {
