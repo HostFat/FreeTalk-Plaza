@@ -12,6 +12,10 @@ use plaza_core::board_state::ChatBoardParametersV1;
 use plaza_core::{
     board_state::{
         configuration::*,
+        content::{
+            ActionContentV1, CategoryContentV1, ModerationActionV1, ACTION_CONTENT_VERSION,
+            CATEGORY_CONTENT_VERSION, CONTENT_TYPE_CATEGORY, CONTENT_TYPE_MODERATION_ACTION,
+        },
         member::*,
         member_info::*,
         message::*,
@@ -38,6 +42,15 @@ pub fn create_example_boards() -> Boards {
     let board3 = create_board(&"Your Private Board".to_string(), SelfIs::Owner);
     map.insert(board3.owner_vk, board3.board_data);
 
+    // A member profile on a device that also holds the owner key. This is the
+    // case where `is_current_owner()` is true but the visible profile is not
+    // the owner: the crown and Manage must stay hidden.
+    let board4 = create_board(
+        &"Owner Key, Member Profile".to_string(),
+        SelfIs::MemberWithOwnerKey,
+    );
+    map.insert(board4.owner_vk, board4.board_data);
+
     Boards {
         map,
         current_board_key: None,
@@ -61,6 +74,7 @@ enum SelfIs {
     Observer,
     Member,
     Owner,
+    MemberWithOwnerKey,
 }
 
 // Function to create a board with an owner and members, self_is determines whether
@@ -112,7 +126,7 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
         ));
 
     // If self is a member but not the owner, add self
-    if self_is == SelfIs::Member {
+    if matches!(self_is, SelfIs::Member | SelfIs::MemberWithOwnerKey) {
         members.members.push(AuthorizedMember::new(
             Member {
                 owner_member_id: owner_id,
@@ -184,13 +198,19 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
 
     // Create a map of member IDs to their signing keys for message creation
     let mut member_keys = HashMap::new();
-    if self_is == SelfIs::Member {
+    if matches!(self_is, SelfIs::Member | SelfIs::MemberWithOwnerKey) {
         member_keys.insert(self_id, self_sk.clone());
     }
     member_keys.insert(other_member_id, other_member_sk);
 
     // Add example messages
-    add_example_messages(&mut board_state, &owner_id, owner_sk, &member_keys);
+    add_example_messages(
+        &mut board_state,
+        &owner_id,
+        owner_sk,
+        &member_keys,
+        board_name == "Team Chat Board",
+    );
 
     let verification_result = board_state.verify(
         &board_state,
@@ -219,9 +239,21 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
             owner_vk: owner_vk.clone(),
             board_state,
             self_sk: self_sk.clone(),
-            owner_sk: None,
-            owner_profile_id: None,
-            profile_id: None,
+            owner_sk: if self_is == SelfIs::MemberWithOwnerKey {
+                Some(owner_sk.clone())
+            } else {
+                None
+            },
+            owner_profile_id: if self_is == SelfIs::MemberWithOwnerKey {
+                Some("owner-profile".to_string())
+            } else {
+                None
+            },
+            profile_id: if self_is == SelfIs::MemberWithOwnerKey {
+                Some("member-profile".to_string())
+            } else {
+                None
+            },
             contract_key,
             last_read_message_id: None,
             secrets: std::collections::HashMap::new(),
@@ -231,6 +263,20 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
             self_authorized_member: None,
             invite_chain: vec![],
             self_member_info: None,
+            category_secrets: std::collections::HashMap::new(),
+            old_category_secrets: std::collections::HashMap::new(),
+            trash_secret: None,
+            trash_secrets: std::collections::HashMap::new(),
+            collapsed_groups: Vec::new(),
+            last_visit: 0,
+            read_categories: std::collections::HashMap::new(),
+            draft: None,
+            drafts: Vec::new(),
+            trash_retention_days: 0,
+            pending_uploads: Vec::new(),
+            pending_send: None,
+            subscribed_categories: Vec::new(),
+            spectator: false,
         },
     }
 }
@@ -240,6 +286,7 @@ fn add_example_messages(
     owner_id: &MemberId,
     owner_key: &SigningKey,
     member_keys: &HashMap<MemberId, SigningKey>,
+    with_sections: bool,
 ) {
     // Use a timestamp 24 hours ago as base time for messages
     let now = crate::util::get_current_system_time()
@@ -250,6 +297,41 @@ fn add_example_messages(
 
     let mut messages = MessagesV1::default();
     let mut current_time_ms = base_time;
+
+    // A board with two sections for the Playwright composer tests: General
+    // inherits the board policy (on), NoAuto overrides it to off.
+    if with_sections {
+        for (name, policy, age_ms) in [
+            ("General", None, 2 * 60 * 60 * 1000),
+            ("NoAuto", Some(false), 60 * 60 * 1000),
+        ] {
+            let mut category =
+                CategoryContentV1::new(name.to_string(), None, "#6366f1".to_string());
+            category.auto_moderated_topics = policy;
+            let message = AuthorizedMessageV1::new(
+                MessageV1 {
+                    images: Vec::new(),
+                    board_owner: *owner_id,
+                    author: *owner_id,
+                    time: get_time_from_millis(base_time.saturating_sub(age_ms)),
+                    content: BoardMessageBody::public_raw(
+                        CONTENT_TYPE_CATEGORY,
+                        CATEGORY_CONTENT_VERSION,
+                        category.encode(),
+                    ),
+                    reply_to: None,
+                    topic_id: None,
+                    topic_public_key: None,
+                    topic_proof: None,
+                    section_id: None,
+                    section_auto_moderated: None,
+                    auto_moderated: false,
+                },
+                owner_key,
+            );
+            messages.messages.push(message);
+        }
+    }
 
     // Verify owner exists in member_info but NOT in members list
     if !board_state
@@ -341,35 +423,163 @@ fn add_example_messages(
     // Add reactions to messages from OTHER members (not owner)
     // Rule: One reaction per user per message
     // In "Your Private Board" the owner IS self, so this shows self reacting to others
-    let non_owner_messages: Vec<_> = messages
+    let non_owner_ids: Vec<MessageId> = messages
         .messages
         .iter()
         .filter(|m| m.message.author != *owner_id)
+        .map(|m| m.id())
         .collect();
 
     // Get a non-owner member ID for multi-user reaction demo
     let other_member_id = member_keys.keys().find(|id| *id != owner_id).cloned();
 
-    if non_owner_messages.len() >= 1 {
-        // First non-owner message: owner reacts with thumbs up, other member with heart
-        let msg_id = non_owner_messages[0].id();
-        let mut reactions = HashMap::new();
-        reactions.insert("👍".to_string(), vec![*owner_id]);
+    if non_owner_ids.len() >= 1 {
+        // First non-owner message: owner reacts with thumbs up, other member with
+        // heart. These are signed action messages, not fixture-only state, so a
+        // real toggle or a rebuilt actions_state keeps them.
+        let msg_id = non_owner_ids[0].clone();
+        push_example_reaction(
+            &mut messages,
+            owner_id,
+            msg_id.clone(),
+            *owner_id,
+            owner_key,
+            "👍",
+            current_time_ms,
+        );
         if let Some(other_id) = other_member_id {
-            reactions.insert("❤️".to_string(), vec![other_id]);
+            if let Some(key) = member_keys.get(&other_id) {
+                push_example_reaction(
+                    &mut messages,
+                    owner_id,
+                    msg_id,
+                    other_id,
+                    key,
+                    "❤️",
+                    current_time_ms + 1000,
+                );
+            }
         }
-        messages.actions_state.reactions.insert(msg_id, reactions);
     }
 
-    if non_owner_messages.len() >= 2 {
+    if non_owner_ids.len() >= 2 {
         // Second non-owner message: owner reacts with celebration
-        let msg_id = non_owner_messages[1].id();
+        let msg_id = non_owner_ids[1].clone();
         let mut reactions = HashMap::new();
         reactions.insert("🎉".to_string(), vec![*owner_id]);
         messages.actions_state.reactions.insert(msg_id, reactions);
     }
 
+    // A stable topic for the Playwright reaction test. The other rules above
+    // react to whichever message happened to be first; this title does not
+    // depend on the generated lipsum order.
+    if let Some(other_id) = other_member_id {
+        if let Some(key) = member_keys.get(&other_id) {
+            let message = AuthorizedMessageV1::new(
+                MessageV1 {
+                    images: Vec::new(),
+                    board_owner: *owner_id,
+                    author: other_id,
+                    time: get_time_from_millis(current_time_ms + 5_000),
+                    content: BoardMessageBody::public(
+                        "Reaction topic".to_string(),
+                        "This topic carries signed reactions for the Playwright test."
+                            .to_string(),
+                    ),
+                    reply_to: None,
+                    topic_id: None,
+                    topic_public_key: None,
+                    topic_proof: None,
+                    section_id: None,
+                    section_auto_moderated: None,
+                    auto_moderated: false,
+                },
+                key,
+            );
+            let target = message.id();
+            messages.messages.push(message);
+            push_example_reaction(
+                &mut messages,
+                owner_id,
+                target.clone(),
+                *owner_id,
+                owner_key,
+                "👍",
+                current_time_ms + 6_000,
+            );
+            push_example_reaction(
+                &mut messages,
+                owner_id,
+                target,
+                other_id,
+                key,
+                "❤️",
+                current_time_ms + 7_000,
+            );
+        }
+    }
+
+    // Turn the signed action messages into the computed view the UI reads.
+    let admins: std::collections::HashSet<MemberId> = board_state
+        .admin
+        .admins
+        .iter()
+        .map(|admin| admin.admin.id())
+        .collect();
+    let members: std::collections::HashSet<MemberId> = board_state
+        .members
+        .members
+        .iter()
+        .map(|member| member.member.id())
+        .collect();
+    messages.rebuild_actions_state_with_permissions(
+        &HashMap::new(),
+        Some(*owner_id),
+        Some(&admins),
+        None,
+        true,
+        Some(&members),
+    );
+
     board_state.recent_messages = messages;
+}
+
+fn push_example_reaction(
+    messages: &mut MessagesV1,
+    owner_id: &MemberId,
+    target: MessageId,
+    author_id: MemberId,
+    signing_key: &SigningKey,
+    emoji: &str,
+    time_ms: u64,
+) {
+    let action = ActionContentV1::reaction(target.clone(), emoji.to_string());
+    let envelope = ModerationActionV1::new(
+        action.action_type,
+        action.target,
+        SealedBytes::public(action.encode()),
+    );
+    messages.messages.push(AuthorizedMessageV1::new(
+        MessageV1 {
+            images: Vec::new(),
+            board_owner: *owner_id,
+            author: author_id,
+            time: get_time_from_millis(time_ms),
+            content: BoardMessageBody::public_raw(
+                CONTENT_TYPE_MODERATION_ACTION,
+                ACTION_CONTENT_VERSION,
+                envelope.encode(),
+            ),
+            reply_to: None,
+            topic_id: None,
+            topic_public_key: None,
+            topic_proof: None,
+            section_id: None,
+            section_auto_moderated: None,
+            auto_moderated: false,
+        },
+        signing_key,
+    ));
 }
 
 fn get_time_from_millis(ms: u64) -> SystemTime {
@@ -392,7 +602,14 @@ mod tests {
     #[test]
     fn test_create_example_boards() {
         let boards = create_example_boards();
-        assert_eq!(boards.map.len(), 3);
+        assert_eq!(boards.map.len(), 4);
+        assert!(
+            boards
+                .map
+                .values()
+                .any(|board| !board.board_state.recent_messages.actions_state.reactions.is_empty()),
+            "the fixture must carry at least one signed reaction"
+        );
 
         for (owner_vk, board_data) in boards.map.iter() {
             // Verify the board state

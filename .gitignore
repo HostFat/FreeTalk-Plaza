@@ -30,5 +30,11 @@ target/
 # Test contract files (generated locally, not committed)
 test-contract/
 
+# Playwright generated files
+ui/tests/node_modules/
+ui/tests/test-results/
+ui/tests/playwright-report/
+ui/tests/blob-report/
+
 .syncthing*
 
