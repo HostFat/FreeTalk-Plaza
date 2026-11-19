@@ -1028,8 +1028,12 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                     // A split board can own and post with different
                                     // keys: owner powers follow the ownership chain.
                                     // A spectator never gets management controls.
-                                    let is_owner = !bd.spectator && bd.is_current_owner();
-                                    let is_admin = !bd.spectator
+                                    let as_member = crate::components::app::view_as_member();
+                                    let is_owner = !as_member
+                                        && !bd.spectator
+                                        && bd.is_current_owner();
+                                    let is_admin = !as_member
+                                        && !bd.spectator
                                         && bd.board_state.admin.admins.iter()
                                             .any(|a| a.admin.id() == self_member_id);
                                     (self_member_id, is_owner, is_admin)
@@ -1044,8 +1048,11 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                         // Follow the ownership chain, not the
                                         // founding key: a spectator and a
                                         // transferred owner differ here.
-                                        !board.spectator && board.is_current_owner(),
-                                        !board.spectator
+                                        !crate::components::app::view_as_member()
+                                            && !board.spectator
+                                            && board.is_current_owner(),
+                                        !crate::components::app::view_as_member()
+                                            && !board.spectator
                                             && board
                                                 .board_state
                                                 .admin

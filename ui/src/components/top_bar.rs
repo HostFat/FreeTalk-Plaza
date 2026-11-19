@@ -205,8 +205,10 @@ pub fn TopBar() -> Element {
 
     let self_member_id = MemberId::from(&board_data.self_sk.verifying_key());
     // A spectator has no management surface, whatever the board state says.
-    let is_owner = !board_data.spectator && board_data.is_current_owner();
-    let is_admin = !board_data.spectator
+    let as_member = crate::components::app::view_as_member();
+    let is_owner = !as_member && !board_data.spectator && board_data.is_current_owner();
+    let is_admin = !as_member
+        && !board_data.spectator
         && board_data
             .board_state
             .admin
@@ -214,7 +216,8 @@ pub fn TopBar() -> Element {
             .iter()
             .any(|a| a.admin.id() == self_member_id);
     let can_participate = board_data.can_participate();
-    let can_manage_trash = !board_data.spectator
+    let can_manage_trash = !as_member
+        && !board_data.spectator
         && crate::board_data::can_manage_trash(&board_data.board_state, self_member_id);
     let can_open_manage = is_owner || is_admin || can_manage_trash;
 

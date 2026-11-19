@@ -431,6 +431,15 @@ pub fn AboutModal() -> Element {
                     }
                     button {
                         class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg transition-colors",
+                        title: "Test only: hides owner and admin controls in this tab until reload",
+                        onclick: move |_| {
+                            *crate::components::app::TEST_VIEW_MEMBER.write() = true;
+                            *ABOUT_MODAL.write() = false;
+                        },
+                        "Test member view"
+                    }
+                    button {
+                        class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg transition-colors",
                         onclick: move |_| *ABOUT_MODAL.write() = false,
                         "Close"
                     }

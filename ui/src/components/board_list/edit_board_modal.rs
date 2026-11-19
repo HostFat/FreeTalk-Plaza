@@ -41,7 +41,10 @@ pub fn EditBoardModal() -> Element {
         editing_board
             .read()
             .as_ref()
-            .is_some_and(|board_data| board_data.is_current_owner())
+            .is_some_and(|board_data| {
+                board_data.is_current_owner()
+                    && !crate::components::app::view_as_member()
+            })
     });
 
     // Render the modal if board configuration is available

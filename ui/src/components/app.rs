@@ -216,6 +216,15 @@ pub struct CurrentPostContext {
 ///
 /// Uses crate::util::defer() to break out of the WASM call stack entirely,
 /// ensuring the write happens in a completely clean execution context.
+/// Test-only UI mode: `?view=member` hides owner/admin controls in this tab
+/// without touching keys or state. Used to check the normal-member UI on a
+/// single-node delegate, which is shared by every origin of that node.
+pub static TEST_VIEW_MEMBER: GlobalSignal<bool> = Signal::global(|| false);
+
+pub fn view_as_member() -> bool {
+    *TEST_VIEW_MEMBER.read()
+}
+
 pub fn mark_needs_sync(board_key: ed25519_dalek::VerifyingKey) {
     crate::util::defer(move || {
         // Count the change so the sync chip can wait for the node's answer.

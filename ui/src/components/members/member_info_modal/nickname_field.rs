@@ -31,7 +31,8 @@ pub fn NicknameField(member_info: AuthorizedMemberInfo) -> Element {
         .any(|admin| admin.admin.id() == viewer_id);
     // Normal members cannot change their own name; the owner and admins can,
     // for any member. The override leaves the member's own record untouched.
-    let can_edit = is_owner || is_admin;
+    let can_edit =
+        !crate::components::app::view_as_member() && (is_owner || is_admin);
     let is_self = viewer_id == member_id;
 
     let initial_nickname = board
