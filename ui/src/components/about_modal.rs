@@ -162,9 +162,11 @@ fn persist_and_reload() {
             ));
             return;
         }
-        if let Some(window) = web_sys::window() {
-            let _ = window.location().reload();
-        }
+        // Stay on the board. Reloading here raced the delegate load and left
+        // the board on "Loading board…"; the in-memory signals already carry
+        // the new identity.
+        crate::components::app::toasts::show("Identity switched.");
+        *crate::components::app::ABOUT_MODAL.write() = false;
     });
 }
 
