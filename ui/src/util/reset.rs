@@ -33,7 +33,7 @@ pub fn confirm_and_reset() {
                     boards.blocked_image_hashes.clear();
                     boards.current_board_key = None;
                 });
-                CURRENT_BOARD.write().owner_key = None;
+                crate::components::app::select_board(None);
                 toasts::show("Local data cleared. Reloading…");
                 // Let the delete requests and the toast reach the screen.
                 crate::util::sleep(Duration::from_millis(1000)).await;

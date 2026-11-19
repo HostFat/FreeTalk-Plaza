@@ -263,9 +263,7 @@ fn create_notification_internal(
                 info!("Notification clicked, switching to board");
 
                 // Switch to the board
-                *CURRENT_BOARD.write() = CurrentBoard {
-                    owner_key: Some(board_key),
-                };
+                crate::components::app::select_board(Some(board_key));
 
                 // Focus the window
                 if let Some(window) = web_sys::window() {

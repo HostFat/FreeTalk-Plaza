@@ -793,39 +793,47 @@ fn NotFound(route: Vec<String>) -> Element {
     }
 }
 
+/// Select a board by any known key and always store the BOARDS map key.
+/// The URL, notifications, joins and the owner chain may name the founding
+/// board key, the current owner key or the visible profile key; the map is
+/// keyed by `BoardData.owner_vk` (the founding board key).
+pub fn select_board(board_id: Option<VerifyingKey>) {
+    let Some(vk) = board_id else {
+        *CURRENT_BOARD.write() = CurrentBoard { owner_key: None };
+        return;
+    };
+    let resolved = BOARDS
+        .read()
+        .map
+        .iter()
+        .find(|(map_key, board)| {
+            **map_key == vk
+                || board.owner_key().verifying_key() == vk
+                || board.current_owner_key() == vk
+                || board.self_sk.verifying_key() == vk
+                || board.owner_vk == vk
+        })
+        .map(|(map_key, _)| *map_key)
+        .unwrap_or(vk);
+    if CURRENT_BOARD.read().owner_key != Some(resolved) {
+        dioxus::logger::tracing::info!(
+            "select_board: {} -> map key {}",
+            bs58::encode(vk.as_bytes()).into_string(),
+            bs58::encode(resolved.as_bytes()).into_string()
+        );
+        *CURRENT_BOARD.write() = CurrentBoard {
+            owner_key: Some(resolved),
+        };
+    }
+}
+
 /// Sync CURRENT_BOARD from URL board_id parameter
 fn sync_board_from_url(board_id: &str) {
     // Parse board_id (base58-encoded VerifyingKey)
     if let Ok(bytes) = bs58::decode(board_id).into_vec() {
         if bytes.len() == 32 {
             if let Ok(vk) = VerifyingKey::from_bytes(&bytes.try_into().unwrap()) {
-                // A URL may carry the current owner key or the visible profile
-                // instead of the founding board key. Resolve it to the map key
-                // (BoardData.owner_vk) before looking the board up.
-                let resolved = BOARDS
-                    .read()
-                    .map
-                    .iter()
-                    .find(|(map_key, board)| {
-                        **map_key == vk
-                            || board.owner_key().verifying_key() == vk
-                            || board.current_owner_key() == vk
-                            || board.self_sk.verifying_key() == vk
-                    })
-                    .map(|(map_key, _)| *map_key)
-                    .unwrap_or(vk);
-                // Only update if different to avoid infinite loops
-                let current = CURRENT_BOARD.read().owner_key;
-                if current != Some(resolved) {
-                    debug!(
-                        "Syncing CURRENT_BOARD from URL: {} (resolved {})",
-                        board_id,
-                        bs58::encode(resolved.as_bytes()).into_string()
-                    );
-                    *CURRENT_BOARD.write() = CurrentBoard {
-                        owner_key: Some(resolved),
-                    };
-                }
+                select_board(Some(vk));
             }
         }
     }

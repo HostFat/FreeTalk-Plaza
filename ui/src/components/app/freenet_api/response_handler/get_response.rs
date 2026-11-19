@@ -413,9 +413,7 @@ pub async fn handle_get_response(
                         // again, PUT, and trigger another GET in a loop.
                         pending.map.remove(&owner_vk);
                     });
-                    CURRENT_BOARD.with_mut(|current_board| {
-                        current_board.owner_key = Some(owner_vk);
-                    });
+                    crate::components::app::select_board(Some(owner_vk));
                 });
 
                 // Publish the stored membership as soon as the board is

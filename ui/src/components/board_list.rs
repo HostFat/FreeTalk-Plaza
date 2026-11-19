@@ -44,7 +44,7 @@ fn remove_board_from_device(board_key: ed25519_dalek::VerifyingKey) {
     });
     let was_current = CURRENT_BOARD.read().owner_key == Some(board_key);
     if was_current {
-        CURRENT_BOARD.write().owner_key = None;
+        crate::components::app::select_board(None);
     }
     crate::components::app::toasts::show("Board removed from this device.");
     wasm_bindgen_futures::spawn_local(async {

@@ -282,7 +282,7 @@ pub fn EditBoardModal() -> Element {
 
                                                 // Check and potentially clear CURRENT_BOARD
                                                 if CURRENT_BOARD.read().owner_key == Some(board_vk) {
-                                                    CURRENT_BOARD.write().owner_key = None;
+                                                    crate::components::app::select_board(None);
                                                 }
 
                                                 // Close the modal *last*

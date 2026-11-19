@@ -21,7 +21,7 @@ static SPECTATOR_FETCHES: GlobalSignal<HashMap<VerifyingKey, (f64, u32)>> =
 /// Register the board locally (if needed), select it and let the tick fetch it.
 pub fn open_spectator_board(owner_vk: VerifyingKey) -> Result<(), String> {
     if BOARDS.read().map.contains_key(&owner_vk) {
-        CURRENT_BOARD.with_mut(|current| current.owner_key = Some(owner_vk));
+        crate::components::app::select_board(Some(owner_vk));
         return Ok(());
     }
 
@@ -61,7 +61,7 @@ pub fn open_spectator_board(owner_vk: VerifyingKey) -> Result<(), String> {
         boards.removed.retain(|vk| *vk != owner_vk);
         boards.map.insert(owner_vk, board_data);
     });
-    CURRENT_BOARD.with_mut(|current| current.owner_key = Some(owner_vk));
+    crate::components::app::select_board(Some(owner_vk));
     crate::util::safe_spawn_local(async {
         if let Err(error) = save_boards_to_delegate().await {
             warn!("Could not store the read-only board: {error}");

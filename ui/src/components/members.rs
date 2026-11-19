@@ -632,9 +632,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                 });
 
                 // Set as current board
-                CURRENT_BOARD.with_mut(|current| {
-                    current.owner_key = Some(owner_key);
-                });
+                crate::components::app::select_board(Some(owner_key));
 
                 // Trigger a sync for the new board (deferred to avoid RefCell panics)
                 mark_needs_sync(owner_key);
