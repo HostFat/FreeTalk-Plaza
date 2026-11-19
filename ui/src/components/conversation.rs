@@ -1,5 +1,8 @@
 use crate::components::app::receive_times::get_delay_secs;
-use crate::components::app::{BOARDS, CURRENT_BOARD, MEMBER_INFO_MODAL};
+use crate::components::app::{
+    Route, BOARDS, CONVERSATION_PINNED, CURRENT_BOARD, INTERCEPTED_JOIN_TOKEN,
+    MEMBER_INFO_MODAL,
+};
 use crate::util::avatar::get_avatar;
 use crate::util::ecies::unseal_bytes_with_secrets;
 use crate::util::images::{request_image, ImageStatus, IMAGES};
@@ -721,6 +724,13 @@ pub fn get_all_messages(
 /// Build a tree of messages with their replies
 /// If parent_id is None, returns top-level messages (those not replying to anything)
 /// If parent_id is Some(id), returns only replies to that specific message
+fn count_message_tree(nodes: &[MessageWithReplies]) -> usize {
+    nodes
+        .iter()
+        .map(|node| 1 + count_message_tree(&node.replies))
+        .sum()
+}
+
 pub fn build_reply_tree(
     all_messages: &[MessageData],
     parent_id: Option<&MessageId>,
@@ -1329,6 +1339,16 @@ pub fn Conversation(
 
     let mut replying_to: Signal<Option<ReplyContext>> = use_signal(|| None);
     let mut pending_delete: Signal<Option<MessageId>> = use_signal(|| None);
+    use_hook(|| {
+        *CONVERSATION_PINNED.write() = true;
+    });
+    use_effect(move || {
+        let intercepted = INTERCEPTED_JOIN_TOKEN.read().clone();
+        if let Some(token) = intercepted {
+            *INTERCEPTED_JOIN_TOKEN.write() = None;
+            navigator().push(Route::JoinBoard { token });
+        }
+    });
 
     // Build message tree for the given parent
     let message_tree = use_memo({
@@ -1389,6 +1409,21 @@ pub fn Conversation(
                 }
             }
             None
+        }
+    });
+
+    let tree_count = message_tree
+        .read()
+        .as_ref()
+        .map(|(tree, _, _, _, _)| count_message_tree(tree))
+        .unwrap_or(0);
+    use_effect(move || {
+        let _ = tree_count;
+        if *CONVERSATION_PINNED.read() {
+            spawn_local(async move {
+                futures_timer::Delay::new(std::time::Duration::from_millis(60)).await;
+                crate::util::scroll_conversation_to_bottom("message-scroll");
+            });
         }
     });
 
@@ -1497,7 +1532,8 @@ pub fn Conversation(
     rsx! {
         div { class: "flex flex-col h-full min-h-0",
             // Reply thread area
-            div { class: "flex-1 overflow-y-auto",
+            div {
+                class: "flex-1 overflow-y-auto",
                 div { class: "max-w-4xl mx-auto px-4 py-4",
                     {
                         if current_board_data.is_some() {
@@ -2374,6 +2410,7 @@ fn ReactionDisplay(
 
     let mut sorted: Vec<_> = reactions.iter().collect();
     sorted.sort_by_key(|(e, _)| e.as_str());
+    let mut open_owners = use_signal(|| None::<String>);
 
     rsx! {
         div { class: "{container_class}",
@@ -2417,13 +2454,53 @@ fn ReactionDisplay(
                             }
                         },
                         "{emoji}"
-                        if count > 1 {
-                            span { class: "{count_class}", "{count}" }
+                        span {
+                            class: "{count_class} reaction-count px-1",
+                            title: "Show who reacted",
+                            aria_label: "Show who reacted",
+                            onclick: {
+                                let owners_emoji = emoji.clone();
+                                move |event| {
+                                    event.stop_propagation();
+                                    open_owners.set(Some(owners_emoji.clone()));
+                                }
+                            },
+                            "{count}"
                         }
                         span { class: "reaction-tooltip", "{tooltip}" }
                     }
                 }
             })}
+        }
+        if let Some(emoji) = open_owners() {
+            if let Some(reactors) = reactions.get(&emoji) {
+                div {
+                    class: "fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4",
+                    onclick: move |_| open_owners.set(None),
+                    div {
+                        class: "reaction-owners-popover w-full max-w-xs rounded-xl border border-border bg-panel p-4 shadow-xl",
+                        onclick: move |event| event.stop_propagation(),
+                        div { class: "mb-2 text-lg font-semibold text-text", "{emoji} reactions" }
+                        div { class: "space-y-1",
+                            for reactor in reactors {
+                                div { class: "text-sm text-text",
+                                    if *reactor == self_member_id {
+                                        "You"
+                                    } else {
+                                        {member_names.get(reactor).cloned().unwrap_or_else(|| "Unknown".to_string())}
+                                    }
+                                }
+                            }
+                        }
+                        button {
+                            r#type: "button",
+                            class: "mt-3 w-full rounded-lg bg-surface px-3 py-1.5 text-sm text-text hover:bg-surface-hover",
+                            onclick: move |_| open_owners.set(None),
+                            "Close"
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -18,6 +18,7 @@ const webServerCommand =
 export default defineConfig({
   testDir: ".",
   testMatch: "*.spec.ts",
+  testIgnore: ["real-node/**"],
   timeout: 60_000,
   retries: 1,
   fullyParallel: true,

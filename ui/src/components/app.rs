@@ -125,6 +125,13 @@ pub static CURRENT_BOARD: GlobalSignal<CurrentBoard> =
 
 pub static MEMBER_INFO_MODAL: GlobalSignal<MemberInfoModalSignal> =
     Global::new(|| MemberInfoModalSignal { member: None });
+
+/// Invite token caught by the document-level click interceptor. App consumes
+/// it and routes in place so the open topic and composer stay alive.
+pub static INTERCEPTED_JOIN_TOKEN: GlobalSignal<Option<String>> = Global::new(|| None);
+
+/// The topic view stays pinned to the latest reply until the reader scrolls up.
+pub static CONVERSATION_PINNED: GlobalSignal<bool> = Global::new(|| true);
 /// Whether the "About FreeTalk Plaza" panel is open.
 pub static ABOUT_MODAL: GlobalSignal<bool> = Global::new(|| false);
 pub static EDIT_BOARD_MODAL: GlobalSignal<EditBoardModalSignal> =
@@ -276,10 +283,13 @@ pub fn App() -> Element {
     // Capture the Dioxus runtime for use in defer()/setTimeout callbacks.
     // Must be called from within a Dioxus component where the runtime is active.
     crate::util::capture_runtime();
+    #[cfg(all(feature = "example-data", target_arch = "wasm32"))]
+    crate::test_hooks::install();
 
     // Chips are raw HTML inside message bodies, so delegate clicks at the
     // document level. Idempotent; safe on every render.
     crate::components::mention_click_interceptor::install_mention_click_interceptor();
+    crate::components::invite_click_interceptor::install_invite_click_interceptor();
 
     // The app runs in a sandboxed iframe inside the Freenet shell: keep the
     // shell's address bar in sync with the app route so refreshes and copied
@@ -449,6 +459,7 @@ pub fn App() -> Element {
             BoardList {}
             // User profile bar with post input
             TopBar {}
+            crate::components::system_notifications::SystemNotificationsBridge {}
             // Development warning, visible on every page including boards.
             div { class: "flex-shrink-0 bg-amber-500/10 border-y border-amber-500/30 px-4 py-1 text-center text-xs text-amber-200",
                 "Work in progress: features and data can break without notice, there is no support. Avoid creating boards you plan to keep long term."
@@ -943,6 +954,8 @@ fn initial_boards() -> Boards {
         current_board_key: None,
         profiles: Vec::new(),
         removed: Vec::new(),
+        board_order: Vec::new(),
+        archived: Vec::new(),
         migrated_boards: Vec::new(),
         blocked_image_hashes: Vec::new(),
         auto_renew_images: false,

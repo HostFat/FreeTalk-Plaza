@@ -1,7 +1,7 @@
 use crate::components::app::chat_delegate::save_boards_to_delegate;
 use crate::components::app::{
-    CurrentCategoryContext, CurrentPostContext, Route, BOARDS, CURRENT_BOARD, CURRENT_CATEGORY,
-    CURRENT_POST,
+    CurrentCategoryContext, CurrentPostContext, Route, BOARDS, CONVERSATION_PINNED,
+    CURRENT_BOARD, CURRENT_CATEGORY, CURRENT_POST,
 };
 use crate::components::category_create_modal::CREATE_CATEGORY_MODAL;
 use crate::components::category_view::{CategoryCard, CategoryEditData};
@@ -2082,7 +2082,13 @@ pub fn SinglePostView(post_id: String) -> Element {
             }
 
             // Post content and replies
-            div { class: "flex-1 overflow-y-auto",
+            div {
+                id: "message-scroll",
+                class: "flex-1 overflow-y-auto",
+                onscroll: move |_| {
+                    *CONVERSATION_PINNED.write() =
+                        crate::util::conversation_near_bottom("message-scroll");
+                },
                 {
                     match post_data.read().as_ref() {
                         Some((post, self_member_id, max_title_size, max_message_size, _, can_moderate, member_names)) => {

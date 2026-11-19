@@ -8,6 +8,8 @@ mod components;
 mod constants;
 #[cfg(feature = "example-data")]
 mod example_data;
+#[cfg(all(feature = "example-data", target_arch = "wasm32"))]
+mod test_hooks;
 mod invites;
 #[allow(dead_code)]
 mod pending_invites;

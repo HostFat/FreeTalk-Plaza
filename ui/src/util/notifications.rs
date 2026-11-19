@@ -19,6 +19,15 @@ pub struct Notice<'a> {
     pub kind: NoticeKind,
 }
 
+/// Whether a per-board mode lets this notice reach the OS notification layer.
+pub fn mode_allows(mode: NotificationMode, kind: NoticeKind) -> bool {
+    match mode {
+        NotificationMode::All => true,
+        NotificationMode::MentionsAndReplies => kind != NoticeKind::Section,
+        NotificationMode::Muted => false,
+    }
+}
+
 /// The nickname other members see, unsealed when the board is private.
 pub fn self_nickname(board: &BoardData, self_id: MemberId) -> String {
     board.display_nickname(self_id).unwrap_or_default()
@@ -320,6 +329,20 @@ mod tests {
         let notices = collect(&messages, me, "Alice", 1_000, &[], &HashMap::new(), NotificationMode::All);
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].kind, NoticeKind::Mention);
+    }
+
+    #[test]
+    fn system_notification_modes_keep_sections_out_of_mentions_only() {
+        assert!(mode_allows(NotificationMode::All, NoticeKind::Section));
+        assert!(mode_allows(
+            NotificationMode::MentionsAndReplies,
+            NoticeKind::Mention
+        ));
+        assert!(!mode_allows(
+            NotificationMode::MentionsAndReplies,
+            NoticeKind::Section
+        ));
+        assert!(!mode_allows(NotificationMode::Muted, NoticeKind::Reply));
     }
 
     #[test]

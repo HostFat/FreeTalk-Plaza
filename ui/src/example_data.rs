@@ -19,7 +19,7 @@ use plaza_core::{
         member::*,
         member_info::*,
         message::*,
-        privacy::{BoardDisplayMetadata, SealedBytes},
+        privacy::{BoardDisplayMetadata, PrivacyMode, SealedBytes},
     },
     ChatBoardStateV1,
 };
@@ -51,11 +51,23 @@ pub fn create_example_boards() -> Boards {
     );
     map.insert(board4.owner_vk, board4.board_data);
 
+    // A private board whose key is unavailable: the gate must show the
+    // recovery screen instead of an endless loading spinner.
+    let mut board5 = create_board(&"Missing Key Board".to_string(), SelfIs::Member);
+    board5.board_data.board_state.configuration.configuration.privacy_mode =
+        PrivacyMode::Private;
+    board5.board_data.secrets.clear();
+    board5.board_data.current_secret_version = None;
+    board5.board_data.owner_sk = None;
+    map.insert(board5.owner_vk, board5.board_data);
+
     Boards {
         map,
         current_board_key: None,
         profiles: Vec::new(),
         removed: Vec::new(),
+    board_order: Vec::new(),
+    archived: Vec::new(),
         migrated_boards: Vec::new(),
         blocked_image_hashes: Vec::new(),
         auto_renew_images: false,
@@ -520,6 +532,73 @@ fn add_example_messages(
         }
     }
 
+    if with_sections {
+        let owner_message = |title: &str, body: String, time_ms: u64, reply_to: Option<MessageId>| {
+            AuthorizedMessageV1::new(
+                MessageV1 {
+                    images: Vec::new(),
+                    board_owner: *owner_id,
+                    author: *owner_id,
+                    time: get_time_from_millis(time_ms),
+                    content: BoardMessageBody::public(title.to_string(), body),
+                    reply_to,
+                    topic_id: None,
+                    topic_public_key: None,
+                    topic_proof: None,
+                    section_id: None,
+                    section_auto_moderated: None,
+                    auto_moderated: false,
+                },
+                owner_key,
+            )
+        };
+
+        let invite = owner_message(
+            "Invite link",
+            "[Join the board](#/join/not-a-valid-token)".to_string(),
+            current_time_ms + 8_000,
+            None,
+        );
+        messages.messages.push(invite);
+
+        let autoscroll = owner_message(
+            "Autoscroll topic",
+            "Start of a long thread used by the autoscroll test.".to_string(),
+            current_time_ms + 9_000,
+            None,
+        );
+        let autoscroll_id = autoscroll.id();
+        messages.messages.push(autoscroll);
+        if let Some(other_id) = other_member_id {
+            if let Some(key) = member_keys.get(&other_id) {
+                for index in 0..24 {
+                    messages.messages.push(AuthorizedMessageV1::new(
+                        MessageV1 {
+                            images: Vec::new(),
+                            board_owner: *owner_id,
+                            author: other_id,
+                            time: get_time_from_millis(
+                                current_time_ms + 10_000 + index * 100,
+                            ),
+                            content: BoardMessageBody::public(
+                                String::new(),
+                                format!("Autoscroll reply {}", index + 1),
+                            ),
+                            reply_to: Some(autoscroll_id.clone()),
+                            topic_id: None,
+                            topic_public_key: None,
+                            topic_proof: None,
+                            section_id: None,
+                            section_auto_moderated: None,
+                            auto_moderated: false,
+                        },
+                        key,
+                    ));
+                }
+            }
+        }
+    }
+
     // Turn the signed action messages into the computed view the UI reads.
     let admins: std::collections::HashSet<MemberId> = board_state
         .admin
@@ -603,7 +682,7 @@ mod tests {
     #[test]
     fn test_create_example_boards() {
         let boards = create_example_boards();
-        assert_eq!(boards.map.len(), 4);
+        assert_eq!(boards.map.len(), 5);
         assert!(
             boards
                 .map

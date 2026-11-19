@@ -8,7 +8,7 @@ pub(crate) mod receive_invitation_modal;
 
 use crate::components::app::chat_delegate::save_boards_to_delegate;
 use crate::components::app::document_title::mark_current_board_as_read;
-use crate::components::app::{BOARDS, CREATE_BOARD_MODAL, CURRENT_BOARD};
+use crate::components::app::{BOARDS, BOARDS_LOADED, CREATE_BOARD_MODAL, CURRENT_BOARD};
 use crate::components::members::ImportIdentityModal;
 use crate::util::ecies::unseal_bytes_with_secrets;
 use dioxus::logger::tracing::error;
@@ -112,10 +112,10 @@ pub fn BoardList() -> Element {
         let current_board_key = CURRENT_BOARD.read().owner_key;
 
         boards
-            .map
-            .iter()
-            .map(|(board_key, board_data)| {
-                let board_key = *board_key;
+            .ordered_keys()
+            .into_iter()
+            .filter_map(|board_key| {
+                let board_data = boards.map.get(&board_key)?;
                 let awaiting_sync = board_data.is_awaiting_initial_sync();
                 // Decrypt board name if board is private and we have the secret
                 let sealed_name = &board_data
@@ -142,7 +142,8 @@ pub fn BoardList() -> Element {
                     }
                 };
                 let is_current = current_board_key == Some(board_key);
-                (board_key, board_name, is_current, awaiting_sync)
+                let archived = boards.is_archived(board_key);
+                Some((board_key, board_name, is_current, awaiting_sync, archived))
             })
             .collect::<Vec<_>>()
     });
@@ -152,10 +153,13 @@ pub fn BoardList() -> Element {
         board_items
             .read()
             .iter()
-            .find(|(_, _, is_current, _)| *is_current)
-            .map(|(_, name, _, _)| name.clone())
+            .find(|(_, _, is_current, _, _)| *is_current)
+            .map(|(_, name, _, _, _)| name.clone())
             .unwrap_or_else(|| "Select or Create Board".to_string())
     });
+    let mut items = board_items.read().clone();
+    // Active boards first, archived ones after them.
+    items.sort_by_key(|item| item.4);
 
     rsx! {
         div { class: "relative w-full",
@@ -217,81 +221,153 @@ pub fn BoardList() -> Element {
 
                         // Board list
                         div { class: "max-h-96 overflow-y-auto",
-                            {board_items.read().iter().map(|(board_key, board_name, is_current, awaiting_sync)| {
-                                let board_key = *board_key;
-                                let board_name = board_name.clone();
-                                let remove_name = board_name.clone();
-                                let is_current = *is_current;
-                                let awaiting_sync = *awaiting_sync;
-                                rsx! {
-                                    div {
-                                        key: "{board_key:?}",
-                                        class: "w-full flex items-center gap-2 pr-3",
-                                        button {
-                                            class: format!(
-                                                "flex-1 flex items-center gap-4 px-6 py-4 transition-colors {}",
-                                                if is_current {
-                                                    "bg-accent/10 text-accent"
-                                                } else {
-                                                    "text-text hover:bg-surface"
-                                                }
-                                            ),
-                                            onclick: move |_| {
-                                                // Navigate to board URL using hash (component is outside Router context)
-                                                let board_id = bs58::encode(board_key.as_bytes()).into_string();
-                                                if let Some(win) = window() {
-                                                    let _ = win.location().set_hash(&format!("/board/{}", board_id));
-                                                }
-                                                mark_current_board_as_read();
-                                                is_open.set(false);
-                                                spawn(async move {
-                                                    if let Err(e) = save_boards_to_delegate().await {
-                                                        error!("Failed to save current board selection: {}", e);
-                                                        crate::components::app::toasts::show_error(format!(
-                                                            "The board selection was not saved: {e}"
-                                                        ));
-                                                    }
-                                                });
-                                            },
-                                            Icon {
-                                            width: 32,
-                                            height: 32,
-                                            icon: FaNewspaper,
-                                            class: if is_current { "text-accent" } else { "text-text-muted" }
-                                        }
-                                        if awaiting_sync {
-                                            div { class: "flex-1 flex items-center gap-2",
-                                                span { class: "text-left text-2xl truncate", dir: "auto", "{board_name}" }
-                                                div { class: "animate-spin w-4 h-4 border-2 border-text-muted border-t-transparent rounded-full flex-shrink-0" }
+                            for (index, (board_key, board_name, is_current, awaiting_sync, archived)) in items.iter().enumerate() {
+                                {
+                                    let board_key = *board_key;
+                                    let board_name = board_name.clone();
+                                    let remove_name = board_name.clone();
+                                    let is_current = *is_current;
+                                    let awaiting_sync = *awaiting_sync;
+                                    let archived = *archived;
+                                    rsx! {
+                                        if archived && (index == 0 || !items[index - 1].4) {
+                                            div { class: "px-6 pt-3 pb-1 text-xs uppercase tracking-wide text-text-muted border-t border-border",
+                                                "Archived"
                                             }
-                                        } else {
-                                            span { class: "flex-1 text-left text-2xl truncate", dir: "auto", "{board_name}" }
                                         }
-                                        }
-                                        button {
-                                            r#type: "button",
-                                            class: "px-2 py-1 text-xs rounded-md bg-red-500/10 text-red-400 hover:bg-red-500/20 flex-shrink-0",
-                                            title: "Remove from this device",
-                                            onclick: move |event| {
-                                                event.stop_propagation();
-                                                if !confirm_remove_board(&remove_name) {
-                                                    return;
-                                                }
-                                                if is_current {
+                                        div {
+                                            class: "w-full flex items-center gap-2 pr-3",
+                                            button {
+                                                class: format!(
+                                                    "flex-1 flex items-center gap-4 px-6 py-4 transition-colors {}",
+                                                    if is_current {
+                                                        "bg-accent/10 text-accent"
+                                                    } else if archived {
+                                                        "text-text-muted hover:bg-surface"
+                                                    } else {
+                                                        "text-text hover:bg-surface"
+                                                    }
+                                                ),
+                                                onclick: move |_| {
+                                                    // Navigate to board URL using hash (component is outside Router context)
+                                                    let board_id = bs58::encode(board_key.as_bytes()).into_string();
+                                                    if let Some(win) = window() {
+                                                        let _ = win.location().set_hash(&format!("/board/{}", board_id));
+                                                    }
+                                                    mark_current_board_as_read();
                                                     is_open.set(false);
+                                                    spawn(async move {
+                                                        if let Err(e) = save_boards_to_delegate().await {
+                                                            error!("Failed to save current board selection: {}", e);
+                                                            crate::components::app::toasts::show_error(format!(
+                                                                "The board selection was not saved: {e}"
+                                                            ));
+                                                        }
+                                                    });
+                                                },
+                                                Icon {
+                                                    width: 32,
+                                                    height: 32,
+                                                    icon: FaNewspaper,
+                                                    class: if is_current { "text-accent" } else { "text-text-muted" }
                                                 }
-                                                remove_board_from_device(board_key);
-                                            },
-                                            "Remove"
+                                                if awaiting_sync {
+                                                    div { class: "flex-1 flex items-center gap-2",
+                                                        span { class: "text-left text-2xl truncate", dir: "auto", "{board_name}" }
+                                                        div { class: "animate-spin w-4 h-4 border-2 border-text-muted border-t-transparent rounded-full flex-shrink-0" }
+                                                    }
+                                                } else {
+                                                    span { class: "flex-1 text-left text-2xl truncate", dir: "auto", "{board_name}" }
+                                                }
+                                            }
+                                            if !archived {
+                                                button {
+                                                    r#type: "button",
+                                                    class: "px-2 py-1 text-xs rounded-md bg-surface hover:bg-surface-hover text-text flex-shrink-0",
+                                                    title: "Move board up",
+                                                    aria_label: "Move board up",
+                                                    onclick: move |event| {
+                                                        event.stop_propagation();
+                                                        BOARDS.with_mut(|boards| boards.move_board(board_key, -1));
+                                                        spawn(async move {
+                                                            let _ = save_boards_to_delegate().await;
+                                                        });
+                                                    },
+                                                    "↑"
+                                                }
+                                                button {
+                                                    r#type: "button",
+                                                    class: "px-2 py-1 text-xs rounded-md bg-surface hover:bg-surface-hover text-text flex-shrink-0",
+                                                    title: "Move board down",
+                                                    aria_label: "Move board down",
+                                                    onclick: move |event| {
+                                                        event.stop_propagation();
+                                                        BOARDS.with_mut(|boards| boards.move_board(board_key, 1));
+                                                        spawn(async move {
+                                                            let _ = save_boards_to_delegate().await;
+                                                        });
+                                                    },
+                                                    "↓"
+                                                }
+                                                button {
+                                                    r#type: "button",
+                                                    class: "px-2 py-1 text-xs rounded-md bg-surface hover:bg-surface-hover text-text flex-shrink-0",
+                                                    title: "Archive board",
+                                                    aria_label: "Archive board",
+                                                    onclick: move |event| {
+                                                        event.stop_propagation();
+                                                        BOARDS.with_mut(|boards| boards.set_archived(board_key, true));
+                                                        spawn(async move {
+                                                            let _ = save_boards_to_delegate().await;
+                                                        });
+                                                    },
+                                                    "Archive"
+                                                }
+                                            } else {
+                                                button {
+                                                    r#type: "button",
+                                                    class: "px-2 py-1 text-xs rounded-md bg-surface hover:bg-surface-hover text-text flex-shrink-0",
+                                                    title: "Restore board",
+                                                    aria_label: "Restore board",
+                                                    onclick: move |event| {
+                                                        event.stop_propagation();
+                                                        BOARDS.with_mut(|boards| boards.set_archived(board_key, false));
+                                                        spawn(async move {
+                                                            let _ = save_boards_to_delegate().await;
+                                                        });
+                                                    },
+                                                    "Restore"
+                                                }
+                                            }
+                                            button {
+                                                r#type: "button",
+                                                class: "px-2 py-1 text-xs rounded-md bg-red-500/10 text-red-400 hover:bg-red-500/20 flex-shrink-0",
+                                                title: "Remove from this device",
+                                                onclick: move |event| {
+                                                    event.stop_propagation();
+                                                    if !confirm_remove_board(&remove_name) {
+                                                        return;
+                                                    }
+                                                    if is_current {
+                                                        is_open.set(false);
+                                                    }
+                                                    remove_board_from_device(board_key);
+                                                },
+                                                "Remove"
+                                            }
                                         }
                                     }
                                 }
-                            }).collect::<Vec<_>>().into_iter()}
+                            }
 
                             // Empty state
                             if board_items.read().is_empty() {
                                 div { class: "px-6 py-8 text-xl text-text-muted text-center",
-                                    "No boards yet"
+                                    if !*BOARDS_LOADED.read() {
+                                        "Loading boards…"
+                                    } else {
+                                        "No boards yet"
+                                    }
                                 }
                             }
                         }

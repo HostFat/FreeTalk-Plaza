@@ -2589,6 +2589,12 @@ pub struct Boards {
     /// them when its save merges the stored map.
     #[serde(default)]
     pub removed: Vec<VerifyingKey>,
+    /// Local display order for the board switcher.
+    #[serde(default)]
+    pub board_order: Vec<VerifyingKey>,
+    /// Boards hidden from the main switcher but kept on this device.
+    #[serde(default)]
+    pub archived: Vec<VerifyingKey>,
     /// Boards whose contract key changed due to WASM update.
     /// Each entry is (owner_vk, old_contract_key) for boards where the owner
     /// should send an upgrade pointer to the old contract.
@@ -2619,6 +2625,8 @@ impl PartialEq for Boards {
     fn eq(&self, other: &Self) -> bool {
         self.map == other.map
             && self.removed == other.removed
+            && self.board_order == other.board_order
+            && self.archived == other.archived
             && self.blocked_image_hashes == other.blocked_image_hashes
             && self.owned_images == other.owned_images
     }
@@ -2633,6 +2641,58 @@ impl Boards {
     /// removal tombstone must not drop it on the next load.
     pub fn clear_removed_for_present(&mut self) {
         self.removed.retain(|key| !self.map.contains_key(key));
+    }
+
+    /// Display order for the switcher. Keys missing from the saved order keep
+    /// the map's deterministic order at the end.
+    pub fn ordered_keys(&self) -> Vec<VerifyingKey> {
+        let mut keys: Vec<VerifyingKey> = self
+            .board_order
+            .iter()
+            .copied()
+            .filter(|key| self.map.contains_key(key))
+            .collect();
+        let mut extra: Vec<VerifyingKey> = self
+            .map
+            .keys()
+            .copied()
+            .filter(|key| !keys.contains(key))
+            .collect();
+        extra.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        keys.extend(extra);
+        keys
+    }
+
+    /// Move one visible board one slot up (`delta = -1`) or down (`delta = 1`).
+    pub fn move_board(&mut self, key: VerifyingKey, delta: isize) {
+        let mut keys: Vec<VerifyingKey> = self
+            .ordered_keys()
+            .into_iter()
+            .filter(|candidate| !self.is_archived(*candidate))
+            .collect();
+        let Some(index) = keys.iter().position(|candidate| *candidate == key) else {
+            return;
+        };
+        let target = index as isize + delta;
+        if target < 0 || target >= keys.len() as isize {
+            return;
+        }
+        keys.swap(index, target as usize);
+        self.board_order = keys;
+    }
+
+    pub fn set_archived(&mut self, key: VerifyingKey, archived: bool) {
+        if archived {
+            if !self.archived.contains(&key) {
+                self.archived.push(key);
+            }
+        } else {
+            self.archived.retain(|candidate| *candidate != key);
+        }
+    }
+
+    pub fn is_archived(&self, key: VerifyingKey) -> bool {
+        self.archived.contains(&key)
     }
 
     /// Recompute each board contract key from the bundled wasm. A mismatch
@@ -2683,6 +2743,8 @@ impl Boards {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3266,6 +3328,8 @@ mod tests {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3291,6 +3355,8 @@ mod tests {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3343,6 +3409,8 @@ mod tests {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3385,6 +3453,8 @@ mod tests {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3442,6 +3512,8 @@ mod tests {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3503,6 +3575,8 @@ mod tests {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3581,6 +3655,8 @@ mod tests {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3727,6 +3803,8 @@ mod tests {
             current_board_key: None,
             profiles: vec![profile.clone()],
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3739,6 +3817,8 @@ mod tests {
             current_board_key: None,
             profiles: vec![profile],
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3773,6 +3853,8 @@ mod tests {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3926,6 +4008,8 @@ mod tests {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3962,6 +4046,8 @@ mod tests {
             current_board_key: Some(key),
             profiles: boards.profiles.clone(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -4010,6 +4096,8 @@ mod tests {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -4054,6 +4142,8 @@ mod tests {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -4192,6 +4282,8 @@ mod tests {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -4239,6 +4331,8 @@ mod tests {
                 current_board_key: None,
                 profiles: Vec::new(),
                 removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
                 migrated_boards: vec![],
                 blocked_image_hashes: Vec::new(),
                 auto_renew_images: false,
@@ -4350,6 +4444,8 @@ mod tests {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: vec![],
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -4580,6 +4676,8 @@ mod tests {
             current_board_key: None,
             profiles: Vec::new(),
             removed: Vec::new(),
+            board_order: Vec::new(),
+            archived: Vec::new(),
             migrated_boards: vec![],
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,

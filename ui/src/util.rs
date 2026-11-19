@@ -124,6 +124,16 @@ export function textarea_replace_range(id, start, end, text) {
     el.dispatchEvent(new Event('input', { bubbles: true }));
     return value;
 }
+export function scroll_container_near_bottom(id, threshold) {
+    const el = document.getElementById(id);
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+}
+export function scroll_container_to_bottom(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+}
 export function install_shell_hash_bridge() {
     if (window.__freetalk_hash_bridge) return;
     window.__freetalk_hash_bridge = true;
@@ -149,6 +159,8 @@ extern "C" {
     fn textarea_mention_query(id: &str) -> String;
     fn textarea_mention_end(id: &str) -> u32;
     fn textarea_replace_range(id: &str, start: u32, end: u32, text: &str) -> String;
+    fn scroll_container_near_bottom(id: &str, threshold: i32) -> bool;
+    fn scroll_container_to_bottom(id: &str);
     fn install_shell_hash_bridge();
 }
 
@@ -169,6 +181,31 @@ pub fn install_shell_hash_bridge_once() {
 /// The app is sandboxed, so reloading the frame itself can lose the node's
 /// auth-token bootstrap. The shell owns the frame and reloads it with the
 /// sandbox flag intact. Returns false when there is no parent frame to ask.
+/// Whether the conversation scroll container is close enough to the bottom
+/// that new messages should keep it pinned there.
+pub fn conversation_near_bottom(id: &str) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        scroll_container_near_bottom(id, 96)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = id;
+        true
+    }
+}
+
+pub fn scroll_conversation_to_bottom(id: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        scroll_container_to_bottom(id);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = id;
+    }
+}
+
 pub fn navigate_in_shell(href: &str) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
