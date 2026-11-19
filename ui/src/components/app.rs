@@ -593,17 +593,23 @@ fn Invite(invite_code: String) -> Element {    let invitation = use_memo(move ||
 /// Guard for board routes - returns Some(Element) if board not found, None if OK
 #[component]
 fn BoardGate(board_id: String, children: Element) -> Element {
-    sync_board_from_url(&board_id);
-
     let parsed = parse_board_key(&board_id);
-    // Reading BOARDS here (not in a plain function called by the route) makes the
-    // gate re-render when the delegate load delivers the board. Without this, a
-    // page reload left the "not found" screen on display even after the board
-    // appeared in the list, because the route component never re-ran.
+    // Resolve the route id (which may be the current owner or the visible
+    // profile) to the BOARDS map key after render.
+    use_effect(move || {
+        if let Some(key) = parsed {
+            select_board(Some(key));
+        }
+    });
+
+    // The existence check must use the resolved CURRENT_BOARD, not the raw
+    // route id: the route can name the owner key while the map is keyed by
+    // the founding board key.
     let exists = use_memo(move || {
-        parsed
-            .map(|key| BOARDS.read().map.contains_key(&key))
-            .unwrap_or(false)
+        CURRENT_BOARD
+            .read()
+            .owner_key
+            .is_some_and(|key| BOARDS.read().map.contains_key(&key))
     });
     let boards_loaded = *crate::components::app::BOARDS_LOADED.read();
 
