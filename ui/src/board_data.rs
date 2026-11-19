@@ -1697,18 +1697,11 @@ impl BoardData {
     }
 
     /// Whether the composer may offer the auto-moderated topic option here.
-    /// The section override wins over the board configuration. Sealed bodies
-    /// (private boards, restricted sections) are refused because the contract
-    /// cannot read the flag or the reply links there.
+    /// The section override wins over the board configuration; a sealed
+    /// section record falls back to the board default. Private boards and
+    /// restricted sections are offered too: the flag rides in the signed
+    /// public metadata, so the contract can enforce it without the body.
     pub fn auto_moderated_topics_enabled(&self, section: Option<&MessageId>) -> bool {
-        if self.is_private() {
-            return false;
-        }
-        if let Some(section) = section {
-            if self.category_secret(section).is_some() {
-                return false;
-            }
-        }
         self.board_state
             .recent_messages
             .section_auto_moderated_topics(&self.board_state, section)
@@ -3846,6 +3839,8 @@ mod tests {
                         "hello".to_string(),
                         String::new(),
                     ),
+                    reply_to: None,
+                    auto_moderated: false,
                 },
                 &invitee_sk,
             ),
@@ -4060,6 +4055,8 @@ mod tests {
                             author: invitee_id,
                             content: BoardMessageBody::public(String::new(), "hello".to_string()),
                             time: get_current_system_time(),
+                            reply_to: None,
+                            auto_moderated: false,
                         },
                         &invitee_sk,
                     )]),
@@ -4087,6 +4084,8 @@ mod tests {
                 category.encode(),
             ),
             time: get_current_system_time(),
+            reply_to: None,
+            auto_moderated: false,
         };
         let authorized = AuthorizedMessageV1::new(message, &owner_sk);
         let category_id = authorized.id();
@@ -4255,6 +4254,8 @@ mod tests {
                                 "joined the role".to_string(),
                             ),
                             time: get_current_system_time(),
+                            reply_to: None,
+                            auto_moderated: false,
                         },
                         &outsider_sk,
                     )]),
@@ -4573,6 +4574,8 @@ mod tests {
                 author: owner_vk.into(),
                 content: BoardMessageBody::public(String::new(), "test".to_string()),
                 time: std::time::SystemTime::UNIX_EPOCH,
+                reply_to: None,
+                auto_moderated: false,
             },
             signature: ed25519_dalek::Signature::from_bytes(&[0u8; 64]),
         };

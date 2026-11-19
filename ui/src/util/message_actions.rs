@@ -847,6 +847,7 @@ pub async fn split_reply(
         content,
         Vec::new(),
         Some(category),
+        false,
         Some(category),
     )
     .await
@@ -1002,6 +1003,8 @@ async fn send_action_messages(
             author: MemberId::from(&ctx.self_sk.verifying_key()),
             content,
             time: get_current_system_time(),
+            reply_to: None,
+            auto_moderated: false,
         };
 
         let mut message_bytes = Vec::new();

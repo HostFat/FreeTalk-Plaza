@@ -418,6 +418,8 @@ mod tests {
                 author: member_id,
                 time: SystemTime::now(),
                 content: BoardMessageBody::public("Post".into(), "Body".into()),
+                reply_to: None,
+                auto_moderated: false,
             },
             &member_sk,
         );
@@ -498,6 +500,8 @@ mod tests {
                 author: member_id,
                 time: SystemTime::now(),
                 content: BoardMessageBody::public("Second".into(), "Body".into()),
+                reply_to: None,
+                auto_moderated: false,
             },
             &board.member_sk,
         );
@@ -536,6 +540,8 @@ mod tests {
                     "#ef4444".to_string(),
                     parent,
                 ),
+                reply_to: None,
+                auto_moderated: false,
             },
             &board.owner_sk,
         );
@@ -570,6 +576,8 @@ mod tests {
                 author,
                 time: SystemTime::now(),
                 content: BoardMessageBody::public(title.to_string(), "Body".into()),
+                reply_to: None,
+                auto_moderated: false,
             },
             &board.member_sk,
         );

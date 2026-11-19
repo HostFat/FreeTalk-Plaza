@@ -319,6 +319,8 @@ fn add_example_messages(
                 author: author_id,
                 time: get_time_from_millis(current_time_ms),
                 content: BoardMessageBody::public(title, body),
+                reply_to: None,
+                auto_moderated: false,
             },
             signing_key,
         );

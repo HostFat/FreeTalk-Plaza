@@ -1455,6 +1455,8 @@ mod tests {
                 author: member_id,
                 time: SystemTime::now(),
                 content: BoardMessageBody::public("Post".into(), "Body".into()),
+                reply_to: None,
+                auto_moderated: false,
             },
             &member_sk,
         );
@@ -1826,6 +1828,8 @@ mod tests {
                 author: owner_id,
                 time: SystemTime::now(),
                 content: BoardMessageBody::public("Contenuto rimosso".into(), "Rimosso.".into()),
+                reply_to: None,
+                auto_moderated: false,
             },
             &board.owner_sk,
         );
@@ -1926,6 +1930,8 @@ mod tests {
                         "#6366f1".to_string(),
                         None,
                     ),
+                    reply_to: None,
+                    auto_moderated: false,
                 },
                 &board.owner_sk,
             )
@@ -1945,6 +1951,8 @@ mod tests {
                 author: owner_id,
                 time: SystemTime::now() + Duration::from_millis(30),
                 content: BoardMessageBody::public("Orphan".to_string(), "Body".to_string()),
+                reply_to: None,
+                auto_moderated: false,
             },
             &board.owner_sk,
         );
@@ -1956,6 +1964,8 @@ mod tests {
                 author: owner_id,
                 time: SystemTime::now() + Duration::from_millis(40),
                 content: BoardMessageBody::delete(source_id.clone()),
+                reply_to: None,
+                auto_moderated: false,
             },
             &board.owner_sk,
         );

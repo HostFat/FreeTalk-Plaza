@@ -712,6 +712,8 @@ pub async fn purge_illegal(
             author: actor_id,
             time: chrono::Utc::now().into(),
             content,
+            reply_to: None,
+            auto_moderated: false,
         };
         // In debug mode skip signing entirely: a dummy signature lets us see
         // whether `AuthorizedMessageV1::new` is the call that blocks.

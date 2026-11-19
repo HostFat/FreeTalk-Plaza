@@ -89,6 +89,14 @@ fn body_auto_moderated(content: &BoardMessageBody) -> Option<bool> {
     }
 }
 
+/// The creation-time auto-moderated flag of a topic. The public field is
+/// authoritative: a sealed body on a private board cannot be read by the
+/// contract. The body flag is the fallback for public topics written before
+/// the field existed.
+fn message_auto_moderated(message: &MessageV1) -> bool {
+    message.auto_moderated || body_auto_moderated(&message.content) == Some(true)
+}
+
 /// Public action carried by a message, whether it travels bare or inside the
 /// moderation envelope. Sealed payloads need a client key and are skipped.
 fn public_action(content: &BoardMessageBody) -> Option<crate::board_state::content::ActionContentV1> {
@@ -425,11 +433,31 @@ impl ComposableState for MessagesV1 {
                             }
                         }
                     }
-                    BoardMessageBody::Public { .. } => {
-                        // In private mode, reject ALL public messages including actions
-                        // Privacy is a layer - everything in a private board must be encrypted
+                    BoardMessageBody::Public {
+                        content_type, data, ..
+                    } => {
+                        // In private mode, message bodies must stay sealed. The
+                        // one exception is a moderation envelope: its type and
+                        // target are public routing metadata, but the payload
+                        // (edit, delete, poll change, section change) must be
+                        // private. Without this, no action works on a private
+                        // board.
                         if *privacy_mode == PrivacyMode::Private {
-                            return Err("Cannot send public messages in private board".to_string());
+                            let sealed_envelope = *content_type
+                                == crate::board_state::content::CONTENT_TYPE_MODERATION_ACTION
+                                && crate::board_state::content::ModerationActionV1::decode(data)
+                                    .map(|envelope| {
+                                        matches!(
+                                            envelope.payload,
+                                            crate::board_state::privacy::SealedBytes::Private { .. }
+                                        )
+                                    })
+                                    .unwrap_or(false);
+                            if !sealed_envelope {
+                                return Err(
+                                    "Cannot send public messages in private board".to_string(),
+                                );
+                            }
                         }
                     }
                 }
@@ -580,6 +608,8 @@ impl MessagesV1 {
             .collect();
 
         // Reply links and the topics whose authors may moderate descendants.
+        // The signed public fields win: on a private board the sealed body is
+        // unreadable here, and they are the authoritative thread link there.
         let mut reply_parent: HashMap<MessageId, MessageId> = HashMap::new();
         let mut auto_moderated_roots: HashMap<MessageId, MemberId> = HashMap::new();
         for message in self.messages.iter() {
@@ -587,10 +617,14 @@ impl MessagesV1 {
             if content.is_action() || content.is_category() {
                 continue;
             }
-            if let Some(target) = body_reply_target(content) {
+            let target = message
+                .message
+                .reply_to
+                .or_else(|| body_reply_target(content));
+            if let Some(target) = target {
                 reply_parent.insert(message.id(), target);
             }
-            if body_auto_moderated(content) == Some(true) {
+            if message_auto_moderated(&message.message) {
                 auto_moderated_roots.insert(message.id(), message.message.author);
             }
         }
@@ -697,11 +731,8 @@ impl MessagesV1 {
                                     if let Some(original) =
                                         self.messages.iter().find(|m| m.id() == *target)
                                     {
-                                        if let Some(created) =
-                                            body_auto_moderated(&original.message.content)
-                                        {
-                                            poll.auto_moderated = created;
-                                        }
+                                        poll.auto_moderated =
+                                            message_auto_moderated(&original.message);
                                     }
                                     self.actions_state
                                         .edited_polls
@@ -901,7 +932,8 @@ impl MessagesV1 {
     }
 
     /// Whether a section lets authors moderate replies. The section override
-    /// wins; without one the board configuration decides.
+    /// wins; without one the board configuration decides. A sealed section
+    /// record cannot be read here, so it inherits the board default.
     pub fn section_auto_moderated_topics(
         &self,
         state: &ChatBoardStateV1,
@@ -922,14 +954,23 @@ impl MessagesV1 {
     }
 
     /// Only a topic with the creation-time flag set, inside a section whose
-    /// effective capability is on, may enter the state.
+    /// effective capability is on, may enter the state. The public flag is
+    /// checked so sealed topics on private boards are validated too.
     fn validate_auto_moderated(
         &self,
         state: &ChatBoardStateV1,
         message: &AuthorizedMessageV1,
     ) -> Result<(), String> {
-        if body_auto_moderated(&message.message.content) != Some(true) {
+        if !message_auto_moderated(&message.message) {
             return Ok(());
+        }
+        // Only a topic carries the flag. A reply must not gain the power to
+        // delete other members' messages by flagging itself.
+        if message.message.content.is_action()
+            || message.message.content.is_category()
+            || message.message.content.content_type() == CONTENT_TYPE_REPLY
+        {
+            return Err("Only topics can be auto-moderated".to_string());
         }
         // The incoming message is not in `self.messages` yet.
         let section = body_section(&message.message.content)
@@ -970,7 +1011,12 @@ impl MessagesV1 {
             if let Some(section) = body_section(&message.message.content) {
                 return Some(section);
             }
-            match body_reply_target(&message.message.content) {
+            // The public link covers sealed replies on private boards.
+            match message
+                .message
+                .reply_to
+                .or_else(|| body_reply_target(&message.message.content))
+            {
                 Some(target) => current = target,
                 None => return None,
             }
@@ -1527,6 +1573,19 @@ pub struct MessageV1 {
     /// before images existed; skipped when empty so old signatures verify.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<crate::board_state::images::ImageRef>,
+    /// Message this one replies to. Public on purpose: the contract cannot read
+    /// a sealed body, and the author's delete rule needs the thread link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<MessageId>,
+    /// Creation-time auto-moderated flag of a topic, repeated outside the body
+    /// so sealed topics on private boards can carry it. Skipped when false so
+    /// old signatures verify byte for byte.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_moderated: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Default for MessageV1 {
@@ -1537,6 +1596,8 @@ impl Default for MessageV1 {
             time: SystemTime::UNIX_EPOCH,
             content: BoardMessageBody::public(String::new(), String::new()),
             images: Vec::new(),
+            reply_to: None,
+            auto_moderated: false,
         }
     }
 }
@@ -1635,6 +1696,8 @@ mod tests {
             author: author_id,
             time: SystemTime::now(),
             content: BoardMessageBody::public(String::new(), "Test message".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         }
     }
 
@@ -1650,6 +1713,8 @@ mod tests {
             author: MemberId::from(&signing_key.verifying_key()),
             content: BoardMessageBody::private_text(vec![1, 2, 3], [0u8; 12], 0),
             time: SystemTime::now(),
+            reply_to: None,
+            auto_moderated: false,
         };
 
         let mut original = Vec::new();
@@ -1666,6 +1731,33 @@ mod tests {
 
         let signature = sign_struct(&message, &signing_key);
         assert!(verify_struct(&decoded, &signature, &signing_key.verifying_key()).is_ok());
+    }
+
+    /// The public reply link and topic flag must not change the bytes of a
+    /// message that leaves them unset, or old signatures stop verifying.
+    #[test]
+    fn unset_public_metadata_is_skipped() {
+        let mut rng = OsRng;
+        let signing_key = SigningKey::generate(&mut rng);
+        let message = MessageV1 {
+            board_owner: MemberId::from(&signing_key.verifying_key()),
+            author: MemberId::from(&signing_key.verifying_key()),
+            time: SystemTime::now(),
+            content: BoardMessageBody::public("t".to_string(), "b".to_string()),
+            images: Vec::new(),
+            reply_to: None,
+            auto_moderated: false,
+        };
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&message, &mut bytes).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("reply_to"), "the default link is skipped");
+        assert!(
+            !text.contains("auto_moderated"),
+            "the default flag is skipped"
+        );
+        let decoded: MessageV1 = ciborium::from_reader(&bytes[..]).unwrap();
+        assert_eq!(decoded, message);
     }
 
     #[test]
@@ -1721,6 +1813,8 @@ mod tests {
                     // 100 ms apart: the whole burst fits one window.
                     time: SystemTime::UNIX_EPOCH + Duration::from_millis(index * 100),
                     content: BoardMessageBody::public(String::new(), "hi".to_string()),
+                    reply_to: None,
+                    auto_moderated: false,
                 },
                 &author_sk,
             )
@@ -1786,6 +1880,8 @@ mod tests {
                     author: MemberId::from(&signer.verifying_key()),
                     time: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
                     content: BoardMessageBody::public("t".to_string(), "b".to_string()),
+                    reply_to: None,
+                    auto_moderated: false,
                 },
                 signer,
             )
@@ -1856,6 +1952,8 @@ mod tests {
                     time: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
                     content: BoardMessageBody::public("t".to_string(), "b".to_string()),
                     images,
+                    reply_to: None,
+                    auto_moderated: false,
                 },
                 &owner,
             )
@@ -1909,6 +2007,8 @@ mod tests {
                 time: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
                 content: BoardMessageBody::delete(MessageId(BoardId::hash(b"target"))),
                 images: vec![image(1024, false)],
+                reply_to: None,
+                auto_moderated: false,
             },
             &owner,
         );
@@ -2038,6 +2138,8 @@ mod tests {
                     category.encode(),
                 ),
                 images: Vec::new(),
+                reply_to: None,
+                auto_moderated: false,
             },
             owner,
         );
@@ -2065,6 +2167,8 @@ mod tests {
                     text.encode(),
                 ),
                 images: vec![sample_image()],
+                reply_to: None,
+                auto_moderated: false,
             },
             signer,
         )
@@ -2214,6 +2318,8 @@ mod tests {
                         ActionContentV1::set_section_images(allowed_id.clone(), allowed).encode(),
                     ),
                     images: Vec::new(),
+                    reply_to: None,
+                    auto_moderated: false,
                 },
                 signer,
             )
@@ -2512,6 +2618,8 @@ mod tests {
                 author: author_id,
                 time,
                 content: BoardMessageBody::public(String::new(), "Test message".to_string()),
+                reply_to: None,
+                auto_moderated: false,
             };
             AuthorizedMessageV1::new(message, &author_signing_key)
         };
@@ -2620,6 +2728,8 @@ mod tests {
                 author: author_id,
                 time: SystemTime::now(),
                 content: BoardMessageBody::public(String::new(), "short".to_string()),
+                reply_to: None,
+                auto_moderated: false,
             },
             &author_sk,
         );
@@ -2630,6 +2740,8 @@ mod tests {
                 author: author_id,
                 time: SystemTime::now(),
                 content: BoardMessageBody::public(String::new(), "x".repeat(100)),
+                reply_to: None,
+                auto_moderated: false,
             },
             &author_sk,
         );
@@ -2681,6 +2793,8 @@ mod tests {
             author: user1_id,
             content: BoardMessageBody::public(String::new(), "Message from user1".to_string()),
             time: SystemTime::now(),
+            reply_to: None,
+            auto_moderated: false,
         };
 
         let msg2 = MessageV1 {
@@ -2689,6 +2803,8 @@ mod tests {
             author: user2_id,
             content: BoardMessageBody::public(String::new(), "Message from user2".to_string()),
             time: SystemTime::now() + Duration::from_secs(1),
+            reply_to: None,
+            auto_moderated: false,
         };
 
         let auth_msg1 = AuthorizedMessageV1::new(msg1.clone(), &user1_sk);
@@ -2747,6 +2863,8 @@ mod tests {
             author: author_id,
             time: SystemTime::now(),
             content: BoardMessageBody::public(String::new(), "Original content".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_original = AuthorizedMessageV1::new(original_msg, &signing_key);
         let original_id = auth_original.id();
@@ -2762,6 +2880,8 @@ mod tests {
                 String::new(),
                 "Edited content".to_string(),
             ),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_edit = AuthorizedMessageV1::new(edit_msg, &signing_key);
 
@@ -2798,6 +2918,8 @@ mod tests {
             author: owner_id,
             time: SystemTime::now(),
             content: BoardMessageBody::public(String::new(), "Original content".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_original = AuthorizedMessageV1::new(original_msg, &owner_sk);
         let original_id = auth_original.id();
@@ -2813,6 +2935,8 @@ mod tests {
                 String::new(),
                 "Hacked content".to_string(),
             ),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_edit = AuthorizedMessageV1::new(edit_msg, &other_sk);
 
@@ -2841,6 +2965,8 @@ mod tests {
             author: owner_id,
             time: SystemTime::now(),
             content: BoardMessageBody::public(String::new(), "Will be deleted".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_original = AuthorizedMessageV1::new(original_msg, &signing_key);
         let original_id = auth_original.id();
@@ -2852,6 +2978,8 @@ mod tests {
             author: owner_id,
             time: SystemTime::now() + Duration::from_secs(1),
             content: BoardMessageBody::delete(original_id.clone()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_delete = AuthorizedMessageV1::new(delete_msg, &signing_key);
 
@@ -2886,6 +3014,8 @@ mod tests {
             author: owner_id,
             time: SystemTime::now(),
             content: BoardMessageBody::public_raw(4, 1, vec![0xa0]),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_category = AuthorizedMessageV1::new(category, &signing_key);
         let category_id = auth_category.id();
@@ -2907,6 +3037,8 @@ mod tests {
                 ACTION_CONTENT_VERSION,
                 envelope.encode(),
             ),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_delete = AuthorizedMessageV1::new(delete_msg, &signing_key);
 
@@ -2936,6 +3068,8 @@ mod tests {
             author: user1_id,
             time: SystemTime::now(),
             content: BoardMessageBody::public(String::new(), "React to me!".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_original = AuthorizedMessageV1::new(original_msg, &user1_sk);
         let original_id = auth_original.id();
@@ -2947,6 +3081,8 @@ mod tests {
             author: user2_id,
             time: SystemTime::now() + Duration::from_secs(1),
             content: BoardMessageBody::reaction(original_id.clone(), "👍".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_reaction = AuthorizedMessageV1::new(reaction_msg, &user2_sk);
 
@@ -2957,6 +3093,8 @@ mod tests {
             author: user1_id,
             time: SystemTime::now() + Duration::from_secs(2),
             content: BoardMessageBody::reaction(original_id.clone(), "👍".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_reaction2 = AuthorizedMessageV1::new(reaction_msg2, &user1_sk);
 
@@ -2987,6 +3125,8 @@ mod tests {
             author: user_id,
             time: SystemTime::now(),
             content: BoardMessageBody::public(String::new(), "Test message".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_original = AuthorizedMessageV1::new(original_msg, &user_sk);
         let original_id = auth_original.id();
@@ -2998,6 +3138,8 @@ mod tests {
             author: user_id,
             time: SystemTime::now() + Duration::from_secs(1),
             content: BoardMessageBody::reaction(original_id.clone(), "❤️".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_reaction = AuthorizedMessageV1::new(reaction_msg, &user_sk);
 
@@ -3008,6 +3150,8 @@ mod tests {
             author: user_id,
             time: SystemTime::now() + Duration::from_secs(2),
             content: BoardMessageBody::remove_reaction(original_id.clone(), "❤️".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_remove = AuthorizedMessageV1::new(remove_msg, &user_sk);
 
@@ -3034,6 +3178,8 @@ mod tests {
             author: owner_id,
             time: SystemTime::now(),
             content: BoardMessageBody::public(String::new(), "Will be deleted".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_original = AuthorizedMessageV1::new(original_msg, &signing_key);
         let original_id = auth_original.id();
@@ -3045,6 +3191,8 @@ mod tests {
             author: owner_id,
             time: SystemTime::now() + Duration::from_secs(1),
             content: BoardMessageBody::delete(original_id.clone()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_delete = AuthorizedMessageV1::new(delete_msg, &signing_key);
 
@@ -3059,6 +3207,8 @@ mod tests {
                 String::new(),
                 "Too late!".to_string(),
             ),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_edit = AuthorizedMessageV1::new(edit_msg, &signing_key);
 
@@ -3086,6 +3236,8 @@ mod tests {
             author: owner_id,
             time: SystemTime::now(),
             content: BoardMessageBody::public(String::new(), "Hello".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_msg1 = AuthorizedMessageV1::new(msg1, &signing_key);
         let msg1_id = auth_msg1.id();
@@ -3097,6 +3249,8 @@ mod tests {
             author: owner_id,
             time: SystemTime::now() + Duration::from_secs(1),
             content: BoardMessageBody::reaction(msg1_id, "👍".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_reaction = AuthorizedMessageV1::new(reaction_msg, &signing_key);
 
@@ -3107,6 +3261,8 @@ mod tests {
             author: owner_id,
             time: SystemTime::now() + Duration::from_secs(2),
             content: BoardMessageBody::public(String::new(), "World".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_msg2 = AuthorizedMessageV1::new(msg2, &signing_key);
 
@@ -3149,6 +3305,8 @@ mod tests {
                 "#ff0000".to_string(),
                 None,
             ),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_category = AuthorizedMessageV1::new(category_msg, &signing_key);
         let category_id = auth_category.id();
@@ -3164,6 +3322,8 @@ mod tests {
                 String::new(),
                 "Hacked content".to_string(),
             ),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_edit = AuthorizedMessageV1::new(edit_msg, &signing_key);
 
@@ -3191,6 +3351,8 @@ mod tests {
             author: owner_id,
             time: SystemTime::now(),
             content: BoardMessageBody::public(String::new(), "Regular message".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_text = AuthorizedMessageV1::new(text_msg, &signing_key);
         let text_id = auth_text.id();
@@ -3208,6 +3370,8 @@ mod tests {
                 None,
                 "#ff0000".to_string(),
             ),
+            reply_to: None,
+            auto_moderated: false,
         };
         let auth_edit = AuthorizedMessageV1::new(edit_msg, &signing_key);
 
@@ -3248,6 +3412,8 @@ mod tests {
                     text.encode(),
                 ),
                 images: Vec::new(),
+                reply_to: None,
+                auto_moderated,
             },
             signer,
         )
@@ -3284,6 +3450,8 @@ mod tests {
                     poll.encode(),
                 ),
                 images: Vec::new(),
+                reply_to: None,
+                auto_moderated,
             },
             signer,
         )
@@ -3304,11 +3472,13 @@ mod tests {
                 content: BoardMessageBody::reply(
                     String::new(),
                     "Reply".to_string(),
-                    target,
+                    target.clone(),
                     "Someone".to_string(),
                     "Preview".to_string(),
                 ),
                 images: Vec::new(),
+                reply_to: Some(target),
+                auto_moderated: false,
             },
             signer,
         )
@@ -3328,6 +3498,8 @@ mod tests {
                 time,
                 content: BoardMessageBody::delete(target),
                 images: Vec::new(),
+                reply_to: None,
+                auto_moderated: false,
             },
             signer,
         )
@@ -3347,6 +3519,8 @@ mod tests {
                 time,
                 content: BoardMessageBody::reaction(target, "👍".to_string()),
                 images: Vec::new(),
+                reply_to: None,
+                auto_moderated: false,
             },
             signer,
         )
@@ -3381,6 +3555,8 @@ mod tests {
                     envelope.encode(),
                 ),
                 images: Vec::new(),
+                reply_to: None,
+                auto_moderated: false,
             },
             signer,
         )
@@ -3412,6 +3588,8 @@ mod tests {
                     category.encode(),
                 ),
                 images: Vec::new(),
+                reply_to: None,
+                auto_moderated: false,
             },
             owner,
         );
@@ -3556,7 +3734,7 @@ mod tests {
                 &fixture.author,
                 fixture.author_id,
                 fixture.owner_id,
-                Some(closed.clone()),
+                Some(closed),
                 true,
                 at(11),
             ),
@@ -3578,7 +3756,7 @@ mod tests {
                 &fixture.author,
                 fixture.author_id,
                 fixture.owner_id,
-                Some(closed.clone()),
+                Some(closed),
                 true,
                 at(11),
             ),
@@ -3618,7 +3796,7 @@ mod tests {
                 &fixture.author,
                 fixture.author_id,
                 fixture.owner_id,
-                Some(closed.clone()),
+                Some(closed),
                 false,
                 at(13),
             ),
@@ -3707,7 +3885,7 @@ mod tests {
             &fixture.stranger,
             fixture.stranger_id,
             fixture.owner_id,
-            topic_id.clone(),
+            topic_id,
             at(11),
         );
         let reply_id = reply.id();
@@ -3715,7 +3893,7 @@ mod tests {
             &fixture.stranger,
             fixture.stranger_id,
             fixture.owner_id,
-            reply_id.clone(),
+            reply_id,
             at(12),
         );
         let nested_id = nested.id();
@@ -3729,14 +3907,14 @@ mod tests {
                     &fixture.author,
                     fixture.author_id,
                     fixture.owner_id,
-                    reply_id.clone(),
+                    reply_id,
                     at(20),
                 ),
                 delete_by(
                     &fixture.author,
                     fixture.author_id,
                     fixture.owner_id,
-                    nested_id.clone(),
+                    nested_id,
                     at(21),
                 ),
                 // The auto-moderated privilege stops at the root; the author's
@@ -3745,7 +3923,7 @@ mod tests {
                     &fixture.stranger,
                     fixture.stranger_id,
                     fixture.owner_id,
-                    topic_id.clone(),
+                    topic_id,
                     at(22),
                 ),
             ],
@@ -3777,7 +3955,7 @@ mod tests {
             &fixture.author,
             fixture.author_id,
             fixture.owner_id,
-            topic_id.clone(),
+            topic_id,
             at(11),
         );
         let reply_id = reply.id();
@@ -3789,7 +3967,7 @@ mod tests {
                     &fixture.stranger,
                     fixture.stranger_id,
                     fixture.owner_id,
-                    reply_id.clone(),
+                    reply_id,
                     at(20),
                 ),
             ],
@@ -3815,7 +3993,7 @@ mod tests {
             &fixture.stranger,
             fixture.stranger_id,
             fixture.owner_id,
-            topic_id.clone(),
+            topic_id,
             at(11),
         );
         let reply_id = reply.id();
@@ -3827,7 +4005,7 @@ mod tests {
                     &fixture.author,
                     fixture.author_id,
                     fixture.owner_id,
-                    reply_id.clone(),
+                    reply_id,
                     at(20),
                 ),
             ],
@@ -3970,6 +4148,8 @@ mod tests {
                     envelope.encode(),
                 ),
                 images: Vec::new(),
+                reply_to: None,
+                auto_moderated: false,
             },
             &fixture.owner,
         );
@@ -4038,6 +4218,8 @@ mod tests {
                     poll.encode(),
                 ),
                 images: Vec::new(),
+                reply_to: None,
+                auto_moderated: false,
             },
             &fixture.author,
         );
@@ -4056,6 +4238,8 @@ mod tests {
                     ActionContentV1::edit_poll(poll_id.clone(), replacement).encode(),
                 ),
                 images: Vec::new(),
+                reply_to: None,
+                auto_moderated: false,
             },
             &fixture.author,
         );
@@ -4090,5 +4274,594 @@ mod tests {
 
         assert!(messages.section_auto_moderated_topics(&fixture.state, Some(&open)));
         assert!(!messages.section_auto_moderated_topics(&fixture.state, None));
+    }
+
+    /// The same people on a private board, where every body is sealed.
+    fn private_board_fixture() -> Fixture {
+        let mut fixture = board_fixture();
+        let mut configuration = fixture.state.configuration.configuration.clone();
+        configuration.configuration_version += 1;
+        configuration.privacy_mode = PrivacyMode::Private;
+        fixture.state.configuration =
+            AuthorizedConfigurationV1::new(configuration, &fixture.owner);
+        fixture
+    }
+
+    /// A topic whose body flag and public flag differ, to prove which one the
+    /// contract trusts.
+    fn topic_with_flags(
+        signer: &SigningKey,
+        author: MemberId,
+        owner_id: MemberId,
+        section: Option<MessageId>,
+        body_flag: bool,
+        public_flag: bool,
+        time: SystemTime,
+    ) -> AuthorizedMessageV1 {
+        use crate::board_state::content::{TEXT_CONTENT_VERSION, CONTENT_TYPE_TEXT};
+        let text = TextContentV1::new("Topic".to_string(), "Body".to_string())
+            .with_category(section)
+            .with_auto_moderated(body_flag);
+        AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author,
+                time,
+                content: BoardMessageBody::public_raw(
+                    CONTENT_TYPE_TEXT,
+                    TEXT_CONTENT_VERSION,
+                    text.encode(),
+                ),
+                images: Vec::new(),
+                reply_to: None,
+                auto_moderated: public_flag,
+            },
+            signer,
+        )
+    }
+
+    /// A sealed topic: the body is opaque to the contract, only the public
+    /// flag can carry the creation-time choice.
+    fn sealed_topic(
+        signer: &SigningKey,
+        author: MemberId,
+        owner_id: MemberId,
+        scope: SecretScope,
+        auto_moderated: bool,
+        time: SystemTime,
+    ) -> AuthorizedMessageV1 {
+        use crate::board_state::content::{TEXT_CONTENT_VERSION, CONTENT_TYPE_TEXT};
+        AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author,
+                time,
+                content: BoardMessageBody::Private {
+                    content_type: CONTENT_TYPE_TEXT,
+                    content_version: TEXT_CONTENT_VERSION,
+                    ciphertext: vec![7u8; 32],
+                    nonce: [0u8; 12],
+                    secret_version: 0,
+                    secret_scope: scope,
+                },
+                images: Vec::new(),
+                reply_to: None,
+                auto_moderated,
+            },
+            signer,
+        )
+    }
+
+    fn sealed_reply(
+        signer: &SigningKey,
+        author: MemberId,
+        owner_id: MemberId,
+        target: MessageId,
+        time: SystemTime,
+    ) -> AuthorizedMessageV1 {
+        use crate::board_state::content::{CONTENT_TYPE_REPLY, REPLY_CONTENT_VERSION};
+        AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author,
+                time,
+                content: BoardMessageBody::Private {
+                    content_type: CONTENT_TYPE_REPLY,
+                    content_version: REPLY_CONTENT_VERSION,
+                    ciphertext: vec![8u8; 32],
+                    nonce: [0u8; 12],
+                    secret_version: 0,
+                    secret_scope: SecretScope::Board,
+                },
+                images: Vec::new(),
+                // The public link is the only thread link on a sealed board.
+                reply_to: Some(target),
+                auto_moderated: false,
+            },
+            signer,
+        )
+    }
+
+    /// A delete whose payload only a client with the key can read. Returns the
+    /// plaintext the rebuild needs, as the UI passes it.
+    fn sealed_delete(
+        signer: &SigningKey,
+        author: MemberId,
+        owner_id: MemberId,
+        target: MessageId,
+        time: SystemTime,
+    ) -> (AuthorizedMessageV1, Vec<u8>) {
+        use crate::board_state::content::{
+            ActionContentV1, ACTION_CONTENT_VERSION, CONTENT_TYPE_ACTION,
+        };
+        let plaintext = ActionContentV1::delete(target).encode();
+        let message = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author,
+                time,
+                content: BoardMessageBody::Private {
+                    content_type: CONTENT_TYPE_ACTION,
+                    content_version: ACTION_CONTENT_VERSION,
+                    ciphertext: vec![9u8; 32],
+                    nonce: [0u8; 12],
+                    secret_version: 0,
+                    secret_scope: SecretScope::Board,
+                },
+                images: Vec::new(),
+                reply_to: None,
+                auto_moderated: false,
+            },
+            signer,
+        );
+        (message, plaintext)
+    }
+
+    /// A sealed section record. The contract cannot read the override inside.
+    fn sealed_category(
+        owner: &SigningKey,
+        owner_id: MemberId,
+        time: SystemTime,
+    ) -> (AuthorizedMessageV1, MessageId) {
+        use crate::board_state::content::{
+            CategoryContentV1, CATEGORY_CONTENT_VERSION, CONTENT_TYPE_CATEGORY,
+            DEFAULT_CATEGORY_COLOR,
+        };
+        let category = CategoryContentV1::new(
+            "Sealed".to_string(),
+            None,
+            DEFAULT_CATEGORY_COLOR.to_string(),
+        )
+        .with_auto_moderated_topics(Some(false));
+        let message = AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author: owner_id,
+                time,
+                content: BoardMessageBody::Private {
+                    content_type: CONTENT_TYPE_CATEGORY,
+                    content_version: CATEGORY_CONTENT_VERSION,
+                    // A sealed body is opaque here, so the override inside
+                    // never reaches the contract.
+                    ciphertext: category.encode(),
+                    nonce: [0u8; 12],
+                    secret_version: 0,
+                    secret_scope: SecretScope::Board,
+                },
+                images: Vec::new(),
+                reply_to: None,
+                auto_moderated: false,
+            },
+            owner,
+        );
+        let id = message.id();
+        (message, id)
+    }
+
+    fn rebuild_decrypted(
+        fixture: &Fixture,
+        messages: &mut MessagesV1,
+        decrypted: &HashMap<MessageId, Vec<u8>>,
+    ) {
+        use std::collections::HashSet;
+        let admins: HashSet<MemberId> = fixture
+            .state
+            .admin
+            .admins
+            .iter()
+            .map(|admin| admin.admin.id())
+            .collect();
+        let members: HashSet<MemberId> = fixture
+            .state
+            .members
+            .members
+            .iter()
+            .map(|member| member.member.id())
+            .collect();
+        messages.rebuild_actions_state_with_permissions(
+            decrypted,
+            Some(fixture.parameters.owner_id()),
+            Some(&admins),
+            None,
+            true,
+            Some(&members),
+        );
+    }
+
+    #[test]
+    fn a_sealed_moderation_envelope_is_accepted_on_a_private_board() {
+        use crate::board_state::content::{
+            ActionContentV1, ACTION_CONTENT_VERSION, CONTENT_TYPE_MODERATION_ACTION,
+            ModerationActionV1,
+        };
+        use crate::board_state::privacy::SealedBytes;
+
+        let fixture = private_board_fixture();
+        let target = MessageId(BoardId::hash(b"action target"));
+        let action = ActionContentV1::delete(target.clone());
+        let plaintext = action.encode();
+
+        let build = |payload: SealedBytes| {
+            let envelope = ModerationActionV1::new(action.action_type, target.clone(), payload);
+            AuthorizedMessageV1::new(
+                MessageV1 {
+                    board_owner: fixture.owner_id,
+                    author: fixture.owner_id,
+                    time: at(20),
+                    content: BoardMessageBody::public_raw(
+                        CONTENT_TYPE_MODERATION_ACTION,
+                        ACTION_CONTENT_VERSION,
+                        envelope.encode(),
+                    ),
+                    images: Vec::new(),
+                    reply_to: None,
+                    auto_moderated: false,
+                },
+                &fixture.owner,
+            )
+        };
+
+        let mut messages = MessagesV1::default();
+        messages
+            .apply_delta(
+                &fixture.state,
+                &fixture.parameters,
+                &Some(vec![build(SealedBytes::private(
+                    plaintext.clone(),
+                    [0u8; 12],
+                    0,
+                    plaintext.len() as u32,
+                ))]),
+            )
+            .expect("a moderation envelope with a sealed payload is allowed");
+
+        let mut messages = MessagesV1::default();
+        let error = messages
+            .apply_delta(
+                &fixture.state,
+                &fixture.parameters,
+                &Some(vec![build(SealedBytes::public(plaintext))]),
+            )
+            .expect_err("a public moderation payload is rejected on a private board");
+        assert!(error.contains("public messages"), "{error}");
+    }
+
+    #[test]
+    fn a_sealed_private_topic_keeps_the_author_delete_rule() {
+        let fixture = private_board_fixture();
+        let topic = sealed_topic(
+            &fixture.author,
+            fixture.author_id,
+            fixture.owner_id,
+            SecretScope::Board,
+            true,
+            at(10),
+        );
+        let topic_id = topic.id();
+
+        // The board default is on, so the sealed topic's public flag applies.
+        let mut messages = MessagesV1::default();
+        apply_topic(
+            &fixture.state,
+            &fixture.parameters,
+            &mut messages,
+            topic,
+        )
+        .expect("a sealed topic on a private board may be auto-moderated");
+
+        let reply = sealed_reply(
+            &fixture.stranger,
+            fixture.stranger_id,
+            fixture.owner_id,
+            topic_id,
+            at(11),
+        );
+        let reply_id = reply.id();
+        let nested = sealed_reply(
+            &fixture.stranger,
+            fixture.stranger_id,
+            fixture.owner_id,
+            reply_id,
+            at(12),
+        );
+        let nested_id = nested.id();
+        let untouched = sealed_reply(
+            &fixture.owner,
+            fixture.owner_id,
+            fixture.owner_id,
+            topic_id,
+            at(13),
+        );
+        let untouched_id = untouched.id();
+
+        let (hard_delete, hard_payload) = sealed_delete(
+            &fixture.author,
+            fixture.author_id,
+            fixture.owner_id,
+            reply_id,
+            at(20),
+        );
+        let (nested_delete, nested_payload) = sealed_delete(
+            &fixture.author,
+            fixture.author_id,
+            fixture.owner_id,
+            nested_id,
+            at(21),
+        );
+        let (stranger_delete, stranger_payload) = sealed_delete(
+            &fixture.stranger,
+            fixture.stranger_id,
+            fixture.owner_id,
+            untouched_id,
+            at(22),
+        );
+        let (root_delete, root_payload) = sealed_delete(
+            &fixture.stranger,
+            fixture.stranger_id,
+            fixture.owner_id,
+            topic_id,
+            at(23),
+        );
+
+        let mut decrypted = HashMap::new();
+        decrypted.insert(hard_delete.id(), hard_payload);
+        decrypted.insert(nested_delete.id(), nested_payload);
+        decrypted.insert(stranger_delete.id(), stranger_payload);
+        decrypted.insert(root_delete.id(), root_payload);
+        messages.messages.extend([
+            reply,
+            nested,
+            untouched,
+            hard_delete,
+            nested_delete,
+            stranger_delete,
+            root_delete,
+        ]);
+
+        rebuild_decrypted(&fixture, &mut messages, &decrypted);
+
+        assert!(
+            messages.is_deleted(&reply_id),
+            "the topic author removes the reply"
+        );
+        assert!(
+            messages.is_deleted(&nested_id),
+            "a nested reply follows"
+        );
+        assert!(
+            !messages.is_deleted(&untouched_id),
+            "a stranger cannot delete a reply on the topic"
+        );
+        assert!(
+            !messages.is_deleted(&topic_id),
+            "the descendant rule never deletes the root"
+        );
+    }
+
+    #[test]
+    fn the_public_flag_is_checked_against_a_readable_section() {
+        let fixture = board_fixture();
+        let (closed_message, closed) =
+            category_with_auto(&fixture.owner, fixture.owner_id, Some(false), at(1));
+        let (open_message, open) =
+            category_with_auto(&fixture.owner, fixture.owner_id, Some(true), at(2));
+        let empty = || MessagesV1 {
+            messages: vec![closed_message.clone(), open_message.clone()],
+            ..Default::default()
+        };
+
+        let mut messages = empty();
+        let error = apply_topic(
+            &fixture.state,
+            &fixture.parameters,
+            &mut messages,
+            topic_with_flags(
+                &fixture.author,
+                fixture.author_id,
+                fixture.owner_id,
+                Some(closed),
+                false,
+                true,
+                at(10),
+            ),
+        )
+        .expect_err("a closed section rejects the public flag on its own");
+        assert!(error.contains("auto-moderated"), "{error}");
+
+        let mut messages = empty();
+        apply_topic(
+            &fixture.state,
+            &fixture.parameters,
+            &mut messages,
+            topic_with_flags(
+                &fixture.author,
+                fixture.author_id,
+                fixture.owner_id,
+                Some(open),
+                false,
+                true,
+                at(11),
+            ),
+        )
+        .expect("an open section accepts the public flag on its own");
+
+        // The public field is authoritative; the content fallback only fills
+        // in for topics written before it existed.
+        let mut messages = empty();
+        apply_topic(
+            &fixture.state,
+            &fixture.parameters,
+            &mut messages,
+            topic_with_flags(
+                &fixture.author,
+                fixture.author_id,
+                fixture.owner_id,
+                None,
+                true,
+                false,
+                at(12),
+            ),
+        )
+        .expect("an old flagged topic still follows its content flag");
+
+        // A reply cannot claim the flag for itself.
+        let reply = reply_to(
+            &fixture.author,
+            fixture.author_id,
+            fixture.owner_id,
+            MessageId::from_bytes([77u8; 32]),
+            at(13),
+        );
+        let mut flagged = reply.message.clone();
+        flagged.auto_moderated = true;
+        let flagged = AuthorizedMessageV1::new(flagged, &fixture.author);
+        let mut messages = empty();
+        let error = apply_topic(&fixture.state, &fixture.parameters, &mut messages, flagged)
+            .expect_err("only a topic can be auto-moderated");
+        assert!(error.contains("Only topics"), "{error}");
+    }
+
+    #[test]
+    fn a_sealed_section_falls_back_to_the_board_default() {
+        let fixture = private_board_fixture();
+        let (category_message, category_id) =
+            sealed_category(&fixture.owner, fixture.owner_id, at(1));
+
+        let mut messages = MessagesV1 {
+            messages: vec![category_message.clone()],
+            ..Default::default()
+        };
+        apply_topic(
+            &fixture.state,
+            &fixture.parameters,
+            &mut messages,
+            sealed_topic(
+                &fixture.author,
+                fixture.author_id,
+                fixture.owner_id,
+                SecretScope::Category(category_id),
+                true,
+                at(10),
+            ),
+        )
+        .expect("a sealed section inherits the board default");
+
+        let mut state = fixture.state.clone();
+        let mut config = state.configuration.configuration.clone();
+        config.configuration_version += 1;
+        config.auto_moderated_topics = false;
+        state.configuration = AuthorizedConfigurationV1::new(config, &fixture.owner);
+
+        let mut messages = MessagesV1 {
+            messages: vec![category_message],
+            ..Default::default()
+        };
+        let error = apply_topic(
+            &state,
+            &fixture.parameters,
+            &mut messages,
+            sealed_topic(
+                &fixture.author,
+                fixture.author_id,
+                fixture.owner_id,
+                SecretScope::Category(category_id),
+                true,
+                at(11),
+            ),
+        )
+        .expect_err("the board default closes a sealed section too");
+        assert!(error.contains("auto-moderated"), "{error}");
+    }
+
+    #[test]
+    fn old_public_topics_fall_back_to_their_content() {
+        let fixture = board_fixture();
+        let (closed_message, closed) =
+            category_with_auto(&fixture.owner, fixture.owner_id, Some(false), at(1));
+
+        // Written before the public fields existed: only the body carries the
+        // flag and the thread link.
+        let legacy_topic = topic(
+            &fixture.author,
+            fixture.author_id,
+            fixture.owner_id,
+            None,
+            true,
+            at(10),
+        );
+        let mut legacy_topic_message = legacy_topic.message.clone();
+        legacy_topic_message.auto_moderated = false;
+        let legacy_topic = AuthorizedMessageV1::new(legacy_topic_message, &fixture.author);
+        let topic_id = legacy_topic.id();
+        let legacy_reply = reply_to(
+            &fixture.stranger,
+            fixture.stranger_id,
+            fixture.owner_id,
+            topic_id,
+            at(11),
+        );
+        let mut legacy_reply_message = legacy_reply.message.clone();
+        legacy_reply_message.reply_to = None;
+        let legacy_reply = AuthorizedMessageV1::new(legacy_reply_message, &fixture.stranger);
+        let reply_id = legacy_reply.id();
+        let delete = delete_by(
+            &fixture.author,
+            fixture.author_id,
+            fixture.owner_id,
+            reply_id,
+            at(20),
+        );
+
+        let mut messages = MessagesV1 {
+            messages: vec![legacy_topic, legacy_reply, delete],
+            ..Default::default()
+        };
+        rebuild(&fixture.state, &fixture.parameters, &mut messages, true);
+        assert!(
+            messages.is_deleted(&reply_id),
+            "the content flag and body link still drive the rule"
+        );
+
+        // The section capability reads the same fallback.
+        let mut messages = MessagesV1 {
+            messages: vec![closed_message],
+            ..Default::default()
+        };
+        let error = apply_topic(
+            &fixture.state,
+            &fixture.parameters,
+            &mut messages,
+            topic_with_flags(
+                &fixture.author,
+                fixture.author_id,
+                fixture.owner_id,
+                Some(closed),
+                true,
+                false,
+                at(12),
+            ),
+        )
+        .expect_err("a closed section rejects an old flagged topic");
+        assert!(error.contains("auto-moderated"), "{error}");
     }
 }

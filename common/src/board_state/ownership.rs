@@ -547,6 +547,8 @@ mod tests {
                     author: admin_id,
                     time: SystemTime::UNIX_EPOCH,
                     content: BoardMessageBody::public("t".to_string(), "b".to_string()),
+                    reply_to: None,
+                    auto_moderated: false,
                 },
                 &admin_sk,
             ));
@@ -1157,6 +1159,8 @@ mod tests {
                     author: second_id,
                     time: SystemTime::UNIX_EPOCH,
                     content: BoardMessageBody::public("t2".to_string(), "b".to_string()),
+                    reply_to: None,
+                    auto_moderated: false,
                 },
                 &second_sk,
             ));

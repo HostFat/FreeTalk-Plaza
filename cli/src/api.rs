@@ -956,6 +956,8 @@ impl ApiClient {
                 message_content,
             ),
             time: std::time::SystemTime::now(),
+            reply_to: None,
+            auto_moderated: false,
         };
 
         // Sign the message
@@ -1051,6 +1053,8 @@ impl ApiClient {
                 message_content,
             ),
             time: std::time::SystemTime::now(),
+            reply_to: None,
+            auto_moderated: false,
         };
 
         // Sign the message
@@ -1156,6 +1160,8 @@ impl ApiClient {
                 new_content,
             ),
             time: std::time::SystemTime::now(),
+            reply_to: None,
+            auto_moderated: false,
         };
 
         // Sign the message
@@ -1214,6 +1220,8 @@ impl ApiClient {
             author: MemberId::from(&signing_key.verifying_key()),
             content: plaza_core::board_state::message::BoardMessageBody::delete(target_message_id),
             time: std::time::SystemTime::now(),
+            reply_to: None,
+            auto_moderated: false,
         };
 
         // Sign the message
@@ -1277,6 +1285,8 @@ impl ApiClient {
                 emoji,
             ),
             time: std::time::SystemTime::now(),
+            reply_to: None,
+            auto_moderated: false,
         };
 
         // Sign the message
@@ -1340,6 +1350,8 @@ impl ApiClient {
                 emoji,
             ),
             time: std::time::SystemTime::now(),
+            reply_to: None,
+            auto_moderated: false,
         };
 
         // Sign the message
@@ -1430,6 +1442,8 @@ impl ApiClient {
                 target_content_preview,
             ),
             time: std::time::SystemTime::now(),
+            reply_to: Some(target_message_id.clone()),
+            auto_moderated: false,
         };
 
         // Sign the message

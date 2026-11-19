@@ -424,6 +424,8 @@ pub async fn send_test_message(
             message_content.clone(),
         ),
         time: std::time::SystemTime::now(),
+        reply_to: None,
+        auto_moderated: false,
     };
 
     let auth_message =

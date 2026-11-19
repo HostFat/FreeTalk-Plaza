@@ -323,6 +323,8 @@ mod tests {
                 author: MemberId::from(&sk.verifying_key()),
                 time: std::time::SystemTime::now(),
                 content: BoardMessageBody::public("t".to_string(), "body".to_string()),
+                reply_to: None,
+                auto_moderated: false,
             },
             sk,
         )

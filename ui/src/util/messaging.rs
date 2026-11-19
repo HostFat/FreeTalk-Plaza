@@ -64,6 +64,7 @@ pub struct PreparedMessage {
     content: BoardMessageBody,
     images: Vec<plaza_core::board_state::images::ImageRef>,
     reply_target: Option<MessageId>,
+    auto_moderated: bool,
     category_id: Option<MessageId>,
 }
 
@@ -117,6 +118,7 @@ pub async fn publish_prepared(prepared: PreparedMessage) -> Result<(), String> {
         prepared.content,
         prepared.images,
         prepared.reply_target,
+        prepared.auto_moderated,
         prepared.category_id,
     )
     .await
@@ -191,6 +193,8 @@ pub fn prepare_message(
         .max_message_size;
 
     let reply_target = reply_ctx.as_ref().map(|reply| reply.message_id.clone());
+    // Only a new topic is auto-moderated; a reply never is.
+    let auto_moderated = auto_moderated && reply_ctx.is_none();
 
     // Build the typed payload once, then seal it with the right key.
     let poll_content = poll.filter(|_| reply_ctx.is_none()).map(|poll| {
@@ -203,7 +207,7 @@ pub fn prepare_message(
         )
         .with_results_visibility(poll.results_visibility)
         .with_category(category_id.clone())
-        .with_auto_moderated(auto_moderated && reply_ctx.is_none())
+        .with_auto_moderated(auto_moderated)
     });
     if let Some(poll) = &poll_content {
         if let Err(error) = poll.validate() {
@@ -232,7 +236,7 @@ pub fn prepare_message(
             TEXT_CONTENT_VERSION,
             TextContentV1::new(title_text.clone(), message_text.clone())
                 .with_category(category_id.clone())
-                .with_auto_moderated(auto_moderated && reply_ctx.is_none())
+                .with_auto_moderated(auto_moderated)
                 .encode(),
         )
     };
@@ -287,6 +291,7 @@ pub fn prepare_message(
         content,
         images,
         reply_target,
+        auto_moderated,
         category_id,
     })
 }
@@ -365,6 +370,7 @@ pub(crate) async fn publish_message(
     content: BoardMessageBody,
     images: Vec<plaza_core::board_state::images::ImageRef>,
     reply_target: Option<MessageId>,
+    auto_moderated: bool,
     category_id: Option<MessageId>,
 ) -> Option<MessageId> {
     if let Some(board_data) = BOARDS.read().map.get(&current_board) {
@@ -379,6 +385,10 @@ pub(crate) async fn publish_message(
         author: MemberId::from(&self_sk.verifying_key()),
         content,
         time: get_current_system_time(),
+        // The signed public fields carry the thread link and the topic flag
+        // outside the body, so the contract sees them on private boards too.
+        reply_to: reply_target,
+        auto_moderated,
     };
 
     // Serialize message to CBOR for signing
@@ -533,6 +543,7 @@ pub async fn send_poll_vote(
         content,
         Vec::new(),
         None,
+        false,
         category_id,
     )
     .await
@@ -714,6 +725,8 @@ pub async fn send_category(
         author: MemberId::from(&self_sk.verifying_key()),
         content,
         time: get_current_system_time(),
+        reply_to: None,
+        auto_moderated: false,
     };
 
     // Serialize message to CBOR for signing
@@ -874,6 +887,8 @@ pub async fn send_group(
         author: MemberId::from(&self_sk.verifying_key()),
         content,
         time: get_current_system_time(),
+        reply_to: None,
+        auto_moderated: false,
     };
     let mut message_bytes = Vec::new();
     ciborium::ser::into_writer(&message, &mut message_bytes)

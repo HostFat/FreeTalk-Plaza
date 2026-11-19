@@ -454,6 +454,8 @@ mod tests {
             author: MemberId::from(&author_sk.verifying_key()),
             content: BoardMessageBody::public(String::new(), "test".to_string()),
             time: std::time::SystemTime::UNIX_EPOCH,
+            reply_to: None,
+            auto_moderated: false,
         };
         let mut msg_bytes = Vec::new();
         ciborium::ser::into_writer(&msg, &mut msg_bytes).unwrap();

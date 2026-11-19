@@ -528,6 +528,8 @@ mod tests {
                 author: member_id,
                 time: SystemTime::now(),
                 content: BoardMessageBody::public("Post".into(), "Body".into()),
+                reply_to: None,
+                auto_moderated: false,
             },
             &member_sk,
         );

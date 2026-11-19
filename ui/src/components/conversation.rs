@@ -349,12 +349,15 @@ pub fn get_all_messages(
             .cloned()
             .unwrap_or_default();
 
-        let (reply_to_author, reply_to_preview, reply_to_message_id) = extract_reply_context(
+        let (reply_to_author, reply_to_preview, body_reply_target) = extract_reply_context(
             &message.message.content,
             secrets,
             category_secrets,
             old_category_secrets,
         );
+        // The signed public link is authoritative; the body is the fallback
+        // for replies written before the field existed.
+        let reply_to_message_id = message.message.reply_to.or(body_reply_target);
         let moved_parent = state.moderation.moved_to(&message_id).copied().flatten();
         let reply_to_message_id = moved_parent.or(reply_to_message_id);
         let merged_into = state.moderation.is_merged_into(&message_id);
@@ -529,12 +532,15 @@ pub fn get_all_messages(
             poll,
             merged_into,
             images: message.message.images.clone(),
-            is_auto_moderated: decrypt_auto_moderated(
-                &message.message.content,
-                secrets,
-                category_secrets,
-                old_category_secrets,
-            ),
+            // The signed public flag covers sealed topics on private boards;
+            // the body flag is the fallback for older public posts.
+            is_auto_moderated: message.message.auto_moderated
+                || decrypt_auto_moderated(
+                    &message.message.content,
+                    secrets,
+                    category_secrets,
+                    old_category_secrets,
+                ),
             can_delete_as_topic_author: false,
         });
     }
@@ -558,13 +564,8 @@ pub fn get_all_messages(
     }
 
     // Auto-moderated topics: mark replies their author may delete. The walk
-    // stops at the first message without a parent, which is the topic.
-    let public_bodies: HashMap<MessageId, bool> = state
-        .recent_messages
-        .messages
-        .iter()
-        .map(|message| (message.id(), message.message.content.is_public()))
-        .collect();
+    // stops at the first message without a parent, which is the topic. Both
+    // links ride in the public fields, so sealed private-board topics count.
     let by_id: HashMap<MessageId, (Option<MessageId>, bool, MemberId)> = messages
         .iter()
         .map(|message| {
@@ -595,16 +596,8 @@ pub fn get_all_messages(
         }
         if let Some(root) = root {
             if root != message.message_id {
-                // The contract needs both bodies in the clear to enforce the
-                // permission; sealed ones would leave a dead action here.
-                let readable = public_bodies.get(&root).copied().unwrap_or(false)
-                    && public_bodies
-                        .get(&message.message_id)
-                        .copied()
-                        .unwrap_or(false);
                 if let Some((_, true, author)) = by_id.get(&root) {
-                    message.can_delete_as_topic_author =
-                        readable && *author == self_member_id;
+                    message.can_delete_as_topic_author = *author == self_member_id;
                 }
             }
         }

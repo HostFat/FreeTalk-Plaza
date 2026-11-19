@@ -56,6 +56,8 @@ fn create_test_msg(
             author: author_id,
             time: SystemTime::now() + std::time::Duration::from_secs(time_offset_secs),
             content: BoardMessageBody::public(String::new(), format!("msg from {:?}", author_id)),
+            reply_to: None,
+            auto_moderated: false,
         },
         author_sk,
     )
@@ -379,6 +381,8 @@ fn test_message_order_convergence() {
             author: owner_id,
             time: same_time,
             content: BoardMessageBody::public(String::new(), "Message A".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         },
         &owner_signing_key,
     );
@@ -390,6 +394,8 @@ fn test_message_order_convergence() {
             author: owner_id,
             time: same_time,
             content: BoardMessageBody::public(String::new(), "Message B".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         },
         &owner_signing_key,
     );
@@ -401,6 +407,8 @@ fn test_message_order_convergence() {
             author: owner_id,
             time: same_time,
             content: BoardMessageBody::public(String::new(), "Message C".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         },
         &owner_signing_key,
     );
@@ -519,6 +527,8 @@ fn test_message_delta_idempotency() {
             author: owner_id,
             time: SystemTime::now(),
             content: BoardMessageBody::public(String::new(), "Test message".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         },
         &owner_signing_key,
     );
@@ -746,6 +756,8 @@ fn test_message_convergence_stress_100_messages() {
                 author: owner_id,
                 time,
                 content: BoardMessageBody::public(String::new(), format!("Message {}", i)),
+                reply_to: None,
+                auto_moderated: false,
             },
             &owner_signing_key,
         );
@@ -1066,6 +1078,8 @@ fn test_message_varying_limits_convergence() {
                 author: owner_id,
                 time: base_time + std::time::Duration::from_secs(i as u64),
                 content: BoardMessageBody::public(String::new(), format!("Message {}", i)),
+                reply_to: None,
+                auto_moderated: false,
             },
             &owner_signing_key,
         );
@@ -1240,6 +1254,8 @@ fn test_messages_all_identical_timestamps() {
                 author: owner_id,
                 time: same_time,
                 content: BoardMessageBody::public(String::new(), format!("Message {}", i)),
+                reply_to: None,
+                auto_moderated: false,
             },
             &owner_signing_key,
         );
@@ -1659,6 +1675,8 @@ fn test_regression_message_pruning_order() {
                 author: owner_id,
                 time,
                 content: BoardMessageBody::public(String::new(), format!("Message {}", i)),
+                reply_to: None,
+                auto_moderated: false,
             },
             &owner_signing_key,
         );
@@ -1765,6 +1783,8 @@ fn test_full_state_merge_commutativity() {
             author: owner_id,
             time: time_1,
             content: BoardMessageBody::public(String::new(), "Hello from owner".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         },
         &owner_signing_key,
     );
@@ -1775,6 +1795,8 @@ fn test_full_state_merge_commutativity() {
             author: member_a.id(),
             time: time_2,
             content: BoardMessageBody::public(String::new(), "Hello from Alice".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         },
         &member_a_sk,
     );
@@ -1785,6 +1807,8 @@ fn test_full_state_merge_commutativity() {
             author: member_b.id(),
             time: time_3,
             content: BoardMessageBody::public(String::new(), "Hello from Bob".to_string()),
+            reply_to: None,
+            auto_moderated: false,
         },
         &member_b_sk,
     );
@@ -1938,6 +1962,8 @@ fn test_regression_combined_scenario() {
                 author: members[author_idx].0.member.id(),
                 time,
                 content: BoardMessageBody::public(String::new(), format!("Message {}", i)),
+                reply_to: None,
+                auto_moderated: false,
             },
             &members[author_idx].1,
         );

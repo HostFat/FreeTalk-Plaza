@@ -983,6 +983,8 @@ mod tests {
                 author: a_id,
                 time: SystemTime::now(),
                 content: BoardMessageBody::public(String::new(), "Hello from A".to_string()),
+                reply_to: None,
+                auto_moderated: false,
             },
             &a_sk,
         );
@@ -1052,6 +1054,8 @@ mod tests {
                 author: b_id,
                 time: SystemTime::now(),
                 content: BoardMessageBody::public(String::new(), "Hello from B".to_string()),
+                reply_to: None,
+                auto_moderated: false,
             },
             &b_sk,
         );
@@ -1207,6 +1211,8 @@ mod tests {
                 author: a_id,
                 time: SystemTime::now(),
                 content: BoardMessageBody::public(String::new(), "Hello again!".to_string()),
+                reply_to: None,
+                auto_moderated: false,
             },
             &a_sk,
         );

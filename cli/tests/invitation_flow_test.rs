@@ -147,6 +147,8 @@ fn test_message_validation_after_invitation_acceptance() -> Result<()> {
         author: invitee_vk.into(),
         content: BoardMessageBody::public(String::new(), "Hello from invited user!".to_string()),
         time: SystemTime::now(),
+        reply_to: None,
+        auto_moderated: false,
     };
     let auth_message = AuthorizedMessageV1::new(message, &invitee_sk);
 
@@ -214,6 +216,8 @@ fn test_uninvited_user_messages_are_filtered() -> Result<()> {
         author: uninvited_vk.into(),
         content: BoardMessageBody::public(String::new(), "Hello from uninvited user!".to_string()),
         time: SystemTime::now(),
+        reply_to: None,
+        auto_moderated: false,
     };
     let auth_message = AuthorizedMessageV1::new(message, &uninvited_sk);
 
