@@ -10,6 +10,9 @@ pub fn CreateBoardModal() -> Element {
     let mut error_msg = use_signal(|| None::<String>);
     let mut is_private = use_signal(|| false);
     let mut selected_profile = use_signal(|| 0usize);
+    // Only matters for a private board with an existing profile. The default
+    // derives a board key; opting in reuses the root key and links the boards.
+    let mut same_identity = use_signal(|| false);
 
     let create_board = move |_| {
         use dioxus::logger::tracing::info;
@@ -47,15 +50,16 @@ pub fn CreateBoardModal() -> Element {
         // The owner key stays unique per board; the profile key may be reused.
         info!("🔵 Generating owner key...");
         let owner_sk = SigningKey::generate(&mut rand::thread_rng());
+        let index = *selected_profile.read();
+        let existing_profile = index > 0;
         let profile = {
-            let index = *selected_profile.read();
             let existing = BOARDS
                 .read()
                 .profiles
                 .get(index.saturating_sub(1))
                 .cloned();
             match existing {
-                Some(profile) if index > 0 => profile,
+                Some(profile) if existing_profile => profile,
                 _ => crate::board_data::IdentityProfile::new(
                     nick.clone(),
                     SigningKey::generate(&mut rand::thread_rng()),
@@ -63,6 +67,14 @@ pub fn CreateBoardModal() -> Element {
             }
         };
         let private = *is_private.read();
+        // A fresh identity is already unlinkable; a public board cannot hide
+        // the posting key either. Only a private board with an existing
+        // profile can derive, and that is the default.
+        let identity_mode = if private && existing_profile && !*same_identity.read() {
+            crate::board_data::BoardIdentityMode::Derived
+        } else {
+            crate::board_data::BoardIdentityMode::Same
+        };
         info!(
             "🔵 Creating {} board with nickname: {}",
             if private { "private" } else { "public" },
@@ -70,9 +82,16 @@ pub fn CreateBoardModal() -> Element {
         );
 
         // Create board and get the key
-        info!("🔵 About to call create_new_board_with_name...");
+        info!("🔵 About to call create_new_board_with_identity...");
         let new_board_key = BOARDS.with_mut(|boards| {
-            boards.create_new_board_with_identity(owner_sk, profile, name, nick, private)
+            boards.create_new_board_with_identity(
+                owner_sk,
+                profile,
+                identity_mode,
+                name,
+                nick,
+                private,
+            )
         });
         info!("🔵 Board created with key: {:?}", new_board_key);
 
@@ -96,6 +115,7 @@ pub fn CreateBoardModal() -> Element {
         nickname.set(String::new());
         is_private.set(false);
         selected_profile.set(0);
+        same_identity.set(false);
         info!("🔵 Closing modal...");
         CREATE_BOARD_MODAL.with_mut(|modal| {
             modal.show = false;
@@ -175,11 +195,45 @@ pub fn CreateBoardModal() -> Element {
                             },
                             option { value: "0", "New identity (unlinkable)" }
                             for (index, profile) in profiles.iter().enumerate() {
-                                option { value: "{index + 1}", "{profile.name} (same identity)" }
+                                option { value: "{index + 1}", "{profile.name}" }
+                            }
+                        }
+                        if *is_private.read() && *selected_profile.read() > 0 {
+                            div { class: "mt-2 space-y-2 rounded-lg border border-border p-3",
+                                label { class: "flex items-start gap-2 cursor-pointer",
+                                    input {
+                                        r#type: "radio",
+                                        name: "create-identity-mode",
+                                        class: "mt-0.5",
+                                        checked: !*same_identity.read(),
+                                        onchange: move |_| same_identity.set(false),
+                                    }
+                                    div { class: "flex flex-col",
+                                        span { class: "text-sm text-text", "Unlinkable identity here" }
+                                        span { class: "text-xs text-text-muted",
+                                            "A key derived from the profile signs on this board. The key link to your other boards is hidden."
+                                        }
+                                    }
+                                }
+                                label { class: "flex items-start gap-2 cursor-pointer",
+                                    input {
+                                        r#type: "radio",
+                                        name: "create-identity-mode",
+                                        class: "mt-0.5",
+                                        checked: *same_identity.read(),
+                                        onchange: move |_| same_identity.set(true),
+                                    }
+                                    div { class: "flex flex-col",
+                                        span { class: "text-sm text-text", "Same identity here (linkable)" }
+                                        span { class: "text-xs text-amber-300",
+                                            "The profile's root key signs here, so anyone who sees it on a public board can link this private board to you."
+                                        }
+                                    }
+                                }
                             }
                         }
                         p { class: "text-xs text-text-muted mt-1",
-                            "Sharing a profile makes the same member id appear on both boards. A new identity does not link them."
+                            "A derived identity hides the key link, but the same nickname on a public board can still link you. Your node, IP address, timing and device can also correlate activity."
                         }
                     }
 

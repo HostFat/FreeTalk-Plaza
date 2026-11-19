@@ -427,6 +427,9 @@ fn ExportIdentityModal(is_active: Signal<bool>) -> Element {
                     let board_name = unseal_bytes_with_secrets(sealed_name, &board_data.secrets)
                         .ok()
                         .map(|bytes| String::from_utf8_lossy(&bytes).to_string());
+                    // A derived board still knows its root profile locally;
+                    // carry it so another client can derive the same key.
+                    let root_profile = boards_read.export_root_profile(board_data);
                     let export = IdentityExport {
                         board_owner: owner_key,
                         signing_key: board_data.self_sk.clone(),
@@ -448,6 +451,11 @@ fn ExportIdentityModal(is_active: Signal<bool>) -> Element {
                             .map(|(version, key)| (*version, *key))
                             .collect(),
                         current_board_secret: board_data.current_secret_version,
+                        profile_id: root_profile.as_ref().map(|profile| profile.id.clone()),
+                        profile_name: root_profile.as_ref().map(|profile| profile.name.clone()),
+                        profile_signing_key: root_profile
+                            .as_ref()
+                            .map(|profile| profile.signing_key.clone()),
                     };
                     token_text.set(export.to_armored_string());
                 }
@@ -555,6 +563,10 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     .unwrap_or_else(|| export.signing_key.clone());
                 let board_key_bytes = owner_key.to_bytes();
 
+                // Register the root profile the export carries, if any, before
+                // the board records the link to it.
+                let profile_id = BOARDS.with_mut(|boards| boards.register_imported_profile(&export));
+
                 let category_secrets = export
                     .category_keys
                     .iter()
@@ -566,6 +578,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     board_state: initial_state, // Will be fully populated on sync
                     self_sk: export.signing_key,
                     owner_sk: Some(owner_sk_for_import),
+                    profile_id: profile_id.clone(),
                     contract_key,
                     last_read_message_id: None,
                     secrets: export
@@ -607,10 +620,14 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     signing_key_for_migration.clone(),
                 );
 
-                // Add to BOARDS and trigger sync
+                // Add to BOARDS and trigger sync. When the export carried a
+                // root profile, that profile is the one to keep; the board's
+                // member key may be derived from it and is not a profile.
                 BOARDS.with_mut(|boards| {
                     boards.removed.retain(|vk| *vk != owner_key);
-                    boards.remember_profile(imported_profile);
+                    if profile_id.is_none() {
+                        boards.remember_profile(imported_profile);
+                    }
                     boards.map.insert(owner_key, board_data);
                 });
 

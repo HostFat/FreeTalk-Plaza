@@ -31,6 +31,7 @@ pub fn open_spectator_board(owner_vk: VerifyingKey) -> Result<(), String> {
         board_state: ChatBoardStateV1::default(),
         self_sk: SigningKey::generate(&mut rand::thread_rng()),
         owner_sk: None,
+        profile_id: None,
         contract_key,
         last_read_message_id: None,
         secrets: HashMap::new(),

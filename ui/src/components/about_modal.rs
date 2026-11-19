@@ -61,16 +61,39 @@ fn board_display_name(board: &crate::board_data::BoardData) -> String {
     })
 }
 
-/// Board names where this profile is the posting identity on this device.
-fn profile_boards(profile: &crate::board_data::IdentityProfile) -> Vec<String> {
-    let profiles_key = profile.signing_key.verifying_key();
-    BOARDS
-        .read()
-        .map
-        .values()
-        .filter(|board| board.self_sk.verifying_key() == profiles_key)
-        .map(board_display_name)
-        .collect()
+/// Boards where this profile is the posting identity on this device: name,
+/// whether the board is private, and whether a derived key signs there.
+fn profile_boards(profile: &crate::board_data::IdentityProfile) -> Vec<(String, bool, bool)> {
+    let boards = BOARDS.read();
+    let linkability = boards.profile_linkability(profile);
+    let mut rows = Vec::new();
+    for key in &linkability.public_boards {
+        if let Some(board) = boards.map.get(key) {
+            rows.push((board_display_name(board), false, false));
+        }
+    }
+    for key in &linkability.private_boards {
+        if let Some(board) = boards.map.get(key) {
+            rows.push((board_display_name(board), true, false));
+        }
+    }
+    for key in &linkability.derived_boards {
+        if let Some(board) = boards.map.get(key) {
+            rows.push((board_display_name(board), true, true));
+        }
+    }
+    rows
+}
+
+/// Whether forgetting this profile would remove the root key that a board
+/// relies on for future derivations.
+fn profile_is_a_board_root(id: &str) -> bool {
+    let boards = BOARDS.read();
+    boards.map.values().any(|board| {
+        boards
+            .profile_for_board(board)
+            .is_some_and(|profile| profile.id == id)
+    })
 }
 
 /// Whether the profile can be selected on the board that is open now.
@@ -158,6 +181,7 @@ pub fn AboutModal() -> Element {
     let site_label = site.clone().unwrap_or_else(|| "local".to_string());
     let mut renaming = use_signal(|| None::<String>);
     let mut rename_text = use_signal(String::new);
+    let mut forget_confirm = use_signal(|| None::<String>);
 
     rsx! {
         div {
@@ -221,6 +245,9 @@ pub fn AboutModal() -> Element {
                         p { class: "text-xs",
                             "Two different profiles cannot be merged: merging would link their keys and defeat the separation. To use one identity on another board, join or rejoin that board with it."
                         }
+                        p { class: "text-xs",
+                            "Keys and nicknames are separate: the same nickname on two boards can still link you even when the keys differ. On a private board a derived key keeps the key link hidden."
+                        }
                         for profile in BOARDS.read().profiles.clone() {
                             div { key: "{profile.id}", class: "flex items-center gap-2 flex-wrap",
                                 if renaming.read().as_deref() == Some(profile.id.as_str()) {
@@ -261,12 +288,38 @@ pub fn AboutModal() -> Element {
                                     }
                                     div { class: "w-full text-[10px] text-text-muted",
                                         {
-                                            let boards = profile_boards(&profile);
-                                            if boards.is_empty() {
+                                            let rows = profile_boards(&profile);
+                                            if rows.is_empty() {
                                                 "Not used by any board on this device.".to_string()
                                             } else {
-                                                format!("Used by: {}", boards.join(", "))
+                                                let boards = rows
+                                                    .iter()
+                                                    .map(|(name, private, derived)| {
+                                                        let kind =
+                                                            if *private { "private" } else { "public" };
+                                                        let mode = if *derived {
+                                                            ", derived here"
+                                                        } else {
+                                                            ", same identity here"
+                                                        };
+                                                        format!("{name} ({kind}{mode})")
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ");
+                                                format!("Used by: {boards}")
                                             }
+                                        }
+                                    }
+                                    if BOARDS.read().profile_linkability(&profile).linked_across {
+                                        div { class: "w-full text-[10px] text-amber-300",
+                                            "This profile links public and private boards."
+                                        }
+                                    }
+                                    if forget_confirm.read().as_deref()
+                                        == Some(profile.id.as_str())
+                                    {
+                                        div { class: "w-full text-[10px] text-amber-300",
+                                            "Boards that used this profile keep working, but no new derivation from it is possible. Press Forget again to confirm."
                                         }
                                     }
                                     if switch_state(&profile).0 {
@@ -275,17 +328,25 @@ pub fn AboutModal() -> Element {
                                             class: "px-2 py-1 bg-accent/20 hover:bg-accent/30 text-accent text-xs rounded",
                                             onclick: {
                                                 let key = profile.signing_key.clone();
+                                                let profile_id = profile.id.clone();
                                                 move |_| {
                                                     let current = CURRENT_BOARD.read().owner_key;
                                                     let switched = current.is_some_and(|current| {
                                                         BOARDS.with_mut(|boards| {
+                                                            let profile_id = profile_id.clone();
                                                             boards
                                                                 .map
                                                                 .get_mut(&current)
                                                                 .is_some_and(|board| {
-                                                                    board
+                                                                    if board
                                                                         .switch_profile(&key)
-                                                                        .is_ok()
+                                                                        .is_err()
+                                                                    {
+                                                                        return false;
+                                                                    }
+                                                                    board.profile_id =
+                                                                        Some(profile_id);
+                                                                    true
                                                                 })
                                                         })
                                                     });
@@ -323,7 +384,15 @@ pub fn AboutModal() -> Element {
                                         onclick: {
                                             let id = profile.id.clone();
                                             move |_| {
+                                                if profile_is_a_board_root(&id)
+                                                    && forget_confirm.read().as_deref()
+                                                        != Some(id.as_str())
+                                                {
+                                                    forget_confirm.set(Some(id.clone()));
+                                                    return;
+                                                }
                                                 BOARDS.with_mut(|boards| boards.forget_profile(&id));
+                                                forget_confirm.set(None);
                                                 persist_profiles();
                                             }
                                         },

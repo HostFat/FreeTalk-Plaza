@@ -190,6 +190,11 @@ pub struct BoardData {
     /// `owner_key()` then falls back to `self_sk`.
     #[serde(default)]
     pub owner_sk: Option<SigningKey>,
+    /// Local root profile this board's posting key belongs to. On a private
+    /// board the key may be derived from the profile and differ from it.
+    /// Boards stored before profiles had this link have no id here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
     pub contract_key: ContractKey,
     /// The last message ID that was read by the user (for unread tracking)
     /// Messages after this ID from other users are considered unread.
@@ -329,6 +334,12 @@ impl BoardData {
         self.owner_key().verifying_key() == self.current_owner_key()
     }
 
+    /// Whether this board signs as the profile's root key. A derived board
+    /// signs with another key and is not linked to the profile's other boards.
+    pub fn uses_same_identity_as(&self, profile: &IdentityProfile) -> bool {
+        self.self_sk == profile.signing_key
+    }
+
     /// Key and signer id for management records. The owner signs as the owner;
     /// a profile signs as a member and must carry its authority proof.
     pub fn management_signer(&self) -> (SigningKey, Option<MemberId>) {
@@ -362,6 +373,9 @@ impl BoardData {
             return Err("That profile is deactivated on this board".to_string());
         }
         self.self_sk = signing_key.clone();
+        // The old root profile no longer explains `self_sk`; callers that know
+        // the selected profile write the new id.
+        self.profile_id = None;
         self.self_authorized_member = Some(member.clone());
         self.self_member_info = self
             .board_state
@@ -2300,6 +2314,40 @@ impl IdentityProfile {
             updated_at: profile_stamp(),
         }
     }
+
+    /// A board-scoped signing key for this profile. The result is deterministic
+    /// per board and cannot be turned back into the root key, so two boards
+    /// that use different derived keys are not cryptographically linked.
+    pub fn derive_for_board(&self, board_owner_vk: &VerifyingKey) -> SigningKey {
+        let material =
+            [self.signing_key.to_bytes().as_slice(), board_owner_vk.as_bytes()].concat();
+        let bytes = blake3::derive_key("freetalk-profile-board-v1", &material);
+        SigningKey::from_bytes(&bytes)
+    }
+}
+
+/// How a new board treats the chosen profile. Public boards always use the
+/// root key; on a private board the default derives a board-specific key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BoardIdentityMode {
+    /// Use a key derived from the profile, keeping this board unlinkable.
+    #[default]
+    Derived,
+    /// Use the profile's root key, linking this board to the others.
+    Same,
+}
+
+/// Which boards a profile signs on, split by what that reveals.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProfileLinkability {
+    /// Public boards signed with the profile's root key.
+    pub public_boards: Vec<VerifyingKey>,
+    /// Private boards signed with the profile's root key.
+    pub private_boards: Vec<VerifyingKey>,
+    /// Private boards signed with a key derived from the profile.
+    pub derived_boards: Vec<VerifyingKey>,
+    /// The same root key is visible on a public and on a private board.
+    pub linked_across: bool,
 }
 
 fn profile_stamp() -> u64 {
@@ -2474,7 +2522,15 @@ impl Boards {
         // Old callers use one key for ownership and posts. New boards can
         // choose a separate owner key and a reusable profile.
         let profile = IdentityProfile::new(nickname.clone(), self_sk.clone());
-        self.create_new_board_with_identity(self_sk, profile, name, nickname, is_private)
+        // The key is freshly made for this board, so reusing it links nothing.
+        self.create_new_board_with_identity(
+            self_sk,
+            profile,
+            BoardIdentityMode::Same,
+            name,
+            nickname,
+            is_private,
+        )
     }
 
     /// Store a profile once, keyed by its verifying key. When two tabs know
@@ -2516,13 +2572,91 @@ impl Boards {
         before != self.profiles.len()
     }
 
+    /// The stored profile a board posts as. Newer boards name it; boards from
+    /// before the link fall back to a key match.
+    pub fn profile_for_board(&self, board: &BoardData) -> Option<&IdentityProfile> {
+        if let Some(id) = board.profile_id.as_deref() {
+            if let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) {
+                return Some(profile);
+            }
+        }
+        self.profiles
+            .iter()
+            .find(|profile| profile.signing_key == board.self_sk)
+    }
+
+    /// Where a profile is visible: root key on public or private boards, and
+    /// derived keys on private boards. The root key on a public board and on
+    /// a private board links the same person across both.
+    pub fn profile_linkability(&self, profile: &IdentityProfile) -> ProfileLinkability {
+        let root_vk = profile.signing_key.verifying_key();
+        let mut linkability = ProfileLinkability::default();
+        for (owner, board) in &self.map {
+            let uses_root = board.self_sk.verifying_key() == root_vk;
+            let named_here = board.profile_id.as_deref() == Some(profile.id.as_str());
+            if !uses_root && !named_here {
+                continue;
+            }
+            if uses_root {
+                if board.is_private() {
+                    linkability.private_boards.push(*owner);
+                } else {
+                    linkability.public_boards.push(*owner);
+                }
+            } else if board.self_sk.verifying_key()
+                == profile.derive_for_board(&board.owner_vk).verifying_key()
+            {
+                linkability.derived_boards.push(*owner);
+            }
+        }
+        linkability.public_boards.sort_by_key(|vk| vk.to_bytes());
+        linkability.private_boards.sort_by_key(|vk| vk.to_bytes());
+        linkability.derived_boards.sort_by_key(|vk| vk.to_bytes());
+        linkability.linked_across =
+            !linkability.public_boards.is_empty() && !linkability.private_boards.is_empty();
+        linkability
+    }
+
+    /// Root profile to publish with an identity export, when this board names
+    /// one and it is still stored here.
+    pub fn export_root_profile(&self, board: &BoardData) -> Option<IdentityProfile> {
+        let id = board.profile_id.as_deref()?;
+        self.profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .cloned()
+    }
+
+    /// Register the root profile carried by an identity export. Returns the
+    /// id the imported board should record, or `None` for older exports that
+    /// only carry the board key.
+    pub fn register_imported_profile(
+        &mut self,
+        export: &plaza_core::board_state::identity::IdentityExport,
+    ) -> Option<String> {
+        let id = export.profile_id.clone()?;
+        let signing_key = export.profile_signing_key.clone()?;
+        let name = export
+            .profile_name
+            .clone()
+            .unwrap_or_else(|| "Imported identity".to_string());
+        let mut profile = IdentityProfile::new(name, signing_key);
+        // Keep the exported id so `profile_for_board` resolves the link even
+        // if the key bytes were produced by another client.
+        profile.id = id.clone();
+        self.remember_profile(profile);
+        Some(id)
+    }
+
     /// Create a board owned by `owner_sk`, with `profile` as its member and
     /// administrator. Reusing a profile on several boards links their member
-    /// ids; a new profile keeps them apart.
+    /// ids; a new profile keeps them apart. A private board in the default
+    /// mode signs with a key derived from the profile instead.
     pub fn create_new_board_with_identity(
         &mut self,
         owner_sk: SigningKey,
         profile: IdentityProfile,
+        identity_mode: BoardIdentityMode,
         name: String,
         nickname: String,
         is_private: bool,
@@ -2533,8 +2667,15 @@ impl Boards {
             name, nickname, is_private
         );
 
-        let self_sk = profile.signing_key.clone();
         let owner_vk = owner_sk.verifying_key();
+        let self_sk = if is_private
+            && identity_mode == BoardIdentityMode::Derived
+            && profile.signing_key.verifying_key() != owner_vk
+        {
+            profile.derive_for_board(&owner_vk)
+        } else {
+            profile.signing_key.clone()
+        };
         let profile_vk = self_sk.verifying_key();
         let has_separate_profile = profile_vk != owner_vk;
         let mut board_state = ChatBoardStateV1::default();
@@ -2683,8 +2824,10 @@ impl Boards {
             None
         };
 
-        // Remember the profile so it can be reused on another board.
-        self.remember_profile(profile.clone());
+        // Remember the root profile so it can be reused on another board. A
+        // derived board key is never stored as a profile of its own.
+        let profile_id = profile.id.clone();
+        self.remember_profile(profile);
 
         // Generate contract key for the board
         info!("🟢 Generating contract key...");
@@ -2709,6 +2852,7 @@ impl Boards {
             board_state,
             self_sk,
             owner_sk: Some(owner_sk),
+            profile_id: Some(profile_id),
             contract_key,
             last_read_message_id: None,
             secrets,
@@ -2863,6 +3007,7 @@ impl Boards {
                     // switched; keep the incoming profile and its membership
                     // data, and keep an owner key from either side.
                     self_board_data.self_sk = board_data.self_sk.clone();
+                    self_board_data.profile_id = board_data.profile_id.clone();
                     self_board_data.self_authorized_member =
                         board_data.self_authorized_member.clone();
                     self_board_data.self_member_info = board_data.self_member_info.clone();
@@ -2885,7 +3030,22 @@ impl Boards {
 mod tests {
     use super::*;
     use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+    use plaza_core::board_state::identity::IdentityExport;
     use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
+
+    fn empty_boards() -> Boards {
+        Boards {
+            map: HashMap::new(),
+            current_board_key: None,
+            profiles: Vec::new(),
+            removed: Vec::new(),
+            migrated_boards: Vec::new(),
+            blocked_image_hashes: Vec::new(),
+            auto_renew_images: false,
+            last_auto_renew_at: 0,
+            owned_images: Vec::new(),
+        }
+    }
 
     /// The image index lives under its own delegate key, so the board map does
     /// not carry its megabytes. A blob from before the split still loads and
@@ -2914,6 +3074,7 @@ mod tests {
         let key = boards.create_new_board_with_identity(
             owner_sk,
             profile,
+            BoardIdentityMode::Same,
             "Shared board".to_string(),
             "Shared profile".to_string(),
             false,
@@ -2964,6 +3125,7 @@ mod tests {
         let key = boards.create_new_board_with_identity(
             owner_sk.clone(),
             IdentityProfile::new("Owner profile".to_string(), profile_sk),
+            BoardIdentityMode::Same,
             "Board".to_string(),
             "Owner".to_string(),
             false,
@@ -3005,6 +3167,7 @@ mod tests {
         let key = boards.create_new_board_with_identity(
             owner_sk,
             IdentityProfile::new("Profile".to_string(), profile_sk),
+            BoardIdentityMode::Same,
             "Board".to_string(),
             "Profile".to_string(),
             false,
@@ -3061,6 +3224,7 @@ mod tests {
         let key = boards.create_new_board_with_identity(
             owner_sk,
             IdentityProfile::new("Profile".to_string(), profile_sk),
+            BoardIdentityMode::Same,
             "Board".to_string(),
             "Profile".to_string(),
             false,
@@ -3121,6 +3285,7 @@ mod tests {
         let key = boards.create_new_board_with_identity(
             owner_sk.clone(),
             IdentityProfile::new("Profile".to_string(), profile_sk),
+            BoardIdentityMode::Same,
             "Board".to_string(),
             "Profile".to_string(),
             false,
@@ -3198,6 +3363,7 @@ mod tests {
         let key = boards.create_new_board_with_identity(
             owner_sk.clone(),
             IdentityProfile::new("Profile".to_string(), profile_sk.clone()),
+            BoardIdentityMode::Same,
             "Board".to_string(),
             "Profile".to_string(),
             false,
@@ -3389,6 +3555,7 @@ mod tests {
         let key = boards.create_new_board_with_identity(
             owner_sk.clone(),
             IdentityProfile::new("First".to_string(), profile_sk),
+            BoardIdentityMode::Same,
             "Board".to_string(),
             "First".to_string(),
             false,
@@ -3452,6 +3619,7 @@ mod tests {
         let key = boards.create_new_board_with_identity(
             owner_sk.clone(),
             IdentityProfile::new("First".to_string(), first_sk),
+            BoardIdentityMode::Same,
             "Board".to_string(),
             "First".to_string(),
             false,
@@ -4411,6 +4579,7 @@ mod tests {
             board_state,
             self_sk: stale_sk,
             owner_sk: None,
+            profile_id: None,
             contract_key,
             last_read_message_id: None,
             secrets: HashMap::new(),
@@ -4497,6 +4666,7 @@ mod tests {
             board_state,
             self_sk: invitee_sk.clone(),
             owner_sk: None,
+            profile_id: None,
             contract_key,
             last_read_message_id: None,
             secrets: HashMap::new(),
@@ -4573,6 +4743,7 @@ mod tests {
                 board_state,
                 self_sk: sk,
                 owner_sk: None,
+                profile_id: None,
                 contract_key,
                 last_read_message_id: None,
                 secrets: HashMap::new(),
@@ -4642,5 +4813,198 @@ mod tests {
             .messages
             .push(dummy_msg);
         assert!(!pruned_board.is_awaiting_initial_sync());
+    }
+
+    /// The board-scoped key is stable for one board, differs between boards,
+    /// and is not the root key.
+    #[test]
+    fn profile_derivation_is_deterministic_and_board_scoped() {
+        let mut rng = rand::thread_rng();
+        let profile = IdentityProfile::new("Profile".to_string(), SigningKey::generate(&mut rng));
+        let board_a = SigningKey::generate(&mut rng).verifying_key();
+        let board_b = SigningKey::generate(&mut rng).verifying_key();
+
+        let first = profile.derive_for_board(&board_a);
+        let again = profile.derive_for_board(&board_a);
+        let other = profile.derive_for_board(&board_b);
+
+        assert_eq!(first.to_bytes(), again.to_bytes());
+        assert_ne!(first.to_bytes(), other.to_bytes());
+        assert_ne!(first.verifying_key(), profile.signing_key.verifying_key());
+    }
+
+    /// A private board in derived mode signs as a board key; the root profile
+    /// stays local and is reachable through `profile_id`.
+    #[test]
+    fn a_private_board_can_use_a_derived_profile_key() {
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let profile = IdentityProfile::new("Shared".to_string(), SigningKey::generate(&mut rng));
+        let root_vk = profile.signing_key.verifying_key();
+        let mut boards = empty_boards();
+
+        let key = boards.create_new_board_with_identity(
+            owner_sk,
+            profile.clone(),
+            BoardIdentityMode::Derived,
+            "Private".to_string(),
+            "Shared".to_string(),
+            true,
+        );
+        let board = boards.map.get(&key).unwrap();
+        let derived_vk = profile.derive_for_board(&key).verifying_key();
+
+        assert_ne!(board.self_sk.verifying_key(), root_vk);
+        assert_eq!(board.self_sk.verifying_key(), derived_vk);
+        assert_eq!(board.profile_id.as_deref(), Some(profile.id.as_str()));
+        assert!(!board.uses_same_identity_as(&profile));
+        assert!(board
+            .board_state
+            .members
+            .members
+            .iter()
+            .any(|member| member.member.member_vk == derived_vk));
+        assert!(board
+            .board_state
+            .admin
+            .admins
+            .iter()
+            .any(|admin| admin.admin.member_id == MemberId::from(&derived_vk)));
+        assert!(!board
+            .board_state
+            .member_info
+            .member_info
+            .iter()
+            .any(|info| info.member_info.member_id == MemberId::from(&root_vk)));
+        board
+            .board_state
+            .verify(&board.board_state, &ChatBoardParametersV1 { owner: key })
+            .expect("the derived membership verifies");
+        assert_eq!(
+            boards.profile_for_board(board).map(|p| p.id.clone()),
+            Some(profile.id.clone())
+        );
+    }
+
+    /// Public boards keep the root key. Private boards signed with the same
+    /// root key are flagged; derived boards are not.
+    #[test]
+    fn profile_linkability_flags_a_shared_root_key_across_privacy_modes() {
+        let mut rng = rand::thread_rng();
+        let profile = IdentityProfile::new("Shared".to_string(), SigningKey::generate(&mut rng));
+        let mut boards = empty_boards();
+
+        let public_key = boards.create_new_board_with_identity(
+            SigningKey::generate(&mut rng),
+            profile.clone(),
+            BoardIdentityMode::Derived,
+            "Public".to_string(),
+            "Shared".to_string(),
+            false,
+        );
+        let derived_key = boards.create_new_board_with_identity(
+            SigningKey::generate(&mut rng),
+            profile.clone(),
+            BoardIdentityMode::Derived,
+            "Derived private".to_string(),
+            "Shared".to_string(),
+            true,
+        );
+
+        assert_eq!(
+            boards.map[&public_key].self_sk.verifying_key(),
+            profile.signing_key.verifying_key()
+        );
+        let linkability = boards.profile_linkability(&profile);
+        assert_eq!(linkability.public_boards, vec![public_key]);
+        assert!(linkability.private_boards.is_empty());
+        assert_eq!(linkability.derived_boards, vec![derived_key]);
+        assert!(!linkability.linked_across);
+
+        // Same identity on a private board: the root key now appears on both.
+        let same_key = boards.create_new_board_with_identity(
+            SigningKey::generate(&mut rng),
+            profile.clone(),
+            BoardIdentityMode::Same,
+            "Same private".to_string(),
+            "Shared".to_string(),
+            true,
+        );
+        let linkability = boards.profile_linkability(&profile);
+        assert_eq!(
+            boards.map[&same_key].self_sk.verifying_key(),
+            profile.signing_key.verifying_key()
+        );
+        assert_eq!(linkability.private_boards, vec![same_key]);
+        assert!(linkability.linked_across);
+        assert_eq!(linkability.derived_boards, vec![derived_key]);
+    }
+
+    /// A derived board exports its root profile; importing it restores the
+    /// profile id, the root key and the owner key path.
+    #[test]
+    fn an_identity_export_roundtrips_the_root_profile() {
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let owner_vk = owner_sk.verifying_key();
+        let profile = IdentityProfile::new("Root".to_string(), SigningKey::generate(&mut rng));
+        let mut boards = empty_boards();
+
+        let key = boards.create_new_board_with_identity(
+            owner_sk,
+            profile.clone(),
+            BoardIdentityMode::Derived,
+            "Private".to_string(),
+            "Root".to_string(),
+            true,
+        );
+        let board = boards.map.get(&key).unwrap();
+        let root = boards
+            .export_root_profile(board)
+            .expect("the board names its root profile");
+        let export = IdentityExport {
+            board_owner: key,
+            signing_key: board.self_sk.clone(),
+            owner_signing_key: Some(board.owner_key().clone()),
+            authorized_member: board.self_authorized_member.clone().unwrap(),
+            invite_chain: board.invite_chain.clone(),
+            member_info: board.self_member_info.clone(),
+            board_name: Some("Private".to_string()),
+            category_keys: Vec::new(),
+            board_secrets: Vec::new(),
+            current_board_secret: None,
+            profile_id: Some(root.id.clone()),
+            profile_name: Some(root.name.clone()),
+            profile_signing_key: Some(root.signing_key.clone()),
+        };
+        let decoded =
+            IdentityExport::from_armored_string(&export.to_armored_string()).expect("decodes");
+
+        let mut imported = empty_boards();
+        let profile_id = imported
+            .register_imported_profile(&decoded)
+            .expect("the root profile is registered");
+        let mut imported_board = board.clone();
+        imported_board.self_sk = decoded.signing_key.clone();
+        imported_board.owner_sk = decoded.owner_signing_key.clone();
+        imported_board.profile_id = Some(profile_id.clone());
+        imported.map.insert(key, imported_board);
+
+        let resolved = imported
+            .profile_for_board(&imported.map[&key])
+            .expect("the board resolves to its root profile");
+        assert_eq!(resolved.id, profile_id);
+        assert_eq!(
+            resolved.signing_key.to_bytes(),
+            profile.signing_key.to_bytes()
+        );
+        assert_eq!(
+            imported.map[&key].self_sk.verifying_key(),
+            root.derive_for_board(&key).verifying_key()
+        );
+        assert_eq!(
+            imported.map[&key].owner_sk.as_ref().map(|key| key.verifying_key()),
+            Some(owner_vk)
+        );
     }
 }

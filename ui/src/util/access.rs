@@ -592,20 +592,51 @@ pub fn revoke_invite_link(token_id: TokenId) -> Result<(), String> {
     })
 }
 
+/// Key a join uses for the chosen profile. The board's privacy is unknown
+/// before joining, so a separate identity derives a board key by default and
+/// reusing the root key is the explicit same-identity choice.
+pub fn join_identity_key(
+    board: &VerifyingKey,
+    profile: &crate::board_data::IdentityProfile,
+    separate_identity: bool,
+) -> SigningKey {
+    if separate_identity {
+        profile.derive_for_board(board)
+    } else {
+        profile.signing_key.clone()
+    }
+}
+
 /// Join a board through a link: use the chosen profile (or create an
 /// unlinkable one), prove we hold the link key, and hand the member record to
 /// the synchronizer, which fetches the board state and subscribes.
 pub fn join_with_token(
     link: &JoinLink,
     nickname: String,
-    profile: Option<SigningKey>,
+    profile: Option<crate::board_data::IdentityProfile>,
+    separate_identity: bool,
 ) -> Result<(), String> {
     let nickname = nickname.trim().to_string();
     if nickname.is_empty() {
         return Err("Please choose a nickname".to_string());
     }
 
-    let member_sk = profile.unwrap_or_else(|| SigningKey::generate(&mut rand::thread_rng()));
+    let (member_sk, profile_id) = match profile {
+        Some(profile) => {
+            let member_sk = join_identity_key(&link.board, &profile, separate_identity);
+            let profile_id = profile.id.clone();
+            BOARDS.with_mut(|boards| boards.remember_profile(profile));
+            (member_sk, Some(profile_id))
+        }
+        None => {
+            let member_sk = SigningKey::generate(&mut rand::thread_rng());
+            let profile =
+                crate::board_data::IdentityProfile::new(nickname.clone(), member_sk.clone());
+            let profile_id = profile.id.clone();
+            BOARDS.with_mut(|boards| boards.remember_profile(profile));
+            (member_sk, Some(profile_id))
+        }
+    };
     let member_vk = member_sk.verifying_key();
     let owner_id = MemberId::from(link.board);
     let member_id = MemberId::from(&member_vk);
@@ -623,15 +654,6 @@ pub fn join_with_token(
     };
     let authorized = AuthorizedMember::new(member, &member_sk);
 
-    // Keep the key on this device so the same profile can be picked again for
-    // another board.
-    BOARDS.with_mut(|boards| {
-        boards.remember_profile(crate::board_data::IdentityProfile::new(
-            nickname.clone(),
-            member_sk.clone(),
-        ));
-    });
-
     PENDING_INVITES.with_mut(|pending| {
         pending.map.insert(
             link.board,
@@ -643,6 +665,7 @@ pub fn join_with_token(
                 subscribing_since: None,
                 retry_count: 0,
                 category_keys: link.category_keys.clone(),
+                profile_id,
             },
         );
     });
@@ -668,6 +691,24 @@ mod tests {
 
     fn key(byte: u8) -> SigningKey {
         SigningKey::from_bytes(&[byte; 32])
+    }
+
+    /// A join derives a board key by default and reuses the root key only
+    /// when the user explicitly keeps the same identity.
+    #[test]
+    fn a_join_derives_a_separate_identity_or_reuses_the_root_key() {
+        let profile = crate::board_data::IdentityProfile::new("Profile".to_string(), key(9));
+        let board = key(1).verifying_key();
+
+        let derived = join_identity_key(&board, &profile, true);
+        assert_eq!(
+            derived.verifying_key(),
+            profile.derive_for_board(&board).verifying_key()
+        );
+        assert_ne!(derived.verifying_key(), profile.signing_key.verifying_key());
+
+        let same = join_identity_key(&board, &profile, false);
+        assert_eq!(same.verifying_key(), profile.signing_key.verifying_key());
     }
 
     #[test]

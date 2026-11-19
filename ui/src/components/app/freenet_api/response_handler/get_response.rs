@@ -97,7 +97,13 @@ pub async fn handle_get_response(
             let retrieved_state: ChatBoardStateV1 = from_cbor_slice::<ChatBoardStateV1>(&state);
 
             // Get the pending invite data once to avoid multiple reads
-            let (self_sk, authorized_member, preferred_nickname, link_category_keys) = {
+            let (
+                self_sk,
+                authorized_member,
+                preferred_nickname,
+                link_category_keys,
+                profile_id,
+            ) = {
                 let pending_invites = PENDING_INVITES.read();
                 let invite = &pending_invites.map[&owner_vk];
                 (
@@ -105,6 +111,7 @@ pub async fn handle_get_response(
                     invite.authorized_member.clone(),
                     invite.preferred_nickname.clone(),
                     invite.category_keys.clone(),
+                    invite.profile_id.clone(),
                 )
             };
 
@@ -143,6 +150,7 @@ pub async fn handle_get_response(
                         board_state: retrieved_state.clone(),
                         self_sk: self_sk.clone(),
                         owner_sk: None,
+                        profile_id: profile_id.clone(),
                         contract_key: key,
                         last_read_message_id: None,
                         secrets: std::collections::HashMap::new(),
@@ -183,6 +191,7 @@ pub async fn handle_get_response(
                             board_data.owner_sk = Some(board_data.self_sk.clone());
                         }
                         board_data.self_sk = self_sk.clone();
+                        board_data.profile_id = profile_id.clone();
                         // Reset migration flag so the new key gets migrated
                         board_data.key_migrated_to_delegate = false;
                     }

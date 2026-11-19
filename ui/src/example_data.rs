@@ -220,6 +220,7 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
             board_state,
             self_sk: self_sk.clone(),
             owner_sk: None,
+            profile_id: None,
             contract_key,
             last_read_message_id: None,
             secrets: std::collections::HashMap::new(),

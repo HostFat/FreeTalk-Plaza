@@ -356,6 +356,7 @@ fn accept_invitation(inv: Invitation, nickname: String) {
                 subscribing_since: None,
                 retry_count: 0,
                 category_keys: Vec::new(),
+                profile_id: None,
             },
         );
     });

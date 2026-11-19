@@ -10,6 +10,9 @@ pub fn JoinScreen(token: String) -> Element {
     let decoded_value = decoded.read().clone();
     let mut nickname = use_signal(String::new);
     let mut selected_profile = use_signal(|| 0usize);
+    // The board's privacy is unknown before joining, so a separate identity is
+    // the safe default. Unchecking links this board to the profile's others.
+    let mut separate_identity = use_signal(|| true);
     let mut error = use_signal(|| None::<String>);
     let mut joining = use_signal(|| false);
     let mut joined = use_signal(|| false);
@@ -78,11 +81,29 @@ pub fn JoinScreen(token: String) -> Element {
                                 },
                                 option { value: "0", "New identity (unlinkable)" }
                                 for (index, profile) in profiles.read().iter().enumerate() {
-                                    option { value: "{index + 1}", "{profile.name} (same identity)" }
+                                    option { value: "{index + 1}", "{profile.name}" }
+                                }
+                            }
+                            if *selected_profile.read() > 0 {
+                                label { class: "flex items-start gap-3 cursor-pointer mb-2",
+                                    input {
+                                        r#type: "checkbox",
+                                        class: "mt-0.5 w-4 h-4 rounded border-border text-accent focus:ring-accent/50",
+                                        checked: *separate_identity.read(),
+                                        onchange: move |evt| separate_identity.set(evt.checked()),
+                                    }
+                                    div { class: "flex flex-col",
+                                        span { class: "text-sm text-text",
+                                            "Use a separate identity on this board (recommended for private boards)"
+                                        }
+                                        span { class: "text-xs text-text-muted",
+                                            "A key derived from the profile signs here, so this board's member id cannot be linked to your other boards. Uncheck only when this is a public board where you want the same identity."
+                                        }
+                                    }
                                 }
                             }
                             p { class: "text-xs text-text-muted mb-3",
-                                "Reusing a profile shows the same member id on this board too. A new identity keeps the boards apart."
+                                "The board's privacy is not known before you join, so the separate identity is the safe default. A new identity is unlinkable. Note that the same nickname on a public board can still link you, and your node, IP address, timing and device can correlate activity."
                             }
                         }
                         input {
@@ -97,18 +118,19 @@ pub fn JoinScreen(token: String) -> Element {
                             class: "w-full px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-lg disabled:opacity-50",
                             disabled: *joining.read() || nickname.read().trim().is_empty(),
                             onclick: move |_| {
-                                let profile_key = {
+                                let selected = {
                                     let index = *selected_profile.read();
                                     profiles
                                         .read()
                                         .get(index.saturating_sub(1))
                                         .filter(|_| index > 0)
-                                        .map(|profile| profile.signing_key.clone())
+                                        .cloned()
                                 };
                                 match crate::util::access::join_with_token(
                                     &link,
                                     nickname.read().clone(),
-                                    profile_key,
+                                    selected,
+                                    *separate_identity.read(),
                                 ) {
                                     Ok(()) => {
                                         joining.set(true);

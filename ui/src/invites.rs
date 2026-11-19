@@ -57,6 +57,8 @@ pub struct PendingBoardJoin {
     /// once its state arrives, so the new member can read those categories
     /// without waiting for a key holder to come online.
     pub category_keys: Vec<(MessageId, [u8; 32])>,
+    /// Local root profile the member key was chosen from, when there is one.
+    pub profile_id: Option<String>,
 }
 
 /// Status of a pending board join request

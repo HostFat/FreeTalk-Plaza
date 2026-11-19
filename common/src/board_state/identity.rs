@@ -48,6 +48,17 @@ pub struct IdentityExport {
     /// Version of the board secret currently in use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_board_secret: Option<u32>,
+    /// Local root profile this board's key belongs to, when the exporter knew
+    /// it. Older exports omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    /// Display name of that root profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_name: Option<String>,
+    /// Root profile key. It is the key `signing_key` was derived from on a
+    /// private board, or the same key on a public board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_signing_key: Option<SigningKey>,
 }
 
 impl IdentityExport {
@@ -173,6 +184,9 @@ mod tests {
             category_keys: vec![],
             board_secrets: Vec::new(),
             current_board_secret: None,
+            profile_id: None,
+            profile_name: None,
+            profile_signing_key: None,
         };
 
         let armored = export.to_armored_string();
@@ -234,6 +248,9 @@ mod tests {
             category_keys: vec![],
             board_secrets: Vec::new(),
             current_board_secret: None,
+            profile_id: None,
+            profile_name: None,
+            profile_signing_key: None,
         };
 
         let armored = export.to_armored_string();
@@ -286,6 +303,9 @@ mod tests {
             category_keys: vec![],
             board_secrets: Vec::new(),
             current_board_secret: None,
+            profile_id: None,
+            profile_name: None,
+            profile_signing_key: None,
         };
 
         let armored = export.to_armored_string();
@@ -334,6 +354,9 @@ mod tests {
             category_keys: vec![],
             board_secrets: Vec::new(),
             current_board_secret: None,
+            profile_id: None,
+            profile_name: None,
+            profile_signing_key: None,
         };
 
         let armored = export.to_armored_string();
@@ -389,6 +412,9 @@ mod tests {
             category_keys: vec![],
             board_secrets: Vec::new(),
             current_board_secret: None,
+            profile_id: None,
+            profile_name: None,
+            profile_signing_key: None,
         };
 
         let armored = export.to_armored_string();
@@ -442,5 +468,68 @@ mod tests {
 
         let decoded = IdentityExport::from_armored_string(&armored).unwrap();
         assert!(decoded.board_name.is_none());
+        assert!(decoded.profile_id.is_none());
+        assert!(decoded.profile_name.is_none());
+        assert!(decoded.profile_signing_key.is_none());
+    }
+
+    /// A derived board carries its root profile: the member key stays the
+    /// board key and the profile key travels separately.
+    #[test]
+    fn test_roundtrip_with_root_profile() {
+        let owner_sk = SigningKey::generate(&mut OsRng);
+        let owner_vk = owner_sk.verifying_key();
+        let profile_sk = SigningKey::generate(&mut OsRng);
+        let board_sk = SigningKey::from_bytes(&blake3::derive_key(
+            "test-only",
+            &[profile_sk.to_bytes().as_slice(), owner_vk.as_bytes()].concat(),
+        ));
+
+        let member = Member {
+            owner_member_id: MemberId::from(&owner_vk),
+            invited_by: MemberId::from(&owner_vk),
+            member_vk: board_sk.verifying_key(),
+            join_proof: None,
+        };
+        let authorized_member = AuthorizedMember::new(member, &owner_sk);
+
+        let export = IdentityExport {
+            board_owner: owner_vk,
+            signing_key: board_sk.clone(),
+            owner_signing_key: Some(owner_sk.clone()),
+            authorized_member,
+            invite_chain: vec![],
+            member_info: None,
+            board_name: Some("Private board".to_string()),
+            category_keys: vec![],
+            board_secrets: Vec::new(),
+            current_board_secret: None,
+            profile_id: Some("profile-id".to_string()),
+            profile_name: Some("Root profile".to_string()),
+            profile_signing_key: Some(profile_sk.clone()),
+        };
+
+        let decoded = IdentityExport::from_armored_string(&export.to_armored_string()).unwrap();
+        assert_eq!(decoded.profile_id.as_deref(), Some("profile-id"));
+        assert_eq!(decoded.profile_name.as_deref(), Some("Root profile"));
+        assert_eq!(
+            decoded
+                .profile_signing_key
+                .as_ref()
+                .map(|key| key.to_bytes()),
+            Some(profile_sk.to_bytes())
+        );
+        assert_eq!(
+            decoded.signing_key.to_bytes(),
+            board_sk.to_bytes(),
+            "the board key is not replaced by the root key"
+        );
+        assert_eq!(
+            decoded
+                .owner_signing_key
+                .as_ref()
+                .map(|key| key.to_bytes()),
+            Some(owner_sk.to_bytes())
+        );
     }
 }
