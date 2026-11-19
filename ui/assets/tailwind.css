@@ -298,3 +298,26 @@ button, a, input, textarea, select, [role="button"] {
   z-index: 60;
 }
 .reaction-chip:hover .reaction-tooltip { display: block; }
+
+/* @mention chips inside rendered message HTML. */
+.plaza-mention {
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+  border-radius: 4px;
+  padding: 0 3px;
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: none;
+}
+.plaza-mention:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.plaza-mention-self {
+  background: var(--color-accent);
+  color: white;
+}
+.bg-accent .plaza-mention {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+}

@@ -42,12 +42,6 @@ pub fn collect<'a>(
         .map(|message| (message.message_id, message))
         .collect();
     let followed: HashSet<MessageId> = subscriptions.iter().copied().collect();
-    let mention = if nickname.is_empty() {
-        String::new()
-    } else {
-        format!("@{}", nickname.to_lowercase())
-    };
-
     let mut notices = Vec::new();
     for message in messages {
         if message.is_category || message.author_id == self_id {
@@ -60,8 +54,11 @@ pub fn collect<'a>(
             .and_then(|target| by_id.get(&target))
             .map(|parent| parent.author_id == self_id)
             .unwrap_or(false);
-        let mentioned =
-            !mention.is_empty() && message.content_text.to_lowercase().contains(&mention);
+        let mentioned = crate::util::mentions::mentions_member(
+            &message.content_text,
+            self_id,
+            nickname,
+        );
         let followed_section = if followed.is_empty() {
             None
         } else {

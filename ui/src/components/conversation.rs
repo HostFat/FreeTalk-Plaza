@@ -274,6 +274,20 @@ pub fn get_all_messages(
             .unwrap_or_else(|| "Unknown".to_string())
     };
 
+    // Every member with a nickname is mentionable. The owner may have no
+    // member record, so add it explicitly.
+    let mut mention_names = Vec::new();
+    for info in &state.member_info.member_info {
+        let id = info.member_info.member_id;
+        mention_names.push((id, name_of(id)));
+    }
+    for member in &state.members.members {
+        let id = member.member.id();
+        mention_names.push((id, name_of(id)));
+    }
+    mention_names.push((owner_id, name_of(owner_id)));
+    let mentions = crate::util::mentions::MentionDirectory::from_names(mention_names);
+
     // Edit actions stay in `recent_messages`; each one carries the new content
     // and the signed author/time. The original message is the first version.
     let mut edits_by_target: HashMap<MessageId, Vec<EditVersion>> = HashMap::new();
@@ -368,10 +382,10 @@ pub fn get_all_messages(
                     old_category_secrets,
                 )
             });
-        let content_html = text_to_html(&crate::util::image_tags::strip_valid(
-            &content_text,
-            message.message.images.len(),
-        ));
+        let content_html = mentions.render_html(
+            &crate::util::image_tags::strip_valid(&content_text, message.message.images.len()),
+            Some(self_member_id),
+        );
         let title_text = decrypt_message_title(
             &message.message.content,
             secrets,
@@ -2065,7 +2079,23 @@ fn MessageEditForm(
     max_title_size: usize,
     /// Maximum message length (from board configuration)
     max_message_size: usize,
+    #[props(default)]
+    member_names: HashMap<MemberId, String>,
 ) -> Element {
+    let mention_directory = use_memo(move || {
+        crate::util::mentions::MentionDirectory::from_names(
+            member_names
+                .iter()
+                .map(|(id, name)| (*id, name.clone())),
+        )
+    });
+    let mut mention_autocomplete =
+        use_signal(|| None::<crate::util::mentions::MentionAutocomplete>);
+    let mention_context = mention_autocomplete.read().clone();
+    let mention_items = mention_context
+        .as_ref()
+        .map(|context| mention_directory.read().search(&context.query))
+        .unwrap_or_default();
     let (input_class, textarea_class, button_class, container_class) = match size {
         MessageSize::Compact => (
             "w-full p-2 rounded-lg text-sm bg-surface border border-border text-text",
@@ -2156,36 +2186,137 @@ fn MessageEditForm(
                         "{edit_text.read().len()}/{max_message_size}"
                     }
                 }
-                textarea {
-                    class: "{textarea_class}",
-                    value: "{edit_text}",
-                    onmounted: move |cx| {
-                        let element = cx.data();
-                        wasm_bindgen_futures::spawn_local(async move {
-                            let _ = element.set_focus(true).await;
-                        });
-                    },
-                    oninput: move |e| edit_text.set(e.value().clone()),
-                    onkeydown: move |e: KeyboardEvent| {
-                        if e.key() == Key::Escape {
-                            editing.set(false);
-                        } else if e.key() == Key::Enter {
-                            let should_submit = if use_ctrl {
-                                e.modifiers().ctrl() || e.modifiers().meta()
-                            } else {
-                                !e.modifiers().shift()
-                            };
-                            if should_submit {
-                                e.prevent_default();
-                                if has_changes() && within_limits() {
-                                    if let Some(ref handler) = on_edit {
-                                        handler.call((msg_id_for_key.clone(), edit_title.read().clone(), edit_text.read().clone()));
+                div { class: "relative",
+                    textarea {
+                        id: "edit-message-input",
+                        class: "{textarea_class}",
+                        value: "{edit_text}",
+                        onmounted: move |cx| {
+                            let element = cx.data();
+                            wasm_bindgen_futures::spawn_local(async move {
+                                let _ = element.set_focus(true).await;
+                            });
+                        },
+                        oninput: move |e| {
+                            edit_text.set(e.value().clone());
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                mention_autocomplete.set(
+                                    crate::util::mentions::textarea_context(
+                                        "edit-message-input",
+                                    ),
+                                );
+                            }
+                        },
+                        onkeydown: move |e: KeyboardEvent| {
+                            if let Some(context) = mention_context.clone() {
+                                let items = mention_directory.read().search(&context.query);
+                                match e.key() {
+                                    Key::ArrowDown => {
+                                        e.prevent_default();
+                                        if !items.is_empty() {
+                                            mention_autocomplete.with_mut(|state| {
+                                                if let Some(state) = state {
+                                                    state.selected =
+                                                        (state.selected + 1) % items.len();
+                                                }
+                                            });
+                                        }
+                                        return;
+                                    }
+                                    Key::ArrowUp => {
+                                        e.prevent_default();
+                                        if !items.is_empty() {
+                                            mention_autocomplete.with_mut(|state| {
+                                                if let Some(state) = state {
+                                                    state.selected = if state.selected == 0 {
+                                                        items.len() - 1
+                                                    } else {
+                                                        state.selected - 1
+                                                    };
+                                                }
+                                            });
+                                        }
+                                        return;
+                                    }
+                                    Key::Enter | Key::Tab => {
+                                        let index =
+                                            context.selected.min(items.len().saturating_sub(1));
+                                        if let Some(member) = items.get(index) {
+                                            e.prevent_default();
+                                            let value = crate::util::mentions::replace_context(
+                                                "edit-message-input",
+                                                &context,
+                                                member,
+                                            );
+                                            edit_text.set(value);
+                                            mention_autocomplete.set(None);
+                                            return;
+                                        }
+                                    }
+                                    Key::Escape => {
+                                        mention_autocomplete.set(None);
+                                        e.prevent_default();
+                                        return;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if e.key() == Key::Escape {
+                                editing.set(false);
+                            } else if e.key() == Key::Enter {
+                                let should_submit = if use_ctrl {
+                                    e.modifiers().ctrl() || e.modifiers().meta()
+                                } else {
+                                    !e.modifiers().shift()
+                                };
+                                if should_submit {
+                                    e.prevent_default();
+                                    if has_changes() && within_limits() {
+                                        if let Some(ref handler) = on_edit {
+                                            handler.call((msg_id_for_key.clone(), edit_title.read().clone(), edit_text.read().clone()));
+                                        }
+                                    }
+                                    editing.set(false);
+                                }
+                            }
+                        },
+                    }
+                    if let Some(context) = mention_context.clone() {
+                        if !mention_items.is_empty() {
+                            div {
+                                class: "mention-autocomplete absolute left-0 right-0 top-full z-50 mt-1 max-h-64 overflow-y-auto rounded-lg border border-border bg-panel shadow-xl",
+                                for (index, member) in mention_items.iter().enumerate() {
+                                    button {
+                                        r#type: "button",
+                                        class: if index == context.selected {
+                                            "mention-option flex w-full items-center px-3 py-2 text-left text-sm bg-accent text-white"
+                                        } else {
+                                            "mention-option flex w-full items-center px-3 py-2 text-left text-sm text-text hover:bg-surface-hover"
+                                        },
+                                        onmousedown: move |event| event.prevent_default(),
+                                        onclick: {
+                                            let member = member.clone();
+                                            let context = context.clone();
+                                            move |_| {
+                                                let value = crate::util::mentions::replace_context(
+                                                    "edit-message-input",
+                                                    &context,
+                                                    &member,
+                                                );
+                                                edit_text.set(value);
+                                                mention_autocomplete.set(None);
+                                            }
+                                        },
+                                        "@{member.name}"
                                     }
                                 }
-                                editing.set(false);
+                                div { class: "px-3 py-1.5 text-[10px] text-text-muted border-t border-border",
+                                    "↑↓ select · Enter insert · Esc close"
+                                }
                             }
                         }
-                    },
+                    }
                 }
             }
             div { class: if matches!(size, MessageSize::Compact) { "flex gap-2" } else { "flex gap-3" },
@@ -2694,6 +2825,7 @@ pub fn MessageCard(
                                 size: size,
                                 max_title_size: max_title_size,
                                 max_message_size: max_message_size,
+                                member_names: member_names.clone(),
                             }
                         } else {
                             MessageContentDisplay {
@@ -2889,6 +3021,7 @@ pub fn MessageCard(
                                         size: size,
                                         max_title_size: max_title_size,
                                         max_message_size: max_message_size,
+                                        member_names: member_names.clone(),
                                     }
                                 } else {
                                     MessageContentDisplay {

@@ -14,6 +14,7 @@ pub mod backup;
 pub mod image_tags;
 pub mod images;
 pub mod markdown;
+pub mod mentions;
 pub mod member_moderation;
 pub mod membership;
 pub mod message_actions;
@@ -85,6 +86,44 @@ export function wrap_textarea_selection(id, before, after) {    const el = docum
     el.dispatchEvent(new Event('input', { bubbles: true }));
     return value;
 }
+export function textarea_mention_start(id, max_query) {
+    const el = document.getElementById(id);
+    if (!el) return -1;
+    const caret = el.selectionStart === null ? el.value.length : el.selectionStart;
+    const before = el.value.slice(0, caret);
+    const at = before.lastIndexOf('@');
+    if (at < 0) return -1;
+    if (at > 0 && /[A-Za-z0-9_]/.test(before.slice(at - 1, at))) return -1;
+    const query = before.slice(at + 1);
+    if (query.length > max_query || query.includes('\\n')) return -1;
+    // Already an explicit mention token, not an autocomplete query.
+    if (query.startsWith('[') || query.includes('](')) return -1;
+    return at;
+}
+export function textarea_mention_query(id) {
+    const el = document.getElementById(id);
+    if (!el) return '';
+    const caret = el.selectionStart === null ? el.value.length : el.selectionStart;
+    const before = el.value.slice(0, caret);
+    const at = before.lastIndexOf('@');
+    return at < 0 ? '' : before.slice(at + 1);
+}
+export function textarea_mention_end(id) {
+    const el = document.getElementById(id);
+    if (!el) return 0;
+    return el.selectionStart === null ? el.value.length : el.selectionStart;
+}
+export function textarea_replace_range(id, start, end, text) {
+    const el = document.getElementById(id);
+    if (!el) return '';
+    const value = el.value.slice(0, start) + text + el.value.slice(end);
+    el.value = value;
+    const caret = start + text.length;
+    el.focus();
+    el.setSelectionRange(caret, caret);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    return value;
+}
 export function install_shell_hash_bridge() {
     if (window.__freetalk_hash_bridge) return;
     window.__freetalk_hash_bridge = true;
@@ -106,6 +145,10 @@ extern "C" {
     fn format_full_datetime_local(timestamp_ms: f64) -> String;
     fn js_copy_to_clipboard(text: &str);
     fn wrap_textarea_selection(id: &str, before: &str, after: &str) -> String;
+    fn textarea_mention_start(id: &str, max_query: u32) -> i32;
+    fn textarea_mention_query(id: &str) -> String;
+    fn textarea_mention_end(id: &str) -> u32;
+    fn textarea_replace_range(id: &str, start: u32, end: u32, text: &str) -> String;
     fn install_shell_hash_bridge();
 }
 

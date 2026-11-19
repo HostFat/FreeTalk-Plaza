@@ -11,6 +11,7 @@ pub mod category_view;
 pub mod conversation;
 pub mod join_screen;
 pub mod members;
+pub mod mention_click_interceptor;
 pub mod moderation_view;
 pub mod notifications_view;
 pub mod posts_view;

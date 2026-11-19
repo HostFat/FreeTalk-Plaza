@@ -10,6 +10,7 @@ use crate::components::conversation::TopicThumb;
 use crate::components::app::{BOARDS, CURRENT_BOARD, CURRENT_CATEGORY};
 use crate::board_data::{PendingSend, PendingUpload};
 use crate::util::image_processing::{prepare_image, ImageMode};
+use crate::util::mentions::{MentionAutocomplete, MentionDirectory};
 use plaza_core::board_state::images::{ImageAlign, ImagePlacement, ImageRef};
 use plaza_core::board_state::message::MessageId;
 
@@ -467,6 +468,23 @@ pub fn PostInput(
     let mut show_modal = use_signal(|| false);
     let mut title_text = use_signal(String::new);
     let mut message_text = use_signal(String::new);
+    let mention_directory = use_memo(move || {
+        let Some(key) = CURRENT_BOARD.read().owner_key else {
+            return MentionDirectory::default();
+        };
+        BOARDS
+            .read()
+            .map
+            .get(&key)
+            .map(MentionDirectory::from_board)
+            .unwrap_or_default()
+    });
+    let mut mention_autocomplete = use_signal(|| None::<MentionAutocomplete>);
+    let mention_context = mention_autocomplete.read().clone();
+    let mention_items = mention_context
+        .as_ref()
+        .map(|context| mention_directory.read().search(&context.query))
+        .unwrap_or_default();
     let mut show_emoji_picker = use_signal(|| false);
     let mut show_preview = use_signal(|| false);
     let mut draft_restored = use_signal(|| false);
@@ -1232,6 +1250,14 @@ pub fn PostInput(
                                         rows: "5",
                                         oninput: move |evt| {
                                             message_text.set(evt.value().to_string());
+                                            #[cfg(target_arch = "wasm32")]
+                                            {
+                                                mention_autocomplete.set(
+                                                    crate::util::mentions::textarea_context(
+                                                        "message-input",
+                                                    ),
+                                                );
+                                            }
                                             schedule_save();
                                         },
                                         onpaste: move |event: Event<dioxus::html::ClipboardData>| {
@@ -1271,6 +1297,60 @@ pub fn PostInput(
                                             );
                                         },
                                         onkeydown: move |evt| {
+                                            // Mention autocomplete owns the arrows, Enter,
+                                            // Tab and Escape while its list is open.
+                                            if let Some(context) = mention_context.clone() {
+                                                let items = mention_directory.read().search(&context.query);
+                                                match evt.key() {
+                                                    Key::ArrowDown => {
+                                                        evt.prevent_default();
+                                                        if !items.is_empty() {
+                                                            mention_autocomplete.with_mut(|state| {
+                                                                if let Some(state) = state {
+                                                                    state.selected = (state.selected + 1) % items.len();
+                                                                }
+                                                            });
+                                                        }
+                                                        return;
+                                                    }
+                                                    Key::ArrowUp => {
+                                                        evt.prevent_default();
+                                                        if !items.is_empty() {
+                                                            mention_autocomplete.with_mut(|state| {
+                                                                if let Some(state) = state {
+                                                                    state.selected = if state.selected == 0 {
+                                                                        items.len() - 1
+                                                                    } else {
+                                                                        state.selected - 1
+                                                                    };
+                                                                }
+                                                            });
+                                                        }
+                                                        return;
+                                                    }
+                                                    Key::Enter | Key::Tab => {
+                                                        let index = context.selected.min(items.len().saturating_sub(1));
+                                                        if let Some(member) = items.get(index) {
+                                                            evt.prevent_default();
+                                                            let value = crate::util::mentions::replace_context(
+                                                                "message-input",
+                                                                &context,
+                                                                member,
+                                                            );
+                                                            message_text.set(value);
+                                                            mention_autocomplete.set(None);
+                                                            schedule_save();
+                                                            return;
+                                                        }
+                                                    }
+                                                    Key::Escape => {
+                                                        mention_autocomplete.set(None);
+                                                        evt.prevent_default();
+                                                        return;
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
                                             // Ctrl/Cmd+Enter sends the message
                                             if evt.key() == Key::Enter && (evt.modifiers().ctrl() || evt.modifiers().meta()) {
                                                 evt.prevent_default();
@@ -1283,11 +1363,47 @@ pub fn PostInput(
                                                 replying_to.set(None);
                                             }
                                         }
+                                        }
+                                        if let Some(context) = mention_context.clone() {
+                                            if !mention_items.is_empty() {
+                                                div {
+                                                    class: "mention-autocomplete absolute left-12 right-2 top-full z-50 mt-1 max-h-64 overflow-y-auto rounded-lg border border-border bg-panel shadow-xl",
+                                                    for (index, member) in mention_items.iter().enumerate() {
+                                                            button {
+                                                                r#type: "button",
+                                                                class: if index == context.selected {
+                                                                    "mention-option flex w-full items-center px-3 py-2 text-left text-sm bg-accent text-white"
+                                                                } else {
+                                                                    "mention-option flex w-full items-center px-3 py-2 text-left text-sm text-text hover:bg-surface-hover"
+                                                                },
+                                                                onmousedown: move |evt| evt.prevent_default(),
+                                                                onclick: {
+                                                                    let member = member.clone();
+                                                                    let context = context.clone();
+                                                                    move |_| {
+                                                                        let value = crate::util::mentions::replace_context(
+                                                                            "message-input",
+                                                                            &context,
+                                                                            &member,
+                                                                        );
+                                                                        message_text.set(value);
+                                                                        mention_autocomplete.set(None);
+                                                                        schedule_save();
+                                                                    }
+                                                                },
+                                                                "@{member.name}"
+                                                            }
+                                                        }
+                                                        div { class: "px-3 py-1.5 text-[10px] text-text-muted border-t border-border",
+                                                            "↑↓ select · Enter insert · Esc close"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
-                        }
-                    }
 
                     if poll_enabled() {
                         div { class: "px-6 pb-4 pt-1 space-y-2",

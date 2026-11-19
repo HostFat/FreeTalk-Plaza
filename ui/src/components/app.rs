@@ -277,6 +277,10 @@ pub fn App() -> Element {
     // Must be called from within a Dioxus component where the runtime is active.
     crate::util::capture_runtime();
 
+    // Chips are raw HTML inside message bodies, so delegate clicks at the
+    // document level. Idempotent; safe on every render.
+    crate::components::mention_click_interceptor::install_mention_click_interceptor();
+
     // The app runs in a sandboxed iframe inside the Freenet shell: keep the
     // shell's address bar in sync with the app route so refreshes and copied
     // links point at the same page.
