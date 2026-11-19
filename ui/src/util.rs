@@ -121,6 +121,49 @@ pub fn install_shell_hash_bridge_once() {
     }
 }
 
+/// Load an in-contract URL in this app's frame through the Freenet shell.
+///
+/// The app is sandboxed, so reloading the frame itself can lose the node's
+/// auth-token bootstrap. The shell owns the frame and reloads it with the
+/// sandbox flag intact. Returns false when there is no parent frame to ask.
+pub fn navigate_in_shell(href: &str) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsValue;
+        let Some(window) = web_sys::window() else {
+            return false;
+        };
+        let Some(parent) = window.parent().ok().flatten() else {
+            return false;
+        };
+        if js_sys::Object::is(parent.as_ref(), window.as_ref()) {
+            return false;
+        }
+        let msg = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(
+            &msg,
+            &JsValue::from_str("__freenet_shell__"),
+            &JsValue::TRUE,
+        );
+        let _ = js_sys::Reflect::set(
+            &msg,
+            &JsValue::from_str("type"),
+            &JsValue::from_str("navigate"),
+        );
+        let _ = js_sys::Reflect::set(
+            &msg,
+            &JsValue::from_str("href"),
+            &JsValue::from_str(href),
+        );
+        parent.post_message(&msg, "*").is_ok()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = href;
+        false
+    }
+}
+
 /// Wrap the current selection of a textarea with markdown markers.
 /// Returns the new value so the caller can update its signal.
 pub fn markdown_wrap(id: &str, before: &str, after: &str) -> String {

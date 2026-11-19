@@ -6,7 +6,7 @@ use crate::components::app::{
     mark_needs_sync, BOARDS, CURRENT_BOARD, PENDING_INVITES, SYNCHRONIZER,
 };
 use crate::invites::{PendingBoardJoin, PendingBoardStatus};
-use dioxus::logger::tracing::info;
+use dioxus::logger::tracing::{debug, info};
 use dioxus::prelude::ReadableExt;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
@@ -44,18 +44,104 @@ impl PartialEq for JoinLink {
     }
 }
 
+/// The serialized form. `checksum` is optional for links made before it
+/// existed, and older clients ignore the field they do not know.
+#[derive(Serialize, Deserialize, Clone)]
+struct JoinLinkWire {
+    board: VerifyingKey,
+    token_id: TokenId,
+    token_key: SigningKey,
+    #[serde(default)]
+    category_keys: Vec<(MessageId, [u8; 32])>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checksum: Option<[u8; 4]>,
+}
+
+const INVITE_CHECKSUM_DOMAIN: &[u8] = b"freetalk-invite-link-v1";
+
+fn invite_checksum(wire: &JoinLinkWire) -> [u8; 4] {
+    let unsigned = JoinLinkWire {
+        checksum: None,
+        ..wire.clone()
+    };
+    let mut data = Vec::new();
+    ciborium::ser::into_writer(&unsigned, &mut data).expect("serialization cannot fail");
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(INVITE_CHECKSUM_DOMAIN);
+    hasher.update(&data);
+    let hash = hasher.finalize();
+    let mut checksum = [0u8; 4];
+    checksum.copy_from_slice(&hash.as_bytes()[..4]);
+    checksum
+}
+
+fn damaged_link_message() -> String {
+    "This invite link is incomplete or damaged. Ask the sender to copy it again with the Copy button, then paste the full link below.".to_string()
+}
+
+/// Extract the token from a pasted value. Accepts a full `#/join/` URL, a bare
+/// token, and a token that a chat client wrapped across lines.
+pub fn token_from_input(input: &str) -> String {
+    let trimmed = input.trim();
+    let after_join = trimmed
+        .split_once("#/join/")
+        .or_else(|| trimmed.split_once("/join/"))
+        .map(|(_, token)| token)
+        .unwrap_or(trimmed);
+    let token = after_join
+        .split(['?', '&', '#'])
+        .next()
+        .unwrap_or(after_join);
+    token
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .trim_end_matches('/')
+        .to_string()
+}
+
 impl JoinLink {
     pub fn encode(&self) -> String {
+        let mut wire = JoinLinkWire {
+            board: self.board,
+            token_id: self.token_id,
+            token_key: self.token_key.clone(),
+            category_keys: self.category_keys.clone(),
+            checksum: None,
+        };
+        wire.checksum = Some(invite_checksum(&wire));
         let mut data = Vec::new();
-        ciborium::ser::into_writer(self, &mut data).expect("serialization cannot fail");
+        ciborium::ser::into_writer(&wire, &mut data).expect("serialization cannot fail");
         bs58::encode(data).into_string()
     }
 
     pub fn decode(s: &str) -> Result<Self, String> {
-        let bytes = bs58::decode(s)
+        let token = token_from_input(s);
+        if token.is_empty() {
+            return Err(damaged_link_message());
+        }
+        let bytes = bs58::decode(&token)
             .into_vec()
-            .map_err(|e| format!("Invalid invite link: {e}"))?;
-        ciborium::de::from_reader(&bytes[..]).map_err(|e| format!("Invalid invite link: {e}"))
+            .map_err(|e| {
+                debug!("Invite link is not base58: {e}");
+                damaged_link_message()
+            })?;
+        let wire: JoinLinkWire = ciborium::de::from_reader(&bytes[..]).map_err(|e| {
+            debug!("Invite link is not a valid JoinLink: {e}");
+            damaged_link_message()
+        })?;
+        if let Some(expected) = wire.checksum {
+            if expected != invite_checksum(&wire) {
+                debug!("Invite link checksum does not match");
+                return Err(damaged_link_message());
+            }
+        }
+        Ok(JoinLink {
+            board: wire.board,
+            token_id: wire.token_id,
+            token_key: wire.token_key,
+            category_keys: wire.category_keys,
+        })
     }
 }
 
@@ -746,5 +832,75 @@ mod tests {
         let decoded = JoinLink::decode(&encoded).unwrap();
         assert!(decoded.category_keys.is_empty());
         assert_eq!(decoded.board, old.board);
+    }
+
+    /// Links made before the checksum existed must keep working.
+    #[test]
+    fn an_older_client_can_still_read_a_new_link() {
+        #[derive(Deserialize)]
+        struct OlderLink {
+            board: VerifyingKey,
+            token_id: TokenId,
+            token_key: SigningKey,
+        }
+
+        let link = JoinLink {
+            board: key(1).verifying_key(),
+            token_id: [2u8; 16],
+            token_key: key(3),
+            category_keys: vec![],
+        };
+        let bytes = bs58::decode(link.encode()).into_vec().unwrap();
+        let decoded: OlderLink = ciborium::de::from_reader(&bytes[..]).unwrap();
+        assert_eq!(decoded.board, link.board);
+        assert_eq!(decoded.token_id, link.token_id);
+        assert_eq!(
+            decoded.token_key.verifying_key(),
+            link.token_key.verifying_key()
+        );
+    }
+
+    #[test]
+    fn a_full_link_and_a_wrapped_token_both_decode() {
+        let link = JoinLink {
+            board: key(1).verifying_key(),
+            token_id: [2u8; 16],
+            token_key: key(3),
+            category_keys: vec![],
+        };
+        let token = link.encode();
+
+        let full = format!(
+            "  https://forum.example/index.html?v=12#/join/{token}?from=chat  ",
+        );
+        assert!(JoinLink::decode(&full).unwrap() == link);
+
+        let wrapped = token
+            .as_bytes()
+            .chunks(20)
+            .map(|chunk| std::str::from_utf8(chunk).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(JoinLink::decode(&wrapped).unwrap() == link);
+    }
+
+    #[test]
+    fn a_broken_checksum_is_reported_as_a_damaged_link() {
+        let link = JoinLink {
+            board: key(1).verifying_key(),
+            token_id: [2u8; 16],
+            token_key: key(3),
+            category_keys: vec![],
+        };
+        let mut bytes = bs58::decode(link.encode()).into_vec().unwrap();
+        let last = bytes.last_mut().unwrap();
+        *last ^= 1;
+        let broken = bs58::encode(bytes).into_string();
+
+        let error = match JoinLink::decode(&broken) {
+            Ok(_) => panic!("a link with a broken checksum was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("incomplete or damaged"), "{error}");
     }
 }

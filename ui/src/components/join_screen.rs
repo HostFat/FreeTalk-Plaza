@@ -3,6 +3,7 @@
 use crate::components::app::{Route, BOARDS};
 use crate::util::access::JoinLink;
 use dioxus::prelude::*;
+use wasm_bindgen::JsCast;
 
 #[component]
 pub fn JoinScreen(token: String) -> Element {
@@ -17,6 +18,7 @@ pub fn JoinScreen(token: String) -> Element {
     let mut joining = use_signal(|| false);
     let mut joined = use_signal(|| false);
     let mut timed_out = use_signal(|| false);
+    let mut pasted_link = use_signal(String::new);
     let profiles = use_memo(move || BOARDS.read().profiles.clone());
 
     let board_key = decoded_value.as_ref().ok().map(|link| link.board);
@@ -39,18 +41,83 @@ pub fn JoinScreen(token: String) -> Element {
     });
 
     match decoded_value.as_ref() {
-        Err(e) => rsx! {
-            div { class: "flex-1 flex flex-col items-center justify-center h-64 text-text-muted",
-                p { class: "text-xl text-red-300", "Invalid invite link" }
-                p { class: "text-sm mt-2", "{e}" }
-                button {
-                    r#type: "button",
-                    class: "mt-4 px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-lg",
-                    onclick: move |_| { navigator().push(Route::Home); },
-                    "Go to Home"
+        Err(e) => {
+            let typed = pasted_link.read().clone();
+            rsx! {
+                div { class: "flex-1 flex items-center justify-center",
+                    div { class: "bg-panel border border-border rounded-xl p-6 max-w-md w-full",
+                        h1 { class: "text-xl font-semibold text-text mb-1", "This invite link did not work" }
+                        p { class: "text-sm text-text-muted mb-4", "{e}" }
+                        label { class: "block text-sm font-medium text-text mb-1",
+                            "Paste the invite link again"
+                        }
+                        textarea {
+                            id: "invite-recovery-input",
+                            class: "w-full h-24 px-3 py-2 bg-surface border border-border rounded-lg text-xs font-mono text-text resize-none",
+                            placeholder: "https://…/#/join/…",
+                            value: "{typed}",
+                            oninput: move |evt| pasted_link.set(evt.value()),
+                        }
+                        div { class: "flex gap-2 mt-3",
+                            button {
+                                r#type: "button",
+                                class: "flex-1 px-4 py-2 bg-accent hover:bg-accent/80 text-white rounded-lg disabled:opacity-50",
+                                disabled: typed.trim().is_empty(),
+                                onclick: move |_| {
+                                    // Read the field itself: this screen exists
+                                    // because the original link failed, so a
+                                    // stale signal must not block the retry.
+                                    let value = web_sys::window()
+                                        .and_then(|window| window.document())
+                                        .and_then(|document| {
+                                            document.get_element_by_id("invite-recovery-input")
+                                        })
+                                        .and_then(|element| {
+                                            element.dyn_into::<web_sys::HtmlTextAreaElement>().ok()
+                                        })
+                                        .map(|element| element.value())
+                                        .unwrap_or_default();
+                                    let token = crate::util::access::token_from_input(&value);
+                                    if token.is_empty() {
+                                        return;
+                                    }
+                                    // A hash-router push to the same route with a
+                                    // different token does not re-render here, so
+                                    // have the shell load the frame at the new URL.
+                                    let base = web_sys::window()
+                                        .and_then(|window| window.location().href().ok())
+                                        .map(|href| {
+                                            href.split('#').next().unwrap_or("").to_string()
+                                        })
+                                        .unwrap_or_default();
+                                    if base.is_empty() {
+                                        return;
+                                    }
+                                    let href = format!("{base}#/join/{token}");
+                                    if !crate::util::navigate_in_shell(&href) {
+                                        // Outside the gateway shell there is no
+                                        // auth bootstrap to lose: reload locally.
+                                        if let Some(window) = web_sys::window() {
+                                            let location = window.location();
+                                            let _ =
+                                                location.set_hash(&format!("/join/{token}"));
+                                            let _ = location.reload();
+                                        }
+                                    }
+                                },
+                                "Open link"
+                            }
+                            button {
+                                r#type: "button",
+                                class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text rounded-lg",
+                                onclick: move |_| { navigator().push(Route::Home); },
+                                "Home"
+                            }
+                        }
+                    }
                 }
             }
-        },
+        }
         Ok(link) => {
             let link = link.clone();
             rsx! {
