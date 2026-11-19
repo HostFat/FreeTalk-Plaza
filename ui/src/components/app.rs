@@ -629,15 +629,7 @@ fn BoardGate(board_id: String, children: Element) -> Element {
                 p { class: "text-text-muted mb-6 text-sm",
                     "Waiting for the board state. It appears in the list above as soon as it is loaded."
                 }
-                if let Some(key) = CURRENT_BOARD.read().owner_key {
-                    p { class: "text-[10px] font-mono text-text-muted mb-4",
-                        {format!(
-                            "diag key={} map={}",
-                            MemberId::from(key),
-                            BOARDS.read().map.len()
-                        )}
-                    }
-                }
+
             }
             button {
                 r#type: "button",
@@ -851,12 +843,6 @@ pub fn select_board(board_id: Option<VerifyingKey>) {
         })
         .map(|(map_key, _)| *map_key)
         .unwrap_or(vk);
-    dioxus::logger::tracing::info!(
-        "select_board: {} -> map key {} (map_len={})",
-        bs58::encode(vk.as_bytes()).into_string(),
-        bs58::encode(resolved.as_bytes()).into_string(),
-        BOARDS.read().map.len()
-    );
     if CURRENT_BOARD.read().owner_key != Some(resolved) {
         *CURRENT_BOARD.write() = CurrentBoard {
             owner_key: Some(resolved),

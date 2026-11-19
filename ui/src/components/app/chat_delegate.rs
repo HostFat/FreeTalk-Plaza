@@ -183,9 +183,7 @@ pub async fn set_up_chat_delegate() -> Result<(), String> {
                 if crate::components::app::BOARDS.read().map.is_empty() {
                     info!("Boards load did not arrive, reading the store directly");
                     match load_boards_direct().await {
-                        Ok(count) => crate::components::app::toasts::show(format!(
-                            "Direct load: {count} board(s)"
-                        )),
+                        Ok(_) => {}
                         Err(error) => warn!("Direct board load failed: {error}"),
                     }
                 }
@@ -388,9 +386,6 @@ pub async fn load_boards_direct() -> Result<usize, String> {
         info!("Ignoring an empty direct board load over a non-empty map");
         return Ok(0);
     }
-    crate::components::app::toasts::show(format!(
-        "Direct board load: {count} board(s)"
-    ));
     BOARDS.with_mut(|current| {
         if let Err(error) = current.merge(boards) {
             warn!("Could not merge the direct board load: {error}");

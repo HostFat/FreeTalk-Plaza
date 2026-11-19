@@ -2147,12 +2147,7 @@ fn ReactionDisplay(
                     } else if let Some(name) = member_names.get(id) {
                         name.clone()
                     } else {
-                        let short: String = id.to_string().chars().take(8).collect();
-                        dioxus::logger::tracing::info!(
-                            "reaction {emoji}: actor {id} not in member_names; keys={:?}",
-                            member_names.keys().map(|key| key.to_string()).collect::<Vec<_>>()
-                        );
-                        format!("Unknown({short})")
+                        "Unknown".to_string()
                     }
                 }).collect();
                 let tooltip = if is_user {

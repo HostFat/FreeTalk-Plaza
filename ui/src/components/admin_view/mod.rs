@@ -45,17 +45,6 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
             .and_then(|key| BOARDS.read().map.get(key).cloned())
     });
 
-    let diag = current_board_data.read().as_ref().map(|data| {
-        format!(
-            "self={} owner={} current={} is_owner={} profile={:?}",
-            MemberId::from(&data.self_sk.verifying_key()),
-            MemberId::from(&data.owner_key().verifying_key()),
-            MemberId::from(data.current_owner_key()),
-            data.is_current_owner(),
-            data.profile_id
-        )
-    });
-
     let active = if tab.is_empty() {
         "admins".to_string()
     } else {
@@ -232,9 +221,6 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
         div { class: "flex-1 flex flex-col p-6 overflow-y-auto",
             // Header
             h1 { class: "text-2xl font-bold text-text mb-4", "Manage" }
-            if let Some(diag) = diag.as_ref() {
-                p { class: "text-[10px] font-mono text-text-muted mb-3", "{diag}" }
-            }
 
             // Tabs and admin actions on one row
             div { class: "flex flex-wrap items-center justify-between gap-3 mb-6",
