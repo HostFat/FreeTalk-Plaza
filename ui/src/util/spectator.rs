@@ -49,6 +49,7 @@ pub fn open_spectator_board(owner_vk: VerifyingKey) -> Result<(), String> {
         pending_uploads: Vec::new(),
         pending_send: None,
         subscribed_categories: Vec::new(),
+        notification_mode: crate::board_data::NotificationMode::All,
         current_secret_version: None,
         last_secret_rotation: None,
         key_migrated_to_delegate: false,

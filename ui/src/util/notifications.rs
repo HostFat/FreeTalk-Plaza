@@ -1,7 +1,7 @@
 //! Local notification list: replies to my posts, mentions of my nickname and
 //! new topics in followed sections, all since the last "mark all read".
 
-use crate::board_data::BoardData;
+use crate::board_data::{BoardData, NotificationMode};
 use crate::components::conversation::{get_all_messages, MessageData};
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
@@ -36,7 +36,12 @@ pub fn collect<'a>(
     last_visit: i64,
     subscriptions: &[MessageId],
     read_categories: &HashMap<MessageId, i64>,
+    mode: NotificationMode,
 ) -> Vec<Notice<'a>> {
+    if mode == NotificationMode::Muted {
+        return Vec::new();
+    }
+    let followed_sections_enabled = mode == NotificationMode::All;
     let by_id: HashMap<MessageId, &MessageData> = messages
         .iter()
         .map(|message| (message.message_id, message))
@@ -70,7 +75,10 @@ pub fn collect<'a>(
             NoticeKind::Reply
         } else if mentioned && time > last_visit {
             NoticeKind::Mention
-        } else if let Some(section) = followed_section {
+        } else if followed_sections_enabled {
+            let Some(section) = followed_section else {
+                continue;
+            };
             let read_upto = read_categories.get(&section).copied().unwrap_or(last_visit);
             if time > read_upto {
                 NoticeKind::Section
@@ -105,6 +113,7 @@ pub fn unread_count(board: &BoardData) -> usize {
         board.last_visit,
         &board.subscribed_categories,
         &board.read_categories,
+        board.notification_mode,
     )
     .len()
 }
@@ -231,7 +240,7 @@ mod tests {
             ),
         ];
 
-        let notices = collect(&messages, me, "Alice", 1_000, &[section], &HashMap::new());
+        let notices = collect(&messages, me, "Alice", 1_000, &[section], &HashMap::new(), NotificationMode::All);
         let ids: Vec<MessageId> = notices
             .iter()
             .map(|notice| notice.message.message_id)
@@ -264,7 +273,7 @@ mod tests {
             message(112, other, 300, Some(parent), "old", false, None),
         ];
 
-        let notices = collect(&messages, me, "Alice", 1_000, &[parent], &HashMap::new());
+        let notices = collect(&messages, me, "Alice", 1_000, &[parent], &HashMap::new(), NotificationMode::All);
         assert_eq!(notices.len(), 1);
         assert_eq!(
             notices[0].message.message_id,
@@ -284,7 +293,7 @@ mod tests {
 
         let mut read_categories = HashMap::new();
         read_categories.insert(section, 3_000);
-        let notices = collect(&messages, me, "Alice", 1_000, &[section], &read_categories);
+        let notices = collect(&messages, me, "Alice", 1_000, &[section], &read_categories, NotificationMode::All);
         assert!(notices.is_empty());
 
         // A personal reply is still a notice even after reading the section.
@@ -292,7 +301,7 @@ mod tests {
             message(100, other, 500, None, "", true, None),
             message(103, other, 4_000, None, "@alice hi", false, None),
         ];
-        let notices = collect(&messages, me, "Alice", 1_000, &[section], &read_categories);
+        let notices = collect(&messages, me, "Alice", 1_000, &[section], &read_categories, NotificationMode::All);
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].kind, NoticeKind::Mention);
     }
@@ -308,8 +317,66 @@ mod tests {
             message(102, other, 2_000, None, "@alice hi", false, None),
         ];
 
-        let notices = collect(&messages, me, "Alice", 1_000, &[], &HashMap::new());
+        let notices = collect(&messages, me, "Alice", 1_000, &[], &HashMap::new(), NotificationMode::All);
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].kind, NoticeKind::Mention);
+    }
+
+    #[test]
+    fn notification_modes_filter_section_activity() {
+        let me = member(1);
+        let other = member(2);
+        let section = MessageId::from_bytes([100u8; 32]);
+        let messages = vec![
+            message(100, other, 500, None, "", true, None),
+            message(101, other, 2_000, None, "@alice hi", false, None),
+            message(104, me, 4_500, None, "mine", false, None),
+            message(
+                105,
+                other,
+                5_000,
+                Some(MessageId::from_bytes([104u8; 32])),
+                "answer",
+                false,
+                None,
+            ),
+            message(106, other, 6_000, Some(section), "new topic", false, None),
+        ];
+
+        let all = collect(
+            &messages,
+            me,
+            "Alice",
+            1_000,
+            &[section],
+            &HashMap::new(),
+            NotificationMode::All,
+        );
+        assert_eq!(all.len(), 3);
+
+        let personal = collect(
+            &messages,
+            me,
+            "Alice",
+            1_000,
+            &[section],
+            &HashMap::new(),
+            NotificationMode::MentionsAndReplies,
+        );
+        assert_eq!(personal.len(), 2);
+        assert!(personal
+            .iter()
+            .all(|notice| notice.kind != NoticeKind::Section));
+
+        let muted = collect(
+            &messages,
+            me,
+            "Alice",
+            1_000,
+            &[section],
+            &HashMap::new(),
+            NotificationMode::Muted,
+        );
+        assert!(muted.is_empty());
     }
 }

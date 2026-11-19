@@ -50,6 +50,7 @@ The test files:
 - `board-navigation.spec.ts` — every fixture board opens instead of staying on “Loading board…”.
 - `invite-recovery.spec.ts` — a damaged invite link shows the recovery field.
 - `mentions.spec.ts` — `@` autocomplete inserts a chip and clicking it opens the member info.
+- `notifications.spec.ts` — a board can be muted and restored from the notifications page.
 - `reactions.spec.ts` — hovering a reaction shows reactor names.
 
 ## CI

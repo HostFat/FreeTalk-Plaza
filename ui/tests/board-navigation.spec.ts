@@ -23,7 +23,13 @@ test.describe("board selection", () => {
 
   test("the selector lists every fixture board", async ({ page }) => {
     await page.goto("/", { waitUntil: "domcontentloaded" });
+    await expect(
+      page.getByText("Select or Create Board", { exact: true }),
+    ).toBeVisible({ timeout: 30_000 });
     await page.getByText("Select or Create Board", { exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: BOARDS[0], exact: true }),
+    ).toBeVisible({ timeout: 10_000 });
 
     for (const name of BOARDS) {
       await expect(page.getByRole("button", { name, exact: true })).toBeVisible();

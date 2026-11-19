@@ -34,6 +34,7 @@ pub fn NotificationsView() -> Element {
             messages,
             board.subscribed_categories.clone(),
             board.read_categories.clone(),
+            board.notification_mode,
         ))
     });
 
@@ -43,8 +44,16 @@ pub fn NotificationsView() -> Element {
         .map(|key| bs58::encode(key.as_bytes()).into_string())
         .unwrap_or_default();
 
-    let Some((owner_vk, last_visit, self_id, nickname, messages, subscribed, read_categories)) =
-        board.read().clone()
+    let Some((
+        owner_vk,
+        last_visit,
+        self_id,
+        nickname,
+        messages,
+        subscribed,
+        read_categories,
+        mode,
+    )) = board.read().clone()
     else {
         return rsx! {};
     };
@@ -56,6 +65,7 @@ pub fn NotificationsView() -> Element {
         last_visit,
         &subscribed,
         &read_categories,
+        mode,
     );
     let mut followed_names: Vec<(_, String)> = messages
         .iter()
@@ -71,6 +81,7 @@ pub fn NotificationsView() -> Element {
         })
         .collect();
     followed_names.sort_by(|a, b| a.1.cmp(&b.1));
+    let mode_value = mode.as_str();
 
     rsx! {
         div { class: "flex-1 flex flex-col min-w-0 min-h-0 bg-bg",
@@ -87,26 +98,50 @@ pub fn NotificationsView() -> Element {
                     "← Back to topics"
                 }
                 h1 { class: "text-lg font-semibold text-text ml-2", "Notifications" }
-                button {
-                    r#type: "button",
-                    class: "ml-auto px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg",
-                    onclick: move |_| {
-                        let now = chrono::Utc::now().timestamp_millis();
-                        BOARDS.with_mut(|boards| {
-                            if let Some(board) = boards.map.get_mut(&owner_vk) {
-                                board.last_visit = now;
-                                // Followed sections use their own timestamps.
-                                for index in 0..board.subscribed_categories.len() {
-                                    let section = board.subscribed_categories[index];
-                                    board.read_categories.insert(section, now);
+                div { class: "ml-auto flex items-center gap-2",
+                    label { class: "text-xs text-text-muted", r#for: "notification-mode",
+                        "Notify"
+                    }
+                    select {
+                        id: "notification-mode",
+                        class: "px-2 py-1.5 bg-surface border border-border text-text text-xs rounded-lg",
+                        value: "{mode_value}",
+                        onchange: move |event| {
+                            let mode = crate::board_data::NotificationMode::from_str(&event.value());
+                            BOARDS.with_mut(|boards| {
+                                if let Some(board) = boards.map.get_mut(&owner_vk) {
+                                    board.notification_mode = mode;
                                 }
-                            }
-                        });
-                        spawn_local(async {
-                            let _ = save_boards_to_delegate().await;
-                        });
-                    },
-                    "Mark all read"
+                            });
+                            spawn_local(async {
+                                let _ = save_boards_to_delegate().await;
+                            });
+                        },
+                        option { value: "all", "All activity" }
+                        option { value: "mentions", "Mentions & replies" }
+                        option { value: "muted", "Muted" }
+                    }
+                    button {
+                        r#type: "button",
+                        class: "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg",
+                        onclick: move |_| {
+                            let now = chrono::Utc::now().timestamp_millis();
+                            BOARDS.with_mut(|boards| {
+                                if let Some(board) = boards.map.get_mut(&owner_vk) {
+                                    board.last_visit = now;
+                                    // Followed sections use their own timestamps.
+                                    for index in 0..board.subscribed_categories.len() {
+                                        let section = board.subscribed_categories[index];
+                                        board.read_categories.insert(section, now);
+                                    }
+                                }
+                            });
+                            spawn_local(async {
+                                let _ = save_boards_to_delegate().await;
+                            });
+                        },
+                        "Mark all read"
+                    }
                 }
             }
             div { class: "flex-1 overflow-y-auto",
@@ -135,7 +170,13 @@ pub fn NotificationsView() -> Element {
                         }
                     }
                     if notices.is_empty() {
-                        p { class: "text-text-muted text-sm", "No new notifications." }
+                        p { class: "text-text-muted text-sm",
+                            if mode == crate::board_data::NotificationMode::Muted {
+                                "Notifications are muted for this board."
+                            } else {
+                                "No new notifications."
+                            }
+                        }
                     } else {
                         div { class: "space-y-2",
                             for notice in notices.iter() {

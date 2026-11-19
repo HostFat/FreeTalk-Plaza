@@ -390,6 +390,8 @@ pub fn TopBar() -> Element {
                 div { class: "relative md:hidden",
                     button {
                         class: "p-3 bg-surface hover:bg-surface-hover text-text rounded-xl transition-colors",
+                        title: "Menu",
+                        aria_label: "Menu",
                         onclick: move |_| menu_open.set(!menu_open()),
                         Icon { width: 24, height: 24, icon: FaBars }
                     }

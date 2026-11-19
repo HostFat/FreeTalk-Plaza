@@ -183,6 +183,32 @@ pub struct OwnedImage {
     pub renewed_at: i64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub enum NotificationMode {
+    #[default]
+    All,
+    MentionsAndReplies,
+    Muted,
+}
+
+impl NotificationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::MentionsAndReplies => "mentions",
+            Self::Muted => "muted",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "mentions" => Self::MentionsAndReplies,
+            "muted" => Self::Muted,
+            _ => Self::All,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardData {
     pub owner_vk: VerifyingKey,
@@ -226,6 +252,10 @@ pub struct BoardData {
     /// Last time each section was opened (milliseconds), for unread badges.
     #[serde(default)]
     pub read_categories: HashMap<MessageId, i64>,
+
+    /// What this device wants to be notified about on this board.
+    #[serde(default)]
+    pub notification_mode: NotificationMode,
 
     /// The composer's unsent post. Local UI state, never shared with the board.
     #[serde(default)]
@@ -3072,6 +3102,7 @@ impl Boards {
             pending_uploads: Vec::new(),
             pending_send: None,
             subscribed_categories: Vec::new(),
+            notification_mode: NotificationMode::All,
         };
 
         if board_data.is_private() {
@@ -4963,6 +4994,7 @@ mod tests {
             pending_uploads: Vec::new(),
             pending_send: None,
             subscribed_categories: Vec::new(),
+            notification_mode: NotificationMode::All,
             current_secret_version: None,
             last_secret_rotation: None,
             key_migrated_to_delegate: false,
@@ -5051,6 +5083,7 @@ mod tests {
             pending_uploads: Vec::new(),
             pending_send: None,
             subscribed_categories: Vec::new(),
+            notification_mode: NotificationMode::All,
             current_secret_version: None,
             last_secret_rotation: None,
             key_migrated_to_delegate: false,
@@ -5131,6 +5164,7 @@ mod tests {
                 pending_uploads: Vec::new(),
                 pending_send: None,
                 subscribed_categories: Vec::new(),
+            notification_mode: NotificationMode::All,
                 current_secret_version: None,
                 last_secret_rotation: None,
                 key_migrated_to_delegate: false,

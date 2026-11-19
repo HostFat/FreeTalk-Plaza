@@ -11,7 +11,9 @@ export async function openApp(page: Page) {
 export async function openBoard(page: Page, name: string) {
   await openApp(page);
   await page.getByText("Select or Create Board", { exact: true }).click();
-  await page.getByRole("button", { name, exact: true }).click();
+  const item = page.getByRole("button", { name, exact: true });
+  await expect(item).toBeVisible({ timeout: 10_000 });
+  await item.click();
   await expect(page.getByText(name, { exact: true }).first()).toBeVisible({
     timeout: 10_000,
   });
