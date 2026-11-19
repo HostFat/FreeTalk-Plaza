@@ -66,7 +66,7 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
         current_board_data
             .read()
             .as_ref()
-            .map_or(false, |board_data| board_data.is_current_owner())
+            .map_or(false, |board_data| board_data.is_active_owner())
     });
 
     let is_admin = use_memo(move || {

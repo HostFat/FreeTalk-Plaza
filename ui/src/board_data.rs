@@ -199,6 +199,11 @@ pub struct BoardData {
     /// Boards stored before profiles had this link have no id here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
+    /// Root profile that owns this board. `profile_id` follows the visible
+    /// profile; this one stays on the owner's profile, so owner controls do
+    /// not appear while browsing as a member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_profile_id: Option<String>,
     pub contract_key: ContractKey,
     /// The last message ID that was read by the user (for unread tracking)
     /// Messages after this ID from other users are considered unread.
@@ -336,6 +341,20 @@ impl BoardData {
 
     pub fn is_current_owner(&self) -> bool {
         self.owner_key().verifying_key() == self.current_owner_key()
+    }
+
+    /// Whether the visible identity is the owner, not only whether this client
+    /// holds the owner key. The owner key stays available after switching to a
+    /// member profile; using it must not put the owner crown or Manage on that
+    /// member's name.
+    pub fn is_active_owner(&self) -> bool {
+        if self.self_sk.verifying_key() == self.current_owner_key() {
+            return true;
+        }
+        match (&self.owner_profile_id, &self.profile_id) {
+            (Some(owner), Some(current)) => owner == current,
+            _ => false,
+        }
     }
 
     /// Whether this board signs as the profile's root key. A derived board
@@ -3001,6 +3020,7 @@ impl Boards {
             board_state,
             self_sk,
             owner_sk: Some(owner_sk),
+            owner_profile_id: Some(profile_id.clone()),
             profile_id: Some(profile_id),
             contract_key,
             last_read_message_id: None,
@@ -3157,6 +3177,10 @@ impl Boards {
                     // data, and keep an owner key from either side.
                     self_board_data.self_sk = board_data.self_sk.clone();
                     self_board_data.profile_id = board_data.profile_id.clone();
+                    if board_data.owner_profile_id.is_some() {
+                        self_board_data.owner_profile_id =
+                            board_data.owner_profile_id.clone();
+                    }
                     self_board_data.self_authorized_member =
                         board_data.self_authorized_member.clone();
                     self_board_data.self_member_info = board_data.self_member_info.clone();
@@ -3741,6 +3765,66 @@ mod tests {
         assert!(board.self_authorized_member.is_some());
         assert!(board.can_participate().is_ok());
         assert!(board.switch_profile(&SigningKey::generate(&mut rng)).is_err());
+    }
+
+    /// The client keeps the owner key when it switches to a member profile.
+    /// Owner controls must follow the visible profile, not that retained key.
+    #[test]
+    fn owner_controls_follow_the_active_profile_not_the_retained_owner_key() {
+        use plaza_core::board_state::member::AuthorizedMember;
+
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let first_sk = SigningKey::generate(&mut rng);
+        let second_sk = SigningKey::generate(&mut rng);
+        let second_vk = second_sk.verifying_key();
+        let mut boards = empty_boards();
+        let key = boards.create_new_board_with_identity(
+            owner_sk.clone(),
+            IdentityProfile::new("Owner".to_string(), first_sk),
+            BoardIdentityMode::Same,
+            "Board".to_string(),
+            "Owner".to_string(),
+            false,
+        );
+        let owner_profile_id = boards
+            .map
+            .get(&key)
+            .unwrap()
+            .owner_profile_id
+            .clone()
+            .expect("the creator profile is recorded");
+        let board = boards.map.get_mut(&key).unwrap();
+        board
+            .board_state
+            .members
+            .members
+            .push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: MemberId::from(key),
+                    invited_by: MemberId::from(key),
+                    member_vk: second_vk,
+                    join_proof: None,
+                },
+                &owner_sk,
+            ));
+
+        assert!(board.is_active_owner(), "the creator profile is the owner");
+        assert!(board.is_current_owner());
+
+        assert!(board.switch_profile(&second_sk).is_ok());
+        board.profile_id = Some("member-profile".to_string());
+        assert!(
+            board.is_current_owner(),
+            "the owner key is still available for management"
+        );
+        assert!(
+            !board.is_active_owner(),
+            "the member profile must not show owner controls"
+        );
+
+        board.profile_id = Some(owner_profile_id);
+        assert!(board.is_active_owner(), "switching back restores the crown");
     }
 
     /// A profile switch changes `self_sk`; the save merge must accept it and
@@ -4809,6 +4893,7 @@ mod tests {
             board_state,
             self_sk: stale_sk,
             owner_sk: None,
+            owner_profile_id: None,
             profile_id: None,
             contract_key,
             last_read_message_id: None,
@@ -4896,6 +4981,7 @@ mod tests {
             board_state,
             self_sk: invitee_sk.clone(),
             owner_sk: None,
+            owner_profile_id: None,
             profile_id: None,
             contract_key,
             last_read_message_id: None,
@@ -4973,6 +5059,7 @@ mod tests {
                 board_state,
                 self_sk: sk,
                 owner_sk: None,
+                owner_profile_id: None,
                 profile_id: None,
                 contract_key,
                 last_read_message_id: None,

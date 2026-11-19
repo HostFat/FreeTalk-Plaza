@@ -42,7 +42,7 @@ pub fn EditBoardModal() -> Element {
             .read()
             .as_ref()
             .is_some_and(|board_data| {
-                board_data.is_current_owner()
+                board_data.is_active_owner()
                     && !crate::components::app::view_as_member()
             })
     });
@@ -167,7 +167,7 @@ pub fn EditBoardModal() -> Element {
                             // Secret Version (only for private boards)
                             {
                                 let is_private = board_data.board_state.configuration.configuration.privacy_mode == PrivacyMode::Private;
-                                let is_owner = board_data.is_current_owner();
+                                let is_owner = board_data.is_active_owner();
                                 let secret_version = board_data.board_state.secrets.current_version;
 
                                 if is_private {

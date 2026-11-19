@@ -130,7 +130,7 @@ pub fn MemberInfoModal() -> Element {
         // admins can ban anyone, including token-joined members, whose
         // self-invite leaves no chain back to the viewer.
         let viewer_id = MemberId::from(&board_state.self_sk.verifying_key());
-        let viewer_is_owner = board_state.is_current_owner();
+        let viewer_is_owner = board_state.is_active_owner();
         let viewer_is_admin = board_state
             .board_state
             .admin

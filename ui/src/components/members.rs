@@ -434,7 +434,7 @@ fn ExportIdentityModal(is_active: Signal<bool>) -> Element {
                         board_owner: owner_key,
                         signing_key: board_data.self_sk.clone(),
                         owner_signing_key: board_data
-                            .is_current_owner()
+                            .is_active_owner()
                             .then(|| board_data.owner_key().clone()),
                         authorized_member,
                         invite_chain: board_data.invite_chain.clone(),
@@ -578,6 +578,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     board_state: initial_state, // Will be fully populated on sync
                     self_sk: export.signing_key,
                     owner_sk: Some(owner_sk_for_import),
+                    owner_profile_id: profile_id.clone(),
                     profile_id: profile_id.clone(),
                     contract_key,
                     last_read_message_id: None,

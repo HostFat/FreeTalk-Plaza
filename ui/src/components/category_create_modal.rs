@@ -91,7 +91,7 @@ pub fn CategoryCreateModal() -> Element {
                     .collect::<Vec<_>>();
                 (
                     board_data.can_create_categories(),
-                    board_data.is_current_owner(),
+                    board_data.is_active_owner(),
                     roles,
                     groups,
                 )

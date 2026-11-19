@@ -22,7 +22,7 @@ pub fn NicknameField(member_info: AuthorizedMemberInfo) -> Element {
     };
 
     let viewer_id = MemberId::from(&board.self_sk.verifying_key());
-    let is_owner = board.is_current_owner();
+    let is_owner = board.is_active_owner();
     let is_admin = board
         .board_state
         .admin

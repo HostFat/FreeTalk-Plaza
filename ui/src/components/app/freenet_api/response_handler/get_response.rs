@@ -150,6 +150,7 @@ pub async fn handle_get_response(
                         board_state: retrieved_state.clone(),
                         self_sk: self_sk.clone(),
                         owner_sk: None,
+                        owner_profile_id: None,
                         profile_id: profile_id.clone(),
                         contract_key: key,
                         last_read_message_id: None,

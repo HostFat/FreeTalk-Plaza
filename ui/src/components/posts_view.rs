@@ -685,7 +685,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
         .as_ref()
         .map(|board| {
             let self_id = MemberId::from(&board.self_sk.verifying_key());
-            board.is_current_owner()
+            board.is_active_owner()
                 || board
                     .board_state
                     .admin
@@ -699,7 +699,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
         .as_ref()
         .map(|board| {
             let self_vk = board.self_sk.verifying_key();
-            board.is_current_owner()
+            board.is_active_owner()
                 || board
                     .board_state
                     .members
@@ -1031,7 +1031,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                     let as_member = crate::components::app::view_as_member();
                                     let is_owner = !as_member
                                         && !bd.spectator
-                                        && bd.is_current_owner();
+                                        && bd.is_active_owner();
                                     let is_admin = !as_member
                                         && !bd.spectator
                                         && bd.board_state.admin.admins.iter()
@@ -1050,7 +1050,7 @@ pub fn PostsView(#[props(default)] category_id: Option<String>) -> Element {
                                         // transferred owner differ here.
                                         !crate::components::app::view_as_member()
                                             && !board.spectator
-                                            && board.is_current_owner(),
+                                            && board.is_active_owner(),
                                         !crate::components::app::view_as_member()
                                             && !board.spectator
                                             && board
@@ -1953,7 +1953,7 @@ pub fn SinglePostView(post_id: String) -> Element {
             .and_then(|key| BOARDS.read().map.get(key).cloned())
             .map(|board_data| {
                 let self_id = MemberId::from(&board_data.self_sk.verifying_key());
-                board_data.is_current_owner()
+                board_data.is_active_owner()
                     || board_data
                         .board_state
                         .admin
@@ -1972,8 +1972,7 @@ pub fn SinglePostView(post_id: String) -> Element {
             .and_then(|key| BOARDS.read().map.get(key).cloned())
             .map(|board_data| {
                 let self_id = MemberId::from(&board_data.self_sk.verifying_key());
-                let owner_id = MemberId::from(&board_data.owner_vk);
-                self_id == owner_id
+                board_data.is_active_owner()
                     || board_data
                         .board_state
                         .admin
