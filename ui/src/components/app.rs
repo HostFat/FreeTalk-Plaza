@@ -311,6 +311,36 @@ pub fn App() -> Element {
         }
     });
 
+    // If a GET or a restore sets CURRENT_BOARD before the delegate map is
+    // loaded, the value may be the current owner or profile key. Once the map
+    // arrives, resolve it back to the map key so the board renders.
+    use_effect(move || {
+        let current = CURRENT_BOARD.read().owner_key;
+        let Some(current) = current else {
+            return;
+        };
+        let resolved = {
+            let boards = BOARDS.read();
+            if boards.map.contains_key(&current) {
+                return;
+            }
+            boards
+                .map
+                .iter()
+                .find(|(map_key, board)| {
+                    **map_key == current
+                        || board.owner_key().verifying_key() == current
+                        || board.current_owner_key() == current
+                        || board.self_sk.verifying_key() == current
+                        || board.owner_vk == current
+                })
+                .map(|(map_key, _)| *map_key)
+        };
+        if let Some(resolved) = resolved {
+            select_board(Some(resolved));
+        }
+    });
+
     // Watch CURRENT_BOARD and navigate if URL doesn't match
     // This handles a board chosen from the list (and sync setting the current board):
     // CURRENT_BOARD changes, and the URL follows. The startup restore from the
@@ -815,12 +845,13 @@ pub fn select_board(board_id: Option<VerifyingKey>) {
         })
         .map(|(map_key, _)| *map_key)
         .unwrap_or(vk);
+    dioxus::logger::tracing::info!(
+        "select_board: {} -> map key {} (map_len={})",
+        bs58::encode(vk.as_bytes()).into_string(),
+        bs58::encode(resolved.as_bytes()).into_string(),
+        BOARDS.read().map.len()
+    );
     if CURRENT_BOARD.read().owner_key != Some(resolved) {
-        dioxus::logger::tracing::info!(
-            "select_board: {} -> map key {}",
-            bs58::encode(vk.as_bytes()).into_string(),
-            bs58::encode(resolved.as_bytes()).into_string()
-        );
         *CURRENT_BOARD.write() = CurrentBoard {
             owner_key: Some(resolved),
         };
