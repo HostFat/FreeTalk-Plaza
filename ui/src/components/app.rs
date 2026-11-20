@@ -24,7 +24,7 @@ use crate::components::board_list::receive_invitation_modal::ReceiveInvitationMo
 use crate::components::category_create_modal::CategoryCreateModal;
 use crate::components::members::member_info_modal::MemberInfoModal;
 use crate::components::members::Invitation;
-use crate::components::messages_view::{DM_SELECTED, MESSAGES_OPEN};
+use crate::components::messages_view::{DM_JOIN_PREFILL, MESSAGES_OPEN};
 use crate::components::notifications_view::NotificationsView;
 use crate::components::posts_view::{PostsView, SinglePostView};
 use crate::components::profile_view::ProfileView;
@@ -478,6 +478,17 @@ pub fn App() -> Element {
             // User profile bar with post input
             TopBar {}
             crate::components::system_notifications::SystemNotificationsBridge {}
+            if *TEST_VIEW_MEMBER.read() {
+                div { class: "flex-shrink-0 flex flex-wrap items-center justify-center gap-3 bg-sky-500/10 border-y border-sky-500/30 px-4 py-1 text-center text-xs text-sky-200",
+                    span { "Member preview: owner and admin controls are hidden in this tab." }
+                    button {
+                        r#type: "button",
+                        class: "underline hover:text-white",
+                        onclick: move |_| *TEST_VIEW_MEMBER.write() = false,
+                        "Exit preview"
+                    }
+                }
+            }
             // Development warning, visible on every page including boards.
             div { class: "flex-shrink-0 bg-amber-500/10 border-y border-amber-500/30 px-4 py-1 text-center text-xs text-amber-200",
                 "Work in progress: features and data can break without notice, there is no support. Avoid creating boards you plan to keep long term."
@@ -563,108 +574,25 @@ fn DmJoin(
     key_version: String,
     key_b58: String,
 ) -> Element {
-    let joining_profile = {
-        let boards = BOARDS.read();
-        let current = CURRENT_BOARD
-            .read()
-            .owner_key
-            .or(boards.current_board_key);
-        current
-            .and_then(|key| boards.map.get(&key))
-            .and_then(|board| boards.profile_for_board(board))
-            .map(|profile| profile.name.clone())
-            .unwrap_or_else(|| "no active profile".to_string())
-    };
-    let mut status = use_signal(|| None::<String>);
-    let mut error = use_signal(|| None::<String>);
+    let _ = (&contract_id, &token, &key_version, &key_b58);
     let mut started = use_signal(|| false);
-    let mut joined = use_signal(|| None::<freenet_stdlib::prelude::ContractInstanceId>);
 
     use_effect(move || {
         if *started.peek() {
             return;
         }
         started.set(true);
-        let contract_id_text = contract_id.clone();
-        let token_text = token.clone();
-        let key_version_text = key_version.clone();
-        let key_text = key_b58.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let parsed_id = contract_id_text
-                .parse::<freenet_stdlib::prelude::ContractInstanceId>();
-            let Ok(contract_id) = parsed_id else {
-                error.set(Some("Il link DM non è valido.".to_string()));
-                return;
-            };
-            let token = bs58::decode(&token_text).into_vec();
-            let key = bs58::decode(&key_text).into_vec();
-            let version = key_version_text.parse::<u32>();
-            let (Ok(token), Ok(key), Ok(version)) = (token, key, version) else {
-                error.set(Some("Il link DM non è valido.".to_string()));
-                return;
-            };
-            let (Ok(token), Ok(key)) = (
-                <[u8; 32]>::try_from(token.as_slice()),
-                <[u8; 32]>::try_from(key.as_slice()),
-            ) else {
-                error.set(Some("Il link DM non è valido.".to_string()));
-                return;
-            };
-            status.set(Some("Joining the conversation…".to_string()));
-            match crate::components::app::dm_contract::join_from_link(
-                contract_id,
-                token,
-                version,
-                key,
-            )
-            .await
-            {
-                Ok(()) => {
-                    crate::util::defer(move || {
-                        status.set(Some(
-                            "Joined. Open the conversation to start chatting.".to_string(),
-                        ));
-                        joined.set(Some(contract_id));
-                    });
-                }
-                Err(message) => {
-                    error.set(Some(message));
-                    status.set(None);
-                }
-            }
-        });
+        let href = web_sys::window()
+            .and_then(|window| window.location().href().ok())
+            .unwrap_or_default();
+        *DM_JOIN_PREFILL.write() = Some(href);
+        *MESSAGES_OPEN.write() = true;
+        navigator().replace(Route::Home);
     });
 
     rsx! {
-        div { class: "flex-1 flex flex-col items-center justify-center px-6 py-10 gap-3 text-center",
-            h1 { class: "text-2xl font-semibold text-text", "Direct message invite" }
-            p { class: "text-xs text-text-muted", "Profile: {joining_profile}" }
-            if let Some(message) = status.read().as_ref() {
-                p { class: "text-sm text-text-muted", "{message}" }
-            }
-            if let Some(contract_id) = *joined.read() {
-                button {
-                    r#type: "button",
-                    class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white text-sm rounded-lg",
-                    onclick: move |_| {
-                        *DM_SELECTED.write() = Some(contract_id);
-                        *MESSAGES_OPEN.write() = true;
-                        navigator().push(Route::Home);
-                    },
-                    "Open conversation"
-                }
-            }
-            if let Some(message) = error.read().as_ref() {
-                p { class: "text-sm text-red-400 max-w-md", "{message}" }
-                button {
-                    r#type: "button",
-                    class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg",
-                    onclick: move |_| {
-                        navigator().push(Route::Home);
-                    },
-                    "Back to FreeTalk Plaza"
-                }
-            }
+        div { class: "flex-1 flex flex-col items-center justify-center px-6 py-10 text-text-muted",
+            p { class: "text-sm", "Opening Messages…" }
         }
     }
 }

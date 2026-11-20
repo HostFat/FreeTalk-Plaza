@@ -8,6 +8,9 @@ use std::collections::HashMap;
 
 pub static MESSAGES_OPEN: GlobalSignal<bool> = Global::new(|| false);
 pub static DM_SELECTED: GlobalSignal<Option<ContractInstanceId>> = Global::new(|| None);
+/// Invite link carried by a `/dm/join` route. The modal consumes it and
+/// prefills the join field.
+pub static DM_JOIN_PREFILL: GlobalSignal<Option<String>> = Global::new(|| None);
 
 fn short_id(bytes: &[u8]) -> String {
     bs58::encode(bytes)
@@ -54,6 +57,12 @@ fn ConversationList() -> Element {
     let mut joining = use_signal(|| false);
     let mut join_error = use_signal(|| None::<String>);
     let conversations = dm_contract::conversations();
+
+    use_effect(move || {
+        if let Some(link) = DM_JOIN_PREFILL.write().take() {
+            join_link.set(link);
+        }
+    });
 
     rsx! {
         div { class: "flex items-center justify-between px-5 py-4 border-b border-border",

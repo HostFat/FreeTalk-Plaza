@@ -560,6 +560,28 @@ test("a DM conversation contract is created and a message round-trips", async ({
 
 // The join runs inside the Messages modal, using the same app context and the
 // profile just selected. This is the deterministic path for the browser test.
+test("a DM invite link opens the Messages join modal", async ({ page }) => {
+  await gotoRoute(page, `/board/${boardKey}`);
+  const app = page.frameLocator("iframe");
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await app.getByRole("button", { name: "Messages" }).first().click();
+  await app.getByRole("button", { name: "New conversation" }).click();
+  await expect(app.getByRole("button", { name: "Invite" })).toBeVisible({
+    timeout: 60_000,
+  });
+  await app.getByRole("button", { name: "Invite" }).click();
+  const inviteInput = app.locator("#dm-invite-link");
+  await expect(inviteInput).toBeVisible({ timeout: 30_000 });
+  const inviteLink = await inviteInput.inputValue();
+  await app.getByRole("button", { name: "Close" }).first().click();
+
+  await page.goto(inviteLink);
+  await expect(app.getByText("Join with invite link")).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(app.locator("#dm-join-link")).toHaveValue(/#\/dm\/join\//);
+});
+
 test("an invited DM identity joins and sends a message", async ({ page }) => {
   await gotoRoute(page, `/board/${boardKey}`);
   const app = page.frameLocator("iframe");
@@ -620,6 +642,30 @@ test("an invited DM identity joins and sends a message", async ({ page }) => {
   await expect(app.getByText("hello from the invited DM")).toBeVisible({
     timeout: 30_000,
   });
+});
+
+test("member preview lives in Developer and exits from the banner", async ({
+  page,
+}) => {
+  await gotoRoute(page, `/board/${boardKey}`);
+  const app = page.frameLocator("iframe");
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await ensureOwner(page);
+  await expect(app.getByRole("button", { name: /Manage/ })).toBeVisible();
+
+  await app.getByRole("button", { name: "Open identities" }).click();
+  const drawer = app.locator(".device-drawer");
+  await drawer.getByText("Developer", { exact: true }).click();
+  await drawer.getByRole("button", { name: "Preview member view" }).click();
+
+  await expect(
+    app.getByText(/Member preview: owner and admin controls are hidden/),
+  ).toBeVisible();
+  await expect(app.getByRole("button", { name: /Manage/ })).toHaveCount(0);
+
+  await app.getByRole("button", { name: "Exit preview" }).click();
+  await expect(app.getByText(/Member preview:/)).toHaveCount(0);
+  await expect(app.getByRole("button", { name: /Manage/ })).toBeVisible();
 });
 
 test("a hidden topic is restored from the trash", async ({ page }) => {

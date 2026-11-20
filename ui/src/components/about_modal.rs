@@ -146,21 +146,6 @@ pub fn AboutModal() -> Element {
                             "github.com/HostFat/FreeTalk-Plaza"
                         }
                     }
-                    div { class: "border-t border-border pt-3",
-                        button {
-                            r#type: "button",
-                            class: "text-xs text-text-muted hover:text-text underline decoration-dotted",
-                            title: "Test only: hides owner and admin controls in this tab until reload",
-                            onclick: move |_| {
-                                *crate::components::app::TEST_VIEW_MEMBER.write() = true;
-                                *ABOUT_MODAL.write() = false;
-                            },
-                            "Preview member view"
-                        }
-                        p { class: "text-[11px] text-text-muted mt-1",
-                            "Hides owner and admin controls in this tab until reload."
-                        }
-                    }
                 }
 
                 div { class: "px-6 py-4 border-t border-border flex items-center justify-between gap-3",
