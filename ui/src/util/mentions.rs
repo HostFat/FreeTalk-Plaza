@@ -347,6 +347,26 @@ pub fn replace_context(id: &str, context: &MentionAutocomplete, member: &Mention
     }
 }
 
+/// Turn explicit tokens back into readable `@Name` text for the edit form.
+pub fn readable_mentions(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '@' {
+            if let Some((end, _, name)) = parse_explicit(&chars, index) {
+                out.push('@');
+                out.push_str(&name);
+                index = end;
+                continue;
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
 /// Whether a message mentions this member, using either a plain `@Nickname`
 /// or the explicit `@[Nickname](mention:<id>)` token inserted by autocomplete.
 pub fn mentions_member(text: &str, member_id: MemberId, nickname: &str) -> bool {

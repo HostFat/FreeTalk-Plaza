@@ -122,7 +122,7 @@ pub fn PollView(
             div { class: "flex flex-wrap items-center justify-between gap-2",
                 div { class: "flex items-center gap-2",
                     span { class: "text-sm font-medium text-text", "Poll" }
-                    if is_author && total == 0 && !closed {
+                    if is_author && !closed {
                         button {
                             r#type: "button",
                             class: "text-xs text-accent hover:underline",
@@ -154,7 +154,7 @@ pub fn PollView(
             }
             if editing() {
                 div { class: "border-t border-border pt-2 space-y-2",
-                    p { class: "text-xs text-text-muted", "Edit the options before the first vote." }
+                    p { class: "text-xs text-text-muted", "Options can change after voting; existing votes for remaining options are kept." }
                     for (index, option) in edit_options.read().iter().enumerate() {
                         div { key: "{index}", class: "flex items-center gap-2",
                             input {

@@ -113,6 +113,38 @@ test("board archive survives a reload and can be restored", async ({ page }) => 
   await expect(row().getByTitle("Restore board")).toHaveCount(0);
 });
 
+test("board order survives a reload", async ({ page }) => {
+  await page.goto(`${BASE}#/board/${BOARD_KEY}`);
+  const app = page.frameLocator("iframe");
+  await expect(app.getByText("P480Private").first()).toBeVisible({
+    timeout: 30_000,
+  });
+  const rows = () => app.locator("div.w-full.flex.items-center.gap-2");
+  const names = () =>
+    rows().evaluateAll((elements) =>
+      elements.map((element) => element.innerText.split("\n")[0]),
+    );
+  const rowFor = (name: string) =>
+    rows().filter({ hasText: name }).first();
+
+  await app.getByRole("button", { name: /P480Private/ }).first().click();
+  const before = await names();
+  const moved = before[1];
+  await rowFor(moved).getByTitle("Move board up").click();
+  expect((await names())[0]).toBe(moved);
+  await page.waitForTimeout(1_500);
+
+  await page.reload();
+  await expect(app.getByText("P480Private").first()).toBeVisible({
+    timeout: 30_000,
+  });
+  await app.getByRole("button", { name: /P480Private/ }).first().click();
+  expect((await names())[0]).toBe(moved);
+
+  // Restore the previous order.
+  await rowFor(moved).getByTitle("Move board down").click();
+});
+
 test("a valid invite opens the join and a new identity joins", async ({
   page,
 }) => {

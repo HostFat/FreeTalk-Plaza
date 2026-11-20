@@ -956,6 +956,7 @@ fn initial_boards() -> Boards {
         removed: Vec::new(),
         board_order: Vec::new(),
         archived: Vec::new(),
+        client_features: crate::board_data::ClientFeatures::default(),
         migrated_boards: Vec::new(),
         blocked_image_hashes: Vec::new(),
         auto_renew_images: false,

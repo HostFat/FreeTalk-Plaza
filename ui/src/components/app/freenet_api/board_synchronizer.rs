@@ -1145,8 +1145,10 @@ pub async fn send_upgrade_pointers() -> usize {
             None => failed += 1,
         }
     }
-    crate::components::app::toasts::show(format!(
-        "Upgrade pointers: {queued} queued, {sent} sent, {skipped} not owner, {failed} failed"
-    ));
+    if queued > 0 || sent > 0 || skipped > 0 || failed > 0 {
+        crate::components::app::toasts::show(format!(
+            "Upgrade pointers: {queued} queued, {sent} sent, {skipped} not owner, {failed} failed"
+        ));
+    }
     sent
 }

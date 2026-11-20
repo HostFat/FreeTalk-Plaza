@@ -252,12 +252,24 @@ pub fn MembersView() -> Element {
                 },
             };
 
+            let mut display = format_member_display(&member_display);
+            if boards_read.client_features.show_member_ids {
+                let short = member_id.to_string();
+                display.push_str(&format!(
+                    " <span class=\"text-xs text-text-muted\">· {}</span>",
+                    &short[..short.len().min(8)]
+                ));
+            }
             all_members.push((
-                format_member_display(&member_display),
+                display,
                 member_id,
                 is_deactivated,
+                member_id == self_member_id,
             ));
         }
+        // Keep the current member at the top; the stable sort preserves the
+        // invite-tree order for everyone else.
+        all_members.sort_by_key(|(_, _, _, is_self)| !*is_self);
 
         Some(all_members)
     })()
@@ -343,7 +355,7 @@ pub fn MembersView() -> Element {
 
             // Member list - scrollable
             ul { class: "flex-1 px-4 py-4 space-y-1 overflow-y-auto",
-                for (display_name, member_id, is_deactivated) in members {
+                for (display_name, member_id, is_deactivated, _is_self) in members {
                     li { key: "{member_id}",
                         button {
                             class: "w-full text-left px-4 py-2 rounded-lg text-text hover:bg-surface transition-colors",

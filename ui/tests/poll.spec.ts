@@ -16,4 +16,15 @@ test("a poll can be created and voted", async ({ page }) => {
   await expect(page.getByText("Vote recorded.", { exact: false })).toBeVisible({
     timeout: 10_000,
   });
+
+  // The author can still edit the options after a vote.
+  await page.getByRole("button", { name: "Edit poll" }).click();
+  await expect(page.locator('input[type="text"]').first()).toBeVisible({
+    timeout: 10_000,
+  });
+  await page.locator('input[type="text"]').first().fill("Gamma");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Gamma", { exact: false })).toBeVisible({
+    timeout: 10_000,
+  });
 });

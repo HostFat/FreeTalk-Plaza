@@ -210,6 +210,13 @@ impl NotificationMode {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub struct ClientFeatures {
+    /// Append the short member id in the member list.
+    #[serde(default)]
+    pub show_member_ids: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub enum NicknameRequestStatus {
     #[default]
     Pending,
@@ -2656,6 +2663,9 @@ pub struct Boards {
     /// Boards hidden from the main switcher but kept on this device.
     #[serde(default)]
     pub archived: Vec<VerifyingKey>,
+    /// Per-device UI feature flags.
+    #[serde(default)]
+    pub client_features: ClientFeatures,
     /// Boards whose contract key changed due to WASM update.
     /// Each entry is (owner_vk, old_contract_key) for boards where the owner
     /// should send an upgrade pointer to the old contract.
@@ -2688,6 +2698,7 @@ impl PartialEq for Boards {
             && self.removed == other.removed
             && self.board_order == other.board_order
             && self.archived == other.archived
+            && self.client_features == other.client_features
             && self.blocked_image_hashes == other.blocked_image_hashes
             && self.owned_images == other.owned_images
     }
@@ -2806,6 +2817,7 @@ impl Boards {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3409,6 +3421,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3436,6 +3449,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3490,6 +3504,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3534,6 +3549,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3593,6 +3609,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3656,6 +3673,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3736,6 +3754,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3884,6 +3903,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3898,6 +3918,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -3934,6 +3955,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -4089,6 +4111,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -4127,6 +4150,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -4177,6 +4201,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -4223,6 +4248,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -4363,6 +4389,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: Vec::new(),
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -4412,6 +4439,7 @@ mod tests {
                 removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
                 migrated_boards: vec![],
                 blocked_image_hashes: Vec::new(),
                 auto_renew_images: false,
@@ -4617,6 +4645,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: vec![],
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,
@@ -4849,6 +4878,7 @@ mod tests {
             removed: Vec::new(),
             board_order: Vec::new(),
             archived: Vec::new(),
+            client_features: ClientFeatures::default(),
             migrated_boards: vec![],
             blocked_image_hashes: Vec::new(),
             auto_renew_images: false,

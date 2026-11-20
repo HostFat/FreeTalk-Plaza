@@ -6,7 +6,6 @@ use crate::components::app::{
 use crate::util::avatar::get_avatar;
 use crate::util::ecies::unseal_bytes_with_secrets;
 use crate::util::images::{request_image, ImageStatus, IMAGES};
-use crate::util::markdown::text_to_html;
 use crate::util::member_id_to_color;
 use crate::util::messaging::{prepare_message, publish_prepared, ReplyContext};
 use crate::util::{format_utc_as_full_datetime, format_utc_as_local_time};
@@ -1942,6 +1941,10 @@ fn MessageContentDisplay(
     title_text: String,
     content_html: String,
     content_text: String,
+    #[props(default)]
+    member_names: HashMap<MemberId, String>,
+    #[props(default)]
+    self_member_id: Option<MemberId>,
     edited: bool,
     #[props(default)]
     history: Vec<EditVersion>,
@@ -1991,11 +1994,19 @@ fn MessageContentDisplay(
     };
 
     // Truncate content for non-expanded card views (Normal size = PostsView cards)
+    let mention_directory = crate::util::mentions::MentionDirectory::from_names(
+        member_names
+            .iter()
+            .map(|(id, name)| (*id, name.clone())),
+    );
     let (display_content_html, content_truncated) = if !expanded {
-        // For truncation, work with plain text then convert back to HTML
+        // For truncation, work with plain text then render it with mentions.
         let (truncated_text, was_truncated) = truncate_content(&content_text, 8, 512);
         if was_truncated {
-            (text_to_html(&truncated_text), true)
+            (
+                mention_directory.render_html(&truncated_text, self_member_id),
+                true,
+            )
         } else {
             (content_html.clone(), false)
         }
@@ -2021,7 +2032,7 @@ fn MessageContentDisplay(
                             div {
                                 class: "{content_class}",
                                 dir: "auto",
-                                dangerous_inner_html: "{text_to_html(&text)}"
+                                dangerous_inner_html: "{mention_directory.render_html(&text, self_member_id)}"
                             }
                         },
                         crate::util::image_tags::Segment::Image { index, align } => {
@@ -2632,7 +2643,7 @@ fn ActionButtons(
                     class: if matches!(size, MessageSize::Compact) { "text-xs text-text-muted hover:text-text px-1" } else { "text-sm text-text-muted hover:text-text px-2" },
                     onclick: {
                         let title = title_text.clone();
-                        let text = content_text.clone();
+                        let text = crate::util::mentions::readable_mentions(&content_text);
                         move |_| {
                             edit_title.set(title.clone());
                             edit_text.set(text.clone());
@@ -2909,6 +2920,8 @@ pub fn MessageCard(
                                 title_text: title_text.clone(),
                                 content_html: content_html.clone(),
                                 content_text: content_text.clone(),
+                                member_names: member_names.clone(),
+                                self_member_id: Some(self_member_id),
                                 edited: edited,
                                 history: msg.edit_history.clone(),
                                 size: size,
@@ -3105,6 +3118,8 @@ pub fn MessageCard(
                                         title_text: title_text.clone(),
                                         content_html: content_html.clone(),
                                         content_text: content_text.clone(),
+                                        member_names: member_names.clone(),
+                                        self_member_id: Some(self_member_id),
                                         edited: edited,
                                         history: msg.edit_history.clone(),
                                         size: size,

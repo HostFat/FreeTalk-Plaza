@@ -501,6 +501,20 @@ pub fn AboutModal() -> Element {
                         },
                         "Copy details"
                     }
+                    label { class: "flex items-center gap-2 text-xs text-text",
+                        input {
+                            r#type: "checkbox",
+                            checked: BOARDS.read().client_features.show_member_ids,
+                            onchange: move |event| {
+                                let show = event.checked();
+                                BOARDS.with_mut(|boards| {
+                                    boards.client_features.show_member_ids = show;
+                                });
+                                persist_profiles();
+                            },
+                        }
+                        "Show member IDs in the member list"
+                    }
                     button {
                         class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg transition-colors",
                         title: "Test only: hides owner and admin controls in this tab until reload",
