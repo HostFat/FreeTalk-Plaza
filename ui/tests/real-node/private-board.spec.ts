@@ -4,6 +4,27 @@ import { expect, test } from "@playwright/test";
 //   $env:PLAZA_REAL_NODE_URL = "http://127.0.0.1:7509/v1/contract/web/<id>/index.html"
 //   npx playwright test -c playwright.real-node.config.ts
 const BASE = process.env.PLAZA_REAL_NODE_URL ?? "";
+async function gotoRoute(
+  page: import("@playwright/test").Page,
+  hash: string,
+) {
+  const url = new URL(BASE);
+  url.searchParams.set("nav", Date.now().toString());
+  url.hash = hash;
+  await page.goto(url.toString());
+}
+
+const PIXEL_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
+
+async function ensureOwner(page: import("@playwright/test").Page) {
+  const app = page.frameLocator("iframe");
+  if (!(await app.getByRole("button", { name: /Manage/ }).count())) {
+    await switchToProfile(page, "OwnerP");
+  }
+}
 const BOARD_KEY = "294pw6U6MMPTiMCAWTgEbj4xv5ZQ7JgXLuhsWxoRk3wf";
 async function switchToProfile(
   page: import("@playwright/test").Page,
@@ -184,6 +205,74 @@ test("a valid invite opens the join and a new identity joins", async ({
 // The first post of an identity that joined through a reusable link is still
 // lost after a reload: the local message is accepted optimistically but the
 // membership + message delta does not survive. Keep the reproduction here.
+test("an image uploads and survives a reload", async ({ page }) => {
+  await page.goto(`${BASE}#/board/${BOARD_KEY}`);
+  const app = page.frameLocator("iframe");
+  await app.getByText("P480Private").first().waitFor({ timeout: 30_000 });
+  await ensureOwner(page);
+
+  await app.getByRole("heading", { name: "General" }).click();
+  await app.getByRole("button", { name: /New Topic/ }).first().click();
+  const title = `Image test ${Date.now()}`;
+  await app.getByPlaceholder("Add a title...").fill(title);
+  await app.locator("#message-input").fill("A pixel image.");
+  await app.locator("#image-file-input-test").setInputFiles({
+    name: "pixel.png",
+    mimeType: "image/png",
+    buffer: PIXEL_PNG,
+  });
+
+  await expect(
+    app.getByText("pixel.png", { exact: false }).first(),
+  ).toBeVisible({ timeout: 30_000 });
+  const send = app.getByRole("button", { name: /Send Topic/ });
+  await expect(send).toBeEnabled({ timeout: 60_000 });
+  await send.click();
+  await expect(
+    app.getByText(title, { exact: true }).first(),
+  ).toBeVisible({ timeout: 30_000 });
+
+  await page.reload();
+  await expect(
+    app.getByText(title, { exact: true }).first(),
+  ).toBeVisible({ timeout: 30_000 });
+});
+
+test.fixme("a hidden topic is restored from the trash", async ({ page }) => {
+  await page.goto(`${BASE}#/board/${BOARD_KEY}`);
+  const app = page.frameLocator("iframe");
+  await app.getByText("P480Private").first().waitFor({ timeout: 30_000 });
+  await ensureOwner(page);
+
+  await app.getByRole("heading", { name: "General" }).click();
+  await app.getByRole("button", { name: /New Topic/ }).first().click();
+  const title = `Trash test ${Date.now()}`;
+  await app.getByPlaceholder("Add a title...").fill(title);
+  await app.locator("#message-input").fill("This topic is hidden and restored.");
+  await app.getByRole("button", { name: /Send Topic/ }).click();
+  await app.getByText(title, { exact: true }).first().click();
+
+  page.once("dialog", (dialog) => dialog.accept("severe test hide"));
+  await app.getByRole("button", { name: "Hide" }).click();
+  await page.waitForTimeout(1_000);
+
+  await gotoRoute(page, `/board/${BOARD_KEY}`);
+  await app.getByText("P480Private").first().waitFor({ timeout: 30_000 });
+  await ensureOwner(page);
+  await gotoRoute(page, `/board/${BOARD_KEY}/admin/trash`);
+  await app.getByText("Trash", { exact: true }).first().waitFor({
+    timeout: 30_000,
+  });
+  await app.getByRole("button", { name: "Restore" }).first().click();
+  await page.waitForTimeout(1_000);
+
+  await gotoRoute(page, `/board/${BOARD_KEY}`);
+  await app.getByRole("heading", { name: "General" }).click();
+  await expect(
+    app.getByText(title, { exact: true }).first(),
+  ).toBeVisible({ timeout: 30_000 });
+});
+
 test("an invited identity's first post survives a reload", async ({ page }) => {
   const invite = await createInviteLink(page);
   const joinUrl = new URL(invite);
