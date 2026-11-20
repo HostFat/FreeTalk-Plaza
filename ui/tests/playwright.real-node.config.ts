@@ -7,7 +7,7 @@ import { defineConfig, devices } from "@playwright/test";
 //   npx playwright test -c playwright.real-node.config.ts
 export default defineConfig({
   testDir: "./real-node",
-  timeout: 90_000,
+  timeout: 180_000,
   retries: 0,
   // All tests share one node and one delegate store.
   workers: 1,

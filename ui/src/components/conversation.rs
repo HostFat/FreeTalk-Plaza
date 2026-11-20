@@ -2534,6 +2534,8 @@ fn ActionButtons(
     edit_title: Signal<String>,
     edit_text: Signal<String>,
     is_hovered: Signal<bool>,
+    #[props(default)]
+    extra_visible: bool,
     on_react: Option<EventHandler<(MessageId, String)>>,
     on_reply: Option<EventHandler<ReplyContext>>,
     on_edit: Option<EventHandler<(MessageId, String, String)>>,
@@ -2552,7 +2554,7 @@ fn ActionButtons(
         || ((is_self || can_moderate || can_delete)
             && (on_edit.is_some() || on_request_delete.is_some()));
 
-    if !has_actions || !*is_hovered.read() {
+    if !has_actions || (!*is_hovered.read() && !extra_visible) {
         return rsx! {};
     }
 
@@ -2781,6 +2783,7 @@ pub fn MessageCard(
     let edit_title = use_signal(String::new);
     let edit_text = use_signal(String::new);
     let mut is_hovered = use_signal(|| false);
+    let mut touch_actions = use_signal(|| false);
 
     let msg_id = msg.message_id.clone();
     let pending = crate::components::app::PENDING_POSTS
@@ -2963,6 +2966,16 @@ pub fn MessageCard(
                             }
                         }
 
+                        // Touch users have no hover: a visible trigger opens
+                        // the same action menu.
+                        button {
+                            r#type: "button",
+                            class: "md:hidden text-text-muted hover:text-accent px-2 py-1 text-xl",
+                            aria_label: "Message actions",
+                            onclick: move |_| touch_actions.set(true),
+                            "⋯"
+                        }
+
                         // Action buttons
                         ActionButtons {
                             msg_id: msg_id.clone(),
@@ -2975,6 +2988,7 @@ pub fn MessageCard(
                             edit_title: edit_title,
                             edit_text: edit_text,
                             is_hovered: is_hovered,
+                            extra_visible: touch_actions(),
                             on_react: on_react.clone(),
                             on_reply: on_reply.clone(),
                             on_edit: on_edit.clone(),
@@ -3178,6 +3192,14 @@ pub fn MessageCard(
                                 }
                             }
 
+                            button {
+                                r#type: "button",
+                                class: "md:hidden text-text-muted hover:text-accent px-2 py-1 text-xl",
+                                aria_label: "Message actions",
+                                onclick: move |_| touch_actions.set(true),
+                                "⋯"
+                            }
+
                             // Action buttons
                             ActionButtons {
                                 msg_id: msg_id.clone(),
@@ -3190,6 +3212,7 @@ pub fn MessageCard(
                                 edit_title: edit_title,
                                 edit_text: edit_text,
                                 is_hovered: is_hovered,
+                                extra_visible: touch_actions(),
                                 on_react: on_react.clone(),
                                 on_reply: on_reply.clone(),
                                 on_edit: on_edit.clone(),

@@ -354,6 +354,22 @@ pub fn AboutModal() -> Element {
                                                         })
                                                     });
                                                     if switched {
+                                                        // The delegate signs every message for
+                                                        // this board. Without this update it keeps
+                                                        // the previous profile's key and produces
+                                                        // signatures the contract rejects.
+                                                        if let Some(board_key) = current {
+                                                            let delegate_key = key.clone();
+                                                            wasm_bindgen_futures::spawn_local(
+                                                                async move {
+                                                                    let _ = crate::signing::migrate_signing_key(
+                                                                        board_key.to_bytes(),
+                                                                        &delegate_key,
+                                                                    )
+                                                                    .await;
+                                                                },
+                                                            );
+                                                        }
                                                         persist_and_reload();
                                                     } else {
                                                         crate::components::app::toasts::show_error(

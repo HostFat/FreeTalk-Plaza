@@ -261,139 +261,132 @@ pub async fn migrate_signing_key(board_key: BoardKey, signing_key: &SigningKey) 
     }
 }
 
-/// Sign message bytes with delegate, falling back to local signing if delegate fails.
+/// Pick the delegate signature only when it verifies against the key the
+/// caller will publish. A profile switch or a join updates the key in memory
+/// before the delegate finishes storing it, and a signature from the previous
+/// profile is rejected by the contract.
+fn use_delegate_signature(
+    bytes: &[u8],
+    fallback_key: &SigningKey,
+    result: Result<Signature, String>,
+) -> Signature {
+    match result {
+        Ok(sig)
+            if fallback_key
+                .verifying_key()
+                .verify_strict(bytes, &sig)
+                .is_ok() =>
+        {
+            sig
+        }
+        Ok(_) => {
+            warn!("Delegate signed with a different key; signing with the active profile");
+            fallback_key.sign(bytes)
+        }
+        Err(e) => {
+            warn!("Delegate signing failed, using fallback: {}", e);
+            fallback_key.sign(bytes)
+        }
+    }
+}
+
+/// Sign message bytes with delegate, falling back to local signing if the
+/// delegate fails or returns a signature for another key.
 pub async fn sign_message_with_fallback(
     board_key: BoardKey,
     message_bytes: Vec<u8>,
     fallback_key: &SigningKey,
 ) -> Signature {
-    match sign_message(board_key, message_bytes.clone()).await {
-        Ok(sig) => sig,
-        Err(e) => {
-            warn!("Delegate signing failed, using fallback: {}", e);
-            fallback_key.sign(&message_bytes)
-        }
-    }
+    let result = sign_message(board_key, message_bytes.clone()).await;
+    use_delegate_signature(&message_bytes, fallback_key, result)
 }
 
-/// Sign member bytes with delegate, falling back to local signing if delegate fails.
+/// Sign member bytes with delegate, falling back to local signing if the
+/// delegate fails or returns a signature for another key.
 pub async fn sign_member_with_fallback(
     board_key: BoardKey,
     member_bytes: Vec<u8>,
     fallback_key: &SigningKey,
 ) -> Signature {
-    match sign_member(board_key, member_bytes.clone()).await {
-        Ok(sig) => sig,
-        Err(e) => {
-            warn!("Delegate signing failed, using fallback: {}", e);
-            fallback_key.sign(&member_bytes)
-        }
-    }
+    let result = sign_member(board_key, member_bytes.clone()).await;
+    use_delegate_signature(&member_bytes, fallback_key, result)
 }
 
-/// Sign ban bytes with delegate, falling back to local signing if delegate fails.
+/// Sign ban bytes with delegate, falling back to local signing if the
+/// delegate fails or returns a signature for another key.
 pub async fn sign_ban_with_fallback(
     board_key: BoardKey,
     ban_bytes: Vec<u8>,
     fallback_key: &SigningKey,
 ) -> Signature {
-    match sign_ban(board_key, ban_bytes.clone()).await {
-        Ok(sig) => sig,
-        Err(e) => {
-            warn!("Delegate signing failed, using fallback: {}", e);
-            fallback_key.sign(&ban_bytes)
-        }
-    }
+    let result = sign_ban(board_key, ban_bytes.clone()).await;
+    use_delegate_signature(&ban_bytes, fallback_key, result)
 }
 
-/// Sign config bytes with delegate, falling back to local signing if delegate fails.
+/// Sign config bytes with delegate, falling back to local signing if the
+/// delegate fails or returns a signature for another key.
 pub async fn sign_config_with_fallback(
     board_key: BoardKey,
     config_bytes: Vec<u8>,
     fallback_key: &SigningKey,
 ) -> Signature {
-    match sign_config(board_key, config_bytes.clone()).await {
-        Ok(sig) => sig,
-        Err(e) => {
-            warn!("Delegate signing failed, using fallback: {}", e);
-            fallback_key.sign(&config_bytes)
-        }
-    }
+    let result = sign_config(board_key, config_bytes.clone()).await;
+    use_delegate_signature(&config_bytes, fallback_key, result)
 }
 
-/// Sign member info bytes with delegate, falling back to local signing if delegate fails.
+/// Sign member info bytes with delegate, falling back to local signing if the
+/// delegate fails or returns a signature for another key.
 pub async fn sign_member_info_with_fallback(
     board_key: BoardKey,
     member_info_bytes: Vec<u8>,
     fallback_key: &SigningKey,
 ) -> Signature {
-    match sign_member_info(board_key, member_info_bytes.clone()).await {
-        Ok(sig) => sig,
-        Err(e) => {
-            warn!("Delegate signing failed, using fallback: {}", e);
-            fallback_key.sign(&member_info_bytes)
-        }
-    }
+    let result = sign_member_info(board_key, member_info_bytes.clone()).await;
+    use_delegate_signature(&member_info_bytes, fallback_key, result)
 }
 
-/// Sign secret version record bytes with delegate, falling back to local signing if delegate fails.
+/// Sign secret version record bytes with delegate, falling back to local
+/// signing if the delegate fails or returns a signature for another key.
 pub async fn sign_secret_version_with_fallback(
     board_key: BoardKey,
     record_bytes: Vec<u8>,
     fallback_key: &SigningKey,
 ) -> Signature {
-    match sign_secret_version(board_key, record_bytes.clone()).await {
-        Ok(sig) => sig,
-        Err(e) => {
-            warn!("Delegate signing failed, using fallback: {}", e);
-            fallback_key.sign(&record_bytes)
-        }
-    }
+    let result = sign_secret_version(board_key, record_bytes.clone()).await;
+    use_delegate_signature(&record_bytes, fallback_key, result)
 }
 
-/// Sign encrypted secret bytes with delegate, falling back to local signing if delegate fails.
+/// Sign encrypted secret bytes with delegate, falling back to local signing if
+/// the delegate fails or returns a signature for another key.
 pub async fn sign_encrypted_secret_with_fallback(
     board_key: BoardKey,
     secret_bytes: Vec<u8>,
     fallback_key: &SigningKey,
 ) -> Signature {
-    match sign_encrypted_secret(board_key, secret_bytes.clone()).await {
-        Ok(sig) => sig,
-        Err(e) => {
-            warn!("Delegate signing failed, using fallback: {}", e);
-            fallback_key.sign(&secret_bytes)
-        }
-    }
+    let result = sign_encrypted_secret(board_key, secret_bytes.clone()).await;
+    use_delegate_signature(&secret_bytes, fallback_key, result)
 }
 
-/// Sign upgrade bytes with delegate, falling back to local signing if delegate fails.
+/// Sign upgrade bytes with delegate, falling back to local signing if the
+/// delegate fails or returns a signature for another key.
 pub async fn sign_upgrade_with_fallback(
     board_key: BoardKey,
     upgrade_bytes: Vec<u8>,
     fallback_key: &SigningKey,
 ) -> Signature {
-    match sign_upgrade(board_key, upgrade_bytes.clone()).await {
-        Ok(sig) => sig,
-        Err(e) => {
-            warn!("Delegate signing failed, using fallback: {}", e);
-            fallback_key.sign(&upgrade_bytes)
-        }
-    }
+    let result = sign_upgrade(board_key, upgrade_bytes.clone()).await;
+    use_delegate_signature(&upgrade_bytes, fallback_key, result)
 }
 
-/// Sign admin bytes with delegate, falling back to local signing if delegate fails.
+/// Sign admin bytes with delegate, falling back to local signing if the
+/// delegate fails or returns a signature for another key.
 pub async fn sign_admin_with_fallback(
     board_key: BoardKey,
     admin_bytes: Vec<u8>,
     fallback_key: &SigningKey,
 ) -> Signature {
-    match sign_admin(board_key, admin_bytes.clone()).await {
-        Ok(sig) => sig,
-        Err(e) => {
-            warn!("Delegate signing failed, using fallback: {}", e);
-            fallback_key.sign(&admin_bytes)
-        }
-    }
+    let result = sign_admin(board_key, admin_bytes.clone()).await;
+    use_delegate_signature(&admin_bytes, fallback_key, result)
 }
 
 /// Remove messages whose signatures cannot be verified against known members.

@@ -3,7 +3,19 @@ import { expect, test } from "@playwright/test";
 // Local-only integration checks. Run with:
 //   $env:PLAZA_REAL_NODE_URL = "http://127.0.0.1:7509/v1/contract/web/<id>/index.html"
 //   npx playwright test -c playwright.real-node.config.ts
+//
+// The suite provisions its own boards: it clears the local delegate store and
+// creates a private board plus a second board for archive/order checks. This
+// keeps every run independent of the data left by earlier runs.
 const BASE = process.env.PLAZA_REAL_NODE_URL ?? "";
+const MAIN_BOARD = "P480Private";
+const SECOND_BOARD = "InviteTest";
+const OWNER = "OwnerP";
+// A valid key that is never stored on the node; the board gate offers "Reset
+// local data" for it.
+const RESET_KEY = "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB";
+let boardKey = "";
+
 async function gotoRoute(
   page: import("@playwright/test").Page,
   hash: string,
@@ -19,46 +31,167 @@ const PIXEL_PNG = Buffer.from(
   "base64",
 );
 
+async function appFrame(page: import("@playwright/test").Page) {
+  const frame = page.frames().find((candidate) => candidate !== page.mainFrame());
+  if (!frame) throw new Error("The app iframe is not available");
+  return frame;
+}
+
+async function waitForBoardRoute(page: import("@playwright/test").Page) {
+  let key = "";
+  await expect
+    .poll(
+      async () => {
+        const hash = await (await appFrame(page)).evaluate(() => location.hash);
+        const match = hash.match(/#\/board\/([1-9A-HJ-NP-Za-km-z]+)/);
+        if (match) key = match[1];
+        return Boolean(match);
+      },
+      { timeout: 30_000 },
+    )
+    .toBe(true);
+  return key;
+}
+
+async function createBoard(
+  page: import("@playwright/test").Page,
+  name: string,
+  nickname: string,
+  privateBoard: boolean,
+  useExistingProfile = false,
+) {
+  const app = page.frameLocator("iframe");
+  const trigger = app
+    .locator('div[role="button"]')
+    .filter({
+      has: app.getByText(/Select or Create Board|P480Private|InviteTest/, {
+        exact: true,
+      }),
+    })
+    .first();
+  await trigger.click();
+  await app
+    .getByRole("button", { name: "Create Board", exact: true })
+    .click();
+  await app.getByPlaceholder("Enter board name").fill(name);
+  if (useExistingProfile) {
+    await app.locator("select").first().selectOption({ label: nickname });
+    // The select fills this from the profile, but writing it keeps the test
+    // independent of the event timing.
+    await app.getByPlaceholder("Enter your nickname").fill(nickname);
+  } else {
+    await app.getByPlaceholder("Enter your nickname").fill(nickname);
+  }
+  if (privateBoard) {
+    await app.getByRole("checkbox").check();
+  }
+  await app
+    .getByRole("button", { name: "Create Board", exact: true })
+    .click();
+  const key = await waitForBoardRoute(page);
+  try {
+    await expect(app.getByText(name).first()).toBeVisible({ timeout: 30_000 });
+  } catch (error) {
+    console.log(
+      `board ${name} did not open; body:\n` +
+        (await app.locator("body").innerText()).slice(-1200),
+    );
+    throw error;
+  }
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, {
+    timeout: 60_000,
+  });
+  // The board PUT and the delegate save run in the background.
+  await page.waitForTimeout(6_000);
+  return key;
+}
+
 async function ensureOwner(page: import("@playwright/test").Page) {
   const app = page.frameLocator("iframe");
-  if (!(await app.getByRole("button", { name: /Manage/ }).count())) {
-    await switchToProfile(page, "OwnerP");
+  if (!(await app.locator('span[title="Board Owner"]').count())) {
+    await switchToProfile(page, OWNER);
   }
 }
-const BOARD_KEY = "294pw6U6MMPTiMCAWTgEbj4xv5ZQ7JgXLuhsWxoRk3wf";
+
 async function switchToProfile(
   page: import("@playwright/test").Page,
   name: string,
 ) {
   const app = page.frameLocator("iframe");
-  await app.getByRole("button", { name: /FreeTalk Plaza/ }).click();
-  const row = app
-    .locator(".about-modal .profile-row")
-    .filter({ hasText: name })
-    .first();
-  await row.getByRole("button", { name: "Use on this board" }).click();
-  await page.waitForTimeout(2_000);
-  if (name === "OwnerP") {
-    await expect(
-      app.getByRole("button", { name: /Manage/ }),
-    ).toBeVisible({ timeout: 10_000 });
+  const rows = () =>
+    app
+      .locator(".about-modal .profile-row")
+      .filter({ has: app.getByText(name, { exact: true }) });
+
+  // Several test runs can create profiles with the same nickname. Try each
+  // row until the owner profile (crown title "Board Owner") is active.
+  for (let attempt = 0; attempt < 8; attempt++) {
+    if ((await app.locator(".about-modal").count()) === 0) {
+      await app.getByRole("button", { name: /FreeTalk Plaza/ }).click();
+      await app.locator(".about-modal").waitFor({ timeout: 10_000 });
+    }
+    const count = await rows().count();
+    let tried = false;
+    for (let index = 0; index < count; index++) {
+      const row = rows().nth(index);
+      const button = row.getByRole("button", { name: "Use on this board" });
+      if ((await button.count()) === 0) continue;
+      tried = true;
+      await button.click();
+      try {
+        await expect(
+          app.getByText(/Identity switched|Could not (save|switch)/),
+        ).toBeVisible({ timeout: 60_000 });
+      } catch (error) {
+        const body = await app.locator("body").innerText();
+        console.log("no switch toast; body tail:\n" + body.slice(-1200));
+        throw error;
+      }
+      try {
+        await expect(app.getByText("Identity switched.")).toBeVisible({
+          timeout: 10_000,
+        });
+      } catch {
+        const body = await app.locator("body").innerText();
+        const line =
+          body
+            .split("\n")
+            .find((text) => /Could not (save|switch)/.test(text)) ??
+          body.slice(0, 600);
+        throw new Error(`Profile switch failed: ${line}`);
+      }
+      if (name !== OWNER) return;
+      if (await app.locator('span[title="Board Owner"]').count()) return;
+      // A duplicate nickname that is not the board owner. Let the toast clear
+      // and try the next row.
+      await app
+        .getByText("Identity switched.")
+        .waitFor({ state: "detached", timeout: 15_000 })
+        .catch(() => {});
+      break;
+    }
+    if (!tried) break;
   }
+  throw new Error(`Could not switch to the owner profile ${name}`);
 }
 
 async function createInviteLink(page: import("@playwright/test").Page) {
   const app = page.frameLocator("iframe");
-  await page.goto(`${BASE}#/board/${BOARD_KEY}`);
-  await expect(app.getByText("P480Private").first()).toBeVisible({
+  await page.goto(`${BASE}#/board/${boardKey}`);
+  await expect(app.getByText(MAIN_BOARD).first()).toBeVisible({
     timeout: 30_000,
   });
-  if (!(await app.getByRole("button", { name: /Manage/ }).count())) {
-    await switchToProfile(page, "OwnerP");
+  if (!(await app.locator('span[title="Board Owner"]').count())) {
+    await switchToProfile(page, OWNER);
   }
 
   const linksUrl = new URL(BASE);
   linksUrl.searchParams.set("links", Date.now().toString());
-  linksUrl.hash = `/board/${BOARD_KEY}/admin/links`;
+  linksUrl.hash = `/board/${boardKey}/admin/links`;
   await page.goto(linksUrl.toString());
+  // The route selects the tab, but a reload can land on the default tab while
+  // the board state loads. Clicking it explicitly makes the test independent.
+  await app.getByRole("button", { name: "Invite links" }).click();
   const role = app.getByRole("combobox").first();
   await expect(role).toBeVisible({ timeout: 30_000 });
   await role.selectOption({ label: "Members" });
@@ -75,31 +208,87 @@ async function createInviteLink(page: import("@playwright/test").Page) {
   return value;
 }
 
-test("a private board recovers its key after a reload", async ({ page }) => {
-  await page.goto(`${BASE}#/board/${BOARD_KEY}`);
+test.beforeAll(async ({ browser }) => {
+  const page = await browser.newPage();
+  page.on("dialog", (dialog) => dialog.accept());
   const app = page.frameLocator("iframe");
 
-  await expect(app.getByText("P480Private").first()).toBeVisible({
+  // Clear the delegate store so the run starts from a known state.
+  await gotoRoute(page, `/board/${RESET_KEY}`);
+  const reset = app.getByRole("button", { name: "Reset local data" });
+  await expect(reset).toBeVisible({ timeout: 30_000 });
+  await reset.click();
+  await page.waitForTimeout(2_000);
+  await page.goto(BASE);
+  await expect(app.getByText(/Select or Create Board/).first()).toBeVisible({
     timeout: 30_000,
   });
-  await expect(app.getByText("AutoModP480").first()).toBeVisible({
-    timeout: 20_000,
+
+  boardKey = await createBoard(page, MAIN_BOARD, OWNER, true);
+  await expect(app.getByRole("button", { name: "+ Section" })).toBeVisible({
+    timeout: 30_000,
   });
+  await app.getByRole("button", { name: "+ Section" }).click();
+  await app.getByPlaceholder("Category name").fill("General");
+  await app.getByRole("button", { name: "Create", exact: true }).click();
+  await expect(app.getByRole("heading", { name: "General" })).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, {
+    timeout: 60_000,
+  });
+  await page.waitForTimeout(6_000);
+
+  // Invite links target a role. Create the "Members" role that the join
+  // tests select on the links page.
+  const rolesUrl = new URL(BASE);
+  rolesUrl.searchParams.set("roles", Date.now().toString());
+  rolesUrl.hash = `/board/${boardKey}/admin/roles`;
+  await page.goto(rolesUrl.toString());
+  await app.getByRole("button", { name: "Roles", exact: true }).click();
+  await app.getByPlaceholder("New role name").fill("Members");
+  await app.getByRole("button", { name: "Create", exact: true }).click();
+  await expect(app.getByText("No roles yet.")).toHaveCount(0, {
+    timeout: 30_000,
+  });
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, {
+    timeout: 60_000,
+  });
+  await page.waitForTimeout(6_000);
+
+  await createBoard(page, SECOND_BOARD, OWNER, false, true);
+  await gotoRoute(page, `/board/${boardKey}`);
+  await expect(app.getByText(MAIN_BOARD).first()).toBeVisible({
+    timeout: 30_000,
+  });
+  await page.close();
+});
+
+test("a private board recovers its key after a reload", async ({ page }) => {
+  await page.goto(`${BASE}#/board/${boardKey}`);
+  const app = page.frameLocator("iframe");
+
+  await expect(app.getByText(MAIN_BOARD).first()).toBeVisible({
+    timeout: 30_000,
+  });
+  const general = app.getByRole("heading", { name: "General" });
+  await expect(general).toBeVisible({ timeout: 20_000 });
 
   await page.reload();
-  await expect(app.getByText("P480Private").first()).toBeVisible({
+  await expect(app.getByText(MAIN_BOARD).first()).toBeVisible({
     timeout: 30_000,
   });
   await expect(
     app.getByText("Loading board…", { exact: true }),
   ).toHaveCount(0);
-  await expect(app.getByText("AutoModP480").first()).toBeVisible({
-    timeout: 20_000,
-  });
+  await expect(app.getByText("Board key missing", { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(general).toBeVisible({ timeout: 20_000 });
 });
 
 test("the notification mode survives a reload", async ({ page }) => {
-  await page.goto(`${BASE}#/board/${BOARD_KEY}/notifications`);
+  await page.goto(`${BASE}#/board/${boardKey}/notifications`);
   const app = page.frameLocator("iframe");
   const mode = app.locator("#notification-mode");
   await expect(mode).toBeVisible({ timeout: 30_000 });
@@ -113,9 +302,9 @@ test("the notification mode survives a reload", async ({ page }) => {
 });
 
 test("board archive survives a reload and can be restored", async ({ page }) => {
-  await page.goto(`${BASE}#/board/${BOARD_KEY}`);
+  await page.goto(`${BASE}#/board/${boardKey}`);
   const app = page.frameLocator("iframe");
-  await expect(app.getByText("P480Private").first()).toBeVisible({
+  await expect(app.getByText(MAIN_BOARD).first()).toBeVisible({
     timeout: 30_000,
   });
 
@@ -125,7 +314,7 @@ test("board archive survives a reload and can be restored", async ({ page }) => 
   const row = () =>
     app
       .locator("div.w-full.flex.items-center.gap-2")
-      .filter({ hasText: "InviteTest" })
+      .filter({ hasText: SECOND_BOARD })
       .first();
 
   await openSwitcher();
@@ -134,10 +323,11 @@ test("board archive survives a reload and can be restored", async ({ page }) => 
   }
   await row().getByTitle("Archive board").click();
   await expect(app.getByText("Archived", { exact: true })).toBeVisible();
-  await page.waitForTimeout(3_000);
+  // The archive flag is saved asynchronously; wait for the delegate write.
+  await page.waitForTimeout(5_000);
 
   await page.reload();
-  await expect(app.getByText("P480Private").first()).toBeVisible({
+  await expect(app.getByText(MAIN_BOARD).first()).toBeVisible({
     timeout: 30_000,
   });
   await openSwitcher();
@@ -148,12 +338,15 @@ test("board archive survives a reload and can be restored", async ({ page }) => 
   await expect(row().getByTitle("Restore board")).toBeVisible();
   await row().getByTitle("Restore board").click();
   await expect(row().getByTitle("Restore board")).toHaveCount(0);
+  await expect(app.getByText("Archived", { exact: true })).toHaveCount(0);
+  // Let the restore reach the delegate before the next test reloads.
+  await page.waitForTimeout(5_000);
 });
 
 test("board order survives a reload", async ({ page }) => {
-  await page.goto(`${BASE}#/board/${BOARD_KEY}`);
+  await page.goto(`${BASE}#/board/${boardKey}`);
   const app = page.frameLocator("iframe");
-  await expect(app.getByText("P480Private").first()).toBeVisible({
+  await expect(app.getByText(MAIN_BOARD).first()).toBeVisible({
     timeout: 30_000,
   });
   const rows = () => app.locator("div.w-full.flex.items-center.gap-2");
@@ -161,18 +354,27 @@ test("board order survives a reload", async ({ page }) => {
     rows().evaluateAll((elements) =>
       elements.map((element) => element.innerText.split("\n")[0]),
     );
-  const rowFor = (name: string) =>
-    rows().filter({ hasText: name }).first();
+  const rowFor = (name: string) => rows().filter({ hasText: name }).first();
 
   await app.getByRole("button", { name: /P480Private/ }).first().click();
+  // A previous archive test can leave the second board archived; restore it
+  // before looking for the move controls.
+  const secondRow = rowFor(SECOND_BOARD);
+  if (await secondRow.getByTitle("Restore board").count()) {
+    await secondRow.getByTitle("Restore board").click();
+    await expect(secondRow.getByTitle("Restore board")).toHaveCount(0);
+    await page.waitForTimeout(5_000);
+  }
   const before = await names();
   const moved = before[1];
   await rowFor(moved).getByTitle("Move board up").click();
   expect((await names())[0]).toBe(moved);
-  await page.waitForTimeout(1_500);
+  // The order is saved asynchronously; with many boards the delegate write
+  // can take a few seconds.
+  await page.waitForTimeout(5_000);
 
   await page.reload();
-  await expect(app.getByText("P480Private").first()).toBeVisible({
+  await expect(app.getByText(MAIN_BOARD).first()).toBeVisible({
     timeout: 30_000,
   });
   await app.getByRole("button", { name: /P480Private/ }).first().click();
@@ -197,18 +399,15 @@ test("a valid invite opens the join and a new identity joins", async ({
   await app.getByPlaceholder("Your nickname").fill("RealNodeGuest");
   await app.getByRole("button", { name: "Join" }).click();
 
-  await expect(app.getByText("P480Private").first()).toBeVisible({
+  await expect(app.getByText(MAIN_BOARD).first()).toBeVisible({
     timeout: 30_000,
   });
 });
 
-// The first post of an identity that joined through a reusable link is still
-// lost after a reload: the local message is accepted optimistically but the
-// membership + message delta does not survive. Keep the reproduction here.
 test("an image uploads and survives a reload", async ({ page }) => {
-  await page.goto(`${BASE}#/board/${BOARD_KEY}`);
+  await page.goto(`${BASE}#/board/${boardKey}`);
   const app = page.frameLocator("iframe");
-  await app.getByText("P480Private").first().waitFor({ timeout: 30_000 });
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
   await ensureOwner(page);
 
   await app.getByRole("heading", { name: "General" }).click();
@@ -238,29 +437,13 @@ test("an image uploads and survives a reload", async ({ page }) => {
   ).toBeVisible({ timeout: 30_000 });
 });
 
-test.fixme("a hidden topic is restored from the trash", async ({ page }) => {
-  // A fresh board makes the current profile the owner, so the trash flow does
-  // not depend on which profile was active in an earlier test.
-  const boardName = `Trash board ${Date.now()}`;
-  await page.goto(`${BASE}#/`);
+test("a hidden topic is restored from the trash", async ({ page }) => {
+  await page.goto(`${BASE}#/board/${boardKey}`);
   const app = page.frameLocator("iframe");
-  await app.getByText("Select or Create Board", { exact: true }).click();
-  await app.getByRole("button", { name: "Create Board", exact: true }).click();
-  await app.getByPlaceholder("Enter board name").fill(boardName);
-  await app.getByPlaceholder("Enter your nickname").fill("TrashOwner");
-  await app.getByRole("checkbox", { name: "Private board" }).check();
-  await app.getByRole("button", { name: "Create Board" }).last().click();
-  await app.getByText(boardName, { exact: true }).first().waitFor({
-    timeout: 30_000,
-  });
-  const boardKey = new URL(page.url()).hash.match(/\/board\/([^/]+)/)?.[1];
-  expect(boardKey).toBeTruthy();
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await ensureOwner(page);
 
-  await app.getByRole("button", { name: /\+ Section/ }).first().click();
-  await app.locator("input").first().fill("General");
-  await app.getByRole("button", { name: "Create Section" }).click();
   await app.getByRole("heading", { name: "General" }).click();
-
   await app.getByRole("button", { name: /New Topic/ }).first().click();
   const title = `Trash test ${Date.now()}`;
   await app.getByPlaceholder("Add a title...").fill(title);
@@ -270,22 +453,53 @@ test.fixme("a hidden topic is restored from the trash", async ({ page }) => {
 
   page.once("dialog", (dialog) => dialog.accept("severe test hide"));
   await app.getByRole("button", { name: "Hide" }).click();
-  await page.waitForTimeout(1_000);
+  await expect(app.getByText(title, { exact: true })).toHaveCount(0, {
+    timeout: 30_000,
+  });
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, {
+    timeout: 30_000,
+  });
 
-  await gotoRoute(page, `/board/${boardKey}/admin/trash`);
+  // Stay in the same page: Manage is the owner UI and preserves the profile.
+  await app.getByRole("button", { name: /Manage/ }).click();
+  await app.getByRole("button", { name: "Trash", exact: true }).click();
   await app.getByText("Trash", { exact: true }).first().waitFor({
     timeout: 30_000,
   });
-  await app.getByRole("button", { name: "Restore" }).first().click();
-  await page.waitForTimeout(1_000);
+
+  // The trash shows message ids, not titles. The hidden topic is the newest
+  // entry, so its preview must contain the body before we restore it.
+  const newest = app
+    .locator("div.border.border-border.rounded-lg")
+    .filter({ has: app.getByRole("button", { name: "Restore" }) })
+    .first();
+  await newest.getByRole("button", { name: "Preview" }).click();
+  await expect(
+    app.getByText("This topic is hidden and restored.").first(),
+  ).toBeVisible({ timeout: 20_000 });
+  await app.getByRole("button", { name: "Close" }).click();
+  await newest.getByRole("button", { name: "Restore" }).click();
+  await expect(app.getByText(/Topic restored/)).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, {
+    timeout: 30_000,
+  });
 
   await gotoRoute(page, `/board/${boardKey}`);
+  await page.reload();
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await app.getByRole("heading", { name: "General" }).click();
   await expect(
     app.getByText(title, { exact: true }).first(),
   ).toBeVisible({ timeout: 30_000 });
 });
 
 test("an invited identity's first post survives a reload", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
   const invite = await createInviteLink(page);
   const joinUrl = new URL(invite);
   joinUrl.searchParams.set("guest", Date.now().toString());
@@ -296,7 +510,7 @@ test("an invited identity's first post survives a reload", async ({ page }) => {
   ).toBeVisible({ timeout: 30_000 });
   await app.getByPlaceholder("Your nickname").fill("RealNodeGuest");
   await app.getByRole("button", { name: "Join" }).click();
-  await expect(app.getByText("P480Private").first()).toBeVisible({
+  await expect(app.getByText(MAIN_BOARD).first()).toBeVisible({
     timeout: 30_000,
   });
 
@@ -307,10 +521,23 @@ test("an invited identity's first post survives a reload", async ({ page }) => {
   await app
     .locator("#message-input")
     .fill("Posted by the invited identity after joining.");
-  await app.getByRole("button", { name: /Send Topic/ }).click();
-  await expect(
-    app.getByText(title, { exact: true }).first(),
-  ).toBeVisible({ timeout: 20_000 });
+  const send = app.getByRole("button", { name: /Send Topic/ });
+  await expect(send).toBeEnabled({ timeout: 60_000 });
+  await send.click();
+  try {
+    await expect(
+      app.getByText(title, { exact: true }).first(),
+    ).toBeVisible({ timeout: 20_000 });
+  } catch (error) {
+    const body = await app.locator("body").innerText();
+    console.log(
+      "console errors before the first post disappeared:\n" +
+        consoleErrors.slice(-20).join("\n") +
+        "\n--- body ---\n" +
+        body.slice(-1500),
+    );
+    throw error;
+  }
 
   // Capture the exact guest profile row (nickname plus short id); many test
   // runs leave profiles with the same nickname.
@@ -330,16 +557,16 @@ test("an invited identity's first post survives a reload", async ({ page }) => {
   await app.getByRole("button", { name: "Close" }).click();
 
   // The owner reload seals the board secret to the new member.
-  await switchToProfile(page, "OwnerP");
+  await switchToProfile(page, OWNER);
   await page.reload();
-  await page.goto(`${BASE}#/board/${BOARD_KEY}`);
-  await app.getByText("P480Private").first().waitFor({ timeout: 30_000 });
-  await page.waitForTimeout(5_000);
+  await page.goto(`${BASE}#/board/${boardKey}`);
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await page.waitForTimeout(10_000);
 
   // Return to the invited identity and reload.
   await switchToProfile(page, guestId);
   await page.reload();
-  await page.goto(`${BASE}#/board/${BOARD_KEY}`);
+  await page.goto(`${BASE}#/board/${boardKey}`);
   await expect(
     app.getByText(title, { exact: true }).first(),
   ).toBeVisible({ timeout: 30_000 });
