@@ -177,12 +177,22 @@ test("a valid invite opens the join and a new identity joins", async ({
 // membership + message delta does not survive. Keep the reproduction here.
 test.fixme("an invited identity's first post survives a reload", async ({
   page,
+  browser,
 }) => {
   const invite = await createInviteLink(page);
+  // Keep the owner page open so it can seal the board secret for the guest.
+  await page.goto(`${BASE}#/board/${BOARD_KEY}`);
+  const ownerApp = page.frameLocator("iframe");
+  await expect(ownerApp.getByText("P480Private").first()).toBeVisible({
+    timeout: 30_000,
+  });
+
+  const guestContext = await browser.newContext();
+  const guestPage = await guestContext.newPage();
   const joinUrl = new URL(invite);
   joinUrl.searchParams.set("guest", Date.now().toString());
-  await page.goto(joinUrl.toString());
-  const app = page.frameLocator("iframe");
+  await guestPage.goto(joinUrl.toString());
+  const app = guestPage.frameLocator("iframe");
   await expect(
     app.getByRole("heading", { name: "Join this board" }),
   ).toBeVisible({ timeout: 30_000 });
@@ -203,10 +213,21 @@ test.fixme("an invited identity's first post survives a reload", async ({
   await expect(
     app.getByText(title, { exact: true }).first(),
   ).toBeVisible({ timeout: 20_000 });
-  await page.waitForTimeout(10_000);
-
+  await page.waitForTimeout(3_000);
+  // Reload the owner client: its merge generates the missing board secret
+  // for the new member and publishes it.
   await page.reload();
+  await expect(ownerApp.getByText("P480Private").first()).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(
+    ownerApp.getByText(title, { exact: true }).first(),
+  ).toBeVisible({ timeout: 30_000 });
+  await page.waitForTimeout(3_000);
+
+  await guestPage.reload();
   await expect(
     app.getByText(title, { exact: true }).first(),
   ).toBeVisible({ timeout: 30_000 });
+  await guestContext.close();
 });

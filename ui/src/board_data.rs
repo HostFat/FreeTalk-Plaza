@@ -2535,6 +2535,36 @@ impl BoardData {
 
     /// Generate encrypted secrets for members who don't have them yet
     /// Returns a SecretsDelta if secrets were generated, None otherwise
+    /// Owner-side: seal the board secret for every member that has no blob
+    /// yet (new joiners, re-added members) and apply the delta locally.
+    /// Returns true when the board state changed and should be published.
+    pub fn distribute_missing_board_secrets(&mut self) -> bool {
+        if !self.is_private() {
+            return false;
+        }
+        self.ensure_pq_key();
+        let mut changed = self.generate_missing_pq_secrets();
+        if let Some(delta) = self.generate_missing_member_secrets() {
+            let before = self.board_state.clone();
+            let params = ChatBoardParametersV1 { owner: self.owner_vk };
+            if self
+                .board_state
+                .apply_delta(
+                    &before,
+                    &params,
+                    &Some(plaza_core::board_state::ChatBoardStateV1Delta {
+                        secrets: Some(delta),
+                        ..Default::default()
+                    }),
+                )
+                .is_ok()
+            {
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn generate_missing_member_secrets(
         &self,
     ) -> Option<plaza_core::board_state::secret::SecretsDelta> {

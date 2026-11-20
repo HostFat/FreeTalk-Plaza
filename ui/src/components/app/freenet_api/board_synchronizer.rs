@@ -163,6 +163,15 @@ impl BoardSynchronizer {
                         // Same for category secrets: the owner or a member of a
                         // key-distribution role hands the key to members who
                         // were added to an allowed role.
+                        // The owner seals the board secret to every member that
+                        // joined since the last state, so an invitee can read
+                        // the private board after a reload.
+                        if board_data.is_current_owner()
+                            && board_data.distribute_missing_board_secrets()
+                        {
+                            distributed_secrets = true;
+                        }
+
                         if board_data.can_distribute_category_keys() {
                             if let Some(category_delta) =
                                 board_data.generate_missing_category_secrets()
@@ -800,6 +809,15 @@ impl BoardSynchronizer {
                         // The owner, or a role allowed to distribute keys,
                         // hands category keys to members who joined since the
                         // last distribution, then pushes the state.
+                        // The owner seals the board secret to every member that
+                        // joined since the last state, so an invitee can read
+                        // the private board after a reload.
+                        if board_data.is_current_owner()
+                            && board_data.distribute_missing_board_secrets()
+                        {
+                            distributed_secrets = true;
+                        }
+
                         if board_data.can_distribute_category_keys() {
                             if let Some(category_delta) =
                                 board_data.generate_missing_category_secrets()
