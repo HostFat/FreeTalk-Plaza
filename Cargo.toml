@@ -5,6 +5,8 @@ members = [
     "plaza-delegate",
     "plaza-blob-core",
     "plaza-blob",
+    "dm-core",
+    "dm-contract",
     "ui",
     "cli",
 ]
@@ -45,6 +47,7 @@ futures-timer = "3.0.2"
 # Internal dependencies
 plaza-core = { path = "common", package = "plaza-core", default-features = true }
 plaza-blob-core = { path = "plaza-blob-core", package = "plaza-blob-core" }
+plaza-dm-core = { path = "dm-core", package = "plaza-dm-core" }
 
 # Freenet dependencies
 freenet-scaffold = "0.2.2"

@@ -3,6 +3,15 @@
 Stato: specifica di design, precedente al codice. Perimetro v1: conversazioni
 1:1. Nessuna chat di gruppo.
 
+Implementazione attuale:
+
+- `dm-core` (crate `plaza-dm-core`): stato, delta, validazione, merge, cap e
+  test di convergenza.
+- `dm-contract` (crate `plaza-dm-contract`): entry point Freenet, validate,
+  update, summarize, delta; wasm compilabile.
+- Non ancora implementati: cifratura reale, sigilli X25519/ML-KEM, delegate,
+  indice locale, UI e deploy.
+
 Documenti collegati:
 
 - `docs/plaza-dm-design.md` — architettura e roadmap.
