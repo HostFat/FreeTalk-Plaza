@@ -3,6 +3,12 @@
 Stato: bozza di design. Nessun codice ancora. Le decisioni in tabella sono
 confermate; le voci “aperto” richiedono una scelta prima dell'implementazione.
 
+Documenti collegati:
+
+- `docs/plaza-dm-contract-spec.md` — stato, delta, validazione, inviti, generazioni.
+- `docs/plaza-dm-threat-model.md` — asset, attori, minacce, mitigazioni.
+- `docs/email-mail-contract-vnext.md` — modifiche email 5+7 raggruppate.
+
 ## Obiettivo
 
 Messaggistica privata nativa di FreeTalk Plaza, separata dal contratto delle
@@ -10,8 +16,8 @@ board e scalabile in modo orizzontale fino a migliaia di utenti. Ogni
 conversazione è un contratto indipendente; il client carica solo le
 conversazioni attive.
 
-Fuori ambito nella v1: videochiamate, presenza, typing indicator, push a app
-chiusa, moderazione condivisa tra conversazioni.
+Fuori ambito: chat di gruppo, videochiamate, presenza, typing indicator, push
+a app chiusa, moderazione condivisa tra conversazioni.
 
 ## Decisioni confermate
 
@@ -21,7 +27,7 @@ chiusa, moderazione condivisa tra conversazioni.
 | Identità DM | Derivata dal profilo con domain separation, distinta dalle chiavi delle board |
 | Multi-dispositivo | Modello dati device-ready; UI con un dispositivo nella v1 |
 | Scoperta | Invito con link/QR nella v1; mailbox e pulsante “Message” nella v2 |
-| Gruppi | Solo 1:1 nella v1; contratto pronto per la membership multipla |
+| Gruppi | Non previsti: solo conversazioni 1:1 |
 | Allegati | Testo nella v1; blob cifrato nella v2 |
 | Forward secrecy | Chiave di conversazione con rotazione; ratchet per messaggio in una fase successiva |
 | Retention | 500 messaggi per contratto, poi nuova generazione |
@@ -142,25 +148,24 @@ DmStateV1 {
 - Nessuna chiave privata nel browser storage: il delegate custodisce le chiavi.
 - Blocco e segnalazione locali nella v1; segnalazioni condivise solo con un
   contratto separato, in una fase successiva.
-- Threat model da scrivere prima del codice: compromissione di un dispositivo,
-  replay, spam, metadata leakage, perdita del delegate, revoca.
+- Threat model in `docs/plaza-dm-threat-model.md`.
 
 ## Roadmap
 
-1. **Design e threat model** (questo documento + revisione).
+1. **Specifica e threat model** (`plaza-dm-contract-spec.md`,
+   `plaza-dm-threat-model.md`).
 2. **v1**: contratto `plaza-dm`, 1:1 con invito, testo, indice locale,
    notifiche, backup.
 3. **v2**: `plaza-dm-profile`, mailbox, pulsante “Message”, blocco,
    allegati cifrati.
-4. **v3**: gruppi, multi-dispositivo completo, ricerca locale, retention
+4. **v3**: multi-dispositivo completo, ricerca locale, retention
    configurabile.
 5. **Test di scala**: 10.000 identità simulate, 100.000 conversazioni,
    misura di sottoscrizioni, update, dimensione stato e recupero cronologia.
 
 ## Aperto
 
-- Numero massimo di membri per gruppo.
-- Dimensione massima di un messaggio e degli allegati.
+- Dimensione massima degli allegati (v2).
 - Durata della finestra locale e politica di backup della cronologia.
 - Se la mailbox debba richiedere una proof-of-work, una board comune o
   entrambe.
