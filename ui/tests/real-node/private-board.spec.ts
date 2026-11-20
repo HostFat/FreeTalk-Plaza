@@ -558,11 +558,10 @@ test("a DM conversation contract is created and a message round-trips", async ({
   });
 });
 
-// The join implementation uses the delegate's persisted active identity and
-// an explicit identity passed through join/accept. The automated two-identity
-// test still receives a stale cached app bundle on the standalone join route,
-// so it cannot assert the 2-member chat; keep it fixme until the bundle cache
-// is deterministic in the harness.
+// Delegate/core two-identity tests cover sealing, member addition and
+// message encryption. The browser join test still sees a stale app bundle on
+// the join route in the harness, so it stays fixme until the shell serves a
+// deterministic bundle for in-app route changes.
 test.fixme("an invited DM identity joins and sends a message", async ({ page }) => {
   const joinLogs: string[] = [];
   page.on("console", (message) => joinLogs.push(message.text()));
@@ -600,7 +599,14 @@ test.fixme("an invited DM identity joins and sends a message", async ({ page }) 
   await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
   await switchToProfile(page, "DMGuest");
 
-  await page.goto(inviteLink);
+  // Navigate inside the running app: a full page load of the join URL can
+  // serve a previously cached app bundle, while the in-app route always uses
+  // the current build and the profile just selected.
+  const joinHash = new URL(inviteLink).hash;
+  const frame = await appFrame(page);
+  await frame.evaluate((hash) => {
+    window.location.hash = hash;
+  }, joinHash);
   try {
     await expect(
       app.getByRole("button", { name: "Open conversation" }),
