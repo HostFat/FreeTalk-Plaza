@@ -196,8 +196,11 @@ test.fixme("an invited identity's first post survives a reload", async ({
   await expect(
     app.getByText(title, { exact: true }).first(),
   ).toBeVisible({ timeout: 20_000 });
-  // Give the membership + first message delta time to reach the node.
-  await page.waitForTimeout(3_000);
+  await page.waitForTimeout(1_500);
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, {
+    timeout: 30_000,
+  });
+  await page.waitForTimeout(1_500);
 
   await page.reload();
   await expect(
