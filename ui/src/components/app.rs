@@ -563,6 +563,18 @@ fn DmJoin(
     key_version: String,
     key_b58: String,
 ) -> Element {
+    let joining_profile = {
+        let boards = BOARDS.read();
+        let current = CURRENT_BOARD
+            .read()
+            .owner_key
+            .or(boards.current_board_key);
+        current
+            .and_then(|key| boards.map.get(&key))
+            .and_then(|board| boards.profile_for_board(board))
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| "no active profile".to_string())
+    };
     let mut status = use_signal(|| None::<String>);
     let mut error = use_signal(|| None::<String>);
     let mut started = use_signal(|| false);
@@ -626,6 +638,7 @@ fn DmJoin(
     rsx! {
         div { class: "flex-1 flex flex-col items-center justify-center px-6 py-10 gap-3 text-center",
             h1 { class: "text-2xl font-semibold text-text", "Direct message invite" }
+            p { class: "text-xs text-text-muted", "Profile: {joining_profile}" }
             if let Some(message) = status.read().as_ref() {
                 p { class: "text-sm text-text-muted", "{message}" }
             }
