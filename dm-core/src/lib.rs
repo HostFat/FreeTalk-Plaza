@@ -19,6 +19,7 @@ pub const MAX_INVITES: usize = 8;
 pub const MAX_MESSAGES: usize = 500;
 pub const MAX_MESSAGE_BYTES: usize = 8192;
 pub const MAX_KEY_CIPHERTEXT_BYTES: usize = 4096;
+pub const MAX_KEM_CIPHERTEXT_BYTES: usize = 2048;
 pub const MAX_KEM_EK_BYTES: usize = 2048;
 pub const MAX_STATE_BYTES: usize = 1_048_576;
 pub const MAX_NAME_BYTES: usize = 256;
@@ -154,6 +155,8 @@ impl Default for DmMetaV1 {
 pub struct DmDevice {
     pub device_id: DmDeviceId,
     pub signing_key: [u8; 32],
+    /// X25519 public key used for the classical half of the hybrid seal.
+    pub x25519_pk: [u8; 32],
     pub kem_ek: Vec<u8>,
     pub created_at: i64,
     pub revoked_at: Option<i64>,
@@ -298,6 +301,11 @@ pub struct SealedDmKey {
     pub member: DmIdentityId,
     pub device: DmDeviceId,
     pub suite: u16,
+    /// Ephemeral X25519 key used for the ECDH half.
+    pub ephemeral_x25519_pk: [u8; 32],
+    /// ML-KEM-768 ciphertext.
+    pub kem_ciphertext: Vec<u8>,
+    /// XChaCha20-Poly1305 ciphertext of the 32-byte conversation key.
     pub ciphertext: Vec<u8>,
     pub nonce: [u8; 24],
     pub sealed_at: i64,
@@ -521,6 +529,7 @@ impl DmStateV1 {
         conversation_id: [u8; 32],
         identity: &SigningKey,
         device: &SigningKey,
+        x25519_pk: [u8; 32],
         kem_ek: Vec<u8>,
         now: i64,
     ) -> Self {
@@ -528,6 +537,7 @@ impl DmStateV1 {
         let device = DmDevice {
             device_id: device_id(device),
             signing_key: device.verifying_key().to_bytes(),
+            x25519_pk,
             kem_ek,
             created_at: now,
             revoked_at: None,
@@ -710,6 +720,11 @@ impl DmStateV1 {
             }
             if record.ciphertext.len() > MAX_KEY_CIPHERTEXT_BYTES {
                 return Err("sealed key is too large".to_string());
+            }
+            if record.kem_ciphertext.is_empty()
+                || record.kem_ciphertext.len() > MAX_KEM_CIPHERTEXT_BYTES
+            {
+                return Err("invalid ML-KEM ciphertext size".to_string());
             }
             let signer_vk = self.device_vk_any(&authorized.signer, record.sealed_at)?;
             authorized.verify(&signer_vk)?;

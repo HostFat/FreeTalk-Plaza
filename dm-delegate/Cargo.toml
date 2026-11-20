@@ -8,6 +8,9 @@ license = "LGPL-3.0"
 ciborium.workspace = true
 serde.workspace = true
 ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
+blake3.workspace = true
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
 ml-kem = { version = "0.3.4", default-features = false }
 freenet-stdlib.workspace = true
 plaza-dm-core.workspace = true

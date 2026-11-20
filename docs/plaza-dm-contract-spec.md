@@ -17,10 +17,14 @@ Implementazione attuale:
   inizializzazione dell'identità dal profilo attivo, creazione del primo
   dispositivo, parser delle risposte nel message loop e reset dal Device
   drawer. Ogni richiesta porta l'`identity` attiva; cambiare profilo aggiunge
-  una voce alla mappa senza perdere le altre. Il sigillo X25519 + ML-KEM
-  end-to-end è il passo successivo.
-- Non ancora implementati: cifratura reale end-to-end, sigilli X25519/ML-KEM,
-  invio/ricezione messaggi, Messages UI e deploy del contratto DM.
+  una voce alla mappa senza perdere le altre.
+- Sigillo ibrido: `DmDevice` include `x25519_pk`; il delegate conserva
+  `x25519_seed` e `kem_seed`, espone `SealConversationKey`,
+  `OpenConversationKey`, `EncryptMessage` e `DecryptMessage`. Il sigillo usa
+  X25519 + ML-KEM-768, KDF BLAKE3 e XChaCha20-Poly1305; i messaggi usano la
+  chiave di conversazione e AAD sui metadati.
+- Non ancora implementati: client del contratto DM (create/get/subscribe/
+  publish), invito e join end-to-end, Messages UI e deploy del contratto DM.
 
 Documenti collegati:
 

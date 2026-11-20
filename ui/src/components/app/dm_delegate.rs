@@ -18,7 +18,10 @@ use futures::future::{select, Either};
 use plaza_dm_core::delegate::{
     DmDelegateEnvelope, DmDelegateRequestMsg, DmDelegateResponseMsg,
 };
-use plaza_dm_core::{DmDevice, DmIdentityId, derive_identity_signing_key};
+use plaza_dm_core::{
+    AuthorizedDmMessage, AuthorizedSealedDmKey, DmDevice, DmIdentityId, SealedDmKey,
+    derive_identity_signing_key,
+};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use std::collections::HashMap;
@@ -160,6 +163,8 @@ pub async fn ensure_identity_and_device() -> Result<(), String> {
 
     let signing = ed25519_dalek::SigningKey::generate(&mut OsRng);
     let signing_seed = signing.to_bytes();
+    let mut x25519_seed = [0u8; 32];
+    OsRng.fill_bytes(&mut x25519_seed);
     let mut kem_seed = vec![0u8; 64];
     OsRng.fill_bytes(&mut kem_seed);
     let created_at = chrono::Utc::now().timestamp_millis();
@@ -167,6 +172,7 @@ pub async fn ensure_identity_and_device() -> Result<(), String> {
         identity,
         label: "This browser".to_string(),
         signing_seed,
+        x25519_seed,
         kem_seed,
         created_at,
     })
@@ -314,6 +320,112 @@ pub fn identity_id_for_active_profile() -> Option<DmIdentityId> {
             .verifying_key()
             .to_bytes()
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn seal_conversation_key(
+    identity: DmIdentityId,
+    sealer_device: [u8; 32],
+    contract_key: [u8; 32],
+    key_version: u32,
+    target_member: DmIdentityId,
+    target_device: [u8; 32],
+    target_x25519_pk: [u8; 32],
+    target_kem_ek: Vec<u8>,
+    ephemeral_seed: [u8; 32],
+    kem_seed: [u8; 32],
+    nonce: [u8; 24],
+    sealed_at: i64,
+) -> Result<AuthorizedSealedDmKey, String> {
+    match send_request(DmDelegateRequestMsg::SealConversationKey {
+        identity,
+        sealer_device,
+        contract_key,
+        key_version,
+        target_member,
+        target_device,
+        target_x25519_pk,
+        target_kem_ek,
+        ephemeral_seed,
+        kem_seed,
+        nonce,
+        sealed_at,
+    })
+    .await?
+    {
+        DmDelegateResponseMsg::SealedKey { key } => Ok(key),
+        DmDelegateResponseMsg::Error { message } => Err(message),
+        other => Err(format!("unexpected SealConversationKey response: {other:?}")),
+    }
+}
+
+pub async fn open_conversation_key(
+    identity: DmIdentityId,
+    device_id: [u8; 32],
+    contract_key: [u8; 32],
+    record: SealedDmKey,
+) -> Result<Option<[u8; 32]>, String> {
+    match send_request(DmDelegateRequestMsg::OpenConversationKey {
+        identity,
+        device_id,
+        contract_key,
+        record,
+    })
+    .await?
+    {
+        DmDelegateResponseMsg::ConversationKey { key, .. } => Ok(key),
+        DmDelegateResponseMsg::Error { message } => Err(message),
+        other => Err(format!("unexpected OpenConversationKey response: {other:?}")),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn encrypt_message(
+    identity: DmIdentityId,
+    device_id: [u8; 32],
+    contract_key: [u8; 32],
+    key_version: u32,
+    plaintext: Vec<u8>,
+    content_type: u16,
+    reply_to: Option<[u8; 32]>,
+    created_at: i64,
+    nonce: [u8; 24],
+) -> Result<AuthorizedDmMessage, String> {
+    match send_request(DmDelegateRequestMsg::EncryptMessage {
+        identity,
+        device_id,
+        contract_key,
+        key_version,
+        plaintext,
+        content_type,
+        reply_to,
+        created_at,
+        nonce,
+    })
+    .await?
+    {
+        DmDelegateResponseMsg::MessageCreated { message } => Ok(message),
+        DmDelegateResponseMsg::Error { message } => Err(message),
+        other => Err(format!("unexpected EncryptMessage response: {other:?}")),
+    }
+}
+
+pub async fn decrypt_message(
+    identity: DmIdentityId,
+    contract_key: [u8; 32],
+    message: AuthorizedDmMessage,
+) -> Result<Vec<u8>, String> {
+    match send_request(DmDelegateRequestMsg::DecryptMessage {
+        identity,
+        contract_key,
+        message,
+    })
+    .await?
+    {
+        DmDelegateResponseMsg::Plaintext { bytes } => Ok(bytes),
+        DmDelegateResponseMsg::Error { message } => Err(message),
+        other => Err(format!("unexpected DecryptMessage response: {other:?}")),
+    }
 }
 
 /// Called when a board becomes active, so the DM identity follows the visible

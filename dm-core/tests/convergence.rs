@@ -18,6 +18,7 @@ fn fixture() -> Fixture {
         [1u8; 32],
         &creator_identity,
         &creator_device,
+        [5u8; 32],
         vec![2u8; 1184],
         1_000,
     );
@@ -65,6 +66,7 @@ fn join(
     let device = DmDevice {
         device_id: device_id(invitee_device),
         signing_key: invitee_device.verifying_key().to_bytes(),
+        x25519_pk: [6u8; 32],
         kem_ek: vec![3u8; 1184],
         created_at: now,
         revoked_at: None,

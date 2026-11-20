@@ -6,7 +6,8 @@
 //! never leave the delegate.
 
 use crate::{
-    DmContractId, DmDevice, DmDeviceId, DmIdentityId, DmMessageId,
+    AuthorizedDmMessage, AuthorizedSealedDmKey, DmContractId, DmDevice, DmDeviceId, DmIdentityId,
+    DmMessageId, SealedDmKey,
 };
 use ed25519_dalek::Signature;
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,8 @@ pub enum DmDelegateRequestMsg {
         identity: DmIdentityId,
         label: String,
         signing_seed: [u8; 32],
+        /// X25519 static seed for the classical half of the hybrid seal.
+        x25519_seed: [u8; 32],
         /// 64-byte ML-KEM seed as bytes; serde has no array impl for 64.
         kem_seed: Vec<u8>,
         created_at: i64,
@@ -114,6 +117,47 @@ pub enum DmDelegateRequestMsg {
         identity: DmIdentityId,
         contract_key: DmContractId,
     },
+    /// Seal the stored conversation key to a target device. The delegate
+    /// signs the record with `sealer_device`.
+    SealConversationKey {
+        identity: DmIdentityId,
+        sealer_device: DmDeviceId,
+        contract_key: DmContractId,
+        key_version: u32,
+        target_member: DmIdentityId,
+        target_device: DmDeviceId,
+        target_x25519_pk: [u8; 32],
+        target_kem_ek: Vec<u8>,
+        ephemeral_seed: [u8; 32],
+        kem_seed: [u8; 32],
+        nonce: [u8; 24],
+        sealed_at: i64,
+    },
+    /// Decrypt a sealed key with a local device and store it in the index.
+    OpenConversationKey {
+        identity: DmIdentityId,
+        device_id: DmDeviceId,
+        contract_key: DmContractId,
+        record: SealedDmKey,
+    },
+    /// Encrypt a message with the stored conversation key and sign it with
+    /// the device key. The caller supplies the AEAD nonce.
+    EncryptMessage {
+        identity: DmIdentityId,
+        device_id: DmDeviceId,
+        contract_key: DmContractId,
+        key_version: u32,
+        plaintext: Vec<u8>,
+        content_type: u16,
+        reply_to: Option<DmMessageId>,
+        created_at: i64,
+        nonce: [u8; 24],
+    },
+    DecryptMessage {
+        identity: DmIdentityId,
+        contract_key: DmContractId,
+        message: AuthorizedDmMessage,
+    },
     ExportBackup,
     ImportBackup {
         bytes: Vec<u8>,
@@ -145,6 +189,7 @@ pub struct DmDeviceBackup {
     pub device: DmDevice,
     pub label: String,
     pub signing_seed: [u8; 32],
+    pub x25519_seed: [u8; 32],
     pub kem_seed: Vec<u8>,
 }
 
@@ -188,6 +233,15 @@ pub enum DmDelegateResponseMsg {
     },
     Signature {
         signature: Signature,
+    },
+    SealedKey {
+        key: AuthorizedSealedDmKey,
+    },
+    MessageCreated {
+        message: AuthorizedDmMessage,
+    },
+    Plaintext {
+        bytes: Vec<u8>,
     },
     ConversationKey {
         key: Option<[u8; 32]>,

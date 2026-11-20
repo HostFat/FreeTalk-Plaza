@@ -4,12 +4,16 @@
 //! Plaza profiles. Devices, conversation keys, index and block list are scoped
 //! to the identity; operations remain pure and testable without a runtime.
 
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use ed25519_dalek::{Signer, SigningKey};
-use ml_kem::kem::KeyExport;
-use ml_kem::{DecapsulationKey, MlKem768, Seed};
+use ml_kem::kem::{Decapsulate, KeyExport};
+use ml_kem::{B32, DecapsulationKey, EncapsulationKey, MlKem768, Seed};
 use plaza_dm_core::delegate::*;
 use plaza_dm_core::{
-    DmContractId, DmDevice, DmDeviceId, DmIdentityId, DmMessageId,
+    AuthorizedDmMessage, AuthorizedSealedDmKey, DmContractId, DmDevice, DmDeviceId, DmIdentityId,
+    DmMessage, DmMessageId, SealedDmKey, CONTENT_TYPE_ATTACHMENT, CONTENT_TYPE_SYSTEM,
+    CONTENT_TYPE_TEXT, KEY_SUITE_X25519_MLKEM768_XCHACHA20,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +22,7 @@ pub struct LocalDevice {
     pub device: DmDevice,
     pub label: String,
     pub signing_seed: [u8; 32],
+    pub x25519_seed: [u8; 32],
     pub kem_seed: Vec<u8>,
 }
 
@@ -63,6 +68,7 @@ impl DmIdentityStateV1 {
         &mut self,
         label: String,
         signing_seed: [u8; 32],
+        x25519_seed: [u8; 32],
         kem_seed: Vec<u8>,
         created_at: i64,
     ) -> DmDelegateResponseMsg {
@@ -81,10 +87,13 @@ impl DmIdentityStateV1 {
         {
             return DmDelegateResponseMsg::error("device already exists");
         }
+        let x25519_secret = x25519_dalek::StaticSecret::from(x25519_seed);
+        let x25519_pk = x25519_dalek::PublicKey::from(&x25519_secret).to_bytes();
         let kem_ek = ml_kem_encapsulation_key(&kem_seed_array);
         let device = DmDevice {
             device_id,
             signing_key: device_id,
+            x25519_pk,
             kem_ek,
             created_at,
             revoked_at: None,
@@ -93,6 +102,7 @@ impl DmIdentityStateV1 {
             device: device.clone(),
             label: label.clone(),
             signing_seed,
+            x25519_seed,
             kem_seed,
         });
         DmDelegateResponseMsg::DeviceCreated { device, label }
@@ -296,6 +306,226 @@ impl DmIdentityStateV1 {
         DmDelegateResponseMsg::Ok
     }
 
+    fn key_for(&self, contract_key: DmContractId, key_version: u32) -> Option<[u8; 32]> {
+        self.keys
+            .iter()
+            .find(|key| key.contract_key == contract_key && key.key_version == key_version)
+            .map(|key| key.key)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seal_conversation_key(
+        &self,
+        sealer_device: DmDeviceId,
+        contract_key: DmContractId,
+        key_version: u32,
+        target_member: DmIdentityId,
+        target_device: DmDeviceId,
+        target_x25519_pk: [u8; 32],
+        target_kem_ek: Vec<u8>,
+        ephemeral_seed: [u8; 32],
+        kem_seed: [u8; 32],
+        nonce: [u8; 24],
+        sealed_at: i64,
+    ) -> DmDelegateResponseMsg {
+        let Some(key) = self.key_for(contract_key, key_version) else {
+            return DmDelegateResponseMsg::error("conversation key not found");
+        };
+        let sealer = match self.active_device(&sealer_device) {
+            Ok(device) => device,
+            Err(error) => return error,
+        };
+        let ek = match ml_kem_encapsulation_key_from_bytes(&target_kem_ek) {
+            Ok(ek) => ek,
+            Err(error) => return DmDelegateResponseMsg::error(error),
+        };
+        let ephemeral = x25519_dalek::StaticSecret::from(ephemeral_seed);
+        let ephemeral_public = x25519_dalek::PublicKey::from(&ephemeral);
+        let recipient = x25519_dalek::PublicKey::from(target_x25519_pk);
+        let x25519_shared = ephemeral.diffie_hellman(&recipient);
+        let (kem_ciphertext, kem_shared) =
+            ek.encapsulate_deterministic(&B32::from(kem_seed));
+        let sealed = match seal_key_bytes(
+            &key,
+            x25519_shared.as_bytes(),
+            kem_shared.as_slice(),
+            &sealed_key_aad(contract_key, key_version, target_member, target_device),
+            &nonce,
+        ) {
+            Ok(sealed) => sealed,
+            Err(error) => return DmDelegateResponseMsg::error(error),
+        };
+        let record = SealedDmKey {
+            key_version,
+            member: target_member,
+            device: target_device,
+            suite: KEY_SUITE_X25519_MLKEM768_XCHACHA20,
+            ephemeral_x25519_pk: ephemeral_public.to_bytes(),
+            kem_ciphertext: kem_ciphertext.as_slice().to_vec(),
+            ciphertext: sealed,
+            nonce,
+            sealed_at,
+        };
+        let authorized = AuthorizedSealedDmKey::new(
+            record,
+            &SigningKey::from_bytes(&sealer.signing_seed),
+        );
+        DmDelegateResponseMsg::SealedKey { key: authorized }
+    }
+
+    fn open_conversation_key(
+        &mut self,
+        device_id: DmDeviceId,
+        contract_key: DmContractId,
+        record: &SealedDmKey,
+    ) -> DmDelegateResponseMsg {
+        if record.member != self.identity() || record.device != device_id {
+            return DmDelegateResponseMsg::error("sealed key targets another device");
+        }
+        if record.suite != KEY_SUITE_X25519_MLKEM768_XCHACHA20 {
+            return DmDelegateResponseMsg::error("unsupported sealed key suite");
+        }
+        let device = match self.active_device(&device_id) {
+            Ok(device) => device,
+            Err(error) => return error,
+        };
+        let Ok(kem_seed) = <[u8; 64]>::try_from(device.kem_seed.as_slice()) else {
+            return DmDelegateResponseMsg::error("stored ML-KEM seed is invalid");
+        };
+        let decapsulation = DecapsulationKey::<MlKem768>::from_seed(Seed::from(kem_seed));
+        let kem_shared = match decapsulation.decapsulate_slice(&record.kem_ciphertext) {
+            Ok(shared) => shared,
+            Err(_) => return DmDelegateResponseMsg::error("invalid ML-KEM ciphertext"),
+        };
+        let own = x25519_dalek::StaticSecret::from(device.x25519_seed);
+        let ephemeral = x25519_dalek::PublicKey::from(record.ephemeral_x25519_pk);
+        let x25519_shared = own.diffie_hellman(&ephemeral);
+        let key = match open_key_bytes(
+            &record.ciphertext,
+            x25519_shared.as_bytes(),
+            kem_shared.as_slice(),
+            &sealed_key_aad(
+                contract_key,
+                record.key_version,
+                record.member,
+                record.device,
+            ),
+            &record.nonce,
+        ) {
+            Ok(key) => key,
+            Err(error) => return DmDelegateResponseMsg::error(error),
+        };
+        if let Some(existing) = self.key_for(contract_key, record.key_version) {
+            if existing != key {
+                return DmDelegateResponseMsg::error(
+                    "a different key is already stored for this version",
+                );
+            }
+        } else {
+            self.keys.push(LocalKey {
+                contract_key,
+                key_version: record.key_version,
+                key,
+                created_at: record.sealed_at,
+            });
+        }
+        DmDelegateResponseMsg::ConversationKey {
+            key: Some(key),
+            key_version: Some(record.key_version),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encrypt_message(
+        &self,
+        device_id: DmDeviceId,
+        contract_key: DmContractId,
+        key_version: u32,
+        plaintext: &[u8],
+        content_type: u16,
+        reply_to: Option<DmMessageId>,
+        created_at: i64,
+        nonce: [u8; 24],
+    ) -> DmDelegateResponseMsg {
+        let Some(key) = self.key_for(contract_key, key_version) else {
+            return DmDelegateResponseMsg::error("conversation key not found");
+        };
+        if !(CONTENT_TYPE_TEXT..=CONTENT_TYPE_ATTACHMENT).contains(&content_type) {
+            return DmDelegateResponseMsg::error("unsupported content type");
+        }
+        let device = match self.active_device(&device_id) {
+            Ok(device) => device,
+            Err(error) => return error,
+        };
+        let author = self.identity();
+        let aad = message_aad(
+            contract_key,
+            author,
+            device_id,
+            key_version,
+            created_at,
+            content_type,
+            reply_to,
+        );
+        let ciphertext = match encrypt_bytes(&key, plaintext, &aad, &nonce) {
+            Ok(ciphertext) => ciphertext,
+            Err(error) => return DmDelegateResponseMsg::error(error),
+        };
+        let message = DmMessage {
+            id: [0u8; 32],
+            author,
+            device: device_id,
+            key_version,
+            created_at,
+            content_type,
+            ciphertext,
+            nonce,
+            reply_to,
+            declared_len: plaintext.len() as u32,
+        };
+        let authorized = AuthorizedDmMessage::new(
+            message,
+            &SigningKey::from_bytes(&device.signing_seed),
+        );
+        DmDelegateResponseMsg::MessageCreated {
+            message: authorized,
+        }
+    }
+
+    fn decrypt_message(
+        &self,
+        contract_key: DmContractId,
+        message: &AuthorizedDmMessage,
+    ) -> DmDelegateResponseMsg {
+        let Some(key) = self.key_for(contract_key, message.message.key_version) else {
+            return DmDelegateResponseMsg::error("conversation key not found");
+        };
+        if !matches!(
+            message.message.content_type,
+            CONTENT_TYPE_TEXT | CONTENT_TYPE_SYSTEM | CONTENT_TYPE_ATTACHMENT
+        ) {
+            return DmDelegateResponseMsg::error("unsupported content type");
+        }
+        let aad = message_aad(
+            contract_key,
+            message.message.author,
+            message.message.device,
+            message.message.key_version,
+            message.message.created_at,
+            message.message.content_type,
+            message.message.reply_to,
+        );
+        match decrypt_bytes(
+            &key,
+            &message.message.ciphertext,
+            &aad,
+            &message.message.nonce,
+        ) {
+            Ok(bytes) => DmDelegateResponseMsg::Plaintext { bytes },
+            Err(error) => DmDelegateResponseMsg::error(error),
+        }
+    }
+
     fn to_backup(&self) -> DmIdentityBackup {
         DmIdentityBackup {
             identity_seed: self.identity_seed,
@@ -306,6 +536,7 @@ impl DmIdentityStateV1 {
                     device: local.device.clone(),
                     label: local.label.clone(),
                     signing_seed: local.signing_seed,
+                    x25519_seed: local.x25519_seed,
                     kem_seed: local.kem_seed.clone(),
                 })
                 .collect(),
@@ -335,6 +566,7 @@ impl DmIdentityStateV1 {
                     device: device.device,
                     label: device.label,
                     signing_seed: device.signing_seed,
+                    x25519_seed: device.x25519_seed,
                     kem_seed: device.kem_seed,
                 });
             }
@@ -452,6 +684,7 @@ impl DmDelegateStateV1 {
                 identity,
                 label,
                 signing_seed,
+                x25519_seed,
                 kem_seed,
                 created_at,
             } => {
@@ -459,7 +692,8 @@ impl DmDelegateStateV1 {
                     Ok(state) => state,
                     Err(error) => return error,
                 };
-                let response = state.create_device(label, signing_seed, kem_seed, created_at);
+                let response =
+                    state.create_device(label, signing_seed, x25519_seed, kem_seed, created_at);
                 if matches!(response, DmDelegateResponseMsg::DeviceCreated { .. }) {
                     self.version = self.version.saturating_add(1);
                 }
@@ -622,6 +856,88 @@ impl DmDelegateStateV1 {
                 self.version = self.version.saturating_add(1);
                 response
             }
+            DmDelegateRequestMsg::SealConversationKey {
+                identity,
+                sealer_device,
+                contract_key,
+                key_version,
+                target_member,
+                target_device,
+                target_x25519_pk,
+                target_kem_ek,
+                ephemeral_seed,
+                kem_seed,
+                nonce,
+                sealed_at,
+            } => {
+                let Some(state) = self.identity(&identity) else {
+                    return DmDelegateResponseMsg::error("DM identity is not initialized");
+                };
+                state.seal_conversation_key(
+                    sealer_device,
+                    contract_key,
+                    key_version,
+                    target_member,
+                    target_device,
+                    target_x25519_pk,
+                    target_kem_ek,
+                    ephemeral_seed,
+                    kem_seed,
+                    nonce,
+                    sealed_at,
+                )
+            }
+            DmDelegateRequestMsg::OpenConversationKey {
+                identity,
+                device_id,
+                contract_key,
+                record,
+            } => {
+                let state = match self.require_identity(&identity) {
+                    Ok(state) => state,
+                    Err(error) => return error,
+                };
+                let response = state.open_conversation_key(device_id, contract_key, &record);
+                if matches!(response, DmDelegateResponseMsg::ConversationKey { .. }) {
+                    self.version = self.version.saturating_add(1);
+                }
+                response
+            }
+            DmDelegateRequestMsg::EncryptMessage {
+                identity,
+                device_id,
+                contract_key,
+                key_version,
+                plaintext,
+                content_type,
+                reply_to,
+                created_at,
+                nonce,
+            } => {
+                let Some(state) = self.identity(&identity) else {
+                    return DmDelegateResponseMsg::error("DM identity is not initialized");
+                };
+                state.encrypt_message(
+                    device_id,
+                    contract_key,
+                    key_version,
+                    &plaintext,
+                    content_type,
+                    reply_to,
+                    created_at,
+                    nonce,
+                )
+            }
+            DmDelegateRequestMsg::DecryptMessage {
+                identity,
+                contract_key,
+                message,
+            } => {
+                let Some(state) = self.identity(&identity) else {
+                    return DmDelegateResponseMsg::error("DM identity is not initialized");
+                };
+                state.decrypt_message(contract_key, &message)
+            }
             DmDelegateRequestMsg::ExportBackup => {
                 let backup = DmBackupV1 {
                     version: DM_DELEGATE_STORAGE_VERSION,
@@ -677,6 +993,138 @@ fn ml_kem_encapsulation_key(seed: &[u8; 64]) -> Vec<u8> {
     decapsulation.encapsulation_key().to_bytes().to_vec()
 }
 
+fn ml_kem_encapsulation_key_from_bytes(
+    bytes: &[u8],
+) -> Result<EncapsulationKey<MlKem768>, String> {
+    let array = ml_kem::array::Array::try_from(bytes)
+        .map_err(|_| "invalid ML-KEM encapsulation key".to_string())?;
+    EncapsulationKey::<MlKem768>::new(&array)
+        .map_err(|_| "invalid ML-KEM encapsulation key".to_string())
+}
+
+fn derive_hybrid_key(x25519_shared: &[u8], kem_shared: &[u8]) -> [u8; 32] {
+    let mut combined = Vec::with_capacity(x25519_shared.len() + kem_shared.len());
+    combined.extend_from_slice(x25519_shared);
+    combined.extend_from_slice(kem_shared);
+    blake3::derive_key("plaza-dm-sealed-key-v1", &combined)
+}
+
+fn sealed_key_aad(
+    contract_key: DmContractId,
+    key_version: u32,
+    member: DmIdentityId,
+    device: DmDeviceId,
+) -> Vec<u8> {
+    let mut aad = b"plaza-dm-sealed-key-v1".to_vec();
+    aad.extend_from_slice(&contract_key);
+    aad.extend_from_slice(&key_version.to_le_bytes());
+    aad.extend_from_slice(&member);
+    aad.extend_from_slice(&device);
+    aad
+}
+
+fn message_aad(
+    contract_key: DmContractId,
+    author: DmIdentityId,
+    device: DmDeviceId,
+    key_version: u32,
+    created_at: i64,
+    content_type: u16,
+    reply_to: Option<DmMessageId>,
+) -> Vec<u8> {
+    let mut aad = b"plaza-dm-message-v1".to_vec();
+    aad.extend_from_slice(&contract_key);
+    aad.extend_from_slice(&author);
+    aad.extend_from_slice(&device);
+    aad.extend_from_slice(&key_version.to_le_bytes());
+    aad.extend_from_slice(&created_at.to_le_bytes());
+    aad.extend_from_slice(&content_type.to_le_bytes());
+    match reply_to {
+        Some(id) => {
+            aad.push(1);
+            aad.extend_from_slice(&id);
+        }
+        None => aad.push(0),
+    }
+    aad
+}
+
+fn seal_key_bytes(
+    key: &[u8; 32],
+    x25519_shared: &[u8],
+    kem_shared: &[u8],
+    aad: &[u8],
+    nonce: &[u8; 24],
+) -> Result<Vec<u8>, String> {
+    let derived = derive_hybrid_key(x25519_shared, kem_shared);
+    XChaCha20Poly1305::new((&derived).into())
+        .encrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: key.as_slice(),
+                aad,
+            },
+        )
+        .map_err(|_| "could not seal the conversation key".to_string())
+}
+
+fn open_key_bytes(
+    ciphertext: &[u8],
+    x25519_shared: &[u8],
+    kem_shared: &[u8],
+    aad: &[u8],
+    nonce: &[u8; 24],
+) -> Result<[u8; 32], String> {
+    let derived = derive_hybrid_key(x25519_shared, kem_shared);
+    let plaintext = XChaCha20Poly1305::new((&derived).into())
+        .decrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|_| "could not open the conversation key".to_string())?;
+    let key: [u8; 32] = plaintext
+        .try_into()
+        .map_err(|_| "unexpected conversation key length".to_string())?;
+    Ok(key)
+}
+
+fn encrypt_bytes(
+    key: &[u8; 32],
+    plaintext: &[u8],
+    aad: &[u8],
+    nonce: &[u8; 24],
+) -> Result<Vec<u8>, String> {
+    XChaCha20Poly1305::new((&(*key)).into())
+        .encrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|_| "could not encrypt the message".to_string())
+}
+
+fn decrypt_bytes(
+    key: &[u8; 32],
+    ciphertext: &[u8],
+    aad: &[u8],
+    nonce: &[u8; 24],
+) -> Result<Vec<u8>, String> {
+    XChaCha20Poly1305::new((&(*key)).into())
+        .decrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|_| "could not decrypt the message".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,11 +1138,171 @@ mod tests {
         identity_public(&seed)
     }
 
+    #[test]
+    fn the_hybrid_seal_opens_on_the_target_device_and_messages_round_trip() {
+        let mut state = DmDelegateStateV1::default();
+        let first = init(&mut state, [11u8; 32]);
+        let second = init(&mut state, [44u8; 32]);
+        let first_device = create_device_with(
+            &mut state,
+            first,
+            [21u8; 32],
+            [31u8; 32],
+            vec![41u8; 64],
+        );
+        let second_device = create_device_with(
+            &mut state,
+            second,
+            [22u8; 32],
+            [32u8; 32],
+            vec![42u8; 64],
+        );
+        store_key(&mut state, first, [1u8; 32], [9u8; 32]);
+
+        let response = state.apply(DmDelegateRequestMsg::SealConversationKey {
+            identity: first,
+            sealer_device: first_device.device_id,
+            contract_key: [1u8; 32],
+            key_version: 0,
+            target_member: second,
+            target_device: second_device.device_id,
+            target_x25519_pk: second_device.x25519_pk,
+            target_kem_ek: second_device.kem_ek,
+            ephemeral_seed: [7u8; 32],
+            kem_seed: [8u8; 32],
+            nonce: [9u8; 24],
+            sealed_at: 1_100,
+        });
+        let DmDelegateResponseMsg::SealedKey { key } = response else {
+            panic!("sealed key missing: {response:?}");
+        };
+        let sealer_vk = VerifyingKey::from_bytes(&first_device.signing_key).unwrap();
+        key.verify(&sealer_vk).expect("sealed key signature");
+
+        let response = state.apply(DmDelegateRequestMsg::OpenConversationKey {
+            identity: second,
+            device_id: second_device.device_id,
+            contract_key: [1u8; 32],
+            record: key.record,
+        });
+        let DmDelegateResponseMsg::ConversationKey { key, key_version } = response else {
+            panic!("opened key missing: {response:?}");
+        };
+        assert_eq!(key, Some([9u8; 32]));
+        assert_eq!(key_version, Some(0));
+
+        let response = state.apply(DmDelegateRequestMsg::EncryptMessage {
+            identity: first,
+            device_id: first_device.device_id,
+            contract_key: [1u8; 32],
+            key_version: 0,
+            plaintext: b"hello from the hybrid seal".to_vec(),
+            content_type: CONTENT_TYPE_TEXT,
+            reply_to: None,
+            created_at: 1_200,
+            nonce: [3u8; 24],
+        });
+        let DmDelegateResponseMsg::MessageCreated { message } = response else {
+            panic!("message missing: {response:?}");
+        };
+        assert_ne!(message.message.ciphertext, b"hello from the hybrid seal");
+
+        let response = state.apply(DmDelegateRequestMsg::DecryptMessage {
+            identity: second,
+            contract_key: [1u8; 32],
+            message,
+        });
+        let DmDelegateResponseMsg::Plaintext { bytes } = response else {
+            panic!("plaintext missing: {response:?}");
+        };
+        assert_eq!(bytes, b"hello from the hybrid seal");
+    }
+
+    #[test]
+    fn a_tampered_seal_or_wrong_device_is_rejected() {
+        let mut state = DmDelegateStateV1::default();
+        let first = init(&mut state, [11u8; 32]);
+        let second = init(&mut state, [44u8; 32]);
+        let first_device = create_device_with(
+            &mut state,
+            first,
+            [21u8; 32],
+            [31u8; 32],
+            vec![41u8; 64],
+        );
+        let second_device = create_device_with(
+            &mut state,
+            second,
+            [22u8; 32],
+            [32u8; 32],
+            vec![42u8; 64],
+        );
+        store_key(&mut state, first, [1u8; 32], [9u8; 32]);
+        let DmDelegateResponseMsg::SealedKey { key } =
+            state.apply(DmDelegateRequestMsg::SealConversationKey {
+                identity: first,
+                sealer_device: first_device.device_id,
+                contract_key: [1u8; 32],
+                key_version: 0,
+                target_member: second,
+                target_device: second_device.device_id,
+                target_x25519_pk: second_device.x25519_pk,
+                target_kem_ek: second_device.kem_ek,
+                ephemeral_seed: [7u8; 32],
+                kem_seed: [8u8; 32],
+                nonce: [9u8; 24],
+                sealed_at: 1_100,
+            })
+        else {
+            panic!("sealed key missing");
+        };
+
+        let mut tampered = key.record.clone();
+        tampered.ciphertext[0] ^= 0xff;
+        let response = state.apply(DmDelegateRequestMsg::OpenConversationKey {
+            identity: second,
+            device_id: second_device.device_id,
+            contract_key: [1u8; 32],
+            record: tampered,
+        });
+        assert!(matches!(response, DmDelegateResponseMsg::Error { .. }));
+
+        let response = state.apply(DmDelegateRequestMsg::OpenConversationKey {
+            identity: first,
+            device_id: first_device.device_id,
+            contract_key: [1u8; 32],
+            record: key.record,
+        });
+        assert!(matches!(response, DmDelegateResponseMsg::Error { .. }));
+    }
+
+    fn create_device_with(
+        state: &mut DmDelegateStateV1,
+        identity: DmIdentityId,
+        signing_seed: [u8; 32],
+        x25519_seed: [u8; 32],
+        kem_seed: Vec<u8>,
+    ) -> DmDevice {
+        let response = state.apply(DmDelegateRequestMsg::CreateDevice {
+            identity,
+            label: "Test".to_string(),
+            signing_seed,
+            x25519_seed,
+            kem_seed,
+            created_at: 1_000,
+        });
+        let DmDelegateResponseMsg::DeviceCreated { device, .. } = response else {
+            panic!("device not created: {response:?}");
+        };
+        device
+    }
+
     fn device(state: &mut DmDelegateStateV1, identity: DmIdentityId) -> DmDevice {
         let response = state.apply(DmDelegateRequestMsg::CreateDevice {
             identity,
             label: "Laptop".to_string(),
             signing_seed: identity,
+            x25519_seed: [55u8; 32],
             kem_seed: vec![33u8; 64],
             created_at: 1_000,
         });
