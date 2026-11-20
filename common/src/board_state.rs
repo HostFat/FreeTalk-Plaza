@@ -9,6 +9,7 @@ pub mod identity;
 pub mod image_retirements;
 pub mod images;
 pub mod invites;
+pub mod mail_addresses;
 pub mod member;
 pub mod member_info;
 pub mod member_moderation;
@@ -31,6 +32,7 @@ use crate::board_state::ban::BansV1;
 use crate::board_state::category_secrets::CategorySecretsV1;
 use crate::board_state::configuration::AuthorizedConfigurationV1;
 use crate::board_state::invites::InviteTokensV1;
+use crate::board_state::mail_addresses::MailAddressesV1;
 use crate::board_state::member::{MemberId, MembersV1};
 use crate::board_state::member_info::MemberInfoV1;
 use crate::board_state::message::MessageId;
@@ -146,6 +148,12 @@ pub struct ChatBoardStateV1 {
     /// Defaults to 0 for backward compatibility with states created before versioning.
     #[serde(default)]
     pub version: StateVersion,
+
+    /// Per-member Freenet Mail addresses. Added at the end of the struct so
+    /// existing CBOR states keep decoding positionally. A record with a
+    /// `None` address is a tombstone that clears the value.
+    #[serde(default)]
+    pub mail_addresses: MailAddressesV1,
 }
 
 impl ChatBoardStateV1 {

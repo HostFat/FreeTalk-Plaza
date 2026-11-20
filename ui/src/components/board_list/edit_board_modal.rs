@@ -72,6 +72,11 @@ pub fn EditBoardModal() -> Element {
                             is_owner: *user_is_owner.read()
                         }
 
+                        super::contact_mail_field::ContactMailField {
+                            config: config.clone(),
+                            is_owner: *user_is_owner.read()
+                        }
+
                         super::read_only_field::ReadOnlyField {
                             config: config.clone(),
                             is_owner: *user_is_owner.read()

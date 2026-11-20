@@ -123,18 +123,15 @@ vanno cancellate. La nuova UI **ignora** le vecchie azioni e legge solo
 Migrazione:
 
 1. Al primo caricamento della nuova versione, per il profilo attivo, se non
-   esiste un record e c'è una vecchia azione con indirizzo, il client può
-   pubblicare un record con lo stesso indirizzo e versione iniziale.
-2. La migrazione è esplicita o una tantum; non riscrive gli indirizzi degli
-   altri membri.
+   esiste un record e c'è una vecchia azione con indirizzo, il client prefill
+   il campo con quell'indirizzo e mostra un avviso.
+2. L'utente preme **Save address**: il client pubblica il record nel nuovo
+   stato. Nessuna scrittura automatica.
 3. Gli altri membri ri-salvano l'indirizzo quando vogliono; il vecchio
    indirizzo resta nel log storico, ma non è più mostrato.
 4. Il tipo `ACTION_TYPE_SET_MAIL_ADDRESS` resta definito per compatibilità;
    il client non lo scrive più. Il contratto continua ad accettarlo come
    messaggio, ma lo stato non lo usa.
-
-La migrazione automatica del proprio indirizzo va mostrata con un toast:
-“Indirizzo Mail migrato al nuovo formato”.
 
 ## 5. Re-key e rollout
 

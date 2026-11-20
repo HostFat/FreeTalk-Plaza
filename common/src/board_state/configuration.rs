@@ -1,5 +1,5 @@
 use crate::board_state::member::MemberId;
-use crate::board_state::privacy::{BoardDisplayMetadata, PrivacyMode};
+use crate::board_state::privacy::{BoardDisplayMetadata, PrivacyMode, SealedBytes};
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::truncated_base64;
 use crate::ChatBoardStateV1;
@@ -202,6 +202,7 @@ impl Default for Configuration {
             reactions_enabled: true,
             auto_moderated_topics: true,
             updated_at: std::time::SystemTime::UNIX_EPOCH,
+            contact_mail: None,
         }
     }
 }
@@ -273,6 +274,12 @@ pub struct Configuration {
         skip_serializing_if = "crate::board_state::admin::is_epoch"
     )]
     pub updated_at: SystemTime,
+
+    /// Optional Freenet Mail contact for the board (reports, appeals). Owner
+    /// signed; sealed by the client on private boards. Skipped when unset so
+    /// older signed configurations keep verifying byte for byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact_mail: Option<SealedBytes>,
 }
 
 /// Limits used when a configuration predates the fields (they decode as 0).

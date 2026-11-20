@@ -265,11 +265,12 @@ pub fn MembersView() -> Element {
                 member_id,
                 is_deactivated,
                 member_id == self_member_id,
+                board_data.mail_address_for(member_id),
             ));
         }
         // Keep the current member at the top; the stable sort preserves the
         // invite-tree order for everyone else.
-        all_members.sort_by_key(|(_, _, _, is_self)| !*is_self);
+        all_members.sort_by_key(|(_, _, _, is_self, _)| !*is_self);
 
         Some(all_members)
     })()
@@ -355,10 +356,10 @@ pub fn MembersView() -> Element {
 
             // Member list - scrollable
             ul { class: "flex-1 px-4 py-4 space-y-1 overflow-y-auto",
-                for (display_name, member_id, is_deactivated, _is_self) in members {
-                    li { key: "{member_id}",
+                for (display_name, member_id, is_deactivated, _is_self, mail_address) in members {
+                    li { key: "{member_id}", class: "flex items-center gap-2",
                         button {
-                            class: "w-full text-left px-4 py-2 rounded-lg text-text hover:bg-surface transition-colors",
+                            class: "flex-1 text-left px-4 py-2 rounded-lg text-text hover:bg-surface transition-colors",
                             title: "Member ID: {member_id}",
                             onclick: move |_| handle_member_click(member_id),
                             span {
@@ -368,6 +369,22 @@ pub fn MembersView() -> Element {
                                 span { class: "ml-2 text-xs uppercase tracking-wide text-text-muted",
                                     "deactivated"
                                 }
+                            }
+                        }
+                        if let Some(address) = mail_address {
+                            a {
+                                href: "{crate::util::mail::app_url()}",
+                                target: "_blank",
+                                rel: "noopener noreferrer",
+                                class: "px-2 py-2 rounded-lg text-text-muted hover:text-accent hover:bg-surface transition-colors",
+                                title: "Open Freenet Mail for {address}",
+                                onclick: move |_| {
+                                    crate::util::copy_to_clipboard(&address);
+                                    crate::components::app::toasts::show(
+                                        "Mail address copied. Opening Freenet Mail…",
+                                    );
+                                },
+                                "✉"
                             }
                         }
                     }

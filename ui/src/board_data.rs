@@ -2165,11 +2165,40 @@ impl BoardData {
     }
 
     /// The member's published Freenet Mail address on this board, if any.
+    /// Reads the dedicated state; old append-only actions are used only for
+    /// the one-time migration path.
     pub fn mail_address_for(&self, member_id: MemberId) -> Option<String> {
+        let address = self
+            .board_state
+            .mail_addresses
+            .address_for(member_id)?;
+        crate::util::ecies::unseal_bytes_with_secrets(address, &self.secrets)
+            .ok()
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    /// The address stored in the old append-only action, if any. Used to
+    /// offer a one-time migration in the Mail tab.
+    pub fn legacy_mail_address_for(&self, member_id: MemberId) -> Option<String> {
         self.board_state
             .recent_messages
             .mail_address(&member_id)
             .map(str::to_string)
+    }
+
+    /// The board's Freenet Mail contact, if the owner set one.
+    pub fn board_contact_mail(&self) -> Option<String> {
+        let contact = self
+            .board_state
+            .configuration
+            .configuration
+            .contact_mail
+            .as_ref()?;
+        crate::util::ecies::unseal_bytes_with_secrets(contact, &self.secrets)
+            .ok()
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+            .filter(|value| !value.trim().is_empty())
     }
 
     /// The newest nickname request for a member, whatever its status.

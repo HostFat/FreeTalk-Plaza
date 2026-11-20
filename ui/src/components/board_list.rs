@@ -1,5 +1,6 @@
 pub(crate) mod board_features_field;
 pub(crate) mod board_name_field;
+pub(crate) mod contact_mail_field;
 pub(crate) mod create_board_modal;
 pub(crate) mod edit_board_modal;
 pub(crate) mod image_limits_field;

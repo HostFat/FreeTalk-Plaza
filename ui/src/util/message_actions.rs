@@ -377,39 +377,75 @@ pub async fn set_nickname(ctx: ActionContext, member_id: MemberId, nickname: Str
 }
 
 /// Publish or clear the current member's Freenet Mail address on this board.
-/// The action travels as a bare action message so the member, rather than an
-/// owner or admin, can change it. On private boards the payload is sealed with
-/// the board key.
+/// The address lives in the dedicated `MailAddressesV1` state so a clear is a
+/// tombstone, not another append-only action.
 pub async fn set_mail_address(ctx: ActionContext, address: Option<String>) {
-    let member_id = MemberId::from(&ctx.self_sk.verifying_key());
-    let encoded =
-        ActionContentV1::set_mail_address(member_id, address.unwrap_or_default()).encode();
-    let content = if ctx.is_private {
-        let Some((key, version)) = ctx.secret_opt else {
-            crate::components::app::toasts::show_error(
-                "Could not update the mail address: the board key is missing",
-            );
-            return;
-        };
-        let (ciphertext, nonce) = encrypt_with_symmetric_key(&key, &encoded, version);
-        BoardMessageBody::private(
-            CONTENT_TYPE_ACTION,
-            ACTION_CONTENT_VERSION,
-            ciphertext,
-            nonce,
-            version,
-        )
-    } else {
-        BoardMessageBody::public_raw(CONTENT_TYPE_ACTION, ACTION_CONTENT_VERSION, encoded)
+    use plaza_core::board_state::mail_addresses::{
+        AuthorizedMailAddress, MailAddressRecord,
     };
-    send_action_messages_with_policy(
-        ctx,
-        vec![content],
-        None,
-        Some("Mail address updated"),
-        "Could not update the mail address",
-    )
-    .await;
+
+    let member_id = MemberId::from(&ctx.self_sk.verifying_key());
+    let version = ctx
+        .board_state
+        .mail_addresses
+        .record_for(member_id)
+        .map(|record| record.version.saturating_add(1))
+        .unwrap_or(0);
+    let sealed = match address {
+        Some(address) => {
+            let bytes = address.into_bytes();
+            if ctx.is_private {
+                let Some((key, secret_version)) = ctx.secret_opt else {
+                    crate::components::app::toasts::show_error(
+                        "Could not update the mail address: the board key is missing",
+                    );
+                    return;
+                };
+                Some(seal_bytes(&bytes, &key, secret_version))
+            } else {
+                Some(SealedBytes::public(bytes))
+            }
+        }
+        None => None,
+    };
+    let record = MailAddressRecord {
+        member_id,
+        version,
+        address: sealed,
+        updated_at: chrono::Utc::now().timestamp_millis(),
+    };
+    let delta = ChatBoardStateV1Delta {
+        mail_addresses: Some(vec![AuthorizedMailAddress::new(record, &ctx.self_sk)]),
+        ..Default::default()
+    };
+    let board_state_clone = ctx.board_state.clone();
+    let current_board = ctx.current_board;
+    let mut applied = false;
+    BOARDS.with_mut(|boards| {
+        if let Some(board_data) = boards.map.get_mut(&current_board) {
+            let params = ChatBoardParametersV1 {
+                owner: current_board,
+            };
+            if board_data
+                .board_state
+                .apply_delta(&board_state_clone, &params, &Some(delta))
+                .is_ok()
+            {
+                board_data.rebuild_actions_with_local_secrets(&params);
+                mark_needs_sync(current_board);
+                applied = true;
+            }
+        }
+    });
+    if applied {
+        crate::components::app::toasts::show(
+            "Mail address updated. Syncing with the network…",
+        );
+    } else {
+        crate::components::app::toasts::show_error(
+            "Could not update the mail address on this board.",
+        );
+    }
 }
 
 /// Replace a poll's content. Only its author, and the caller hides the action

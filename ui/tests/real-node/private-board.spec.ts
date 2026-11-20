@@ -581,6 +581,12 @@ test("a Mail address publishes on the board and survives a reload", async ({
     )
     .toBe(true);
 
+  // The member list exposes a quick Mail link.
+  await gotoRoute(page, `/board/${boardKey}/members`);
+  await expect(
+    app.locator('a[title*="Open Freenet Mail"]').first(),
+  ).toBeVisible({ timeout: 30_000 });
+
   await gotoRoute(page, `/board/${boardKey}`);
   await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
   await app.getByRole("button", { name: "Open identities" }).click();
@@ -589,6 +595,28 @@ test("a Mail address publishes on the board and survives a reload", async ({
   await expect(
     drawer.getByText(`Published on this board: ${address}`),
   ).toHaveCount(0, { timeout: 30_000 });
+});
+
+test("the board Mail contact survives a reload", async ({ page }) => {
+  await gotoRoute(page, `/board/${boardKey}`);
+  const app = page.frameLocator("iframe");
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await ensureOwner(page);
+
+  await app.getByRole("button", { name: /Manage/ }).click();
+  await app.getByRole("button", { name: /Board Settings/ }).click();
+  const contact = "board@3x4g3um9JYXLchv5VE3SD8wW9TnR8oSMLAA7AYfodBFc";
+  await app.locator("#board-contact-mail").fill(contact);
+  await app.getByRole("button", { name: "Save contact" }).click();
+  await waitForSync(page);
+  await page.waitForTimeout(5_000);
+  await app.getByRole("button", { name: "✕" }).click();
+
+  await page.reload();
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await app.getByRole("button", { name: /Manage/ }).click();
+  await app.getByRole("button", { name: /Board Settings/ }).click();
+  await expect(app.locator("#board-contact-mail")).toHaveValue(contact);
 });
 
 test("an invited identity's first post survives a reload", async ({ page }) => {
