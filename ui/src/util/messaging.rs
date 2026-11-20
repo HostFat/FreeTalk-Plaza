@@ -187,7 +187,16 @@ pub fn prepare_message(
                 && board_data.self_authorized_member.is_some()
         })
         .unwrap_or(false);
-    if needs_membership {
+    // A pending invite has a stored signed membership. Put it in this same
+    // delta: restoring it locally first would make `self_membership_delta`
+    // return None and the contract would reject the message against a state
+    // that still lacks the author.
+    let membership_from_join = BOARDS
+        .read()
+        .map
+        .get(&current_board)
+        .and_then(self_membership_delta);
+    if needs_membership && membership_from_join.is_none() {
         let _ = crate::util::membership::restore_self_membership();
     }
 
@@ -461,15 +470,17 @@ pub(crate) async fn publish_message(
 
     let auth_message = AuthorizedMessageV1::with_signature(message, signature);
 
-    // Re-add ourselves when this client was pruned for inactivity (or after
-    // a ban was lifted). The helper returns None when we are already in.
-    let (members_delta, member_info_delta) = BOARDS
+    // Re-add ourselves when this client was pruned for inactivity, after a
+    // ban was lifted, or when joining through a reusable link. The membership
+    // captured before any local restore travels in the same delta as the
+    // message.
+    let membership_delta = BOARDS
         .read()
         .map
         .get(&current_board)
-        .and_then(|board_data| {
-            self_membership_delta(board_data).map(|(members, info)| (Some(members), Some(info)))
-        })
+        .and_then(self_membership_delta);
+    let (members_delta, member_info_delta) = membership_delta
+        .map(|(members, info)| (Some(members), Some(info)))
         .unwrap_or((None, None));
 
     let route = AuthorizedMessageRoute::new(

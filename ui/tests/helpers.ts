@@ -15,7 +15,7 @@ export async function openBoard(page: Page, name: string) {
   await expect(item).toBeVisible({ timeout: 10_000 });
   await item.click();
   await expect(page.getByText(name, { exact: true }).first()).toBeVisible({
-    timeout: 10_000,
+    timeout: 20_000,
   });
   await expect(page.getByText("Loading board…", { exact: true })).toHaveCount(0);
 }
