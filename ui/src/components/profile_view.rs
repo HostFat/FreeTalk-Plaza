@@ -91,6 +91,14 @@ pub fn ProfileView(member_key: String) -> Element {
     let post_count = posts.len();
     posts.truncate(30);
 
+    let mail_address = {
+        let boards = BOARDS.read();
+        boards
+            .map
+            .get(&owner_vk)
+            .and_then(|board| board.mail_address_for(target))
+    };
+
     let (warnings, suspension, can_view_warnings) = {
         let boards = BOARDS.read();
         match boards.map.get(&owner_vk) {
@@ -155,6 +163,28 @@ pub fn ProfileView(member_key: String) -> Element {
                         }
                         p { class: "text-xs text-text-muted mt-2",
                             "{post_count} post(s)"
+                        }
+                        if let Some(address) = mail_address {
+                            div { class: "mt-3 flex flex-wrap items-center gap-2",
+                                span { class: "text-xs text-text-muted", "Freenet Mail" }
+                                code { class: "text-xs text-text font-mono break-all", "{address}" }
+                                a {
+                                    href: "{crate::util::mail::app_url()}",
+                                    target: "_blank",
+                                    rel: "noopener noreferrer",
+                                    class: "px-2 py-1 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg transition-colors",
+                                    "Open Mail"
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "px-2 py-1 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg transition-colors",
+                                    onclick: move |_| {
+                                        crate::util::copy_to_clipboard(&address);
+                                        crate::components::app::toasts::show("Mail address copied.");
+                                    },
+                                    "Copy"
+                                }
+                            }
                         }
                     }
                     if can_view_warnings && (!warnings.is_empty() || suspension.is_some()) {

@@ -1,6 +1,6 @@
 use crate::util::random_full_name;
 use crate::{
-    board_data::{BoardData, Boards},
+    board_data::{BoardData, Boards, IdentityProfile},
     constants::BOARD_CONTRACT_WASM,
     util::to_cbor_vec,
 };
@@ -71,10 +71,54 @@ pub fn create_example_boards() -> Boards {
     board5.board_data.owner_sk = None;
     map.insert(board5.owner_vk, board5.board_data);
 
+    // The drawer needs a stored profile to manage identities and the Mail
+    // address. Fixture boards carry keys, not profiles, so derive one per
+    // posting key; the owner key gets its own entry.
+    let mut profiles: Vec<IdentityProfile> = Vec::new();
+    for board in map.values() {
+        let self_vk = board.self_sk.verifying_key();
+        if !profiles
+            .iter()
+            .any(|profile| profile.signing_key.verifying_key() == self_vk)
+        {
+            let member_id = MemberId::from(&self_vk);
+            let name = board
+                .display_nickname(member_id)
+                .unwrap_or_else(|| "You".to_string());
+            let id = if board.profile_id.as_deref() == Some("member-profile") {
+                "member-profile".to_string()
+            } else {
+                format!("profile-{}", bs58::encode(self_vk.as_bytes()).into_string())
+            };
+            profiles.push(IdentityProfile {
+                id,
+                name,
+                signing_key: board.self_sk.clone(),
+                mail_address: None,
+                updated_at: 0,
+            });
+        }
+        if let Some(owner_sk) = &board.owner_sk {
+            let owner_vk = owner_sk.verifying_key();
+            if !profiles
+                .iter()
+                .any(|profile| profile.signing_key.verifying_key() == owner_vk)
+            {
+                profiles.push(IdentityProfile {
+                    id: "owner-profile".to_string(),
+                    name: "OwnerP".to_string(),
+                    signing_key: owner_sk.clone(),
+                    mail_address: None,
+                    updated_at: 0,
+                });
+            }
+        }
+    }
+
     Boards {
         map,
         current_board_key: None,
-        profiles: Vec::new(),
+        profiles,
         removed: Vec::new(),
     board_order: Vec::new(),
     archived: Vec::new(),
@@ -300,6 +344,7 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
             pending_send: None,
             subscribed_categories: Vec::new(),
             notification_mode: crate::board_data::NotificationMode::All,
+            mail_visibility: crate::util::mail::MailVisibility::Hidden,
             nickname_requests: Vec::new(),
             spectator: false,
         },

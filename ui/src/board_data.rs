@@ -2,6 +2,7 @@
 
 use crate::util::ecies::encrypt_secret_for_member;
 use crate::util::get_current_system_time;
+use crate::util::mail::MailVisibility;
 use crate::{constants::BOARD_CONTRACT_WASM, util::to_cbor_vec};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
@@ -282,6 +283,11 @@ pub struct BoardData {
     /// What this device wants to be notified about on this board.
     #[serde(default)]
     pub notification_mode: NotificationMode,
+
+    /// Whether this board shows the profile's Freenet Mail address. Local
+    /// preference; the address itself travels as a signed action.
+    #[serde(default)]
+    pub mail_visibility: MailVisibility,
 
     /// Structured nickname change requests awaiting an owner/admin decision.
     #[serde(default)]
@@ -2158,9 +2164,16 @@ impl BoardData {
             })
     }
 
+    /// The member's published Freenet Mail address on this board, if any.
+    pub fn mail_address_for(&self, member_id: MemberId) -> Option<String> {
+        self.board_state
+            .recent_messages
+            .mail_address(&member_id)
+            .map(str::to_string)
+    }
+
     /// The newest nickname request for a member, whatever its status.
-    pub fn latest_nickname_request(&self, member_id: MemberId) -> Option<&NicknameRequest> {
-        self.nickname_requests
+    pub fn latest_nickname_request(&self, member_id: MemberId) -> Option<&NicknameRequest> {        self.nickname_requests
             .iter()
             .filter(|request| request.member_id == member_id)
             .max_by_key(|request| request.created_at)
@@ -2720,6 +2733,10 @@ pub struct IdentityProfile {
     pub id: String,
     pub name: String,
     pub signing_key: SigningKey,
+    /// Optional Freenet Mail address. Kept on this device and published only
+    /// on boards where the user enables visibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_address: Option<String>,
     /// Last local rename, in milliseconds since the epoch. The merge keeps the
     /// newest name when two tabs saved different ones.
     #[serde(default)]
@@ -2733,6 +2750,7 @@ impl IdentityProfile {
             id,
             name,
             signing_key,
+            mail_address: None,
             updated_at: profile_stamp(),
         }
     }
@@ -3048,6 +3066,9 @@ impl Boards {
                 existing.name = profile.name;
                 existing.updated_at = profile.updated_at;
             }
+            if profile.mail_address.is_some() {
+                existing.mail_address = profile.mail_address;
+            }
             return;
         }
         self.profiles.push(profile);
@@ -3060,6 +3081,17 @@ impl Boards {
             return false;
         };
         profile.name = name;
+        profile.updated_at = profile_stamp();
+        true
+    }
+
+    /// Store or clear the profile's Freenet Mail address. Publishing it on a
+    /// board is a separate, explicit action.
+    pub fn set_profile_mail_address(&mut self, id: &str, address: Option<String>) -> bool {
+        let Some(profile) = self.profiles.iter_mut().find(|p| p.id == id) else {
+            return false;
+        };
+        profile.mail_address = address;
         profile.updated_at = profile_stamp();
         true
     }
@@ -3381,6 +3413,7 @@ impl Boards {
             pending_send: None,
             subscribed_categories: Vec::new(),
             notification_mode: NotificationMode::All,
+            mail_visibility: MailVisibility::Hidden,
             nickname_requests: Vec::new(),
         };
 
@@ -5428,6 +5461,7 @@ mod tests {
             pending_send: None,
             subscribed_categories: Vec::new(),
             notification_mode: NotificationMode::All,
+            mail_visibility: MailVisibility::Hidden,
             nickname_requests: Vec::new(),
             current_secret_version: None,
             last_secret_rotation: None,
@@ -5518,6 +5552,7 @@ mod tests {
             pending_send: None,
             subscribed_categories: Vec::new(),
             notification_mode: NotificationMode::All,
+            mail_visibility: MailVisibility::Hidden,
             nickname_requests: Vec::new(),
             current_secret_version: None,
             last_secret_rotation: None,
@@ -5600,6 +5635,7 @@ mod tests {
                 pending_send: None,
                 subscribed_categories: Vec::new(),
             notification_mode: NotificationMode::All,
+            mail_visibility: MailVisibility::Hidden,
             nickname_requests: Vec::new(),
                 current_secret_version: None,
                 last_secret_rotation: None,

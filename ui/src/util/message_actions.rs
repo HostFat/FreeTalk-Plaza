@@ -376,6 +376,42 @@ pub async fn set_nickname(ctx: ActionContext, member_id: MemberId, nickname: Str
     .await;
 }
 
+/// Publish or clear the current member's Freenet Mail address on this board.
+/// The action travels as a bare action message so the member, rather than an
+/// owner or admin, can change it. On private boards the payload is sealed with
+/// the board key.
+pub async fn set_mail_address(ctx: ActionContext, address: Option<String>) {
+    let member_id = MemberId::from(&ctx.self_sk.verifying_key());
+    let encoded =
+        ActionContentV1::set_mail_address(member_id, address.unwrap_or_default()).encode();
+    let content = if ctx.is_private {
+        let Some((key, version)) = ctx.secret_opt else {
+            crate::components::app::toasts::show_error(
+                "Could not update the mail address: the board key is missing",
+            );
+            return;
+        };
+        let (ciphertext, nonce) = encrypt_with_symmetric_key(&key, &encoded, version);
+        BoardMessageBody::private(
+            CONTENT_TYPE_ACTION,
+            ACTION_CONTENT_VERSION,
+            ciphertext,
+            nonce,
+            version,
+        )
+    } else {
+        BoardMessageBody::public_raw(CONTENT_TYPE_ACTION, ACTION_CONTENT_VERSION, encoded)
+    };
+    send_action_messages_with_policy(
+        ctx,
+        vec![content],
+        None,
+        Some("Mail address updated"),
+        "Could not update the mail address",
+    )
+    .await;
+}
+
 /// Replace a poll's content. Only its author, and the caller hides the action
 /// once a vote exists.
 pub async fn edit_poll(ctx: ActionContext, poll_id: MessageId, poll: PollContentV1) {

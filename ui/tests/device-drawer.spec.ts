@@ -11,6 +11,7 @@ test("identities and backup live in the device drawer", async ({ page }) => {
     "aria-selected",
     "true",
   );
+  await expect(drawer.getByRole("tab", { name: "Mail" })).toBeVisible();
   await expect(drawer.getByText("Your identities")).toBeVisible();
 
   await drawer.getByRole("tab", { name: "Backup" }).click();

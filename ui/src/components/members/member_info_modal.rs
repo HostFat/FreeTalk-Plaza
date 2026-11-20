@@ -141,8 +141,7 @@ pub fn MemberInfoModal() -> Element {
             .and_then(|m| {
                 owner_key_signal.as_ref().map(|owner| {
                     let params = ChatBoardParametersV1 { owner: *owner };
-                    let invite_chain =
-                        board_state.board_state.members.get_invite_chain(m, &params);
+                    let invite_chain = board_state.board_state.members.get_invite_chain(m, &params);
                     invite_chain
                         .is_ok_and(|chain| chain.iter().any(|entry| entry.member.id() == viewer_id))
                 })
@@ -180,6 +179,7 @@ pub fn MemberInfoModal() -> Element {
 
         // Get the member ID string to display
         let member_id_str = member_id.to_string();
+        let mail_address = board_state.mail_address_for(member_id);
 
         rsx! {
             // Modal backdrop
@@ -282,6 +282,38 @@ pub fn MemberInfoModal() -> Element {
                                 class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text font-mono text-sm",
                                 value: "{member_id_str}",
                                 readonly: true
+                            }
+                        }
+
+                        if let Some(mail_address) = mail_address {
+                            div { class: "mb-4",
+                                label { class: "block text-sm font-medium text-text-muted mb-2", "Freenet Mail" }
+                                div { class: "flex flex-wrap items-center gap-2",
+                                    input {
+                                        class: "flex-1 min-w-40 px-3 py-2 bg-surface border border-border rounded-lg text-text font-mono text-sm",
+                                        value: "{mail_address}",
+                                        readonly: true
+                                    }
+                                    a {
+                                        href: "{crate::util::mail::app_url()}",
+                                        target: "_blank",
+                                        rel: "noopener noreferrer",
+                                        class: "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg transition-colors",
+                                        "Open Mail"
+                                    }
+                                    button {
+                                        r#type: "button",
+                                        class: "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg transition-colors",
+                                        onclick: move |_| {
+                                            crate::util::copy_to_clipboard(&mail_address);
+                                            crate::components::app::toasts::show("Mail address copied.");
+                                        },
+                                        "Copy"
+                                    }
+                                }
+                                p { class: "text-[11px] text-text-muted mt-1",
+                                    "Published by this member on this board. Freenet Mail is a separate app."
+                                }
                             }
                         }
 

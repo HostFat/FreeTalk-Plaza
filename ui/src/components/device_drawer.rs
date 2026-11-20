@@ -3,12 +3,16 @@
 
 use crate::components::app::{BOARDS, CURRENT_BOARD};
 use crate::util::ecies::unseal_bytes_with_secrets;
+use crate::util::mail::{self, MailVisibility};
+use crate::util::message_actions::ActionContext;
 use dioxus::prelude::*;
+use plaza_core::board_state::member::MemberId;
 use web_sys::window;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DeviceTab {
     Identities,
+    Mail,
     Backup,
 }
 
@@ -177,6 +181,15 @@ pub fn DeviceDrawer() -> Element {
         close();
     };
 
+    let mail_profile_id = {
+        let boards = BOARDS.read();
+        let current = CURRENT_BOARD.read().owner_key;
+        current
+            .and_then(|key| boards.map.get(&key))
+            .and_then(|board| boards.profile_for_board(board))
+            .map(|profile| profile.id.clone())
+    };
+
     rsx! {
         div {
             class: "fixed inset-0 z-50 bg-black/50",
@@ -200,7 +213,7 @@ pub fn DeviceDrawer() -> Element {
                 div { class: "min-w-0",
                     h2 { class: "text-lg font-semibold text-text", "This device" }
                     p { class: "text-xs text-text-muted mt-0.5",
-                        "Identities and backups stored by this browser."
+                        "Identities, Freenet Mail and backups stored by this browser."
                     }
                 }
                 button {
@@ -220,6 +233,14 @@ pub fn DeviceDrawer() -> Element {
                     class: tab_class(active == DeviceTab::Identities),
                     onclick: move |_| open(DeviceTab::Identities),
                     "Identities"
+                }
+                button {
+                    r#type: "button",
+                    role: "tab",
+                    aria_selected: if active == DeviceTab::Mail { "true" } else { "false" },
+                    class: tab_class(active == DeviceTab::Mail),
+                    onclick: move |_| open(DeviceTab::Mail),
+                    "Mail"
                 }
                 button {
                     r#type: "button",
@@ -469,6 +490,20 @@ pub fn DeviceDrawer() -> Element {
                             }
                         }
                     },
+                    DeviceTab::Mail => rsx! {
+                        if let Some(profile_id) = mail_profile_id.clone() {
+                            MailTab { key: "{profile_id}", profile_id }
+                        } else {
+                            section { class: "space-y-4",
+                                div { class: "rounded-xl border border-border bg-panel p-4 space-y-2",
+                                    h3 { class: "text-sm font-semibold text-text", "Freenet Mail" }
+                                    p { class: "text-xs text-text-muted",
+                                        "Open a board and choose the active profile to set its Freenet Mail address."
+                                    }
+                                }
+                            }
+                        }
+                    },
                     DeviceTab::Backup => rsx! {
                         section { class: "space-y-4",
                             div { class: "rounded-xl border border-border bg-panel p-4 space-y-2",
@@ -546,6 +581,235 @@ pub fn DeviceDrawer() -> Element {
                             }
                         }
                     },
+                }
+            }
+        }
+    }
+}
+
+/// Publish or clear the address on the current board. The action is signed by
+/// the active profile and sealed with the board key on private boards.
+fn publish_mail_address(value: Option<String>) {
+    let Some(ctx) = ActionContext::from_current_board() else {
+        crate::components::app::toasts::show_error(
+            "Could not publish the mail address on this board.",
+        );
+        return;
+    };
+    wasm_bindgen_futures::spawn_local(async move {
+        crate::util::message_actions::set_mail_address(ctx, value).await;
+    });
+}
+
+fn change_mail_visibility(
+    profile_id: String,
+    board_key: ed25519_dalek::VerifyingKey,
+    next: MailVisibility,
+    is_private: bool,
+    raw: String,
+) {
+    let next = if is_private && next == MailVisibility::Public {
+        MailVisibility::Board
+    } else {
+        next
+    };
+    let value = if next == MailVisibility::Hidden {
+        None
+    } else {
+        match mail::normalize_address(&raw) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                crate::components::app::toasts::show_error(error);
+                return;
+            }
+        }
+    };
+    BOARDS.with_mut(|boards| {
+        boards.set_profile_mail_address(&profile_id, value.clone());
+        if let Some(board) = boards.map.get_mut(&board_key) {
+            board.mail_visibility = next;
+        }
+    });
+    persist_profiles();
+    publish_mail_address(value);
+}
+
+#[component]
+fn MailTab(profile_id: String) -> Element {
+    let (local_address, board_key, board_name, is_private, visibility, published) = {
+        let boards = BOARDS.read();
+        let profile = boards
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .cloned();
+        let current = CURRENT_BOARD.read().owner_key;
+        let board = current.and_then(|key| boards.map.get(&key));
+        let published = board.and_then(|board| {
+            let member = MemberId::from(&board.self_sk.verifying_key());
+            board.mail_address_for(member)
+        });
+        (
+            profile.and_then(|profile| profile.mail_address),
+            current,
+            board.map(board_display_name).unwrap_or_default(),
+            board.map(|board| board.is_private()).unwrap_or(false),
+            board.map(|board| board.mail_visibility).unwrap_or_default(),
+            published,
+        )
+    };
+    let mut address = use_signal(|| local_address.clone().unwrap_or_default());
+    let mut error = use_signal(|| None::<String>);
+
+    let save = {
+        let profile_id = profile_id.clone();
+        move |_| {
+            let raw = address.read().clone();
+            match mail::normalize_address(&raw) {
+                Ok(value) => {
+                    address.set(value.clone());
+                    error.set(None);
+                    BOARDS.with_mut(|boards| {
+                        boards.set_profile_mail_address(&profile_id, Some(value.clone()));
+                    });
+                    persist_profiles();
+                    if board_key.is_some() && visibility != MailVisibility::Hidden {
+                        publish_mail_address(Some(value));
+                    } else {
+                        crate::components::app::toasts::show("Mail address saved.");
+                    }
+                }
+                Err(message) => error.set(Some(message.to_string())),
+            }
+        }
+    };
+
+    let open = crate::util::mail::app_url();
+
+    rsx! {
+        section { class: "space-y-4",
+            div { class: "rounded-xl border border-border bg-panel p-4 space-y-2",
+                h3 { class: "text-sm font-semibold text-text", "Freenet Mail" }
+                p { class: "text-xs text-text-muted",
+                    "Freenet Mail is a separate app on Freenet. It has its own identity, recovery key and inbox. FreeTalk Plaza stores only the address; messages stay in Mail."
+                }
+                a {
+                    href: "{open}",
+                    target: "_blank",
+                    rel: "noopener noreferrer",
+                    class: "inline-flex items-center gap-1 text-xs text-accent hover:underline",
+                    "Open Freenet Mail →"
+                }
+            }
+
+            div { class: "rounded-xl border border-border bg-panel p-4 space-y-3",
+                label { class: "block text-sm font-medium text-text", "Address on this profile" }
+                p { class: "text-xs text-text-muted",
+                    "Paste the address Mail shows in its share dialog: name@address, or the bare inbox address."
+                }
+                input {
+                    id: "mail-address",
+                    class: "w-full px-3 py-2 bg-surface border border-border rounded-lg text-text font-mono text-sm",
+                    dir: "auto",
+                    placeholder: "name@address",
+                    value: "{address}",
+                    oninput: move |event| address.set(event.value()),
+                }
+                if let Some(message) = error.read().as_ref() {
+                    p { class: "text-xs text-red-400", "{message}" }
+                }
+                div { class: "flex flex-wrap items-center gap-2",
+                    button {
+                        r#type: "button",
+                        class: "px-3 py-1.5 bg-accent hover:bg-accent-hover text-white text-xs rounded-lg transition-colors",
+                        onclick: save,
+                        "Save address"
+                    }
+                    button {
+                        r#type: "button",
+                        class: "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg transition-colors",
+                        onclick: move |_| {
+                            let value = address.read().clone();
+                            if !value.trim().is_empty() {
+                                crate::util::copy_to_clipboard(&value);
+                                crate::components::app::toasts::show("Mail address copied.");
+                            }
+                        },
+                        "Copy address"
+                    }
+                }
+            }
+
+            div { class: "rounded-xl border border-border bg-panel p-4 space-y-3",
+                h3 { class: "text-sm font-semibold text-text", "Show on this board" }
+                if let Some(board_key) = board_key {
+                    p { class: "text-xs text-text-muted",
+                        "Board: {board_name}"
+                    }
+                    div { class: "flex flex-wrap gap-2",
+                        button {
+                            r#type: "button",
+                            class: if visibility == MailVisibility::Hidden {
+                                "px-3 py-1.5 bg-accent text-white text-xs rounded-lg"
+                            } else {
+                                "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg"
+                            },
+                            onclick: {
+                                let profile_id = profile_id.clone();
+                                move |_| change_mail_visibility(
+                                    profile_id.clone(),
+                                    board_key,
+                                    MailVisibility::Hidden,
+                                    is_private,
+                                    address.read().clone(),
+                                )
+                            },
+                            "Hidden"
+                        }
+                        button {
+                            r#type: "button",
+                            class: if visibility != MailVisibility::Hidden {
+                                "px-3 py-1.5 bg-accent text-white text-xs rounded-lg"
+                            } else {
+                                "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg"
+                            },
+                            onclick: {
+                                let profile_id = profile_id.clone();
+                                let next = if is_private { MailVisibility::Board } else { MailVisibility::Public };
+                                move |_| change_mail_visibility(
+                                    profile_id.clone(),
+                                    board_key,
+                                    next,
+                                    is_private,
+                                    address.read().clone(),
+                                )
+                            },
+                            if is_private { "Board members" } else { "Public" }
+                        }
+                    }
+                    p { class: "text-xs text-text-muted",
+                        if is_private {
+                            "Sealed with the board key: only members of this board can read it."
+                        } else {
+                            "Visible to anyone who can read this board. Board members only cannot be enforced on a public board."
+                        }
+                    }
+                    if let Some(published) = published {
+                        p { class: "text-xs text-text",
+                            "Published on this board: {published}"
+                        }
+                    }
+                } else {
+                    p { class: "text-xs text-text-muted",
+                        "Open a board to publish the address. It stays on this device until you choose a visibility."
+                    }
+                }
+            }
+
+            div { class: "rounded-xl border border-border bg-panel p-4 space-y-2",
+                h3 { class: "text-sm font-semibold text-text", "What Plaza keeps" }
+                p { class: "text-xs text-text-muted",
+                    "Only the address and the visibility choice. Plaza never asks for the Mail recovery key and does not read the inbox."
                 }
             }
         }

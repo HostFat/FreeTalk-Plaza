@@ -615,6 +615,7 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     pending_send: None,
                     subscribed_categories: Vec::new(),
                     notification_mode: crate::board_data::NotificationMode::All,
+                    mail_visibility: crate::util::mail::MailVisibility::Hidden,
                     nickname_requests: Vec::new(),
                     current_secret_version: export.current_board_secret,
                     last_secret_rotation: None,

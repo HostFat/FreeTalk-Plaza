@@ -445,12 +445,16 @@ test("an image uploads and survives a reload", async ({ page }) => {
   await expect(
     app.getByText("pixel.png", { exact: false }).first(),
   ).toBeVisible({ timeout: 30_000 });
+  await expect(app.getByText(/Uploading/)).toHaveCount(0, {
+    timeout: 120_000,
+  });
   const send = app.getByRole("button", { name: /Send Topic/ });
   await expect(send).toBeEnabled({ timeout: 60_000 });
   await send.click();
+  await waitForSync(page);
   await expect(
     app.getByText(title, { exact: true }).first(),
-  ).toBeVisible({ timeout: 30_000 });
+  ).toBeVisible({ timeout: 60_000 });
 
   await page.reload();
   await expect(
@@ -516,6 +520,75 @@ test("a hidden topic is restored from the trash", async ({ page }) => {
   await expect(
     app.getByText(title, { exact: true }).first(),
   ).toBeVisible({ timeout: 30_000 });
+});
+
+test("a Mail address publishes on the board and survives a reload", async ({
+  page,
+}) => {
+  await gotoRoute(page, `/board/${boardKey}`);
+  const app = page.frameLocator("iframe");
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await ensureOwner(page);
+
+  await app.getByRole("button", { name: "Open identities" }).click();
+  const drawer = app.locator(".device-drawer");
+  await drawer.getByRole("tab", { name: "Mail" }).click();
+  const address = "3x4g3um9JYXLchv5VE3SD8wW9TnR8oSMLAA7AYfodBFc";
+  await drawer.locator("#mail-address").fill(address);
+  await drawer.getByRole("button", { name: "Save address" }).click();
+  await drawer.getByRole("button", { name: "Board members" }).click();
+  await expect(
+    drawer.getByText(`Published on this board: ${address}`),
+  ).toBeVisible({ timeout: 30_000 });
+  await waitForSync(page);
+  await page.waitForTimeout(5_000);
+  await drawer.getByRole("button", { name: "Close" }).click();
+
+  await page.reload();
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await app.getByRole("button", { name: "Open identities" }).click();
+  await drawer.getByRole("tab", { name: "Mail" }).click();
+  await expect(drawer.locator("#mail-address")).toHaveValue(address);
+  await expect(
+    drawer.getByText(`Published on this board: ${address}`),
+  ).toBeVisible({ timeout: 30_000 });
+
+  // The member profile or member info shows the published address.
+  await drawer.getByRole("button", { name: "Close" }).click();
+  await app.getByRole("button", { name: /Members/ }).click();
+  await app.getByRole("button", { name: /OwnerP/ }).first().click();
+  await expect(app.getByText("Freenet Mail").first()).toBeVisible({
+    timeout: 30_000,
+  });
+  const frame = await appFrame(page);
+  await expect
+    .poll(
+      async () => {
+        if (await frame.getByText(address, { exact: false }).count()) {
+          return true;
+        }
+        return frame
+          .locator("input")
+          .evaluateAll(
+            (elements, value) =>
+              elements.some(
+                (element) => (element as HTMLInputElement).value === value,
+              ),
+            address,
+          );
+      },
+      { timeout: 30_000 },
+    )
+    .toBe(true);
+
+  await gotoRoute(page, `/board/${boardKey}`);
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await app.getByRole("button", { name: "Open identities" }).click();
+  await drawer.getByRole("tab", { name: "Mail" }).click();
+  await drawer.getByRole("button", { name: "Hidden" }).click();
+  await expect(
+    drawer.getByText(`Published on this board: ${address}`),
+  ).toHaveCount(0, { timeout: 30_000 });
 });
 
 test("an invited identity's first post survives a reload", async ({ page }) => {

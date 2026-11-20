@@ -13,6 +13,7 @@ pub mod image_retire;
 pub mod backup;
 pub mod image_tags;
 pub mod images;
+pub mod mail;
 pub mod markdown;
 pub mod mentions;
 pub mod member_moderation;

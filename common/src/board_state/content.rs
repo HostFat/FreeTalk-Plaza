@@ -62,6 +62,10 @@ pub const ACTION_TYPE_SET_SECTION_IMAGES: u32 = 6;
 pub const ACTION_TYPE_EDIT_POLL: u32 = 7;
 /// Replace a member's displayed nickname with a moderator override.
 pub const ACTION_TYPE_SET_NICKNAME: u32 = 8;
+/// Publish or clear the member's Freenet Mail address on this board. Signed by
+/// the member themselves; the address travels in the action payload so it can
+/// be sealed on private boards.
+pub const ACTION_TYPE_SET_MAIL_ADDRESS: u32 = 9;
 // Future: ACTION_TYPE_PIN = 6, ACTION_TYPE_REPLY = 7, etc.
 
 /// Text message content (content_type = 1)
@@ -619,6 +623,29 @@ impl ActionContentV1 {
             None
         }
     }
+
+    /// Build an action that publishes the member's Freenet Mail address on
+    /// this board. An empty address clears it. The member id doubles as the
+    /// action target, the same convention as the nickname override.
+    pub fn set_mail_address(
+        member_id: crate::board_state::member::MemberId,
+        address: String,
+    ) -> Self {
+        Self {
+            action_type: ACTION_TYPE_SET_MAIL_ADDRESS,
+            target: MessageId::from_bytes(*member_id.as_bytes()),
+            payload: encode_cbor(&SetMailAddressPayload { member_id, address }),
+        }
+    }
+
+    /// Get the mail address payload if this is a set_mail_address action.
+    pub fn set_mail_address_payload(&self) -> Option<SetMailAddressPayload> {
+        if self.action_type == ACTION_TYPE_SET_MAIL_ADDRESS {
+            ciborium::from_reader(&self.payload[..]).ok()
+        } else {
+            None
+        }
+    }
 }
 
 /// Payload for edit actions
@@ -677,6 +704,15 @@ pub struct SectionImagesV1 {
 pub struct SetNicknamePayload {
     pub member_id: crate::board_state::member::MemberId,
     pub nickname: String,
+}
+
+/// Payload for `ACTION_TYPE_SET_MAIL_ADDRESS`. The member publishes the
+/// address other members use to reach them on Freenet Mail. An empty address
+/// clears the previous value.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct SetMailAddressPayload {
+    pub member_id: crate::board_state::member::MemberId,
+    pub address: String,
 }
 
 /// Keeps new default fields out of the bytes that signatures cover.

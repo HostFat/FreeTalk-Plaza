@@ -289,6 +289,18 @@ pub struct MessageActionsState {
     pub reactions: HashMap<MessageId, HashMap<String, Vec<MemberId>>>,
     /// Moderator overrides of a member's displayed nickname.
     pub nickname_overrides: HashMap<MemberId, NicknameOverride>,
+    /// The member's own latest Freenet Mail address on this board.
+    pub mail_addresses: HashMap<MemberId, MailAddressRecord>,
+}
+
+/// The last signed Freenet Mail address a member published on this board.
+/// An empty address is not stored: it removes the entry.
+#[derive(Clone, PartialEq, Debug)]
+pub struct MailAddressRecord {
+    pub address: String,
+    /// Signed time in milliseconds; the highest version wins.
+    pub version: u64,
+    pub set_at: SystemTime,
 }
 
 /// The last signed nickname override for one member. The member's own
@@ -664,7 +676,7 @@ impl MessagesV1 {
             ActionContentV1, DecodedContent, ModerationActionV1, ACTION_TYPE_DELETE,
             ACTION_TYPE_EDIT_POLL,
             ACTION_TYPE_EDIT, ACTION_TYPE_EDIT_CATEGORY, ACTION_TYPE_REACTION,
-            ACTION_TYPE_REMOVE_REACTION, ACTION_TYPE_SET_NICKNAME,
+            ACTION_TYPE_REMOVE_REACTION, ACTION_TYPE_SET_MAIL_ADDRESS, ACTION_TYPE_SET_NICKNAME,
         };
         use crate::board_state::privacy::SealedBytes;
 
@@ -939,6 +951,50 @@ impl MessagesV1 {
                         );
                     }
                 }
+                ACTION_TYPE_SET_MAIL_ADDRESS => {
+                    // A member publishes and clears their own address. The
+                    // signed message author must match the payload target.
+                    let Some(payload) = action.set_mail_address_payload() else {
+                        continue;
+                    };
+                    if actor != payload.member_id {
+                        continue;
+                    }
+                    let target_is_member = owner_id == Some(payload.member_id)
+                        || members
+                            .map(|members| members.contains(&payload.member_id))
+                            .unwrap_or(true);
+                    if !target_is_member {
+                        continue;
+                    }
+                    let address = payload.address.trim();
+                    if address.len() > 256 {
+                        continue;
+                    }
+                    let version =
+                        crate::board_state::rate_limit::system_time_ms(msg.message.time) as u64;
+                    let replace = self
+                        .actions_state
+                        .mail_addresses
+                        .get(&payload.member_id)
+                        .map(|old| version >= old.version)
+                        .unwrap_or(true);
+                    if !replace {
+                        continue;
+                    }
+                    if address.is_empty() {
+                        self.actions_state.mail_addresses.remove(&payload.member_id);
+                    } else {
+                        self.actions_state.mail_addresses.insert(
+                            payload.member_id,
+                            MailAddressRecord {
+                                address: address.to_string(),
+                                version,
+                                set_at: msg.message.time,
+                            },
+                        );
+                    }
+                }
                 _ => {
                     // Unknown action type - ignore for forward compatibility
                 }
@@ -996,6 +1052,14 @@ impl MessagesV1 {
     /// Moderator nickname override for a member, if one was published.
     pub fn nickname_override(&self, member_id: &MemberId) -> Option<&NicknameOverride> {
         self.actions_state.nickname_overrides.get(member_id)
+    }
+
+    /// The member's latest Freenet Mail address, if they published one.
+    pub fn mail_address(&self, member_id: &MemberId) -> Option<&str> {
+        self.actions_state
+            .mail_addresses
+            .get(member_id)
+            .map(|record| record.address.as_str())
     }
 
     /// Whether a section lets authors moderate replies. The policy published
@@ -4082,6 +4146,41 @@ mod tests {
         )
     }
 
+    fn mail_by(
+        signer: &SigningKey,
+        author: MemberId,
+        owner_id: MemberId,
+        target: MemberId,
+        address: &str,
+        time: SystemTime,
+    ) -> AuthorizedMessageV1 {
+        use crate::board_state::content::{
+            ActionContentV1, ACTION_CONTENT_VERSION, CONTENT_TYPE_ACTION,
+        };
+        let action = ActionContentV1::set_mail_address(target, address.to_string());
+        AuthorizedMessageV1::new(
+            MessageV1 {
+                board_owner: owner_id,
+                author,
+                time,
+                content: BoardMessageBody::public_raw(
+                    CONTENT_TYPE_ACTION,
+                    ACTION_CONTENT_VERSION,
+                    action.encode(),
+                ),
+                images: Vec::new(),
+                reply_to: None,
+                topic_id: None,
+                topic_public_key: None,
+                topic_proof: None,
+                section_id: None,
+                section_auto_moderated: None,
+                auto_moderated: false,
+            },
+            signer,
+        )
+    }
+
     fn category_with_auto(
         owner: &SigningKey,
         owner_id: MemberId,
@@ -4902,6 +5001,49 @@ mod tests {
                 .is_none(),
             "a non-member gets no override"
         );
+    }
+
+    #[test]
+    fn members_publish_and_clear_their_own_mail_address() {
+        let fixture = board_fixture();
+        let mut messages = MessagesV1 {
+            messages: vec![
+                mail_by(
+                    &fixture.author,
+                    fixture.author_id,
+                    fixture.owner_id,
+                    fixture.author_id,
+                    "alice@3x4g3um9JYXLchv5VE3SD8wW9TnR8oSMLAA7AYfodBFc",
+                    at(10),
+                ),
+                // Another member cannot publish an address for the author.
+                mail_by(
+                    &fixture.stranger,
+                    fixture.stranger_id,
+                    fixture.owner_id,
+                    fixture.author_id,
+                    "attacker@3x4g3um9JYXLchv5VE3SD8wW9TnR8oSMLAA7AYfodBFc",
+                    at(11),
+                ),
+            ],
+            ..Default::default()
+        };
+        rebuild(&fixture.state, &fixture.parameters, &mut messages, true);
+        assert_eq!(
+            messages.mail_address(&fixture.author_id),
+            Some("alice@3x4g3um9JYXLchv5VE3SD8wW9TnR8oSMLAA7AYfodBFc")
+        );
+
+        messages.messages.push(mail_by(
+            &fixture.author,
+            fixture.author_id,
+            fixture.owner_id,
+            fixture.author_id,
+            "",
+            at(12),
+        ));
+        rebuild(&fixture.state, &fixture.parameters, &mut messages, true);
+        assert_eq!(messages.mail_address(&fixture.author_id), None);
     }
 
     #[test]
