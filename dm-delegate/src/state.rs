@@ -11,9 +11,10 @@ use ml_kem::kem::{Decapsulate, KeyExport};
 use ml_kem::{B32, DecapsulationKey, EncapsulationKey, MlKem768, Seed};
 use plaza_dm_core::delegate::*;
 use plaza_dm_core::{
-    AuthorizedDmMessage, AuthorizedSealedDmKey, DmContractId, DmDevice, DmDeviceId, DmIdentityId,
-    DmMessage, DmMessageId, SealedDmKey, CONTENT_TYPE_ATTACHMENT, CONTENT_TYPE_SYSTEM,
-    CONTENT_TYPE_TEXT, KEY_SUITE_X25519_MLKEM768_XCHACHA20,
+    AuthorizedDmDevice, AuthorizedDmMember, AuthorizedDmMessage, AuthorizedSealedDmKey,
+    DmContractId, DmDevice, DmDeviceId, DmIdentityId, DmMember, DmMembersV1, DmMessage,
+    DmMessageId, DmMetaV1, DmRole, DmStateV1, SealedDmKey, CONTENT_TYPE_ATTACHMENT,
+    CONTENT_TYPE_SYSTEM, CONTENT_TYPE_TEXT, KEY_SUITE_X25519_MLKEM768_XCHACHA20,
 };
 use serde::{Deserialize, Serialize};
 
@@ -152,6 +153,42 @@ impl DmIdentityStateV1 {
         };
         let signature = SigningKey::from_bytes(&local.signing_seed).sign(bytes);
         DmDelegateResponseMsg::Signature { signature }
+    }
+
+    fn create_conversation_state(
+        &self,
+        device_id: DmDeviceId,
+        conversation_id: [u8; 32],
+        created_at: i64,
+    ) -> DmDelegateResponseMsg {
+        let local = match self.active_device(&device_id) {
+            Ok(local) => local,
+            Err(error) => return error,
+        };
+        let identity_sk = SigningKey::from_bytes(&self.identity_seed);
+        let authorized_device =
+            AuthorizedDmDevice::new(local.device.clone(), &identity_sk);
+        let member = DmMember {
+            identity: self.identity(),
+            version: 0,
+            role: DmRole::Creator,
+            joined_at: created_at,
+            devices: vec![authorized_device],
+            left_at: None,
+        };
+        let state = DmStateV1 {
+            meta: DmMetaV1 {
+                conversation_id,
+                created_at,
+                state_version: 1,
+                name: None,
+            },
+            members: DmMembersV1 {
+                members: vec![AuthorizedDmMember::new(member, &identity_sk)],
+            },
+            ..Default::default()
+        };
+        DmDelegateResponseMsg::StateCreated { state }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -737,6 +774,17 @@ impl DmDelegateStateV1 {
                     return DmDelegateResponseMsg::error("DM identity is not initialized");
                 };
                 state.sign_device(device_id, &bytes)
+            }
+            DmDelegateRequestMsg::CreateConversation {
+                identity,
+                device_id,
+                conversation_id,
+                created_at,
+            } => {
+                let Some(state) = self.identity(&identity) else {
+                    return DmDelegateResponseMsg::error("DM identity is not initialized");
+                };
+                state.create_conversation_state(device_id, conversation_id, created_at)
             }
             DmDelegateRequestMsg::StoreConversationKey {
                 identity,

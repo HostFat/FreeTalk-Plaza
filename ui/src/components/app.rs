@@ -1,4 +1,5 @@
 pub mod chat_delegate;
+pub mod dm_contract;
 pub mod dm_delegate;
 pub mod document_title;
 pub mod freenet_api;
@@ -511,6 +512,7 @@ pub fn App() -> Element {
             CategoryCreateModal {}
             AboutModal {}
             crate::components::device_drawer::DeviceDrawer {}
+            crate::components::messages_view::MessagesModal {}
             DocumentTitleUpdater {}
         }
     }

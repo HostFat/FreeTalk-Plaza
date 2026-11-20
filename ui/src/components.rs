@@ -13,6 +13,7 @@ pub mod device_drawer;
 pub mod invite_click_interceptor;
 pub mod join_screen;
 pub mod members;
+pub mod messages_view;
 pub mod mention_click_interceptor;
 pub mod moderation_view;
 pub mod notifications_view;

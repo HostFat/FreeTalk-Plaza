@@ -70,6 +70,14 @@ pub enum DmDelegateRequestMsg {
         device_id: DmDeviceId,
         bytes: Vec<u8>,
     },
+    /// Build the creator state for a new conversation. The delegate signs the
+    /// creator member and its device with the identity key.
+    CreateConversation {
+        identity: DmIdentityId,
+        device_id: DmDeviceId,
+        conversation_id: [u8; 32],
+        created_at: i64,
+    },
     StoreConversationKey {
         identity: DmIdentityId,
         contract_key: DmContractId,
@@ -239,6 +247,9 @@ pub enum DmDelegateResponseMsg {
     },
     MessageCreated {
         message: AuthorizedDmMessage,
+    },
+    StateCreated {
+        state: crate::DmStateV1,
     },
     Plaintext {
         bytes: Vec<u8>,

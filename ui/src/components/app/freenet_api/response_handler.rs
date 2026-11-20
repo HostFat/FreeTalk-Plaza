@@ -73,7 +73,17 @@ impl ResponseHandler {
             HostResponse::Ok => {
                 info!("Received OK response from API");
             }
-            HostResponse::ContractResponse(contract_response) => match contract_response {
+            HostResponse::ContractResponse(contract_response) => {
+                if crate::components::app::dm_contract::is_dm_contract_response(
+                    &contract_response,
+                ) {
+                    crate::components::app::dm_contract::handle_contract_response(
+                        contract_response,
+                    )
+                    .await?;
+                    return Ok(flags);
+                }
+                match contract_response {
                 ContractResponse::GetResponse {
                     key,
                     contract: _,
@@ -114,7 +124,8 @@ impl ResponseHandler {
                 _ => {
                     info!("Unhandled contract response: {:?}", contract_response);
                 }
-            },
+                }
+            }
             HostResponse::DelegateResponse { key, values } => {
                 // Check if this is a response from any known legacy delegate
                 let is_legacy_delegate = is_legacy_delegate_key(key.bytes());

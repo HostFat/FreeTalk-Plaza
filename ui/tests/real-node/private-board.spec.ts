@@ -517,6 +517,21 @@ test("the DM delegate registers and keeps a device", async ({ page }) => {
   expect(logs.join("\n")).not.toContain("DM delegate did not become ready");
 });
 
+test("a DM conversation contract is created", async ({ page }) => {
+  await gotoRoute(page, `/board/${boardKey}`);
+  const app = page.frameLocator("iframe");
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+
+  await app.getByRole("button", { name: "Messages" }).first().click();
+  await app.getByRole("button", { name: "New conversation" }).click();
+  await expect(app.locator(".dm-conversation-row").first()).toBeVisible({
+    timeout: 60_000,
+  });
+  await expect(app.getByText("Synced", { exact: true })).toBeVisible({
+    timeout: 60_000,
+  });
+});
+
 test("a hidden topic is restored from the trash", async ({ page }) => {
   await page.goto(`${BASE}#/board/${boardKey}`);
   const app = page.frameLocator("iframe");

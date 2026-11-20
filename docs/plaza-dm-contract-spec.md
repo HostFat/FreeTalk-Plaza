@@ -25,6 +25,13 @@ Implementazione attuale:
   chiave di conversazione e AAD sui metadati.
 - Non ancora implementati: client del contratto DM (create/get/subscribe/
   publish), invito e join end-to-end, Messages UI e deploy del contratto DM.
+- Client del contratto DM: `ui/src/components/app/dm_contract.rs` crea il
+  contratto con parametri casuali, costruisce lo stato creator tramite il
+  delegate, fa PUT con subscribe, mantiene la mappa locale, applica delta e
+  pubblica update, instrada le risposte del contratto. La voce Messages nella
+  barra superiore apre un elenco e crea la prima conversazione.
+- Restano: invito/join end-to-end, crittografia dei messaggi nel flusso di
+  invio, vista chat, notifiche e test a due client.
 
 Documenti collegati:
 

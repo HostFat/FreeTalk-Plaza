@@ -8,6 +8,7 @@ use crate::components::app::{
 use crate::components::board_sync_chip::BoardSyncChip;
 use crate::components::conversation::message_input::PostInput;
 use crate::components::device_drawer::{open as open_device, DeviceTab};
+use crate::components::messages_view::MESSAGES_OPEN;
 use crate::util::avatar::get_avatar;
 use crate::util::messaging::{prepare_message, publish_prepared, PollDraft, ReplyContext};
 use dioxus::prelude::*;
@@ -317,6 +318,16 @@ pub fn TopBar() -> Element {
                         span { "📝" }
                         span { "Board" }
                     }
+                    // Direct messages
+                    button {
+                        r#type: "button",
+                        title: "Messages",
+                        aria_label: "Messages",
+                        class: tab_class(false),
+                        onclick: move |_| *MESSAGES_OPEN.write() = true,
+                        span { "💬" }
+                        span { "Messages" }
+                    }
                     // Notifications button
                     button {
                         r#type: "button",
@@ -425,6 +436,16 @@ pub fn TopBar() -> Element {
                                 },
                                 span { "📝" }
                                 span { "Board" }
+                            }
+                            button {
+                                r#type: "button",
+                                class: "flex items-center gap-3 px-4 py-3 text-text hover:bg-surface transition-colors w-full text-left",
+                                onclick: move |_| {
+                                    menu_open.set(false);
+                                    *MESSAGES_OPEN.write() = true;
+                                },
+                                span { "💬" }
+                                span { "Messages" }
                             }
                             button {
                                 r#type: "button",
