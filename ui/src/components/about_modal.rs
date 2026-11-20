@@ -1,8 +1,9 @@
-//! "About FreeTalk Plaza" panel: name, what the app is, and the build/deployment
-//! details a user needs when reporting a problem.
+//! "About FreeTalk Plaza" panel: what the app is and the build/deployment
+//! details a user needs when reporting a problem. Identities and backups live
+//! in the device drawer so this panel stays informational.
 
-use crate::components::app::{ABOUT_MODAL, BOARDS, CURRENT_BOARD};
-use crate::util::ecies::unseal_bytes_with_secrets;
+use crate::components::app::ABOUT_MODAL;
+use crate::components::device_drawer::{open as open_device, DeviceTab};
 use dioxus::prelude::*;
 use web_sys::window;
 
@@ -28,148 +29,6 @@ fn site_contract_id() -> Option<String> {
     }
 }
 
-/// Profile edits are local state; write them before a reload can drop them.
-fn persist_profiles() {
-    crate::util::safe_spawn_local(async {
-        if let Err(error) =
-            crate::components::app::chat_delegate::save_boards_and_wait().await
-        {
-            crate::components::app::toasts::show_error(format!(
-                "Could not save the profile: {error}"
-            ));
-        }
-    });
-}
-
-fn board_display_name(board: &crate::board_data::BoardData) -> String {
-    unseal_bytes_with_secrets(
-        &board.board_state.configuration.configuration.display.name,
-        &board.secrets,
-    )
-    .ok()
-    .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
-    .filter(|name| !name.trim().is_empty())
-    .unwrap_or_else(|| {
-        format!(
-            "{}…",
-            bs58::encode(board.owner_vk.as_bytes())
-                .into_string()
-                .chars()
-                .take(8)
-                .collect::<String>()
-        )
-    })
-}
-
-/// Boards where this profile is the posting identity on this device: name,
-/// whether the board is private, and whether a derived key signs there.
-fn profile_boards(profile: &crate::board_data::IdentityProfile) -> Vec<(String, bool, bool)> {
-    let boards = BOARDS.read();
-    let linkability = boards.profile_linkability(profile);
-    let mut rows = Vec::new();
-    for key in &linkability.public_boards {
-        if let Some(board) = boards.map.get(key) {
-            rows.push((board_display_name(board), false, false));
-        }
-    }
-    for key in &linkability.private_boards {
-        if let Some(board) = boards.map.get(key) {
-            rows.push((board_display_name(board), true, false));
-        }
-    }
-    for key in &linkability.derived_boards {
-        if let Some(board) = boards.map.get(key) {
-            rows.push((board_display_name(board), true, true));
-        }
-    }
-    rows
-}
-
-/// Whether forgetting this profile would remove the root key that a board
-/// relies on for future derivations.
-fn profile_is_a_board_root(id: &str) -> bool {
-    let boards = BOARDS.read();
-    boards.map.values().any(|board| {
-        boards
-            .profile_for_board(board)
-            .is_some_and(|profile| profile.id == id)
-    })
-}
-
-/// Whether the profile can be selected on the board that is open now.
-fn switch_state(profile: &crate::board_data::IdentityProfile) -> (bool, bool) {
-    let Some(current) = CURRENT_BOARD.read().owner_key else {
-        return (false, false);
-    };
-    let boards = BOARDS.read();
-    let Some(board) = boards.map.get(&current) else {
-        return (false, false);
-    };
-    let vk = profile.signing_key.verifying_key();
-    let is_current = board.self_sk.verifying_key() == vk;
-    let is_member = board
-        .board_state
-        .members
-        .members
-        .iter()
-        .any(|member| {
-            member.member.member_vk == vk
-                && !board
-                    .board_state
-                    .ownership
-                    .is_deactivated_now(&member.member.id())
-        });
-    (is_member && !is_current, is_current)
-}
-
-/// Read one selected file and merge it into the local store, then reload.
-async fn restore_file(file: web_sys::File) {
-    let Ok(buffer) = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await else {
-        crate::components::app::toasts::show_error("Could not read the backup file.");
-        return;
-    };
-    let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-    use std::sync::atomic::Ordering;
-    crate::components::app::chat_delegate::IMPORT_IN_PROGRESS
-        .store(true, Ordering::SeqCst);
-    match crate::util::backup::import_bytes(&bytes).await {
-        Ok(count) => {
-            crate::components::app::toasts::show(format!(
-                "Restored {count} board(s). Reloading…"
-            ));
-            crate::util::sleep(std::time::Duration::from_millis(800)).await;
-            if let Some(window) = window() {
-                let _ = window.location().reload();
-            }
-        }
-        Err(error) => {
-            crate::components::app::chat_delegate::IMPORT_IN_PROGRESS
-                .store(false, Ordering::SeqCst);
-            crate::components::app::toasts::show_error(format!(
-                "Could not restore: {error}"
-            ));
-        }
-    }
-}
-
-fn persist_and_reload() {
-    crate::util::safe_spawn_local(async {
-        if let Err(error) =
-            crate::components::app::chat_delegate::save_boards_and_wait().await
-        {
-            crate::components::app::toasts::show_error(format!(
-                "Could not save the new identity: {error}"
-            ));
-            return;
-        }
-        // Stay on the board. Reloading here raced the delegate load and left
-        // the board on "Loading board…"; the in-memory signals already carry
-        // the new identity.
-        crate::components::app::toasts::show("Identity switched.");
-        *crate::components::app::ABOUT_MODAL.write() = false;
-    });
-}
-
 #[component]
 pub fn AboutModal() -> Element {
     if !*ABOUT_MODAL.read() {
@@ -181,9 +40,6 @@ pub fn AboutModal() -> Element {
         .unwrap_or_else(|| "unknown".to_string());
     let site = site_contract_id();
     let site_label = site.clone().unwrap_or_else(|| "local".to_string());
-    let mut renaming = use_signal(|| None::<String>);
-    let mut rename_text = use_signal(String::new);
-    let mut forget_confirm = use_signal(|| None::<String>);
 
     rsx! {
         div {
@@ -200,7 +56,7 @@ pub fn AboutModal() -> Element {
                 onclick: move |_| *ABOUT_MODAL.write() = false,
             }
             div {
-                class: "about-modal relative bg-panel rounded-xl shadow-xl max-w-md w-full max-h-[90vh] overflow-y-auto",
+                class: "about-modal relative bg-panel rounded-xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto",
                 onclick: move |e| e.stop_propagation(),
 
                 div { class: "flex items-center gap-3 px-6 py-5 border-b border-border",
@@ -239,191 +95,26 @@ pub fn AboutModal() -> Element {
                     p { class: "text-xs",
                         "To check whether this site is current, compare the commit above with the latest commit in the repository."
                     }
-                    div { class: "border-t border-border pt-3 space-y-2",
-                        p { class: "text-sm text-text", "Your identities" }
-                        p { class: "text-xs",
-                            "A profile is a local key. Reusing it on several boards shows the same member id on each; a separate profile keeps them unlinked. Keys never leave this device."
-                        }
-                        p { class: "text-xs",
-                            "Two different profiles cannot be merged: merging would link their keys and defeat the separation. To use one identity on another board, join or rejoin that board with it."
-                        }
-                        p { class: "text-xs",
-                            "Keys and nicknames are separate: the same nickname on two boards can still link you even when the keys differ. On a private board a derived key keeps the key link hidden."
-                        }
-                        for profile in BOARDS.read().profiles.clone() {
-                            div { key: "{profile.id}", class: "profile-row flex items-center gap-2 flex-wrap",
-                                if renaming.read().as_deref() == Some(profile.id.as_str()) {
-                                    input {
-                                        class: "flex-1 min-w-24 px-2 py-1 bg-surface border border-border rounded text-text text-xs",
-                                        dir: "auto",
-                                        value: "{rename_text}",
-                                        oninput: move |evt| rename_text.set(evt.value()),
-                                    }
-                                    button {
-                                        r#type: "button",
-                                        class: "px-2 py-1 bg-accent text-white text-xs rounded",
-                                        onclick: {
-                                            let id = profile.id.clone();
-                                            move |_| {
-                                                let name = rename_text.read().trim().to_string();
-                                                if !name.is_empty() {
-                                                    BOARDS.with_mut(|boards| {
-                                                        boards.rename_profile(&id, name)
-                                                    });
-                                                    persist_profiles();
-                                                }
-                                                renaming.set(None);
-                                            }
-                                        },
-                                        "Save"
-                                    }
-                                    button {
-                                        r#type: "button",
-                                        class: "px-2 py-1 bg-surface text-text text-xs rounded",
-                                        onclick: move |_| renaming.set(None),
-                                        "Cancel"
-                                    }
-                                } else {
-                                    span { class: "text-text text-xs", "{profile.name}" }
-                                    span { class: "text-text-muted text-[10px] font-mono",
-                                        "{profile.id.chars().take(8).collect::<String>()}"
-                                    }
-                                    div { class: "w-full text-[10px] text-text-muted",
-                                        {
-                                            let rows = profile_boards(&profile);
-                                            if rows.is_empty() {
-                                                "Not used by any board on this device.".to_string()
-                                            } else {
-                                                let boards = rows
-                                                    .iter()
-                                                    .map(|(name, private, derived)| {
-                                                        let kind =
-                                                            if *private { "private" } else { "public" };
-                                                        let mode = if *derived {
-                                                            ", derived here"
-                                                        } else {
-                                                            ", same identity here"
-                                                        };
-                                                        format!("{name} ({kind}{mode})")
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                                    .join(", ");
-                                                format!("Used by: {boards}")
-                                            }
-                                        }
-                                    }
-                                    if BOARDS.read().profile_linkability(&profile).linked_across {
-                                        div { class: "w-full text-[10px] text-amber-300",
-                                            "This profile links public and private boards."
-                                        }
-                                    }
-                                    if forget_confirm.read().as_deref()
-                                        == Some(profile.id.as_str())
-                                    {
-                                        div { class: "w-full text-[10px] text-amber-300",
-                                            "Boards that used this profile keep working, but no new derivation from it is possible. Press Forget again to confirm."
-                                        }
-                                    }
-                                    if switch_state(&profile).0 {
-                                        button {
-                                            r#type: "button",
-                                            class: "px-2 py-1 bg-accent/20 hover:bg-accent/30 text-accent text-xs rounded",
-                                            onclick: {
-                                                let key = profile.signing_key.clone();
-                                                let profile_id = profile.id.clone();
-                                                move |_| {
-                                                    let current = CURRENT_BOARD.read().owner_key;
-                                                    let switched = current.is_some_and(|current| {
-                                                        BOARDS.with_mut(|boards| {
-                                                            let profile_id = profile_id.clone();
-                                                            boards
-                                                                .map
-                                                                .get_mut(&current)
-                                                                .is_some_and(|board| {
-                                                                    if board
-                                                                        .switch_profile(&key)
-                                                                        .is_err()
-                                                                    {
-                                                                        return false;
-                                                                    }
-                                                                    board.profile_id =
-                                                                        Some(profile_id);
-                                                                    board.backfill_owner_profile();
-                                                                    true
-                                                                })
-                                                        })
-                                                    });
-                                                    if switched {
-                                                        // The delegate signs every message for
-                                                        // this board. Without this update it keeps
-                                                        // the previous profile's key and produces
-                                                        // signatures the contract rejects.
-                                                        if let Some(board_key) = current {
-                                                            let delegate_key = key.clone();
-                                                            wasm_bindgen_futures::spawn_local(
-                                                                async move {
-                                                                    let _ = crate::signing::migrate_signing_key(
-                                                                        board_key.to_bytes(),
-                                                                        &delegate_key,
-                                                                    )
-                                                                    .await;
-                                                                },
-                                                            );
-                                                        }
-                                                        persist_and_reload();
-                                                    } else {
-                                                        crate::components::app::toasts::show_error(
-                                                            "Could not switch to that profile on this board.",
-                                                        );
-                                                    }
-                                                }
-                                            },
-                                            "Use on this board"
-                                        }
-                                    }
-                                    if switch_state(&profile).1 {
-                                        span { class: "text-[10px] text-accent", "current here" }
-                                    }
-                                    button {
-                                        r#type: "button",
-                                        class: "px-2 py-1 bg-surface hover:bg-surface-hover text-text text-xs rounded",
-                                        onclick: {
-                                            let id = profile.id.clone();
-                                            let name = profile.name.clone();
-                                            move |_| {
-                                                rename_text.set(name.clone());
-                                                renaming.set(Some(id.clone()));
-                                            }
-                                        },
-                                        "Rename"
-                                    }
-                                    button {
-                                        r#type: "button",
-                                        class: "px-2 py-1 bg-surface hover:bg-surface-hover text-text-muted text-xs rounded",
-                                        onclick: {
-                                            let id = profile.id.clone();
-                                            move |_| {
-                                                if profile_is_a_board_root(&id)
-                                                    && forget_confirm.read().as_deref()
-                                                        != Some(id.as_str())
-                                                {
-                                                    forget_confirm.set(Some(id.clone()));
-                                                    return;
-                                                }
-                                                BOARDS.with_mut(|boards| boards.forget_profile(&id));
-                                                forget_confirm.set(None);
-                                                persist_profiles();
-                                            }
-                                        },
-                                        "Forget"
-                                    }
-                                }
+
+                    // The device drawer holds the actions on local data, so
+                    // this panel stays a short informational page.
+                    button {
+                        r#type: "button",
+                        class: "w-full flex items-center gap-3 rounded-xl border border-border bg-surface/60 p-3 text-left hover:border-accent/60 hover:bg-surface transition-colors",
+                        onclick: move |_| {
+                            *ABOUT_MODAL.write() = false;
+                            open_device(DeviceTab::Identities);
+                        },
+                        span { class: "text-lg", "👤" }
+                        div { class: "flex flex-1 flex-col",
+                            span { class: "text-sm font-medium text-text", "Identities and backup" }
+                            span { class: "text-xs text-text-muted",
+                                "Profiles, private-board keys and the local backup file."
                             }
                         }
-                        if BOARDS.read().profiles.is_empty() {
-                            p { class: "text-xs", "No profiles yet. Create one with a board or an invite." }
-                        }
+                        span { class: "text-text-muted text-lg", "›" }
                     }
+
                     details { class: "border-t border-border pt-3",
                         summary { class: "text-sm text-text cursor-pointer",
                             "Contract versions and rekey"
@@ -445,55 +136,6 @@ pub fn AboutModal() -> Element {
                             }
                         }
                     }
-                    div { class: "border-t border-border pt-3 space-y-2",
-                        p { class: "text-xs",
-                            "A backup contains the identities, private-board secrets, drafts and settings stored on this device. Board content stays on Freenet; uploaded image bytes and composer queues are not included. Keep it private."
-                        }
-                        div { class: "flex flex-wrap gap-2",
-                            button {
-                                r#type: "button",
-                                class: "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg transition-colors",
-                                onclick: move |_| match crate::util::backup::download() {
-                                    Ok(()) => crate::components::app::toasts::show(
-                                        "Backup downloaded.",
-                                    ),
-                                    Err(error) => crate::components::app::toasts::show_error(format!(
-                                        "Could not create the backup: {error}"
-                                    )),
-                                },
-                                "Download backup"
-                            }
-                            label {
-                                class: "flex flex-col gap-1 text-xs text-text-muted",
-                                span { "Restore backup" }
-                                input {
-                                    id: "plaza-backup-file",
-                                    r#type: "file",
-                                    accept: ".cbor",
-                                    class: "block w-full text-xs text-text-muted",
-                                    // Selection only; "Restore now" applies it.
-                                    // Importing on change made a second attempt
-                                    // impossible and raced the button.
-                                }
-                                "Restore backup"
-                            }
-                            button {
-                                r#type: "button",
-                                class: "px-3 py-1.5 bg-accent hover:bg-accent-hover text-white text-xs rounded-lg transition-colors",
-                                onclick: move |_| {
-                                    wasm_bindgen_futures::spawn_local(async move {
-                                        match crate::util::backup::selected_file() {
-                                            Some(file) => restore_file(file).await,
-                                            None => crate::components::app::toasts::show_error(
-                                                "Choose a backup file first.",
-                                            ),
-                                        }
-                                    });
-                                },
-                                "Restore now"
-                            }
-                        }
-                    }
                     p { class: "text-xs",
                         "Source code: "
                         a {
@@ -502,6 +144,21 @@ pub fn AboutModal() -> Element {
                             rel: "noopener noreferrer",
                             class: "text-accent hover:underline break-all",
                             "github.com/HostFat/FreeTalk-Plaza"
+                        }
+                    }
+                    div { class: "border-t border-border pt-3",
+                        button {
+                            r#type: "button",
+                            class: "text-xs text-text-muted hover:text-text underline decoration-dotted",
+                            title: "Test only: hides owner and admin controls in this tab until reload",
+                            onclick: move |_| {
+                                *crate::components::app::TEST_VIEW_MEMBER.write() = true;
+                                *ABOUT_MODAL.write() = false;
+                            },
+                            "Preview member view"
+                        }
+                        p { class: "text-[11px] text-text-muted mt-1",
+                            "Hides owner and admin controls in this tab until reload."
                         }
                     }
                 }
@@ -516,29 +173,6 @@ pub fn AboutModal() -> Element {
                             crate::util::copy_to_clipboard(&details);
                         },
                         "Copy details"
-                    }
-                    label { class: "flex items-center gap-2 text-xs text-text",
-                        input {
-                            r#type: "checkbox",
-                            checked: BOARDS.read().client_features.show_member_ids,
-                            onchange: move |event| {
-                                let show = event.checked();
-                                BOARDS.with_mut(|boards| {
-                                    boards.client_features.show_member_ids = show;
-                                });
-                                persist_profiles();
-                            },
-                        }
-                        "Show member IDs in the member list"
-                    }
-                    button {
-                        class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg transition-colors",
-                        title: "Test only: hides owner and admin controls in this tab until reload",
-                        onclick: move |_| {
-                            *crate::components::app::TEST_VIEW_MEMBER.write() = true;
-                            *ABOUT_MODAL.write() = false;
-                        },
-                        "Test member view"
                     }
                     button {
                         class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg transition-colors",

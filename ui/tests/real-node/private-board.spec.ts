@@ -113,6 +113,13 @@ async function ensureOwner(page: import("@playwright/test").Page) {
   }
 }
 
+async function waitForSync(page: import("@playwright/test").Page) {
+  const app = page.frameLocator("iframe");
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, {
+    timeout: 30_000,
+  });
+}
+
 async function switchToProfile(
   page: import("@playwright/test").Page,
   name: string,
@@ -120,16 +127,30 @@ async function switchToProfile(
   const app = page.frameLocator("iframe");
   const rows = () =>
     app
-      .locator(".about-modal .profile-row")
+      .locator(".device-drawer .profile-row")
       .filter({ has: app.getByText(name, { exact: true }) });
+
+  const openDrawer = async () => {
+    if (await app.locator(".device-drawer").count()) return;
+    await waitForSync(page);
+    const profileButton = app.getByRole("button", { name: "Open identities" });
+    if (await profileButton.count()) {
+      await profileButton.click();
+    } else {
+      await app
+        .getByRole("button", { name: "About, build and backup" })
+        .click();
+      await app
+        .getByRole("button", { name: /Identities and backup/ })
+        .click();
+    }
+    await app.locator(".device-drawer").waitFor({ timeout: 10_000 });
+  };
 
   // Several test runs can create profiles with the same nickname. Try each
   // row until the owner profile (crown title "Board Owner") is active.
   for (let attempt = 0; attempt < 8; attempt++) {
-    if ((await app.locator(".about-modal").count()) === 0) {
-      await app.getByRole("button", { name: /FreeTalk Plaza/ }).click();
-      await app.locator(".about-modal").waitFor({ timeout: 10_000 });
-    }
+    await openDrawer();
     const count = await rows().count();
     let tried = false;
     for (let index = 0; index < count; index++) {
@@ -450,6 +471,8 @@ test("a hidden topic is restored from the trash", async ({ page }) => {
   await app.locator("#message-input").fill("This topic is hidden and restored.");
   await app.getByRole("button", { name: /Send Topic/ }).click();
   await app.getByText(title, { exact: true }).first().click();
+  await waitForSync(page);
+  await page.waitForTimeout(2_000);
 
   page.once("dialog", (dialog) => dialog.accept("severe test hide"));
   await app.getByRole("button", { name: "Hide" }).click();
@@ -541,10 +564,12 @@ test("an invited identity's first post survives a reload", async ({ page }) => {
 
   // Capture the exact guest profile row (nickname plus short id); many test
   // runs leave profiles with the same nickname.
-  await app.getByRole("button", { name: /FreeTalk Plaza/ }).click();
+  await waitForSync(page);
+  await page.waitForTimeout(2_000);
+  await app.getByRole("button", { name: "Open identities" }).click();
   const guestLabel = (
     await app
-      .locator(".about-modal .profile-row")
+      .locator(".device-drawer .profile-row")
       .filter({ hasText: "RealNodeGuest" })
       .filter({ hasText: "current here" })
       .first()

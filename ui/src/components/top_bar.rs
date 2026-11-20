@@ -2,11 +2,12 @@
 
 use crate::board_data::SendMessageError;
 use crate::components::app::{
-    BOARDS, COMPOSE_REQUEST, CURRENT_BOARD, CURRENT_CATEGORY, CURRENT_HASH, CURRENT_POST,
-    MEMBER_INFO_MODAL, QUOTE_COLLECTION,
+    ABOUT_MODAL, BOARDS, COMPOSE_REQUEST, CURRENT_BOARD, CURRENT_CATEGORY, CURRENT_HASH,
+    CURRENT_POST, QUOTE_COLLECTION,
 };
 use crate::components::board_sync_chip::BoardSyncChip;
 use crate::components::conversation::message_input::PostInput;
+use crate::components::device_drawer::{open as open_device, DeviceTab};
 use crate::util::avatar::get_avatar;
 use crate::util::messaging::{prepare_message, publish_prepared, PollDraft, ReplyContext};
 use dioxus::prelude::*;
@@ -273,16 +274,14 @@ pub fn TopBar() -> Element {
 
     rsx! {
         div { class: "flex justify-between",
-            // User profile
-            div { class: "flex items-center min-w-0",
-                // User profile header
-                div {
-                    class: "flex items-center gap-3 px-4 md:px-6 py-4 cursor-pointer hover:bg-surface/50 transition-colors",
-                onclick: move |_| {
-                    MEMBER_INFO_MODAL.with_mut(|signal| {
-                        signal.member = Some(self_member_id);
-                    });
-                },
+            // Profile header. Clicking it opens the identities drawer, the
+            // place where profiles are switched and managed.
+            button {
+                r#type: "button",
+                class: "flex items-center gap-3 px-4 md:px-6 py-4 cursor-pointer hover:bg-surface/50 transition-colors text-left",
+                title: "Identities and backup",
+                aria_label: "Open identities",
+                onclick: move |_| open_device(DeviceTab::Identities),
                 img {
                     src: "{self_avatar}",
                     alt: "Your avatar",
@@ -296,7 +295,7 @@ pub fn TopBar() -> Element {
                 } else if is_admin {
                     span { class: "text-lg", title: "Admin", "👑" }
                 }
-                }
+                span { class: "text-text-muted text-xl ml-1", "›" }
             }
 
             // Right side: navigation buttons and post input
@@ -383,6 +382,16 @@ pub fn TopBar() -> Element {
                             span { "⚙" }
                             span { "Manage" }
                         }
+                    }
+                    // About and build details. Visible for every member.
+                    button {
+                        r#type: "button",
+                        title: "About, build and backup",
+                        aria_label: "About FreeTalk Plaza",
+                        class: tab_class(false),
+                        onclick: move |_| *ABOUT_MODAL.write() = true,
+                        span { "ⓘ" }
+                        span { "About" }
                     }
                 }
 
@@ -471,6 +480,28 @@ pub fn TopBar() -> Element {
                                     },
                                     span { "⚙" }
                                     span { "Manage" }
+                                }
+                            }
+                            div { class: "border-t border-border",
+                                button {
+                                    r#type: "button",
+                                    class: "flex items-center gap-3 px-4 py-3 text-text hover:bg-surface transition-colors w-full text-left",
+                                    onclick: move |_| {
+                                        menu_open.set(false);
+                                        open_device(DeviceTab::Identities);
+                                    },
+                                    span { "👤" }
+                                    span { "Identities and backup" }
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "flex items-center gap-3 px-4 py-3 text-text hover:bg-surface transition-colors w-full text-left",
+                                    onclick: move |_| {
+                                        menu_open.set(false);
+                                        *ABOUT_MODAL.write() = true;
+                                    },
+                                    span { "ⓘ" }
+                                    span { "About FreeTalk Plaza" }
                                 }
                             }
                         }

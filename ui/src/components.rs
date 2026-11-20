@@ -9,6 +9,7 @@ pub mod lightbox;
 pub mod category_create_modal;
 pub mod category_view;
 pub mod conversation;
+pub mod device_drawer;
 pub mod invite_click_interceptor;
 pub mod join_screen;
 pub mod members;
