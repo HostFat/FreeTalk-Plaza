@@ -50,6 +50,8 @@ pub struct PollData {
     pub multiselect: bool,
     pub results_visibility: plaza_core::board_state::content::PollResultsVisibility,
     pub votes: Vec<PollBallot>,
+    /// The poll content was replaced after creation.
+    pub edited: bool,
 }
 
 impl PollData {
@@ -515,9 +517,11 @@ pub fn get_all_messages(
             ),
         };
 
-        // Mark as edited if category was edited
+        // Mark as edited if the post, category or poll was edited.
+        let poll_was_edited = state.recent_messages.edited_poll(&message_id).is_some();
         let edited = state.recent_messages.is_edited(&message_id)
-            || state.recent_messages.is_category_edited(&message_id);
+            || state.recent_messages.is_category_edited(&message_id)
+            || poll_was_edited;
 
         let poll = state
             .recent_messages
@@ -545,6 +549,7 @@ pub fn get_all_messages(
                 multiselect: content.multiselect,
                 results_visibility: content.results_visibility,
                 votes,
+                edited: poll_was_edited,
             }
         });
 

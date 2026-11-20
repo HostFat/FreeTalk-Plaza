@@ -122,6 +122,13 @@ pub fn PollView(
             div { class: "flex flex-wrap items-center justify-between gap-2",
                 div { class: "flex items-center gap-2",
                     span { class: "text-sm font-medium text-text", "Poll" }
+                    if poll.edited {
+                        span {
+                            class: "text-xs text-amber-400",
+                            title: "The poll was edited after it was created",
+                            "· edited"
+                        }
+                    }
                     if is_author && !closed {
                         button {
                             r#type: "button",

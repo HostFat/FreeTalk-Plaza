@@ -53,9 +53,19 @@ pub fn create_example_boards() -> Boards {
 
     // A private board whose key is unavailable: the gate must show the
     // recovery screen instead of an endless loading spinner.
-    let mut board5 = create_board(&"Missing Key Board".to_string(), SelfIs::Member);
+    let mut board5 = create_board(&"Missing Key Board".to_string(), SelfIs::Owner);
+    let signing_key = board5.board_data.self_sk.clone();
     board5.board_data.board_state.configuration.configuration.privacy_mode =
         PrivacyMode::Private;
+    board5.board_data.board_state.configuration = AuthorizedConfigurationV1::new(
+        board5
+            .board_data
+            .board_state
+            .configuration
+            .configuration
+            .clone(),
+        &signing_key,
+    );
     board5.board_data.secrets.clear();
     board5.board_data.current_secret_version = None;
     board5.board_data.owner_sk = None;
@@ -703,7 +713,8 @@ mod tests {
             );
             assert!(
                 verification_result.is_ok(),
-                "Board state failed to verify: {:?}",
+                "Board {} failed to verify: {:?}",
+                bs58::encode(owner_vk.as_bytes()).into_string(),
                 verification_result.err()
             );
 

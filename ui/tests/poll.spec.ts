@@ -27,4 +27,5 @@ test("a poll can be created and voted", async ({ page }) => {
   await expect(page.getByText("Gamma", { exact: false })).toBeVisible({
     timeout: 10_000,
   });
+  await expect(page.getByText("· edited", { exact: false })).toBeVisible();
 });
