@@ -185,19 +185,22 @@ test.fixme("an invited identity's first post survives a reload", async ({
     timeout: 30_000,
   });
 
+  const title = `Guest membership test ${Date.now()}`;
   await app.getByRole("heading", { name: "General" }).click();
   await app.getByRole("button", { name: /New Topic/ }).first().click();
-  await app.getByPlaceholder("Add a title...").fill("Guest membership test");
+  await app.getByPlaceholder("Add a title...").fill(title);
   await app
     .locator("#message-input")
     .fill("Posted by the invited identity after joining.");
   await app.getByRole("button", { name: /Send Topic/ }).click();
   await expect(
-    app.getByText("Guest membership test", { exact: true }).first(),
+    app.getByText(title, { exact: true }).first(),
   ).toBeVisible({ timeout: 20_000 });
+  // Give the membership + first message delta time to reach the node.
+  await page.waitForTimeout(3_000);
 
   await page.reload();
   await expect(
-    app.getByText("Guest membership test", { exact: true }).first(),
+    app.getByText(title, { exact: true }).first(),
   ).toBeVisible({ timeout: 30_000 });
 });
