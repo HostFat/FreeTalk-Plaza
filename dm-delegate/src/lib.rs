@@ -138,13 +138,13 @@ mod tests {
         let bytes = state.encode().unwrap();
         let decoded = DmDelegateStateV1::decode(&bytes).unwrap();
         assert_eq!(decoded.version, 0);
-        assert!(decoded.identity_seed.is_none());
+        assert!(decoded.identities.is_empty());
     }
 
     #[test]
     fn a_response_round_trips() {
         let response = DmDelegateResponseMsg::Status {
-            identity: None,
+            identity: [0u8; 32],
             devices: Vec::new(),
             conversations: 0,
             blocked: 0,

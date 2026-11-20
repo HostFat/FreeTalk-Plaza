@@ -1,14 +1,17 @@
 //! Request/response types shared by the DM delegate and the client.
 //!
-//! The delegate owns the private seeds: identity, per-device signing keys and
-//! per-conversation keys. The client sends public device records and asks the
-//! delegate to sign bytes; the delegate never returns private seeds.
+//! The delegate owns the private seeds: per-profile identities, per-device
+//! signing/encapsulation seeds and per-conversation keys. The client sends
+//! public device records and asks the delegate to sign bytes; private seeds
+//! never leave the delegate.
 
-use crate::{DmContractId, DmDevice, DmDeviceId, DmIdentityId, DmMessageId};
+use crate::{
+    DmContractId, DmDevice, DmDeviceId, DmIdentityId, DmMessageId,
+};
 use ed25519_dalek::Signature;
 use serde::{Deserialize, Serialize};
 
-pub const DM_DELEGATE_STORAGE_VERSION: u16 = 1;
+pub const DM_DELEGATE_STORAGE_VERSION: u16 = 2;
 
 /// Wire envelope for correlation. The delegate echoes the id in the response.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25,36 +28,47 @@ pub struct DmDelegateResponseEnvelope {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DmDelegateRequestMsg {
-    GetStatus,
-    /// Clear the identity, devices, keys, index and block list. Used by the
-    /// "reset local data" recovery path.
-    Reset,
+    GetStatus {
+        identity: DmIdentityId,
+    },
+    /// Clear one identity, or every identity when `identity` is `None`.
+    Reset {
+        identity: Option<DmIdentityId>,
+    },
     /// Store the 32-byte seed of the identity key derived from the profile.
+    /// The same seed is idempotent; a different profile adds a new map entry.
     InitIdentity {
         identity_seed: [u8; 32],
     },
     /// The client generates the seeds; the delegate derives the public device
     /// record and keeps the private material.
     CreateDevice {
+        identity: DmIdentityId,
         label: String,
         signing_seed: [u8; 32],
         /// 64-byte ML-KEM seed as bytes; serde has no array impl for 64.
         kem_seed: Vec<u8>,
         created_at: i64,
     },
-    ListDevices,
+    ListDevices {
+        identity: DmIdentityId,
+    },
     RevokeDevice {
+        identity: DmIdentityId,
         device_id: DmDeviceId,
         revoked_at: i64,
     },
     SignIdentity {
+        identity: DmIdentityId,
         bytes: Vec<u8>,
     },
     SignDevice {
+        identity: DmIdentityId,
         device_id: DmDeviceId,
         bytes: Vec<u8>,
     },
     StoreConversationKey {
+        identity: DmIdentityId,
         contract_key: DmContractId,
         conversation_id: [u8; 32],
         key_version: u32,
@@ -65,29 +79,39 @@ pub enum DmDelegateRequestMsg {
         created_at: i64,
     },
     GetConversationKey {
+        identity: DmIdentityId,
         contract_key: DmContractId,
         key_version: u32,
     },
     GetLatestConversationKey {
+        identity: DmIdentityId,
         contract_key: DmContractId,
     },
-    ListConversations,
+    ListConversations {
+        identity: DmIdentityId,
+    },
     UpdateRead {
+        identity: DmIdentityId,
         contract_key: DmContractId,
         last_message: DmMessageId,
         unread: u32,
         updated_at: i64,
     },
     SetDraft {
+        identity: DmIdentityId,
         contract_key: DmContractId,
         draft: Option<String>,
     },
     BlockIdentity {
         identity: DmIdentityId,
+        target: DmIdentityId,
         blocked: bool,
     },
-    ListBlocked,
+    ListBlocked {
+        identity: DmIdentityId,
+    },
     RemoveConversation {
+        identity: DmIdentityId,
         contract_key: DmContractId,
     },
     ExportBackup,
@@ -132,20 +156,25 @@ pub struct DmKeyBackup {
     pub created_at: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct DmBackupV1 {
-    pub version: u16,
-    pub identity_seed: Option<[u8; 32]>,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DmIdentityBackup {
+    pub identity_seed: [u8; 32],
     pub devices: Vec<DmDeviceBackup>,
     pub conversations: Vec<DmConversationInfo>,
     pub keys: Vec<DmKeyBackup>,
     pub blocked: Vec<DmIdentityId>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct DmBackupV1 {
+    pub version: u16,
+    pub identities: Vec<DmIdentityBackup>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DmDelegateResponseMsg {
     Status {
-        identity: Option<[u8; 32]>,
+        identity: DmIdentityId,
         devices: Vec<DmDeviceInfo>,
         conversations: usize,
         blocked: usize,

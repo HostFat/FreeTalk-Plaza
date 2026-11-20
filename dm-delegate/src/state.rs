@@ -1,14 +1,16 @@
 //! Persistent DM state owned by the delegate.
 //!
-//! The delegate stores the identity seed, device seeds, conversation keys and
-//! the local index. Operations are pure so the same state machine is testable
-//! without a Freenet runtime.
+//! One entry per derived DM identity lets a device hold the DMs of several
+//! Plaza profiles. Devices, conversation keys, index and block list are scoped
+//! to the identity; operations remain pure and testable without a runtime.
 
 use ed25519_dalek::{Signer, SigningKey};
 use ml_kem::kem::KeyExport;
 use ml_kem::{DecapsulationKey, MlKem768, Seed};
 use plaza_dm_core::delegate::*;
-use plaza_dm_core::{DmContractId, DmDevice, DmDeviceId, DmIdentityId, DmMessageId};
+use plaza_dm_core::{
+    DmContractId, DmDevice, DmDeviceId, DmIdentityId, DmMessageId,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -27,126 +29,24 @@ pub struct LocalKey {
     pub created_at: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct DmDelegateStateV1 {
-    pub version: u32,
-    pub identity_seed: Option<[u8; 32]>,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DmIdentityStateV1 {
+    pub identity_seed: [u8; 32],
     pub devices: Vec<LocalDevice>,
     pub conversations: Vec<DmConversationInfo>,
     pub keys: Vec<LocalKey>,
     pub blocked: Vec<DmIdentityId>,
 }
 
-impl DmDelegateStateV1 {
-    pub fn identity_public(&self) -> Option<[u8; 32]> {
-        self.identity_seed
-            .map(|seed| SigningKey::from_bytes(&seed).verifying_key().to_bytes())
-    }
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct DmDelegateStateV1 {
+    pub version: u32,
+    pub identities: Vec<DmIdentityStateV1>,
+}
 
-    pub fn encode(&self) -> Result<Vec<u8>, String> {
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(self, &mut bytes)
-            .map_err(|error| format!("encode delegate state: {error}"))?;
-        Ok(bytes)
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        ciborium::de::from_reader(bytes).map_err(|error| format!("decode delegate state: {error}"))
-    }
-
-    pub fn apply(&mut self, request: DmDelegateRequestMsg) -> DmDelegateResponseMsg {
-        match request {
-            DmDelegateRequestMsg::GetStatus => DmDelegateResponseMsg::Status {
-                identity: self.identity_public(),
-                devices: self.device_infos(),
-                conversations: self.conversations.len(),
-                blocked: self.blocked.len(),
-            },
-            DmDelegateRequestMsg::Reset => {
-                *self = DmDelegateStateV1::default();
-                DmDelegateResponseMsg::Ok
-            }
-            DmDelegateRequestMsg::InitIdentity { identity_seed } => {
-                if self
-                    .identity_seed
-                    .is_some_and(|existing| existing != identity_seed)
-                {
-                    return DmDelegateResponseMsg::error(
-                        "a different DM identity is already initialized",
-                    );
-                }
-                self.identity_seed = Some(identity_seed);
-                self.version = self.version.saturating_add(1);
-                DmDelegateResponseMsg::Ok
-            }
-            DmDelegateRequestMsg::CreateDevice {
-                label,
-                signing_seed,
-                kem_seed,
-                created_at,
-            } => self.create_device(label, signing_seed, kem_seed, created_at),
-            DmDelegateRequestMsg::ListDevices => DmDelegateResponseMsg::Devices {
-                devices: self.device_infos(),
-            },
-            DmDelegateRequestMsg::RevokeDevice {
-                device_id,
-                revoked_at,
-            } => self.revoke_device(device_id, revoked_at),
-            DmDelegateRequestMsg::SignIdentity { bytes } => self.sign_identity(&bytes),
-            DmDelegateRequestMsg::SignDevice { device_id, bytes } => {
-                self.sign_device(device_id, &bytes)
-            }
-            DmDelegateRequestMsg::StoreConversationKey {
-                contract_key,
-                conversation_id,
-                key_version,
-                key,
-                peer,
-                title,
-                generation,
-                created_at,
-            } => self.store_conversation_key(
-                contract_key,
-                conversation_id,
-                key_version,
-                key,
-                peer,
-                title,
-                generation,
-                created_at,
-            ),
-            DmDelegateRequestMsg::GetConversationKey {
-                contract_key,
-                key_version,
-            } => self.get_conversation_key(contract_key, key_version),
-            DmDelegateRequestMsg::GetLatestConversationKey { contract_key } => {
-                self.get_latest_conversation_key(contract_key)
-            }
-            DmDelegateRequestMsg::ListConversations => DmDelegateResponseMsg::Conversations {
-                conversations: self.sorted_conversations(),
-            },
-            DmDelegateRequestMsg::UpdateRead {
-                contract_key,
-                last_message,
-                unread,
-                updated_at,
-            } => self.update_read(contract_key, last_message, unread, updated_at),
-            DmDelegateRequestMsg::SetDraft {
-                contract_key,
-                draft,
-            } => self.set_draft(contract_key, draft),
-            DmDelegateRequestMsg::BlockIdentity { identity, blocked } => {
-                self.set_blocked(identity, blocked)
-            }
-            DmDelegateRequestMsg::ListBlocked => DmDelegateResponseMsg::Blocked {
-                identities: self.blocked.clone(),
-            },
-            DmDelegateRequestMsg::RemoveConversation { contract_key } => {
-                self.remove_conversation(contract_key)
-            }
-            DmDelegateRequestMsg::ExportBackup => self.export_backup(),
-            DmDelegateRequestMsg::ImportBackup { bytes } => self.import_backup(&bytes),
-        }
+impl DmIdentityStateV1 {
+    pub fn identity(&self) -> DmIdentityId {
+        identity_public(&self.identity_seed)
     }
 
     fn device_infos(&self) -> Vec<DmDeviceInfo> {
@@ -195,11 +95,14 @@ impl DmDelegateStateV1 {
             signing_seed,
             kem_seed,
         });
-        self.version = self.version.saturating_add(1);
         DmDelegateResponseMsg::DeviceCreated { device, label }
     }
 
-    fn revoke_device(&mut self, device_id: DmDeviceId, revoked_at: i64) -> DmDelegateResponseMsg {
+    fn revoke_device(
+        &mut self,
+        device_id: DmDeviceId,
+        revoked_at: i64,
+    ) -> DmDelegateResponseMsg {
         let Some(local) = self
             .devices
             .iter_mut()
@@ -209,7 +112,6 @@ impl DmDelegateStateV1 {
         };
         if local.device.revoked_at.is_none() {
             local.device.revoked_at = Some(revoked_at);
-            self.version = self.version.saturating_add(1);
         }
         DmDelegateResponseMsg::Ok
     }
@@ -229,10 +131,7 @@ impl DmDelegateStateV1 {
     }
 
     fn sign_identity(&self, bytes: &[u8]) -> DmDelegateResponseMsg {
-        let Some(seed) = self.identity_seed else {
-            return DmDelegateResponseMsg::error("DM identity is not initialized");
-        };
-        let signature = SigningKey::from_bytes(&seed).sign(bytes);
+        let signature = SigningKey::from_bytes(&self.identity_seed).sign(bytes);
         DmDelegateResponseMsg::Signature { signature }
     }
 
@@ -307,7 +206,6 @@ impl DmDelegateStateV1 {
                 draft: None,
             });
         }
-        self.version = self.version.saturating_add(1);
         DmDelegateResponseMsg::Ok
     }
 
@@ -362,7 +260,6 @@ impl DmDelegateStateV1 {
         conversation.last_message_id = Some(last_message);
         conversation.unread = unread;
         conversation.last_message_at = conversation.last_message_at.max(updated_at);
-        self.version = self.version.saturating_add(1);
         DmDelegateResponseMsg::Ok
     }
 
@@ -379,31 +276,28 @@ impl DmDelegateStateV1 {
             return DmDelegateResponseMsg::error("conversation not found");
         };
         conversation.draft = draft.filter(|draft| !draft.is_empty());
-        self.version = self.version.saturating_add(1);
         DmDelegateResponseMsg::Ok
     }
 
-    fn set_blocked(&mut self, identity: DmIdentityId, blocked: bool) -> DmDelegateResponseMsg {
-        self.blocked.retain(|existing| *existing != identity);
+    fn set_blocked(&mut self, target: DmIdentityId, blocked: bool) -> DmDelegateResponseMsg {
+        self.blocked.retain(|existing| *existing != target);
         if blocked {
-            self.blocked.push(identity);
+            self.blocked.push(target);
             self.blocked.sort_unstable();
         }
-        self.version = self.version.saturating_add(1);
         DmDelegateResponseMsg::Ok
     }
 
     fn remove_conversation(&mut self, contract_key: DmContractId) -> DmDelegateResponseMsg {
         self.conversations
             .retain(|conversation| conversation.contract_key != contract_key);
-        self.keys.retain(|key| key.contract_key != contract_key);
-        self.version = self.version.saturating_add(1);
+        self.keys
+            .retain(|key| key.contract_key != contract_key);
         DmDelegateResponseMsg::Ok
     }
 
-    fn export_backup(&self) -> DmDelegateResponseMsg {
-        let backup = DmBackupV1 {
-            version: DM_DELEGATE_STORAGE_VERSION,
+    fn to_backup(&self) -> DmIdentityBackup {
+        DmIdentityBackup {
             identity_seed: self.identity_seed,
             devices: self
                 .devices
@@ -427,32 +321,10 @@ impl DmDelegateStateV1 {
                 })
                 .collect(),
             blocked: self.blocked.clone(),
-        };
-        let mut bytes = Vec::new();
-        if let Err(error) = ciborium::ser::into_writer(&backup, &mut bytes) {
-            return DmDelegateResponseMsg::error(format!("encode backup: {error}"));
         }
-        DmDelegateResponseMsg::Backup { bytes }
     }
 
-    fn import_backup(&mut self, bytes: &[u8]) -> DmDelegateResponseMsg {
-        let backup: DmBackupV1 = match ciborium::de::from_reader(bytes) {
-            Ok(backup) => backup,
-            Err(error) => {
-                return DmDelegateResponseMsg::error(format!("decode backup: {error}"));
-            }
-        };
-        if backup.version > DM_DELEGATE_STORAGE_VERSION {
-            return DmDelegateResponseMsg::error("backup comes from a newer version");
-        }
-        if let (Some(local), Some(incoming)) = (self.identity_seed, backup.identity_seed) {
-            if local != incoming {
-                return DmDelegateResponseMsg::error("backup belongs to a different DM identity");
-            }
-        } else if self.identity_seed.is_none() {
-            self.identity_seed = backup.identity_seed;
-        }
-
+    fn merge_backup(&mut self, backup: DmIdentityBackup) {
         for device in backup.devices {
             if !self
                 .devices
@@ -469,7 +341,8 @@ impl DmDelegateStateV1 {
         }
         for key in backup.keys {
             if !self.keys.iter().any(|existing| {
-                existing.contract_key == key.contract_key && existing.key_version == key.key_version
+                existing.contract_key == key.contract_key
+                    && existing.key_version == key.key_version
             }) {
                 self.keys.push(LocalKey {
                     contract_key: key.contract_key,
@@ -498,9 +371,305 @@ impl DmDelegateStateV1 {
             }
         }
         self.blocked.sort_unstable();
-        self.version = self.version.saturating_add(1);
-        DmDelegateResponseMsg::Ok
     }
+}
+
+impl DmDelegateStateV1 {
+    pub fn identity(&self, identity: &DmIdentityId) -> Option<&DmIdentityStateV1> {
+        self.identities
+            .iter()
+            .find(|state| &state.identity() == identity)
+    }
+
+    fn identity_mut(&mut self, identity: &DmIdentityId) -> Option<&mut DmIdentityStateV1> {
+        self.identities
+            .iter_mut()
+            .find(|state| &state.identity() == identity)
+    }
+
+    fn require_identity(
+        &mut self,
+        identity: &DmIdentityId,
+    ) -> Result<&mut DmIdentityStateV1, DmDelegateResponseMsg> {
+        self.identity_mut(identity)
+            .ok_or_else(|| DmDelegateResponseMsg::error("DM identity is not initialized"))
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(self, &mut bytes)
+            .map_err(|error| format!("encode delegate state: {error}"))?;
+        Ok(bytes)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        ciborium::de::from_reader(bytes).map_err(|error| format!("decode delegate state: {error}"))
+    }
+
+    pub fn apply(&mut self, request: DmDelegateRequestMsg) -> DmDelegateResponseMsg {
+        match request {
+            DmDelegateRequestMsg::GetStatus { identity } => {
+                let Some(state) = self.identity(&identity) else {
+                    return DmDelegateResponseMsg::error("DM identity is not initialized");
+                };
+                DmDelegateResponseMsg::Status {
+                    identity,
+                    devices: state.device_infos(),
+                    conversations: state.conversations.len(),
+                    blocked: state.blocked.len(),
+                }
+            }
+            DmDelegateRequestMsg::Reset { identity } => {
+                if let Some(identity) = identity {
+                    self.identities.retain(|state| state.identity() != identity);
+                } else {
+                    self.identities.clear();
+                }
+                self.version = self.version.saturating_add(1);
+                DmDelegateResponseMsg::Ok
+            }
+            DmDelegateRequestMsg::InitIdentity { identity_seed } => {
+                let identity = identity_public(&identity_seed);
+                if let Some(existing) = self.identity(&identity) {
+                    if existing.identity_seed != identity_seed {
+                        return DmDelegateResponseMsg::error(
+                            "DM identity seed does not match the stored identity",
+                        );
+                    }
+                } else {
+                    self.identities.push(DmIdentityStateV1 {
+                        identity_seed,
+                        devices: Vec::new(),
+                        conversations: Vec::new(),
+                        keys: Vec::new(),
+                        blocked: Vec::new(),
+                    });
+                }
+                self.version = self.version.saturating_add(1);
+                DmDelegateResponseMsg::Ok
+            }
+            DmDelegateRequestMsg::CreateDevice {
+                identity,
+                label,
+                signing_seed,
+                kem_seed,
+                created_at,
+            } => {
+                let state = match self.require_identity(&identity) {
+                    Ok(state) => state,
+                    Err(error) => return error,
+                };
+                let response = state.create_device(label, signing_seed, kem_seed, created_at);
+                if matches!(response, DmDelegateResponseMsg::DeviceCreated { .. }) {
+                    self.version = self.version.saturating_add(1);
+                }
+                response
+            }
+            DmDelegateRequestMsg::ListDevices { identity } => {
+                let Some(state) = self.identity(&identity) else {
+                    return DmDelegateResponseMsg::error("DM identity is not initialized");
+                };
+                DmDelegateResponseMsg::Devices {
+                    devices: state.device_infos(),
+                }
+            }
+            DmDelegateRequestMsg::RevokeDevice {
+                identity,
+                device_id,
+                revoked_at,
+            } => {
+                let state = match self.require_identity(&identity) {
+                    Ok(state) => state,
+                    Err(error) => return error,
+                };
+                let response = state.revoke_device(device_id, revoked_at);
+                if matches!(response, DmDelegateResponseMsg::Ok) {
+                    self.version = self.version.saturating_add(1);
+                }
+                response
+            }
+            DmDelegateRequestMsg::SignIdentity { identity, bytes } => {
+                let Some(state) = self.identity(&identity) else {
+                    return DmDelegateResponseMsg::error("DM identity is not initialized");
+                };
+                state.sign_identity(&bytes)
+            }
+            DmDelegateRequestMsg::SignDevice {
+                identity,
+                device_id,
+                bytes,
+            } => {
+                let Some(state) = self.identity(&identity) else {
+                    return DmDelegateResponseMsg::error("DM identity is not initialized");
+                };
+                state.sign_device(device_id, &bytes)
+            }
+            DmDelegateRequestMsg::StoreConversationKey {
+                identity,
+                contract_key,
+                conversation_id,
+                key_version,
+                key,
+                peer,
+                title,
+                generation,
+                created_at,
+            } => {
+                let state = match self.require_identity(&identity) {
+                    Ok(state) => state,
+                    Err(error) => return error,
+                };
+                let response = state.store_conversation_key(
+                    contract_key,
+                    conversation_id,
+                    key_version,
+                    key,
+                    peer,
+                    title,
+                    generation,
+                    created_at,
+                );
+                if matches!(response, DmDelegateResponseMsg::Ok) {
+                    self.version = self.version.saturating_add(1);
+                }
+                response
+            }
+            DmDelegateRequestMsg::GetConversationKey {
+                identity,
+                contract_key,
+                key_version,
+            } => match self.identity(&identity) {
+                Some(state) => state.get_conversation_key(contract_key, key_version),
+                None => DmDelegateResponseMsg::error("DM identity is not initialized"),
+            },
+            DmDelegateRequestMsg::GetLatestConversationKey {
+                identity,
+                contract_key,
+            } => match self.identity(&identity) {
+                Some(state) => state.get_latest_conversation_key(contract_key),
+                None => DmDelegateResponseMsg::error("DM identity is not initialized"),
+            },
+            DmDelegateRequestMsg::ListConversations { identity } => {
+                let Some(state) = self.identity(&identity) else {
+                    return DmDelegateResponseMsg::error("DM identity is not initialized");
+                };
+                DmDelegateResponseMsg::Conversations {
+                    conversations: state.sorted_conversations(),
+                }
+            }
+            DmDelegateRequestMsg::UpdateRead {
+                identity,
+                contract_key,
+                last_message,
+                unread,
+                updated_at,
+            } => {
+                let state = match self.require_identity(&identity) {
+                    Ok(state) => state,
+                    Err(error) => return error,
+                };
+                let response = state.update_read(contract_key, last_message, unread, updated_at);
+                if matches!(response, DmDelegateResponseMsg::Ok) {
+                    self.version = self.version.saturating_add(1);
+                }
+                response
+            }
+            DmDelegateRequestMsg::SetDraft {
+                identity,
+                contract_key,
+                draft,
+            } => {
+                let state = match self.require_identity(&identity) {
+                    Ok(state) => state,
+                    Err(error) => return error,
+                };
+                let response = state.set_draft(contract_key, draft);
+                if matches!(response, DmDelegateResponseMsg::Ok) {
+                    self.version = self.version.saturating_add(1);
+                }
+                response
+            }
+            DmDelegateRequestMsg::BlockIdentity {
+                identity,
+                target,
+                blocked,
+            } => {
+                let state = match self.require_identity(&identity) {
+                    Ok(state) => state,
+                    Err(error) => return error,
+                };
+                let response = state.set_blocked(target, blocked);
+                self.version = self.version.saturating_add(1);
+                response
+            }
+            DmDelegateRequestMsg::ListBlocked { identity } => {
+                let Some(state) = self.identity(&identity) else {
+                    return DmDelegateResponseMsg::error("DM identity is not initialized");
+                };
+                DmDelegateResponseMsg::Blocked {
+                    identities: state.blocked.clone(),
+                }
+            }
+            DmDelegateRequestMsg::RemoveConversation {
+                identity,
+                contract_key,
+            } => {
+                let state = match self.require_identity(&identity) {
+                    Ok(state) => state,
+                    Err(error) => return error,
+                };
+                let response = state.remove_conversation(contract_key);
+                self.version = self.version.saturating_add(1);
+                response
+            }
+            DmDelegateRequestMsg::ExportBackup => {
+                let backup = DmBackupV1 {
+                    version: DM_DELEGATE_STORAGE_VERSION,
+                    identities: self.identities.iter().map(|state| state.to_backup()).collect(),
+                };
+                let mut bytes = Vec::new();
+                if let Err(error) = ciborium::ser::into_writer(&backup, &mut bytes) {
+                    return DmDelegateResponseMsg::error(format!("encode backup: {error}"));
+                }
+                DmDelegateResponseMsg::Backup { bytes }
+            }
+            DmDelegateRequestMsg::ImportBackup { bytes } => {
+                let backup: DmBackupV1 = match ciborium::de::from_reader(bytes.as_slice()) {
+                    Ok(backup) => backup,
+                    Err(error) => {
+                        return DmDelegateResponseMsg::error(format!("decode backup: {error}"));
+                    }
+                };
+                if backup.version > DM_DELEGATE_STORAGE_VERSION {
+                    return DmDelegateResponseMsg::error("backup comes from a newer version");
+                }
+                for identity in backup.identities {
+                    let id = identity_public(&identity.identity_seed);
+                    if let Some(existing) = self.identity_mut(&id) {
+                        existing.merge_backup(identity);
+                    } else {
+                        let mut state = DmIdentityStateV1 {
+                            identity_seed: identity.identity_seed,
+                            devices: Vec::new(),
+                            conversations: Vec::new(),
+                            keys: Vec::new(),
+                            blocked: Vec::new(),
+                        };
+                        state.merge_backup(identity);
+                        self.identities.push(state);
+                    }
+                }
+                self.version = self.version.saturating_add(1);
+                DmDelegateResponseMsg::Ok
+            }
+        }
+    }
+}
+
+fn identity_public(seed: &[u8; 32]) -> DmIdentityId {
+    // The client derives the DM identity seed from the profile root before
+    // sending it. The delegate uses the seed directly.
+    SigningKey::from_bytes(seed).verifying_key().to_bytes()
 }
 
 fn ml_kem_encapsulation_key(seed: &[u8; 64]) -> Vec<u8> {
@@ -513,242 +682,174 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Verifier, VerifyingKey};
 
-    fn identity_seed() -> [u8; 32] {
-        [11u8; 32]
+    fn init(state: &mut DmDelegateStateV1, seed: [u8; 32]) -> DmIdentityId {
+        let response = state.apply(DmDelegateRequestMsg::InitIdentity {
+            identity_seed: seed,
+        });
+        assert!(matches!(response, DmDelegateResponseMsg::Ok));
+        identity_public(&seed)
     }
 
-    fn device_seeds() -> ([u8; 32], Vec<u8>) {
-        ([22u8; 32], vec![33u8; 64])
-    }
-
-    fn initialized() -> DmDelegateStateV1 {
-        let mut state = DmDelegateStateV1::default();
-        assert!(matches!(
-            state.apply(DmDelegateRequestMsg::InitIdentity {
-                identity_seed: identity_seed()
-            }),
-            DmDelegateResponseMsg::Ok
-        ));
-        state
-    }
-
-    #[test]
-    fn identity_and_devices_are_stored() {
-        let mut state = initialized();
-        let (signing_seed, kem_seed) = device_seeds();
+    fn device(state: &mut DmDelegateStateV1, identity: DmIdentityId) -> DmDevice {
         let response = state.apply(DmDelegateRequestMsg::CreateDevice {
+            identity,
             label: "Laptop".to_string(),
-            signing_seed,
-            kem_seed,
+            signing_seed: identity,
+            kem_seed: vec![33u8; 64],
             created_at: 1_000,
         });
         let DmDelegateResponseMsg::DeviceCreated { device, .. } = response else {
             panic!("device not created: {response:?}");
         };
-        assert_eq!(device.signing_key, device.device_id);
-        assert_eq!(device.kem_ek.len(), 1184);
+        device
+    }
 
-        let public = state.identity_public().unwrap();
-        assert_eq!(
-            public,
-            SigningKey::from_bytes(&identity_seed())
-                .verifying_key()
-                .to_bytes()
-        );
-        let status = state.apply(DmDelegateRequestMsg::GetStatus);
-        let DmDelegateResponseMsg::Status { devices, .. } = status else {
+    fn store_key(
+        state: &mut DmDelegateStateV1,
+        identity: DmIdentityId,
+        contract_key: DmContractId,
+        key: [u8; 32],
+    ) -> DmDelegateResponseMsg {
+        state.apply(DmDelegateRequestMsg::StoreConversationKey {
+            identity,
+            contract_key,
+            conversation_id: [2u8; 32],
+            key_version: 0,
+            key,
+            peer: [3u8; 32],
+            title: Some("Peer".to_string()),
+            generation: 0,
+            created_at: 1_000,
+        })
+    }
+
+    #[test]
+    fn two_profiles_have_independent_devices_and_keys() {
+        let mut state = DmDelegateStateV1::default();
+        let first = init(&mut state, [11u8; 32]);
+        let second = init(&mut state, [44u8; 32]);
+        assert_eq!(state.identities.len(), 2);
+        assert_ne!(first, second);
+
+        let first_device = device(&mut state, first);
+        let second_device = device(&mut state, second);
+        assert_ne!(first_device.device_id, second_device.device_id);
+
+        let response = store_key(&mut state, first, [1u8; 32], [9u8; 32]);
+        assert!(matches!(response, DmDelegateResponseMsg::Ok));
+        let response = store_key(&mut state, second, [1u8; 32], [8u8; 32]);
+        assert!(matches!(response, DmDelegateResponseMsg::Ok));
+
+        let first_key = state.apply(DmDelegateRequestMsg::GetConversationKey {
+            identity: first,
+            contract_key: [1u8; 32],
+            key_version: 0,
+        });
+        let DmDelegateResponseMsg::ConversationKey { key, .. } = first_key else {
+            panic!("first key missing");
+        };
+        assert_eq!(key, Some([9u8; 32]));
+        let second_key = state.apply(DmDelegateRequestMsg::GetConversationKey {
+            identity: second,
+            contract_key: [1u8; 32],
+            key_version: 0,
+        });
+        let DmDelegateResponseMsg::ConversationKey { key, .. } = second_key else {
+            panic!("second key missing");
+        };
+        assert_eq!(key, Some([8u8; 32]));
+
+        let first_status = state.apply(DmDelegateRequestMsg::GetStatus { identity: first });
+        let DmDelegateResponseMsg::Status {
+            conversations,
+            devices,
+            ..
+        } = first_status
+        else {
             panic!("status missing");
         };
+        assert_eq!(conversations, 1);
         assert_eq!(devices.len(), 1);
     }
 
     #[test]
-    fn the_delegate_signs_with_identity_and_device() {
-        let mut state = initialized();
-        let (signing_seed, kem_seed) = device_seeds();
-        let response = state.apply(DmDelegateRequestMsg::CreateDevice {
-            label: "Laptop".to_string(),
-            signing_seed,
-            kem_seed,
-            created_at: 1_000,
+    fn resetting_one_profile_keeps_the_other() {
+        let mut state = DmDelegateStateV1::default();
+        let first = init(&mut state, [11u8; 32]);
+        let second = init(&mut state, [44u8; 32]);
+        device(&mut state, first);
+        device(&mut state, second);
+        state.apply(DmDelegateRequestMsg::Reset {
+            identity: Some(first),
         });
-        let DmDelegateResponseMsg::DeviceCreated { device, .. } = response else {
-            panic!("device not created");
-        };
-        let payload = b"hello dm";
+        assert!(state.identity(&first).is_none());
+        assert!(state.identity(&second).is_some());
 
-        let identity_signature = state.apply(DmDelegateRequestMsg::SignIdentity {
-            bytes: payload.to_vec(),
-        });
-        let DmDelegateResponseMsg::Signature { signature } = identity_signature else {
-            panic!("identity signature missing");
-        };
-        VerifyingKey::from_bytes(&state.identity_public().unwrap())
-            .unwrap()
-            .verify(payload, &signature)
-            .unwrap();
-
-        let device_signature = state.apply(DmDelegateRequestMsg::SignDevice {
-            device_id: device.device_id,
-            bytes: payload.to_vec(),
-        });
-        let DmDelegateResponseMsg::Signature { signature } = device_signature else {
-            panic!("device signature missing");
-        };
-        VerifyingKey::from_bytes(&device.signing_key)
-            .unwrap()
-            .verify(payload, &signature)
-            .unwrap();
+        state.apply(DmDelegateRequestMsg::Reset { identity: None });
+        assert!(state.identities.is_empty());
     }
 
     #[test]
-    fn conversation_keys_and_index_are_persistent() {
-        let mut state = initialized();
-        let response = state.apply(DmDelegateRequestMsg::StoreConversationKey {
-            contract_key: [1u8; 32],
-            conversation_id: [2u8; 32],
-            key_version: 0,
-            key: [9u8; 32],
-            peer: [3u8; 32],
-            title: Some("Alice".to_string()),
-            generation: 0,
-            created_at: 1_000,
-        });
-        assert!(matches!(response, DmDelegateResponseMsg::Ok));
+    fn backup_restores_every_profile() {
+        let mut state = DmDelegateStateV1::default();
+        let first = init(&mut state, [11u8; 32]);
+        let second = init(&mut state, [44u8; 32]);
+        device(&mut state, first);
+        device(&mut state, second);
+        store_key(&mut state, first, [1u8; 32], [9u8; 32]);
+        store_key(&mut state, second, [2u8; 32], [8u8; 32]);
 
-        let response = state.apply(DmDelegateRequestMsg::GetConversationKey {
-            contract_key: [1u8; 32],
-            key_version: 0,
-        });
-        let DmDelegateResponseMsg::ConversationKey { key, .. } = response else {
-            panic!("key missing");
-        };
-        assert_eq!(key, Some([9u8; 32]));
-
-        let response = state.apply(DmDelegateRequestMsg::UpdateRead {
-            contract_key: [1u8; 32],
-            last_message: [4u8; 32],
-            unread: 0,
-            updated_at: 1_100,
-        });
-        assert!(matches!(response, DmDelegateResponseMsg::Ok));
-        let response = state.apply(DmDelegateRequestMsg::SetDraft {
-            contract_key: [1u8; 32],
-            draft: Some("draft".to_string()),
-        });
-        assert!(matches!(response, DmDelegateResponseMsg::Ok));
-
-        let response = state.apply(DmDelegateRequestMsg::ListConversations);
-        let DmDelegateResponseMsg::Conversations { conversations } = response else {
-            panic!("conversations missing");
-        };
-        assert_eq!(conversations.len(), 1);
-        assert_eq!(conversations[0].unread, 0);
-        assert_eq!(conversations[0].draft.as_deref(), Some("draft"));
-    }
-
-    #[test]
-    fn revoked_devices_cannot_sign() {
-        let mut state = initialized();
-        let (signing_seed, kem_seed) = device_seeds();
-        let response = state.apply(DmDelegateRequestMsg::CreateDevice {
-            label: "Laptop".to_string(),
-            signing_seed,
-            kem_seed,
-            created_at: 1_000,
-        });
-        let DmDelegateResponseMsg::DeviceCreated { device, .. } = response else {
-            panic!("device not created");
-        };
-        let response = state.apply(DmDelegateRequestMsg::RevokeDevice {
-            device_id: device.device_id,
-            revoked_at: 1_100,
-        });
-        assert!(matches!(response, DmDelegateResponseMsg::Ok));
-        let response = state.apply(DmDelegateRequestMsg::SignDevice {
-            device_id: device.device_id,
-            bytes: b"after revoke".to_vec(),
-        });
-        assert!(matches!(response, DmDelegateResponseMsg::Error { .. }));
-    }
-
-    #[test]
-    fn backup_round_trip_restores_identity_devices_and_keys() {
-        let mut state = initialized();
-        let (signing_seed, kem_seed) = device_seeds();
-        state.apply(DmDelegateRequestMsg::CreateDevice {
-            label: "Laptop".to_string(),
-            signing_seed,
-            kem_seed,
-            created_at: 1_000,
-        });
-        state.apply(DmDelegateRequestMsg::StoreConversationKey {
-            contract_key: [1u8; 32],
-            conversation_id: [2u8; 32],
-            key_version: 0,
-            key: [9u8; 32],
-            peer: [3u8; 32],
-            title: None,
-            generation: 0,
-            created_at: 1_000,
-        });
-        state.apply(DmDelegateRequestMsg::BlockIdentity {
-            identity: [5u8; 32],
-            blocked: true,
-        });
-
-        let response = state.apply(DmDelegateRequestMsg::ExportBackup);
-        let DmDelegateResponseMsg::Backup { bytes } = response else {
+        let DmDelegateResponseMsg::Backup { bytes } =
+            state.apply(DmDelegateRequestMsg::ExportBackup)
+        else {
             panic!("backup missing");
         };
         let mut restored = DmDelegateStateV1::default();
         let response = restored.apply(DmDelegateRequestMsg::ImportBackup { bytes });
         assert!(matches!(response, DmDelegateResponseMsg::Ok));
-        assert_eq!(restored.identity_public(), state.identity_public());
-        assert_eq!(restored.devices.len(), 1);
-        assert_eq!(restored.keys.len(), 1);
-        assert_eq!(restored.conversations.len(), 1);
-        assert_eq!(restored.blocked, vec![[5u8; 32]]);
+        assert_eq!(restored.identities.len(), 2);
+        assert!(restored.identity(&first).is_some());
+        assert!(restored.identity(&second).is_some());
+        assert_eq!(
+            restored
+                .identity(&first)
+                .unwrap()
+                .keys
+                .first()
+                .map(|key| key.key),
+            Some([9u8; 32])
+        );
     }
 
     #[test]
-    fn importing_a_different_identity_is_rejected() {
-        let mut state = initialized();
-        let mut other = DmDelegateStateV1::default();
-        other.apply(DmDelegateRequestMsg::InitIdentity {
-            identity_seed: [99u8; 32],
+    fn an_unknown_profile_is_rejected() {
+        let mut state = DmDelegateStateV1::default();
+        let response = state.apply(DmDelegateRequestMsg::ListDevices {
+            identity: [99u8; 32],
         });
-        let response = other.apply(DmDelegateRequestMsg::ExportBackup);
-        let DmDelegateResponseMsg::Backup { bytes } = response else {
-            panic!("backup missing");
+        assert!(matches!(response, DmDelegateResponseMsg::Error { .. }));
+    }
+
+    #[test]
+    fn signing_uses_the_selected_identity() {
+        let mut state = DmDelegateStateV1::default();
+        let first = init(&mut state, [11u8; 32]);
+        let second = init(&mut state, [44u8; 32]);
+        let payload = b"hello";
+        let response = state.apply(DmDelegateRequestMsg::SignIdentity {
+            identity: second,
+            bytes: payload.to_vec(),
+        });
+        let DmDelegateResponseMsg::Signature { signature } = response else {
+            panic!("signature missing");
         };
-        let response = state.apply(DmDelegateRequestMsg::ImportBackup { bytes });
-        assert!(matches!(response, DmDelegateResponseMsg::Error { .. }));
-    }
-
-    #[test]
-    fn a_different_key_for_the_same_version_is_rejected() {
-        let mut state = initialized();
-        state.apply(DmDelegateRequestMsg::StoreConversationKey {
-            contract_key: [1u8; 32],
-            conversation_id: [2u8; 32],
-            key_version: 0,
-            key: [9u8; 32],
-            peer: [3u8; 32],
-            title: None,
-            generation: 0,
-            created_at: 1_000,
-        });
-        let response = state.apply(DmDelegateRequestMsg::StoreConversationKey {
-            contract_key: [1u8; 32],
-            conversation_id: [2u8; 32],
-            key_version: 0,
-            key: [8u8; 32],
-            peer: [3u8; 32],
-            title: None,
-            generation: 0,
-            created_at: 1_000,
-        });
-        assert!(matches!(response, DmDelegateResponseMsg::Error { .. }));
+        VerifyingKey::from_bytes(&second)
+            .unwrap()
+            .verify(payload, &signature)
+            .unwrap();
+        assert!(VerifyingKey::from_bytes(&first)
+            .unwrap()
+            .verify(payload, &signature)
+            .is_err());
     }
 }

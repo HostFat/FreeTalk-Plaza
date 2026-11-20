@@ -128,6 +128,9 @@ pub async fn ensure_identity_and_device() -> Result<(), String> {
     }
     info!("DM identity: initializing for the active profile");
     let identity_seed = derive_identity_signing_key(&profile_seed).to_bytes();
+    let identity = ed25519_dalek::SigningKey::from_bytes(&identity_seed)
+        .verifying_key()
+        .to_bytes();
     match send_request(DmDelegateRequestMsg::InitIdentity { identity_seed }).await? {
         DmDelegateResponseMsg::Ok => {}
         DmDelegateResponseMsg::Error { message } => {
@@ -136,7 +139,7 @@ pub async fn ensure_identity_and_device() -> Result<(), String> {
         other => return Err(format!("unexpected InitIdentity response: {other:?}")),
     }
 
-    let devices = match send_request(DmDelegateRequestMsg::ListDevices).await? {
+    let devices = match send_request(DmDelegateRequestMsg::ListDevices { identity }).await? {
         DmDelegateResponseMsg::Devices { devices } => devices,
         DmDelegateResponseMsg::Error { message } => {
             return Err(format!("list DM devices: {message}"));
@@ -161,6 +164,7 @@ pub async fn ensure_identity_and_device() -> Result<(), String> {
     OsRng.fill_bytes(&mut kem_seed);
     let created_at = chrono::Utc::now().timestamp_millis();
     match send_request(DmDelegateRequestMsg::CreateDevice {
+        identity,
         label: "This browser".to_string(),
         signing_seed,
         kem_seed,
@@ -247,13 +251,13 @@ pub async fn send_request(
     }
 }
 
-pub async fn status() -> Result<DmDelegateResponseMsg, String> {
-    send_request(DmDelegateRequestMsg::GetStatus).await
+pub async fn status(identity: DmIdentityId) -> Result<DmDelegateResponseMsg, String> {
+    send_request(DmDelegateRequestMsg::GetStatus { identity }).await
 }
 
 /// Clear all DM delegate material. Used by the local reset flow.
 pub async fn reset() -> Result<(), String> {
-    match send_request(DmDelegateRequestMsg::Reset).await? {
+    match send_request(DmDelegateRequestMsg::Reset { identity: None }).await? {
         DmDelegateResponseMsg::Ok => {
             if let Ok(mut ensured) = LAST_ENSURED_PROFILE.lock() {
                 *ensured = None;
@@ -265,8 +269,8 @@ pub async fn reset() -> Result<(), String> {
     }
 }
 
-pub async fn list_devices() -> Result<Vec<DmDevice>, String> {
-    match send_request(DmDelegateRequestMsg::ListDevices).await? {
+pub async fn list_devices(identity: DmIdentityId) -> Result<Vec<DmDevice>, String> {
+    match send_request(DmDelegateRequestMsg::ListDevices { identity }).await? {
         DmDelegateResponseMsg::Devices { devices } => {
             Ok(devices.into_iter().map(|device| device.device).collect())
         }
@@ -275,8 +279,11 @@ pub async fn list_devices() -> Result<Vec<DmDevice>, String> {
     }
 }
 
-pub async fn sign_identity(bytes: Vec<u8>) -> Result<ed25519_dalek::Signature, String> {
-    match send_request(DmDelegateRequestMsg::SignIdentity { bytes }).await? {
+pub async fn sign_identity(
+    identity: DmIdentityId,
+    bytes: Vec<u8>,
+) -> Result<ed25519_dalek::Signature, String> {
+    match send_request(DmDelegateRequestMsg::SignIdentity { identity, bytes }).await? {
         DmDelegateResponseMsg::Signature { signature } => Ok(signature),
         DmDelegateResponseMsg::Error { message } => Err(message),
         other => Err(format!("unexpected SignIdentity response: {other:?}")),
@@ -284,10 +291,17 @@ pub async fn sign_identity(bytes: Vec<u8>) -> Result<ed25519_dalek::Signature, S
 }
 
 pub async fn sign_device(
+    identity: DmIdentityId,
     device_id: [u8; 32],
     bytes: Vec<u8>,
 ) -> Result<ed25519_dalek::Signature, String> {
-    match send_request(DmDelegateRequestMsg::SignDevice { device_id, bytes }).await? {
+    match send_request(DmDelegateRequestMsg::SignDevice {
+        identity,
+        device_id,
+        bytes,
+    })
+    .await?
+    {
         DmDelegateResponseMsg::Signature { signature } => Ok(signature),
         DmDelegateResponseMsg::Error { message } => Err(message),
         other => Err(format!("unexpected SignDevice response: {other:?}")),

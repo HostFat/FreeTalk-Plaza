@@ -10,13 +10,15 @@ Implementazione attuale:
 - `dm-contract` (crate `plaza-dm-contract`): entry point Freenet, validate,
   update, summarize, delta; wasm compilabile.
 - `dm-delegate` (crate `plaza-dm-delegate`): API request/response in
-  `dm-core::delegate`, stato persistente, identità e semi dei dispositivi,
-  firme, chiavi di conversazione, indice locale, blocco/draft, export/import
-  del backup; wasm compilabile.
+  `dm-core::delegate`, stato persistente **per identità** (`identities` map),
+  semi dei dispositivi, firme, chiavi di conversazione, indice locale,
+  blocco/draft, export/import del backup; wasm compilabile.
 - Client: registrazione del delegate all'avvio, envelope con request id,
   inizializzazione dell'identità dal profilo attivo, creazione del primo
   dispositivo, parser delle risposte nel message loop e reset dal Device
-  drawer. Il sigillo X25519 + ML-KEM end-to-end è il passo successivo.
+  drawer. Ogni richiesta porta l'`identity` attiva; cambiare profilo aggiunge
+  una voce alla mappa senza perdere le altre. Il sigillo X25519 + ML-KEM
+  end-to-end è il passo successivo.
 - Non ancora implementati: cifratura reale end-to-end, sigilli X25519/ML-KEM,
   invio/ricezione messaggi, Messages UI e deploy del contratto DM.
 
