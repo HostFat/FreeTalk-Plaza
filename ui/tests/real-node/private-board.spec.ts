@@ -668,6 +668,78 @@ test("member preview lives in Developer and exits from the banner", async ({
   await expect(app.getByRole("button", { name: /Manage/ })).toBeVisible();
 });
 
+test("a DM conversation survives backup and restore", async ({ page }) => {
+  await gotoRoute(page, `/board/${boardKey}`);
+  const app = page.frameLocator("iframe");
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await ensureOwner(page);
+
+  await app.getByRole("button", { name: "Messages" }).first().click();
+  await app.getByRole("button", { name: "New conversation" }).click();
+  const title = `Backup DM ${Date.now()}`;
+  await app.getByPlaceholder("Write a message…").fill(title);
+  await app.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(app.getByText(title)).toBeVisible({ timeout: 30_000 });
+  const conversationShort = (
+    await app.locator("h2.font-mono").first().innerText()
+  )
+    .trim()
+    .slice(0, 8);
+  await app.getByRole("button", { name: "Close" }).first().click();
+
+  await app.getByRole("button", { name: "Open identities" }).click();
+  const drawer = app.locator(".device-drawer");
+  await drawer.getByRole("tab", { name: "Backup" }).click();
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    drawer.getByRole("button", { name: "Download backup" }).click(),
+  ]);
+  const backupPath = await download.path();
+  if (!backupPath) {
+    throw new Error("the backup download has no path");
+  }
+
+  // Remove the DM delegate state, then restore it from the same file.
+  await drawer.getByRole("tab", { name: "Identities" }).click();
+  await drawer.getByText("Developer", { exact: true }).click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await drawer.getByRole("button", { name: "Reset DM delegate" }).click();
+  await expect(app.getByText(/DM delegate reset/)).toBeVisible({
+    timeout: 30_000,
+  });
+  await drawer.getByRole("button", { name: "Close" }).click();
+
+  await app.getByRole("button", { name: "Open identities" }).click();
+  await drawer.getByRole("tab", { name: "Backup" }).click();
+  await drawer
+    .locator("#plaza-backup-file")
+    .setInputFiles(backupPath);
+  const restore = drawer.getByRole("button", { name: "Restore now" });
+  await expect(restore).toBeEnabled({ timeout: 30_000 });
+  await restore.click();
+  await page.waitForTimeout(3_000);
+  try {
+    await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 15_000 });
+  } catch {
+    // The restore reload can race the node WebSocket handshake.
+    await page.reload();
+    await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  }
+  const closeDrawer = app.getByRole("button", { name: "Close" });
+  if (await closeDrawer.count()) {
+    await closeDrawer.first().click();
+  }
+
+  await app.getByRole("button", { name: "Messages" }).first().click();
+  const restored = app
+    .locator(".dm-conversation-row")
+    .filter({ hasText: conversationShort })
+    .first();
+  await expect(restored).toBeVisible({ timeout: 30_000 });
+  await restored.click();
+  await expect(app.getByText(title)).toBeVisible({ timeout: 30_000 });
+});
+
 test("a hidden topic is restored from the trash", async ({ page }) => {
   await page.goto(`${BASE}#/board/${boardKey}`);
   const app = page.frameLocator("iframe");

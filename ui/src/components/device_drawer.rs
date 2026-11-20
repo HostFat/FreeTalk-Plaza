@@ -565,28 +565,32 @@ pub fn DeviceDrawer() -> Element {
                             div { class: "rounded-xl border border-border bg-panel p-4 space-y-2",
                                 h3 { class: "text-sm font-semibold text-text", "Backup and restore" }
                                 p { class: "text-xs text-text-muted",
-                                    "The backup contains the identities, private-board keys, drafts and settings stored on this device. Board content stays on Freenet; uploaded image bytes and composer queues are not included."
+                                    "The backup contains identities, private-board keys, DM identities and conversation keys, drafts and settings stored on this device. Board content stays on Freenet; uploaded image bytes and composer queues are not included."
                                 }
                                 p { class: "text-xs text-amber-300",
-                                    "Keep the file private: it can open every private board saved here."
+                                    "Keep the file private: it can open every private board and DM saved here."
                                 }
                             }
 
                             div { class: "rounded-xl border border-border bg-panel p-4 space-y-3",
                                 h3 { class: "text-sm font-semibold text-text", "Save a copy" }
                                 p { class: "text-xs text-text-muted",
-                                    "Download a file with the identities and private-board keys held by this browser."
+                                    "Download a file with the identities, private-board keys, DM identities and DM conversation keys held by this browser."
                                 }
                                 button {
                                     r#type: "button",
                                     class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white text-sm rounded-lg transition-colors",
-                                    onclick: move |_| match crate::util::backup::download() {
-                                        Ok(()) => crate::components::app::toasts::show(
-                                            "Backup downloaded.",
-                                        ),
-                                        Err(error) => crate::components::app::toasts::show_error(format!(
-                                            "Could not create the backup: {error}"
-                                        )),
+                                    onclick: move |_| {
+                                        wasm_bindgen_futures::spawn_local(async {
+                                            match crate::util::backup::download().await {
+                                                Ok(()) => crate::components::app::toasts::show(
+                                                    "Backup downloaded.",
+                                                ),
+                                                Err(error) => crate::components::app::toasts::show_error(format!(
+                                                    "Could not create the backup: {error}"
+                                                )),
+                                            }
+                                        });
                                     },
                                     "Download backup"
                                 }
@@ -595,7 +599,7 @@ pub fn DeviceDrawer() -> Element {
                             div { class: "rounded-xl border border-border bg-panel p-4 space-y-3",
                                 h3 { class: "text-sm font-semibold text-text", "Restore from a file" }
                                 p { class: "text-xs text-text-muted",
-                                    "Boards in the file are merged into this device. Existing boards with the same key are replaced by the copy in the backup."
+                                    "Boards and DM identities in the file are merged into this device. Existing boards with the same key are replaced by the copy in the backup."
                                 }
                                 label { class: "flex flex-col gap-1 text-xs text-text-muted",
                                     span { "Backup file" }
@@ -606,7 +610,7 @@ pub fn DeviceDrawer() -> Element {
                                         class: "block w-full text-xs text-text-muted",
                                         onchange: move |_| {
                                             backup_error.set(None);
-                                            let name = crate::util::backup::selected_file()
+                                            let name = crate::util::backup::peek_selected_file()
                                                 .map(|file| file.name());
                                             backup_name.set(name);
                                         },

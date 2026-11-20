@@ -682,6 +682,31 @@ pub async fn load_conversations() -> Result<(), String> {
         other => return Err(format!("unexpected ListConversations response: {other:?}")),
     };
     let code = ContractCode::from(DM_CONTRACT_WASM);
+    for conversation in &conversations {
+        let key_version = match dm_delegate::send_request(
+            DmDelegateRequestMsg::GetLatestConversationKey {
+                identity,
+                contract_key: conversation.contract_key,
+            },
+        )
+        .await
+        {
+            Ok(DmDelegateResponseMsg::ConversationKey { key_version, .. }) => key_version,
+            Ok(DmDelegateResponseMsg::Error { message }) => {
+                dioxus::logger::tracing::warn!(
+                    "DM conversation {} has no local key: {message}",
+                    bs58::encode(conversation.contract_key).into_string()
+                );
+                None
+            }
+            _ => None,
+        };
+        dioxus::logger::tracing::info!(
+            "DM restored conversation {} key version {:?}",
+            &bs58::encode(conversation.contract_key).into_string()[..8],
+            key_version
+        );
+    }
     let mut to_fetch = Vec::new();
     for conversation in conversations {
         let contract_id = ContractInstanceId::new(conversation.contract_key);

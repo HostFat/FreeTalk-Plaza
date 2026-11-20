@@ -20,9 +20,40 @@ pub struct BackupV1 {
     /// `BoardData.secrets` is skipped by serde, so it travels separately.
     secrets: HashMap<VerifyingKey, HashMap<u32, [u8; 32]>>,
     current_secret_versions: HashMap<VerifyingKey, u32>,
+    /// `DmBackupV1` bytes exported by the DM delegate. Optional so format 1
+    /// backups still import.
+    #[serde(default)]
+    dm: Option<Vec<u8>>,
 }
 
-pub fn export_bytes() -> Result<Vec<u8>, String> {
+pub async fn export_bytes() -> Result<Vec<u8>, String> {
+    let dm = match crate::components::app::dm_delegate::send_request(
+        plaza_dm_core::delegate::DmDelegateRequestMsg::ExportBackup,
+    )
+    .await?
+    {
+        plaza_dm_core::delegate::DmDelegateResponseMsg::Backup { bytes } => Some(bytes),
+        plaza_dm_core::delegate::DmDelegateResponseMsg::Error { message } => {
+            return Err(format!("Could not export the DM keys: {message}"));
+        }
+        other => return Err(format!("Unexpected DM backup response: {other:?}")),
+    };
+    if let Some(bytes) = &dm {
+        if let Ok(parsed) = ciborium::from_reader::<plaza_dm_core::delegate::DmBackupV1, _>(
+            bytes.as_slice(),
+        ) {
+            dioxus::logger::tracing::info!(
+                "DM backup export: {} identities, {} conversation keys",
+                parsed.identities.len(),
+                parsed
+                    .identities
+                    .iter()
+                    .map(|identity| identity.keys.len())
+                    .sum::<usize>()
+            );
+        }
+    }
+
     let boards = BOARDS.read();
     let mut secrets = HashMap::new();
     let mut current_secret_versions = HashMap::new();
@@ -35,11 +66,12 @@ pub fn export_bytes() -> Result<Vec<u8>, String> {
         }
     }
     let backup = BackupV1 {
-        format: 1,
+        format: 2,
         created_at: chrono::Utc::now().timestamp_millis(),
         boards: boards.clone(),
         secrets,
         current_secret_versions,
+        dm,
     };
     let mut buffer = Vec::new();
     ciborium::ser::into_writer(&backup, &mut buffer)
@@ -52,7 +84,7 @@ pub fn export_bytes() -> Result<Vec<u8>, String> {
 pub async fn import_bytes(bytes: &[u8]) -> Result<usize, String> {
     let backup: BackupV1 = ciborium::from_reader(bytes)
         .map_err(|error| format!("This is not a FreeTalk Plaza backup: {error}"))?;
-    if backup.format != 1 {
+    if backup.format == 0 || backup.format > 2 {
         return Err(format!("Unsupported backup format {}", backup.format));
     }
     dioxus::logger::tracing::info!(
@@ -115,12 +147,47 @@ pub async fn import_bytes(bytes: &[u8]) -> Result<usize, String> {
         "Backup saved; BOARDS has {} boards",
         BOARDS.read().map.len()
     );
+
+    if let Some(dm_bytes) = backup.dm {
+        if let Ok(parsed) = ciborium::from_reader::<plaza_dm_core::delegate::DmBackupV1, _>(
+            dm_bytes.as_slice(),
+        ) {
+            dioxus::logger::tracing::info!(
+                "DM backup import: {} identities, {} conversation keys",
+                parsed.identities.len(),
+                parsed
+                    .identities
+                    .iter()
+                    .map(|identity| identity.keys.len())
+                    .sum::<usize>()
+            );
+        }
+        match crate::components::app::dm_delegate::send_request(
+            plaza_dm_core::delegate::DmDelegateRequestMsg::ImportBackup { bytes: dm_bytes },
+        )
+        .await?
+        {
+            plaza_dm_core::delegate::DmDelegateResponseMsg::Ok => {}
+            plaza_dm_core::delegate::DmDelegateResponseMsg::Error { message } => {
+                return Err(format!(
+                    "Boards restored, but the DM backup failed: {message}"
+                ));
+            }
+            other => {
+                return Err(format!(
+                    "Boards restored, but the DM import returned: {other:?}"
+                ));
+            }
+        }
+        let _ = crate::components::app::dm_contract::load_conversations().await;
+    }
+
     Ok(imported)
 }
 
 /// Download the backup through a temporary object URL.
-pub fn download() -> Result<(), String> {
-    let bytes = export_bytes()?;
+pub async fn download() -> Result<(), String> {
+    let bytes = export_bytes().await?;
     let parts = js_sys::Array::new();
     parts.push(&js_sys::Uint8Array::from(bytes.as_slice()));
     let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)
@@ -147,6 +214,17 @@ pub fn download() -> Result<(), String> {
     }
     anchor.remove();
     Ok(())
+}
+
+/// File currently chosen in the restore input, without clearing it. The
+/// change handler uses this; only the restore action consumes the file.
+pub fn peek_selected_file() -> Option<web_sys::File> {
+    let document = web_sys::window()?.document()?;
+    let input = document
+        .get_element_by_id("plaza-backup-file")?
+        .dyn_into::<web_sys::HtmlInputElement>()
+        .ok()?;
+    input.files()?.get(0)
 }
 
 /// File chosen in the restore input, clearing it for the next attempt.

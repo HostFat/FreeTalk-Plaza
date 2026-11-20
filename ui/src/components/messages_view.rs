@@ -238,13 +238,21 @@ fn ChatView(contract_id: ContractInstanceId) -> Element {
         }
         wasm_bindgen_futures::spawn_local(async move {
             for message in pending {
-                if let Ok(text) = dm_contract::decrypt_message(contract_id, message.clone()).await {
-                    let id = message.message.id;
-                    crate::util::defer(move || {
-                        plaintexts.with_mut(|cache| {
-                            cache.insert(id, text);
+                let id = message.message.id;
+                match dm_contract::decrypt_message(contract_id, message.clone()).await {
+                    Ok(text) => {
+                        crate::util::defer(move || {
+                            plaintexts.with_mut(|cache| {
+                                cache.insert(id, text);
+                            });
                         });
-                    });
+                    }
+                    Err(error) => {
+                        dioxus::logger::tracing::warn!(
+                            "DM decrypt failed for {}: {error}",
+                            bs58::encode(id).into_string()
+                        );
+                    }
                 }
             }
         });
