@@ -39,3 +39,36 @@ test("a member can edit and delete their own topic", async ({ page }) => {
     timeout: 10_000,
   });
 });
+
+test.fixme("deleting a reply lowers the topic reply count", async ({ page }) => {
+  await openSectionComposer(page, "Team Chat Board", "General");
+  await page.getByPlaceholder("Add a title...").fill("Reply count test");
+  await page.locator("#message-input").fill("Root post");
+  await page.getByRole("button", { name: /Send Topic/ }).click();
+
+  await page.getByText("Reply count test", { exact: true }).first().click();
+  await page.getByRole("button", { name: /Compose Reply/ }).click();
+  await page.locator("#message-input").fill("Reply to delete");
+  await page.getByRole("button", { name: /Send Reply/ }).click();
+  await expect(page.getByText("Reply to delete", { exact: true })).toBeVisible({
+    timeout: 10_000,
+  });
+
+  await page.getByRole("button", { name: /Back to topics/ }).click();
+  await expect(
+    page.getByText("1 reply", { exact: false }).first(),
+  ).toBeVisible();
+
+  await page.getByText("Reply count test", { exact: true }).first().click();
+  await page.getByText("Reply to delete", { exact: true }).hover();
+  await page
+    .getByRole("button", { name: "delete", exact: true })
+    .first()
+    .dispatchEvent("click");
+  await page.getByRole("button", { name: "Delete", exact: true }).click();
+
+  await page.getByRole("button", { name: /Back to topics/ }).click();
+  await expect(
+    page.getByText("0 replies", { exact: false }).first(),
+  ).toBeVisible({ timeout: 10_000 });
+});
