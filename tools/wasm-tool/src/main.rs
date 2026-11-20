@@ -119,6 +119,8 @@ fn cmd_sync() -> Result<(), String> {
             "plaza-contract",
             "-p",
             "plaza-delegate",
+            "-p",
+            "plaza-dm-delegate",
         ])
         .current_dir(&root)
         .status()
@@ -131,6 +133,10 @@ fn cmd_sync() -> Result<(), String> {
     let copies = [
         ("plaza_contract.wasm", "ui/public/contracts/plaza_contract.wasm"),
         ("plaza_delegate.wasm", "ui/public/contracts/plaza_delegate.wasm"),
+        (
+            "plaza_dm_delegate.wasm",
+            "ui/public/contracts/plaza_dm_delegate.wasm",
+        ),
         ("plaza_contract.wasm", "cli/contracts/plaza_contract.wasm"),
     ];
     for (src, dst) in copies {

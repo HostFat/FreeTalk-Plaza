@@ -81,6 +81,7 @@ $fdev = Find-Tool -Name 'fdev' -Candidates @(
 )
 $webContainerTool = Find-Tool -Name 'web-container-tool' -Candidates @(
     (Join-Path $env:TEMP 'web-container-tool.exe'),
+    (Join-Path $repoRoot '..\freenet-shared\target\release\web-container-tool.exe'),
     (Join-Path $repoRoot '..\freenet-shared\web-container-tool\target\release\web-container-tool.exe'),
     (Join-Path $repoRoot '..\freenet-shared\web-container-tool\target\debug\web-container-tool.exe')
 )
@@ -192,12 +193,14 @@ if (-not $SkipContractBuild) {
     $artifactSources = @{
         'plaza_contract.wasm' = @('common\src', 'plaza-contract\src')
         'plaza_delegate.wasm' = @('plaza-delegate\src', 'common\src\chat_delegate.rs')
+        'plaza_dm_delegate.wasm' = @('dm-delegate\src', 'dm-core\src')
         'plaza_blob.wasm' = @('plaza-blob-core\src', 'plaza-blob\src')
     }
     $wasmProfile = if ($Production) { 'release' } else { 'release-fast' }
     $wasmArtifacts = @(
         @{ File = 'plaza_contract.wasm'; Dest = 'plaza_contract.wasm'; Package = 'plaza-contract' },
         @{ File = 'plaza_delegate.wasm'; Dest = 'plaza_delegate.wasm'; Package = 'plaza-delegate' },
+        @{ File = 'plaza_dm_delegate.wasm'; Dest = 'plaza_dm_delegate.wasm'; Package = 'plaza-dm-delegate'; Profile = 'release' },
         @{ File = 'plaza_blob.wasm'; Dest = 'blob_contract.wasm'; Package = 'plaza-blob' }
     )
     foreach ($artifact in $wasmArtifacts) {
@@ -215,7 +218,7 @@ if (-not $SkipContractBuild) {
         }
         # The blob contract was published with the release profile; keep that
         # profile so its key does not change with a deploy.
-        $artifactProfile = if ($artifact.File -eq 'plaza_blob.wasm') { 'release' } else { $wasmProfile }
+        $artifactProfile = if ($artifact.Profile) { $artifact.Profile } elseif ($artifact.File -eq 'plaza_blob.wasm') { 'release' } else { $wasmProfile }
         Write-Host "Building $($artifact.File) with profile $artifactProfile..."
         & cargo build --locked --profile $artifactProfile --target wasm32-unknown-unknown `
             -p $artifact.Package --target-dir $TargetDir

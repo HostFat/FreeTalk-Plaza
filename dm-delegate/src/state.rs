@@ -62,6 +62,10 @@ impl DmDelegateStateV1 {
                 conversations: self.conversations.len(),
                 blocked: self.blocked.len(),
             },
+            DmDelegateRequestMsg::Reset => {
+                *self = DmDelegateStateV1::default();
+                DmDelegateResponseMsg::Ok
+            }
             DmDelegateRequestMsg::InitIdentity { identity_seed } => {
                 if self
                     .identity_seed

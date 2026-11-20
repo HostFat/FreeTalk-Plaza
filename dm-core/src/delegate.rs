@@ -10,9 +10,25 @@ use serde::{Deserialize, Serialize};
 
 pub const DM_DELEGATE_STORAGE_VERSION: u16 = 1;
 
+/// Wire envelope for correlation. The delegate echoes the id in the response.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DmDelegateEnvelope {
+    pub request_id: u64,
+    pub request: DmDelegateRequestMsg,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DmDelegateResponseEnvelope {
+    pub request_id: u64,
+    pub response: DmDelegateResponseMsg,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DmDelegateRequestMsg {
     GetStatus,
+    /// Clear the identity, devices, keys, index and block list. Used by the
+    /// "reset local data" recovery path.
+    Reset,
     /// Store the 32-byte seed of the identity key derived from the profile.
     InitIdentity {
         identity_seed: [u8; 32],

@@ -462,6 +462,61 @@ test("an image uploads and survives a reload", async ({ page }) => {
   ).toBeVisible({ timeout: 30_000 });
 });
 
+test("the DM delegate registers and keeps a device", async ({ page }) => {
+  const logs: string[] = [];
+  page.on("console", (message) => logs.push(message.text()));
+  await gotoRoute(page, `/board/${boardKey}`);
+  const app = page.frameLocator("iframe");
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+
+  await expect
+    .poll(() => logs.join("\n").includes("DM delegate registered"), {
+      timeout: 30_000,
+    })
+    .toBe(true);
+
+  // Selecting the board through the UI triggers the profile-bound identity
+  // setup. Reset the DM delegate first so the new run's profile can initialize
+  // even when a previous run left a different identity on this node.
+  await gotoRoute(page, "/");
+  await app
+    .getByRole("button", { name: "About, build and backup" })
+    .click();
+  await app
+    .getByRole("button", { name: /Identities and backup/ })
+    .click();
+  const drawer = app.locator(".device-drawer");
+  await drawer.getByText("Developer", { exact: true }).click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await drawer
+    .getByRole("button", { name: "Reset DM delegate" })
+    .click();
+  await expect(app.getByText(/DM delegate reset/)).toBeVisible({
+    timeout: 30_000,
+  });
+  await app.getByRole("button", { name: "Close" }).first().click();
+
+  await app
+    .getByRole("button", { name: /Select or Create Board/ })
+    .first()
+    .click();
+  await app.getByRole("button", { name: MAIN_BOARD }).last().click();
+  try {
+    await expect
+      .poll(
+        () => /DM identity: \d+ device\(s\) registered/.test(logs.join("\n")),
+        {
+          timeout: 30_000,
+        },
+      )
+      .toBe(true);
+  } catch (error) {
+    console.log("DM LOGS:\n" + logs.join("\n"));
+    throw error;
+  }
+  expect(logs.join("\n")).not.toContain("DM delegate did not become ready");
+});
+
 test("a hidden topic is restored from the trash", async ({ page }) => {
   await page.goto(`${BASE}#/board/${boardKey}`);
   const app = page.frameLocator("iframe");

@@ -488,6 +488,40 @@ pub fn DeviceDrawer() -> Element {
                                     }
                                 }
                             }
+
+                            details { class: "rounded-xl border border-border bg-panel p-4",
+                                summary { class: "text-sm text-text cursor-pointer", "Developer" }
+                                p { class: "text-xs text-text-muted mt-2",
+                                    "Reset the DM delegate identity, devices and conversation keys on this device. Use it when the active profile has no matching DM identity."
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "mt-2 px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg transition-colors",
+                                    onclick: move |_| {
+                                        let Some(window) = window() else { return; };
+                                        let confirmed = window
+                                            .confirm_with_message(
+                                                "Reset the DM delegate identity, devices and conversation keys on this device?",
+                                            )
+                                            .ok()
+                                            .unwrap_or(false);
+                                        if !confirmed {
+                                            return;
+                                        }
+                                        wasm_bindgen_futures::spawn_local(async {
+                                            match crate::components::app::dm_delegate::reset().await {
+                                                Ok(()) => crate::components::app::toasts::show(
+                                                    "DM delegate reset. Select a board to initialize the active profile.",
+                                                ),
+                                                Err(error) => crate::components::app::toasts::show_error(
+                                                    format!("Could not reset the DM delegate: {error}"),
+                                                ),
+                                            }
+                                        });
+                                    },
+                                    "Reset DM delegate"
+                                }
+                            }
                         }
                     },
                     DeviceTab::Mail => rsx! {

@@ -1,4 +1,5 @@
 pub mod chat_delegate;
+pub mod dm_delegate;
 pub mod document_title;
 pub mod freenet_api;
 pub mod notifications;
@@ -310,11 +311,19 @@ pub fn App() -> Element {
         synchronizer.start().await;
     });
 
+    // The DM delegate follows the active profile. The connection may come up
+    // while the app is still on the home page, so trigger initialization when
+    // a board becomes current.
+    use_effect(move || {
+        if CURRENT_BOARD.read().owner_key.is_some() {
+            dm_delegate::ensure_identity_for_active_board();
+        }
+    });
+
     // Finish posts whose images were still uploading when the page closed.
     use_effect(move || {
         if *BOARDS_LOADED.read() {
-            crate::util::pending_send::resume_all();
-            // Once the board state has settled, retire own uploads that no
+            crate::util::pending_send::resume_all();            // Once the board state has settled, retire own uploads that no
             // board references anymore.
             crate::util::safe_spawn_local(async {
                 crate::util::sleep(std::time::Duration::from_secs(60)).await;
@@ -939,6 +948,7 @@ pub fn select_board(board_id: Option<VerifyingKey>) {
             owner_key: Some(resolved),
         };
     }
+    dm_delegate::ensure_identity_for_active_board();
 }
 
 /// Sync CURRENT_BOARD from URL board_id parameter

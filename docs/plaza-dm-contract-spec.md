@@ -12,10 +12,13 @@ Implementazione attuale:
 - `dm-delegate` (crate `plaza-dm-delegate`): API request/response in
   `dm-core::delegate`, stato persistente, identità e semi dei dispositivi,
   firme, chiavi di conversazione, indice locale, blocco/draft, export/import
-  del backup; wasm compilabile. La registrazione dal client e il sigillo
-  X25519 + ML-KEM sono il passo successivo.
+  del backup; wasm compilabile.
+- Client: registrazione del delegate all'avvio, envelope con request id,
+  inizializzazione dell'identità dal profilo attivo, creazione del primo
+  dispositivo, parser delle risposte nel message loop e reset dal Device
+  drawer. Il sigillo X25519 + ML-KEM end-to-end è il passo successivo.
 - Non ancora implementati: cifratura reale end-to-end, sigilli X25519/ML-KEM,
-  registrazione del delegate nel client, indice UI, Messages UI e deploy.
+  invio/ricezione messaggi, Messages UI e deploy del contratto DM.
 
 Documenti collegati:
 

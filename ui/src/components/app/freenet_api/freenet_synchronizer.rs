@@ -309,6 +309,12 @@ impl FreenetSynchronizer {
                                     if let Err(e) = set_up_chat_delegate().await {
                                         error!("Failed to set up chat delegate: {}", e);
                                     }
+                                    if let Err(e) =
+                                        crate::components::app::dm_delegate::set_up_dm_delegate()
+                                            .await
+                                    {
+                                        error!("Failed to set up DM delegate: {}", e);
+                                    }
 
                                     info!("Processing boards after successful connection");
                                     if let Err(e) = response_handler

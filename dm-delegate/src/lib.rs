@@ -12,7 +12,9 @@ use freenet_stdlib::prelude::{
     delegate, ApplicationMessage, DelegateContext, DelegateCtx, DelegateError, DelegateInterface,
     InboundDelegateMsg, MessageOrigin, OutboundDelegateMsg, Parameters,
 };
-use plaza_dm_core::delegate::{DmDelegateRequestMsg, DmDelegateResponseMsg};
+use plaza_dm_core::delegate::{
+    DmDelegateEnvelope, DmDelegateResponseEnvelope, DmDelegateResponseMsg,
+};
 use state::DmDelegateStateV1;
 
 const STATE_KEY_SUFFIX: &[u8] = b"/plaza_dm_state_v1";
@@ -52,9 +54,16 @@ fn save_state(
     Ok(())
 }
 
-fn app_response(response: &DmDelegateResponseMsg) -> Result<OutboundDelegateMsg, DelegateError> {
+fn app_response(
+    request_id: u64,
+    response: &DmDelegateResponseMsg,
+) -> Result<OutboundDelegateMsg, DelegateError> {
+    let envelope = DmDelegateResponseEnvelope {
+        request_id,
+        response: response.clone(),
+    };
     let mut bytes = Vec::new();
-    ciborium::ser::into_writer(response, &mut bytes)
+    ciborium::ser::into_writer(&envelope, &mut bytes)
         .map_err(|error| DelegateError::Deser(format!("serialize response: {error}")))?;
     let message = ApplicationMessage::new(bytes)
         .with_context(DelegateContext::default())
@@ -96,14 +105,14 @@ impl DelegateInterface for DmDelegate {
                 ));
             }
         };
-        let request: DmDelegateRequestMsg =
+        let envelope: DmDelegateEnvelope =
             ciborium::de::from_reader(app_msg.payload.as_slice())
                 .map_err(|error| DelegateError::Deser(format!("decode request: {error}")))?;
         let key = storage_key(&origin);
         let mut state = load_state(ctx, &key)?;
-        let response = state.apply(request);
+        let response = state.apply(envelope.request);
         save_state(ctx, &key, &state)?;
-        Ok(vec![app_response(&response)?])
+        Ok(vec![app_response(envelope.request_id, &response)?])
     }
 }
 

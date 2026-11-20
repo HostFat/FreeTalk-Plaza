@@ -24,6 +24,9 @@ pub fn confirm_and_reset() {
     }
 
     wasm_bindgen_futures::spawn_local(async move {
+        if let Err(error) = crate::components::app::dm_delegate::reset().await {
+            dioxus::logger::tracing::warn!("Could not reset the DM delegate: {error}");
+        }
         match reset_local_data().await {
             Ok(()) => {
                 BOARDS.with_mut(|boards| {

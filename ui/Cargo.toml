@@ -92,6 +92,7 @@ log = "0.4" # Add log crate
 # Internal dependencies
 plaza-core.workspace = true
 plaza-blob-core.workspace = true
+plaza-dm-core.workspace = true
 
 # Freenet dependencies
 freenet-scaffold.workspace = true

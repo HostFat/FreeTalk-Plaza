@@ -12,6 +12,7 @@ use crate::components::app::chat_delegate::{
     complete_pending_signing_key_request, is_legacy_delegate_key, mark_legacy_migration_done,
     save_boards_to_delegate, BOARDS_STORAGE_KEY,
 };
+use crate::components::app::dm_delegate::{complete_dm_pending, is_dm_delegate_key};
 use crate::components::app::document_title::{mark_current_board_as_read, update_document_title};
 use crate::components::app::notifications::mark_initial_sync_complete;
 use crate::components::app::sync_info::{BoardSyncStatus, SYNC_INFO};
@@ -27,6 +28,7 @@ pub use get_response::handle_get_response;
 use plaza_core::board_state::privacy::PrivacyMode;
 use plaza_core::board_state::ChatBoardParametersV1;
 use plaza_core::chat_delegate::{ChatDelegateRequestMsg, ChatDelegateResponseMsg};
+use plaza_dm_core::delegate::DmDelegateResponseEnvelope;
 pub use put_response::handle_put_response;
 pub use subscribe_response::handle_subscribe_response;
 pub use update_notification::handle_update_notification;
@@ -127,6 +129,29 @@ impl ResponseHandler {
                 );
                 for (i, v) in values.iter().enumerate() {
                     info!("Processing delegate response value #{}", i);
+                    if is_dm_delegate_key(key.bytes()) {
+                        if let OutboundDelegateMsg::ApplicationMessage(app_msg) = v {
+                            match from_reader::<DmDelegateResponseEnvelope, _>(
+                                app_msg.payload.as_slice(),
+                            ) {
+                                Ok(envelope) => {
+                                    if !complete_dm_pending(
+                                        envelope.request_id,
+                                        envelope.response,
+                                    ) {
+                                        warn!(
+                                            "DM response for unknown request {}",
+                                            envelope.request_id
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    error!("Could not decode DM delegate response: {error}");
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     match v {
                         OutboundDelegateMsg::ApplicationMessage(app_msg) => {
                             info!(
