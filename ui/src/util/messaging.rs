@@ -509,14 +509,21 @@ pub(crate) async fn publish_message(
     let mut applied = false;
     BOARDS.with_mut(|boards| {
         if let Some(board_data) = boards.map.get_mut(&current_board) {
+            // A first post from an invited identity is prepared before the
+            // membership restore. Apply against the current state so the
+            // just-restored member is the parent the delta verifies against.
+            let state_before = board_data.board_state.clone();
             if let Err(e) = board_data.board_state.apply_delta(
-                &board_state_clone,
+                &state_before,
                 &ChatBoardParametersV1 {
                     owner: current_board,
                 },
                 &Some(delta),
             ) {
                 error!("Failed to apply message delta: {:?}", e);
+                crate::components::app::toasts::show_error(format!(
+                    "Local apply: {e}"
+                ));
             } else {
                 // Mark board as needing sync after message added (deferred to avoid RefCell panics)
                 mark_needs_sync(current_board);
