@@ -50,6 +50,9 @@ pub fn MessagesModal() -> Element {
 #[component]
 fn ConversationList() -> Element {
     let mut creating = use_signal(|| false);
+    let mut join_link = use_signal(String::new);
+    let mut joining = use_signal(|| false);
+    let mut join_error = use_signal(|| None::<String>);
     let conversations = dm_contract::conversations();
 
     rsx! {
@@ -94,6 +97,65 @@ fn ConversationList() -> Element {
                     });
                 },
                 if *creating.read() { "Creating…" } else { "New conversation" }
+            }
+        }
+
+        div { class: "px-5 py-3 border-b border-border space-y-2",
+            label { class: "block text-sm font-medium text-text", "Join with invite link" }
+            div { class: "flex items-center gap-2",
+                input {
+                    id: "dm-join-link",
+                    class: "flex-1 px-3 py-2 bg-surface border border-border rounded-lg text-xs text-text font-mono",
+                    placeholder: "Paste a DM invite link",
+                    value: "{join_link}",
+                    oninput: move |event| join_link.set(event.value()),
+                }
+                button {
+                    r#type: "button",
+                    class: "px-3 py-2 bg-surface hover:bg-surface-hover disabled:opacity-60 text-text text-xs rounded-lg",
+                    disabled: *joining.read() || join_link.read().trim().is_empty(),
+                    onclick: move |_| {
+                        if *joining.read() {
+                            return;
+                        }
+                        let link = join_link.read().trim().to_string();
+                        let parsed = match dm_contract::parse_join_link(&link) {
+                            Ok(parsed) => parsed,
+                            Err(message) => {
+                                join_error.set(Some(message));
+                                return;
+                            }
+                        };
+                        joining.set(true);
+                        join_error.set(None);
+                        wasm_bindgen_futures::spawn_local(async move {
+                            match dm_contract::join_from_link(
+                                parsed.contract_id,
+                                parsed.token,
+                                parsed.key_version,
+                                parsed.key,
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    crate::util::defer(move || {
+                                        *DM_SELECTED.write() = Some(parsed.contract_id);
+                                        join_link.set(String::new());
+                                        joining.set(false);
+                                    });
+                                }
+                                Err(message) => crate::util::defer(move || {
+                                    join_error.set(Some(message));
+                                    joining.set(false);
+                                }),
+                            }
+                        });
+                    },
+                    if *joining.read() { "Joining…" } else { "Join" }
+                }
+            }
+            if let Some(message) = join_error.read().as_ref() {
+                p { class: "text-xs text-red-400", "{message}" }
             }
         }
 

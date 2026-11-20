@@ -558,12 +558,9 @@ test("a DM conversation contract is created and a message round-trips", async ({
   });
 });
 
-// The delegate-level two-identity test covers sealing, membership and message
-// exchange. The browser test still does not render the join component on the
-// standalone route in this harness; keep it fixme.
-test.fixme("an invited DM identity joins and sends a message", async ({ page }) => {
-  const joinLogs: string[] = [];
-  page.on("console", (message) => joinLogs.push(message.text()));
+// The join runs inside the Messages modal, using the same app context and the
+// profile just selected. This is the deterministic path for the browser test.
+test("an invited DM identity joins and sends a message", async ({ page }) => {
   await gotoRoute(page, `/board/${boardKey}`);
   const app = page.frameLocator("iframe");
   await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
@@ -598,45 +595,12 @@ test.fixme("an invited DM identity joins and sends a message", async ({ page }) 
   await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
   await switchToProfile(page, "DMGuest");
 
-  await page.goto(inviteLink);
-  try {
-    await expect(
-      app.getByRole("button", { name: "Open conversation" }),
-    ).toBeVisible({ timeout: 90_000 });
-  } catch (error) {
-    console.log(
-      "JOIN PAGE BODY:\n" + (await app.locator("body").innerText()).slice(-1500),
-    );
-    console.log(
-      "JOIN PAGE LOGS:\n" +
-        joinLogs
-          .filter((line) => /DM join|DM identity|invite|profile/i.test(line))
-          .slice(-40)
-          .join("\n"),
-    );
-    throw error;
-  }
-  await app.getByRole("button", { name: "Open conversation" }).click();
   await gotoRoute(page, `/board/${boardKey}`);
   await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
   await app.getByRole("button", { name: "Messages" }).first().click();
-  try {
-    await expect(app.getByText(/2 member\(s\)/)).toBeVisible({
-      timeout: 60_000,
-    });
-  } catch (error) {
-    console.log(
-      "JOIN BODY:\n" + (await app.locator("body").innerText()).slice(-1800),
-    );
-    console.log(
-      "JOIN LOGS:\n" +
-        joinLogs
-          .filter((line) => /DM join|DM identity|profile/i.test(line))
-          .slice(-30)
-          .join("\n"),
-    );
-    throw error;
-  }
+  await app.locator("#dm-join-link").fill(inviteLink);
+  await app.getByRole("button", { name: "Join", exact: true }).click();
+  await expect(app.getByText(/2 member\(s\)/)).toBeVisible({ timeout: 60_000 });
   await app.getByPlaceholder("Write a message…").fill("hello from the invited DM");
   await app.getByRole("button", { name: "Send", exact: true }).click();
   await expect(app.getByText("hello from the invited DM")).toBeVisible({

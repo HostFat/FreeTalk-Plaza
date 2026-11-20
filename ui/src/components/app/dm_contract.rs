@@ -297,6 +297,54 @@ pub fn conversations() -> Vec<(ContractInstanceId, DmConversation)> {
     values
 }
 
+pub struct DmJoinLink {
+    pub contract_id: ContractInstanceId,
+    pub token: [u8; 32],
+    pub key_version: u32,
+    pub key: [u8; 32],
+}
+
+pub fn parse_join_link(input: &str) -> Result<DmJoinLink, String> {
+    let fragment = input.split('#').nth(1).unwrap_or(input);
+    let parts: Vec<&str> = fragment
+        .trim_start_matches('#')
+        .trim_start_matches('/')
+        .split('/')
+        .collect();
+    let parts = if parts.first() == Some(&"dm") {
+        parts
+    } else {
+        return Err("This is not a FreeTalk Plaza DM link.".to_string());
+    };
+    if parts.len() != 6 || parts[1] != "join" {
+        return Err("The DM invite link is incomplete.".to_string());
+    }
+    let contract_id = parts[2]
+        .parse::<ContractInstanceId>()
+        .map_err(|_| "The DM contract id is not valid.".to_string())?;
+    let token_bytes = bs58::decode(parts[3])
+        .into_vec()
+        .map_err(|_| "The invite token is not valid.".to_string())?;
+    let token: [u8; 32] = token_bytes
+        .try_into()
+        .map_err(|_| "The invite token is not valid.".to_string())?;
+    let key_version = parts[4]
+        .parse::<u32>()
+        .map_err(|_| "The conversation key version is not valid.".to_string())?;
+    let key_bytes = bs58::decode(parts[5])
+        .into_vec()
+        .map_err(|_| "The conversation key is not valid.".to_string())?;
+    let key: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| "The conversation key is not valid.".to_string())?;
+    Ok(DmJoinLink {
+        contract_id,
+        token,
+        key_version,
+        key,
+    })
+}
+
 /// Create a signed single-use invite and return the join link.
 pub async fn create_invite(contract_id: ContractInstanceId) -> Result<String, String> {
     let (contract_key, identity) = conversation_identity(contract_id)?;
