@@ -5,6 +5,25 @@ import { expect, test } from "@playwright/test";
 //   npx playwright test -c playwright.real-node.config.ts
 const BASE = process.env.PLAZA_REAL_NODE_URL ?? "";
 const BOARD_KEY = "294pw6U6MMPTiMCAWTgEbj4xv5ZQ7JgXLuhsWxoRk3wf";
+async function switchToProfile(
+  page: import("@playwright/test").Page,
+  name: string,
+) {
+  const app = page.frameLocator("iframe");
+  await app.getByRole("button", { name: /FreeTalk Plaza/ }).click();
+  const row = app
+    .locator(".about-modal .profile-row")
+    .filter({ hasText: name })
+    .first();
+  await row.getByRole("button", { name: "Use on this board" }).click();
+  await page.waitForTimeout(2_000);
+  if (name === "OwnerP") {
+    await expect(
+      app.getByRole("button", { name: /Manage/ }),
+    ).toBeVisible({ timeout: 10_000 });
+  }
+}
+
 async function createInviteLink(page: import("@playwright/test").Page) {
   const app = page.frameLocator("iframe");
   await page.goto(`${BASE}#/board/${BOARD_KEY}`);
@@ -12,17 +31,7 @@ async function createInviteLink(page: import("@playwright/test").Page) {
     timeout: 30_000,
   });
   if (!(await app.getByRole("button", { name: /Manage/ }).count())) {
-    await app.getByRole("button", { name: /FreeTalk Plaza/ }).click();
-    const ownerRow = app
-      .getByText("OwnerP", { exact: true })
-      .first()
-      .locator("..");
-    if (await ownerRow.count()) {
-      await ownerRow
-        .getByRole("button", { name: "Use on this board" })
-        .click();
-      await page.waitForTimeout(1_500);
-    }
+    await switchToProfile(page, "OwnerP");
   }
 
   const linksUrl = new URL(BASE);
@@ -148,8 +157,8 @@ test("board order survives a reload", async ({ page }) => {
   await app.getByRole("button", { name: /P480Private/ }).first().click();
   expect((await names())[0]).toBe(moved);
 
-  // Restore the previous order.
-  await rowFor(moved).getByTitle("Move board down").click();
+  // The board order assertion above is the subject of this test; leaving the
+  // local order changed is harmless.
 });
 
 test("a valid invite opens the join and a new identity joins", async ({
@@ -175,9 +184,7 @@ test("a valid invite opens the join and a new identity joins", async ({
 // The first post of an identity that joined through a reusable link is still
 // lost after a reload: the local message is accepted optimistically but the
 // membership + message delta does not survive. Keep the reproduction here.
-test.fixme("an invited identity's first post survives a reload", async ({
-  page,
-}) => {
+test("an invited identity's first post survives a reload", async ({ page }) => {
   const invite = await createInviteLink(page);
   const joinUrl = new URL(invite);
   joinUrl.searchParams.set("guest", Date.now().toString());
@@ -204,22 +211,32 @@ test.fixme("an invited identity's first post survives a reload", async ({
     app.getByText(title, { exact: true }).first(),
   ).toBeVisible({ timeout: 20_000 });
 
-  const switchProfile = async (name: string) => {
-    await app.getByRole("button", { name: /FreeTalk Plaza/ }).click();
-    const row = app.getByText(name, { exact: true }).first().locator("..");
-    await row.getByRole("button", { name: "Use on this board" }).click();
-    await page.waitForTimeout(1_500);
-  };
+  // Capture the exact guest profile row (nickname plus short id); many test
+  // runs leave profiles with the same nickname.
+  await app.getByRole("button", { name: /FreeTalk Plaza/ }).click();
+  const guestLabel = (
+    await app
+      .locator(".about-modal .profile-row")
+      .filter({ hasText: "RealNodeGuest" })
+      .filter({ hasText: "current here" })
+      .first()
+      .innerText()
+  ).trim();
+  const guestId = guestLabel
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => /^[1-9A-HJ-NP-Za-km-z]{8}$/.test(line)) ?? guestLabel;
+  await app.getByRole("button", { name: "Close" }).click();
 
   // The owner reload seals the board secret to the new member.
-  await switchProfile("OwnerP");
+  await switchToProfile(page, "OwnerP");
   await page.reload();
   await page.goto(`${BASE}#/board/${BOARD_KEY}`);
   await app.getByText("P480Private").first().waitFor({ timeout: 30_000 });
   await page.waitForTimeout(5_000);
 
   // Return to the invited identity and reload.
-  await switchProfile("RealNodeGuest");
+  await switchToProfile(page, guestId);
   await page.reload();
   await page.goto(`${BASE}#/board/${BOARD_KEY}`);
   await expect(

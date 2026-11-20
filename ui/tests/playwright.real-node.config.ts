@@ -9,6 +9,9 @@ export default defineConfig({
   testDir: "./real-node",
   timeout: 90_000,
   retries: 0,
+  // All tests share one node and one delegate store.
+  workers: 1,
+  fullyParallel: false,
   use: {
     trace: "on-first-retry",
   },

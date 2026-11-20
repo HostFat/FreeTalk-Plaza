@@ -200,7 +200,7 @@ pub fn AboutModal() -> Element {
                 onclick: move |_| *ABOUT_MODAL.write() = false,
             }
             div {
-                class: "relative bg-panel rounded-xl shadow-xl max-w-md w-full max-h-[90vh] overflow-y-auto",
+                class: "about-modal relative bg-panel rounded-xl shadow-xl max-w-md w-full max-h-[90vh] overflow-y-auto",
                 onclick: move |e| e.stop_propagation(),
 
                 div { class: "flex items-center gap-3 px-6 py-5 border-b border-border",
@@ -251,7 +251,7 @@ pub fn AboutModal() -> Element {
                             "Keys and nicknames are separate: the same nickname on two boards can still link you even when the keys differ. On a private board a derived key keeps the key link hidden."
                         }
                         for profile in BOARDS.read().profiles.clone() {
-                            div { key: "{profile.id}", class: "flex items-center gap-2 flex-wrap",
+                            div { key: "{profile.id}", class: "profile-row flex items-center gap-2 flex-wrap",
                                 if renaming.read().as_deref() == Some(profile.id.as_str()) {
                                     input {
                                         class: "flex-1 min-w-24 px-2 py-1 bg-surface border border-border rounded text-text text-xs",
