@@ -43,6 +43,8 @@ const DEFAULT_NONCE: [u8; 24] = [
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static ENSURE_RUNNING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static DELEGATE_READY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 static PENDING: LazyLock<Mutex<HashMap<u64, oneshot::Sender<DmDelegateResponseMsg>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -125,6 +127,7 @@ pub async fn set_up_dm_delegate() -> Result<(), String> {
         }
     };
     result.map_err(|error| format!("register DM delegate: {error}"))?;
+    DELEGATE_READY.store(true, Ordering::SeqCst);
     info!("DM delegate registered");
 
     // The identity depends on the active profile and can only be initialized
@@ -172,6 +175,16 @@ pub async fn ensure_identity_and_device() -> Result<(), String> {
         other => return Err(format!("unexpected InitIdentity response: {other:?}")),
     }
 
+    ensure_device_for_identity(identity).await?;
+    if let Ok(mut ensured) = LAST_ENSURED_PROFILE.lock() {
+        *ensured = Some(profile_seed);
+    }
+    Ok(())
+}
+
+/// Ensure the delegate has an active device for an identity. Useful on a join
+/// route where only the identity id is available.
+pub async fn ensure_device_for_identity(identity: DmIdentityId) -> Result<(), String> {
     let devices = match send_request(DmDelegateRequestMsg::ListDevices { identity }).await? {
         DmDelegateResponseMsg::Devices { devices } => devices,
         DmDelegateResponseMsg::Error { message } => {
@@ -185,9 +198,6 @@ pub async fn ensure_identity_and_device() -> Result<(), String> {
         .any(|device| device.device.revoked_at.is_none())
     {
         info!("DM device already present");
-        if let Ok(mut ensured) = LAST_ENSURED_PROFILE.lock() {
-            *ensured = Some(profile_seed);
-        }
         return Ok(());
     }
 
@@ -210,9 +220,6 @@ pub async fn ensure_identity_and_device() -> Result<(), String> {
     {
         DmDelegateResponseMsg::DeviceCreated { .. } => {
             info!("DM device created");
-            if let Ok(mut ensured) = LAST_ENSURED_PROFILE.lock() {
-                *ensured = Some(profile_seed);
-            }
             Ok(())
         }
         DmDelegateResponseMsg::Error { message } => Err(format!("create DM device: {message}")),
@@ -227,10 +234,7 @@ fn active_profile_seed() -> Option<[u8; 32]> {
         .owner_key
         .or(boards.current_board_key);
     let board = current.and_then(|key| boards.map.get(&key));
-    let profile = board
-        .and_then(|board| boards.profile_for_board(board))
-        .cloned()
-        .or_else(|| boards.profiles.first().cloned());
+    let profile = board.and_then(|board| boards.profile_for_board(board)).cloned();
     if let Some(profile) = &profile {
         info!("DM active profile: {}", profile.name);
     }
@@ -303,6 +307,21 @@ pub async fn get_active_identity() -> Result<Option<DmIdentityId>, String> {
         DmDelegateResponseMsg::Error { message } => Err(message),
         other => Err(format!("unexpected GetActiveIdentity response: {other:?}")),
     }
+}
+
+/// Wait for registration and return the last initialized identity. On a
+/// standalone join route this can run before the connection sets up the
+/// delegate.
+pub async fn wait_for_active_identity() -> Option<DmIdentityId> {
+    for _ in 0..40 {
+        if DELEGATE_READY.load(Ordering::SeqCst) {
+            if let Ok(Some(identity)) = get_active_identity().await {
+                return Some(identity);
+            }
+        }
+        crate::util::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    None
 }
 
 /// Clear all DM delegate material. Used by the local reset flow.

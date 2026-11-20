@@ -398,6 +398,7 @@ fn conversation_identity(
 /// Register a conversation from a join link and fetch its state.
 pub async fn join_conversation(
     contract_id: ContractInstanceId,
+    identity: plaza_dm_core::DmIdentityId,
     key_version: u32,
     key: [u8; 32],
 ) -> Result<(), String> {
@@ -416,8 +417,6 @@ pub async fn join_conversation(
         });
     });
 
-    let identity = dm_delegate::active_identity_for_ops()
-        .ok_or_else(|| "no active profile for the DM identity".to_string())?;
     let key_bytes: [u8; 32] = contract_id
         .as_bytes()
         .try_into()
@@ -445,6 +444,7 @@ pub async fn join_conversation(
 /// Verify the invite token in the fetched state and add the local member.
 pub async fn accept_invite(
     contract_id: ContractInstanceId,
+    identity: plaza_dm_core::DmIdentityId,
     token: [u8; 32],
 ) -> Result<(), String> {
     let state = DM_CONVERSATIONS
@@ -461,8 +461,6 @@ pub async fn accept_invite(
     {
         return Err("invite token is missing, expired or already used".to_string());
     }
-    let identity = dm_delegate::active_identity_for_ops()
-        .ok_or_else(|| "no active profile for the DM identity".to_string())?;
     if state
         .members
         .members
@@ -518,25 +516,16 @@ pub async fn join_from_link(
     key: [u8; 32],
 ) -> Result<(), String> {
     dioxus::logger::tracing::info!("DM join: waiting for the active profile");
-    // The join route can load before the delegate has restored the boards and
-    // the active profile. The delegate remembers the last initialized
-    // identity, so use it when no board/profile is selected.
-    if dm_delegate::identity_id_for_active_profile().is_none() {
-        if let Ok(Some(identity)) = dm_delegate::get_active_identity().await {
-            *crate::components::app::dm_delegate::ACTIVE_IDENTITY_OVERRIDE.write() =
-                Some(identity);
-        }
-    }
-    for _ in 0..40 {
-        if dm_delegate::active_identity_for_ops().is_some() {
-            break;
-        }
-        crate::util::sleep(std::time::Duration::from_millis(250)).await;
-    }
-    dioxus::logger::tracing::info!("DM join: ensuring the DM identity");
-    dm_delegate::ensure_identity_and_device().await?;
+    // The join route can load before the boards and the active profile. The
+    // delegate remembers the last initialized identity, so prefer it.
+    let identity = dm_delegate::wait_for_active_identity()
+        .await
+        .or_else(dm_delegate::identity_id_for_active_profile)
+        .ok_or_else(|| "no active DM identity on this device".to_string())?;
+    *crate::components::app::dm_delegate::ACTIVE_IDENTITY_OVERRIDE.write() = Some(identity);
+    dm_delegate::ensure_device_for_identity(identity).await?;
     dioxus::logger::tracing::info!("DM join: registering the conversation");
-    join_conversation(contract_id, key_version, key).await?;
+    join_conversation(contract_id, identity, key_version, key).await?;
     for _ in 0..120 {
         let loaded = DM_CONVERSATIONS
             .read()
@@ -549,7 +538,7 @@ pub async fn join_from_link(
         crate::util::sleep(std::time::Duration::from_millis(250)).await;
     }
     dioxus::logger::tracing::info!("DM join: accepting the invite");
-    let result = accept_invite(contract_id, token).await;
+    let result = accept_invite(contract_id, identity, token).await;
     match &result {
         Ok(()) => dioxus::logger::tracing::info!("DM join: accepted"),
         Err(error) => dioxus::logger::tracing::error!("DM join failed: {error}"),

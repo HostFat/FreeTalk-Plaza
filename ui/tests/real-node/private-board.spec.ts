@@ -558,9 +558,11 @@ test("a DM conversation contract is created and a message round-trips", async ({
   });
 });
 
-// Invite creation and the join route are implemented. The automated
-// two-identity flow still needs a deterministic way to carry the active DM
-// profile across the standalone join route; keep this fixme until then.
+// The join implementation uses the delegate's persisted active identity and
+// an explicit identity passed through join/accept. The automated two-identity
+// test still receives a stale cached app bundle on the standalone join route,
+// so it cannot assert the 2-member chat; keep it fixme until the bundle cache
+// is deterministic in the harness.
 test.fixme("an invited DM identity joins and sends a message", async ({ page }) => {
   const joinLogs: string[] = [];
   page.on("console", (message) => joinLogs.push(message.text()));
@@ -599,9 +601,23 @@ test.fixme("an invited DM identity joins and sends a message", async ({ page }) 
   await switchToProfile(page, "DMGuest");
 
   await page.goto(inviteLink);
-  await expect(
-    app.getByRole("button", { name: "Open conversation" }),
-  ).toBeVisible({ timeout: 90_000 });
+  try {
+    await expect(
+      app.getByRole("button", { name: "Open conversation" }),
+    ).toBeVisible({ timeout: 90_000 });
+  } catch (error) {
+    console.log(
+      "JOIN PAGE BODY:\n" + (await app.locator("body").innerText()).slice(-1500),
+    );
+    console.log(
+      "JOIN PAGE LOGS:\n" +
+        joinLogs
+          .filter((line) => /DM join|DM identity|invite|profile/i.test(line))
+          .slice(-40)
+          .join("\n"),
+    );
+    throw error;
+  }
   await app.getByRole("button", { name: "Open conversation" }).click();
   await gotoRoute(page, `/board/${boardKey}`);
   await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
