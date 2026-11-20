@@ -20,6 +20,28 @@ pub fn restore_self_membership() -> bool {
         info!("membership restore skipped: no current board");
         return false;
     };
+    // A legacy action in the stored state can make every full-state update
+    // fail contract verification. Remove it before publishing the membership.
+    let pruned = BOARDS.with_mut(|boards| {
+        boards
+            .map
+            .get_mut(&board_key)
+            .map(|board| {
+                let params = plaza_core::board_state::ChatBoardParametersV1 {
+                    owner: board_key,
+                };
+                let bad = crate::signing::remove_unverifiable_messages(
+                    &mut board.board_state,
+                    &params,
+                );
+                bad + board.prune_invalid_actions()
+            })
+            .unwrap_or(0)
+    });
+    if pruned > 0 {
+        info!("membership restore: pruned {pruned} invalid action message(s)");
+    }
+
     let board = {
         let boards = BOARDS.read();
         let Some(board) = boards.map.get(&board_key).cloned() else {

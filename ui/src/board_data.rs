@@ -1137,6 +1137,110 @@ impl BoardData {
             );
     }
 
+    /// Drop action messages that the current contract rules reject.
+    ///
+    /// A board written by an older build can carry an action that was valid
+    /// then and is not valid now. A full-state update would be rejected for
+    /// every later post, so remove the offending action locally first.
+    pub fn prune_invalid_actions(&mut self) -> usize {
+        use plaza_core::board_state::content::CONTENT_TYPE_MODERATION_ACTION;
+        use plaza_core::board_state::message::BoardMessageBody;
+
+        let params = ChatBoardParametersV1 { owner: self.owner_vk };
+        let owner_id = MemberId::from(&self.owner_vk);
+        let admin_ids: std::collections::HashSet<MemberId> = self
+            .board_state
+            .admin
+            .admins
+            .iter()
+            .map(|admin| admin.admin.id())
+            .collect();
+        let authors: std::collections::HashMap<_, _> = self
+            .board_state
+            .recent_messages
+            .messages
+            .iter()
+            .map(|message| (message.id(), message.message.author))
+            .collect();
+        let before = self.board_state.recent_messages.messages.len();
+        self.board_state.recent_messages.messages.retain(|message| {
+            let action = match &message.message.content {
+                BoardMessageBody::Public {
+                    content_type,
+                    data,
+                    ..
+                } if *content_type == CONTENT_TYPE_MODERATION_ACTION => {
+                    plaza_core::board_state::content::ModerationActionV1::decode(data).ok()
+                }
+                _ => None,
+            };
+            let Some(action) = action else {
+                return true;
+            };
+            if action.action_type == plaza_core::board_state::content::ACTION_TYPE_REACTION
+                || action.action_type
+                    == plaza_core::board_state::content::ACTION_TYPE_REMOVE_REACTION
+            {
+                return true;
+            }
+            let actor = message.message.author;
+            if actor == owner_id || admin_ids.contains(&actor) {
+                return true;
+            }
+            let target_author = authors.get(&action.target).copied();
+            target_author == Some(actor)
+        });
+        let mut removed = before - self.board_state.recent_messages.messages.len();
+        loop {
+            if self
+                .board_state
+                .moderation
+                .validate_actions(&self.board_state, &params)
+                .is_ok()
+            {
+                break;
+            }
+            let mut removed_one = false;
+            for index in 0..self.board_state.recent_messages.messages.len() {
+                let is_action = matches!(
+                    &self.board_state.recent_messages.messages[index].message.content,
+                    BoardMessageBody::Public { content_type, .. }
+                        if *content_type == CONTENT_TYPE_MODERATION_ACTION
+                );
+                if !is_action {
+                    continue;
+                }
+                let message = self
+                    .board_state
+                    .recent_messages
+                    .messages
+                    .remove(index);
+                if self
+                    .board_state
+                    .moderation
+                    .validate_actions(&self.board_state, &params)
+                    .is_ok()
+                {
+                    removed += 1;
+                    removed_one = true;
+                    break;
+                }
+                self
+                    .board_state
+                    .recent_messages
+                    .messages
+                    .insert(index, message);
+            }
+            if !removed_one {
+                break;
+            }
+        }
+        if removed > 0 {
+            self.rebuild_actions_with_local_secrets(&params);
+        }
+        removed
+    }
+
     /// Whether this client may sign category key distributions: the owner, or
     /// a member of a role the owner allowed to distribute keys.
     pub fn can_distribute_category_keys(&self) -> bool {

@@ -506,6 +506,24 @@ pub(crate) async fn publish_message(
 
     info!("Sending message: {:?}", auth_message);
 
+    // A legacy action or message signature in the stored state makes the
+    // contract reject the whole full-state update. Remove both before the
+    // message is applied and sent.
+    BOARDS.with_mut(|boards| {
+        if let Some(board_data) = boards.map.get_mut(&current_board) {
+            let params = ChatBoardParametersV1 { owner: current_board };
+            let bad_signatures =
+                crate::signing::remove_unverifiable_messages(&mut board_data.board_state, &params);
+            if bad_signatures > 0 {
+                warn!("Dropped {bad_signatures} unverifiable message(s) before sending");
+            }
+            let removed = board_data.prune_invalid_actions();
+            if removed > 0 {
+                warn!("Dropped {removed} invalid action message(s) before sending");
+            }
+        }
+    });
+
     let mut applied = false;
     BOARDS.with_mut(|boards| {
         if let Some(board_data) = boards.map.get_mut(&current_board) {

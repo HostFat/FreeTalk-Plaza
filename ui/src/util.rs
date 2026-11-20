@@ -495,5 +495,3 @@ pub fn member_id_to_color(member_id: &MemberId) -> String {
     // Use moderate saturation and lightness for visibility
     format!("hsl({}, 65%, 55%)", hue)
 }
-
-

@@ -35,7 +35,14 @@ async function createInviteLink(page: import("@playwright/test").Page) {
   await app.getByRole("button", { name: "Create link" }).click();
   const link = app.locator("input[readonly]").last();
   await expect(link).toBeVisible();
-  return link.inputValue();
+  const value = await link.inputValue();
+  // The token has to reach the board contract before the invited client
+  // fetches the state; otherwise the join proof references an inactive token.
+  await page.waitForTimeout(3_000);
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, {
+    timeout: 30_000,
+  });
+  return value;
 }
 
 test("a private board recovers its key after a reload", async ({ page }) => {
