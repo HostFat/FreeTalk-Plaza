@@ -376,6 +376,11 @@ impl ResponseHandler {
                                                                             })
                                                                             .collect();
                                                                         board_data.decrypt_board_secrets_with_extra_keys(&extra_keys);
+                                                                        if board_data.is_current_owner()
+                                                                            && board_data.distribute_missing_board_secrets()
+                                                                        {
+                                                                            crate::components::app::mark_needs_sync(board_data.owner_vk);
+                                                                        }
                                                                     }
                                                                 }
 
