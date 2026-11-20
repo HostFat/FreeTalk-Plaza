@@ -13,8 +13,9 @@ use plaza_dm_core::delegate::*;
 use plaza_dm_core::{
     AuthorizedDmDevice, AuthorizedDmMember, AuthorizedDmMessage, AuthorizedSealedDmKey,
     DmContractId, DmDevice, DmDeviceId, DmIdentityId, DmInvite, DmMember, DmMembersV1, DmMessage,
-    DmMessageId, DmMetaV1, DmRole, DmStateV1, SealedDmKey, CONTENT_TYPE_ATTACHMENT,
-    CONTENT_TYPE_SYSTEM, CONTENT_TYPE_TEXT, KEY_SUITE_X25519_MLKEM768_XCHACHA20,
+    DmMessageId, DmMetaV1, DmParamsV1, DmRole, DmStateDeltaV1, DmStateV1, SealedDmKey,
+    CONTENT_TYPE_ATTACHMENT, CONTENT_TYPE_SYSTEM, CONTENT_TYPE_TEXT,
+    KEY_SUITE_X25519_MLKEM768_XCHACHA20,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1258,6 +1259,132 @@ fn decrypt_bytes(
 mod tests {
     use super::*;
     use ed25519_dalek::{Verifier, VerifyingKey};
+
+    #[test]
+    fn two_delegates_join_seal_and_exchange_a_message() {
+        let mut alice = DmDelegateStateV1::default();
+        let alice_id = init(&mut alice, [11u8; 32]);
+        let alice_device = create_device_with(
+            &mut alice,
+            alice_id,
+            [21u8; 32],
+            [31u8; 32],
+            vec![41u8; 64],
+        );
+        let mut contract = match alice.apply(DmDelegateRequestMsg::CreateConversation {
+            identity: alice_id,
+            device_id: alice_device.device_id,
+            conversation_id: [7u8; 32],
+            created_at: 1_000,
+        }) {
+            DmDelegateResponseMsg::StateCreated { state } => state,
+            other => panic!("conversation state missing: {other:?}"),
+        };
+        let params = DmParamsV1::default();
+        let response = alice.apply(DmDelegateRequestMsg::StoreConversationKey {
+            identity: alice_id,
+            contract_key: [1u8; 32],
+            conversation_id: [7u8; 32],
+            key_version: 0,
+            key: [9u8; 32],
+            peer: [0u8; 32],
+            title: None,
+            generation: 0,
+            created_at: 1_000,
+        });
+        assert!(matches!(response, DmDelegateResponseMsg::Ok));
+
+        let mut bob = DmDelegateStateV1::default();
+        let bob_id = init(&mut bob, [44u8; 32]);
+        let bob_device = create_device_with(
+            &mut bob,
+            bob_id,
+            [22u8; 32],
+            [32u8; 32],
+            vec![42u8; 64],
+        );
+        let member = match bob.apply(DmDelegateRequestMsg::CreateJoinMember {
+            identity: bob_id,
+            device_id: bob_device.device_id,
+            conversation_id: [7u8; 32],
+            created_at: 1_100,
+        }) {
+            DmDelegateResponseMsg::JoinMemberCreated { member } => member,
+            other => panic!("join member missing: {other:?}"),
+        };
+        contract
+            .apply_delta(
+                &params,
+                &DmStateDeltaV1 {
+                    members: Some(vec![member]),
+                    ..Default::default()
+                },
+            )
+            .expect("the second member joins the contract");
+        assert_eq!(contract.members.members.len(), 2);
+
+        let sealed = match alice.apply(DmDelegateRequestMsg::SealConversationKey {
+            identity: alice_id,
+            sealer_device: alice_device.device_id,
+            contract_key: [1u8; 32],
+            key_version: 0,
+            target_member: bob_id,
+            target_device: bob_device.device_id,
+            target_x25519_pk: bob_device.x25519_pk,
+            target_kem_ek: bob_device.kem_ek,
+            ephemeral_seed: [5u8; 32],
+            kem_seed: [6u8; 32],
+            nonce: [7u8; 24],
+            sealed_at: 1_200,
+        }) {
+            DmDelegateResponseMsg::SealedKey { key } => key,
+            other => panic!("sealed key missing: {other:?}"),
+        };
+        let opened = bob.apply(DmDelegateRequestMsg::OpenConversationKey {
+            identity: bob_id,
+            device_id: bob_device.device_id,
+            contract_key: [1u8; 32],
+            record: sealed.record,
+        });
+        let DmDelegateResponseMsg::ConversationKey { key, .. } = opened else {
+            panic!("opened key missing: {opened:?}");
+        };
+        assert_eq!(key, Some([9u8; 32]));
+
+        let encrypted = match alice.apply(DmDelegateRequestMsg::EncryptMessage {
+            identity: alice_id,
+            device_id: alice_device.device_id,
+            contract_key: [1u8; 32],
+            key_version: 0,
+            plaintext: b"two identities, one message".to_vec(),
+            content_type: CONTENT_TYPE_TEXT,
+            reply_to: None,
+            created_at: 1_300,
+            nonce: [3u8; 24],
+        }) {
+            DmDelegateResponseMsg::MessageCreated { message } => message,
+            other => panic!("message missing: {other:?}"),
+        };
+        contract
+            .apply_delta(
+                &params,
+                &DmStateDeltaV1 {
+                    messages: Some(vec![encrypted.clone()]),
+                    ..Default::default()
+                },
+            )
+            .expect("the encrypted message enters the contract");
+
+        let decrypted = bob.apply(DmDelegateRequestMsg::DecryptMessage {
+            identity: bob_id,
+            contract_key: [1u8; 32],
+            message: encrypted,
+        });
+        let DmDelegateResponseMsg::Plaintext { bytes } = decrypted else {
+            panic!("plaintext missing: {decrypted:?}");
+        };
+        assert_eq!(bytes, b"two identities, one message");
+    }
 
     fn init(state: &mut DmDelegateStateV1, seed: [u8; 32]) -> DmIdentityId {
         let response = state.apply(DmDelegateRequestMsg::InitIdentity {
