@@ -11,6 +11,11 @@ declare global {
       boardNames: () => [string, boolean][];
       notify: (title: string, body: string) => void;
     };
-    __notifications: Array<{ title: string; body?: string; tag?: string }>;
+    __notifications: Array<{
+      title: string;
+      body?: string;
+      tag?: string;
+      instance: { onclick: (() => void) | null };
+    }>;
   }
 }

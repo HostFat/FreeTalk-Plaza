@@ -15,6 +15,7 @@ test("an OS notification is created when permission is granted", async ({
           title,
           body: options?.body,
           tag: options?.tag,
+          instance: this,
         });
       }
       close() {}
@@ -39,4 +40,42 @@ test("an OS notification is created when permission is granted", async ({
   const notification = await page.evaluate(() => window.__notifications[0]);
   expect(notification.title).toBe("Plaza test");
   expect(notification.body).toBe("A new reply arrived");
+});
+
+test("clicking the notification opens the target post", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__notifications = [];
+    class FakeNotification {
+      static permission = "granted";
+      static requestPermission = async () => "granted";
+      onclick: (() => void) | null = null;
+      constructor(title: string, options?: { body?: string; tag?: string }) {
+        window.__notifications.push({
+          title,
+          body: options?.body,
+          tag: options?.tag,
+          instance: this,
+        });
+      }
+      close() {}
+    }
+    (window as unknown as { Notification: typeof FakeNotification }).Notification =
+      FakeNotification;
+  });
+
+  await openBoard(page, "Team Chat Board");
+  await page.waitForFunction(() => Boolean(window.__plazaTest));
+  await page.evaluate(() =>
+    window.__plazaTest.notify("Open this", "The target post"),
+  );
+
+  await page
+    .evaluate(() => window.__notifications[0].instance.onclick?.())
+    .catch(() => {
+      // The callback reloads the frame, which destroys the JS context.
+    });
+
+  await page.waitForURL(/board\/test-board\/post\/test-post/, {
+    timeout: 10_000,
+  });
 });

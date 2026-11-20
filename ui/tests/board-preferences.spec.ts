@@ -52,6 +52,9 @@ test.describe("board list preferences", () => {
   }) => {
     await openApp(page);
     await page.evaluate(() => window.__plazaTest.clearBoards());
+    await expect(
+      page.getByText("Select or Create Board", { exact: true }),
+    ).toBeVisible({ timeout: 5_000 });
     await page.getByText("Select or Create Board", { exact: true }).click();
     await expect(page.getByText("Loading boards…")).toBeVisible();
   });

@@ -2842,6 +2842,15 @@ impl Boards {
                 Some("removed") => {
                     boards.removed = value.deserialized().unwrap_or_default();
                 }
+                Some("profiles") => {
+                    boards.profiles = value.deserialized().unwrap_or_default();
+                }
+                Some("board_order") => {
+                    boards.board_order = value.deserialized().unwrap_or_default();
+                }
+                Some("archived") => {
+                    boards.archived = value.deserialized().unwrap_or_default();
+                }
                 Some("owned_images") => {
                     boards.owned_images = value.deserialized().unwrap_or_default();
                 }
@@ -3243,6 +3252,14 @@ impl Boards {
 
     /// Merge the other Boards into this Boards (eg. when Boards are loaded from storage)
     pub fn merge(&mut self, other: Boards) -> Result<(), String> {
+        // Top-level UI preferences live on this device. When the in-memory
+        // copy has no value yet (initial delegate load), take the stored one.
+        if self.board_order.is_empty() {
+            self.board_order = other.board_order.clone();
+        }
+        if self.archived.is_empty() {
+            self.archived = other.archived.clone();
+        }
         // A board the user left stays gone even when an older snapshot still
         // carries it.
         for key in other.removed {
@@ -4488,6 +4505,37 @@ mod tests {
             board.get_secret().map(|(secret, _)| *secret),
             Some(secret),
             "the stored profile restores the board secret"
+        );
+    }
+
+    #[test]
+    fn merging_keeps_the_owner_profile_id() {
+        let mut rng = rand::thread_rng();
+        let owner_sk = SigningKey::generate(&mut rng);
+        let profile = IdentityProfile::new("Owner".to_string(), SigningKey::generate(&mut rng));
+        let mut local = empty_boards();
+        let key = local.create_new_board_with_identity(
+            owner_sk,
+            profile.clone(),
+            BoardIdentityMode::Same,
+            "Board".to_string(),
+            "Owner".to_string(),
+            false,
+        );
+        let expected = local.map.get(&key).unwrap().owner_profile_id.clone();
+        assert_eq!(expected, Some(profile.id.clone()));
+
+        let mut incoming = empty_boards();
+        let mut board = local.map.get(&key).unwrap().clone();
+        board.profile_id = Some("member-profile".to_string());
+        board.owner_profile_id = None;
+        incoming.map.insert(key, board);
+
+        local.merge(incoming).expect("the board merge succeeds");
+        assert_eq!(
+            local.map.get(&key).unwrap().owner_profile_id,
+            expected,
+            "a member profile save must not erase the owner profile"
         );
     }
 
