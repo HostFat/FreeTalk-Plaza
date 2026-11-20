@@ -365,9 +365,13 @@ pub(crate) fn self_membership_delta(
         .map(|member| member.member.id())
         .collect();
     let mut members_to_add = vec![authorized_member.clone()];
-    for chain_member in &board_data.invite_chain {
-        if !current_member_ids.contains(&chain_member.member.id()) {
-            members_to_add.push(chain_member.clone());
+    // A token join carries its own join_proof; replaying a stale invite chain
+    // on top of it makes the membership delta fail verification.
+    if authorized_member.member.join_proof.is_none() {
+        for chain_member in &board_data.invite_chain {
+            if !current_member_ids.contains(&chain_member.member.id()) {
+                members_to_add.push(chain_member.clone());
+            }
         }
     }
 
