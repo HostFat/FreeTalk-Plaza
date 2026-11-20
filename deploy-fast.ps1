@@ -235,6 +235,11 @@ if (-not $SkipContractBuild) {
 
 Write-Host "Building UI with profile $buildProfile (first run is a full build, later runs are incremental)..."
 $buildTimer = [System.Diagnostics.Stopwatch]::StartNew()
+# Touch the build script so Cargo embeds the current commit and build time even
+# when only the version or a commit changed and no source file has a newer
+# timestamp. Without this, dx reuses the previous wasm and About shows stale
+# build details.
+(Get-Item (Join-Path $repoRoot 'ui\build.rs')).LastWriteTime = Get-Date
 # DWARF debug info is on by default in dx and roughly doubles the wasm. The
 # published bundle does not need it.
 if ($Production) {
