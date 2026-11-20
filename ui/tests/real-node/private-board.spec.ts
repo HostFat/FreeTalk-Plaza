@@ -239,12 +239,28 @@ test("an image uploads and survives a reload", async ({ page }) => {
 });
 
 test.fixme("a hidden topic is restored from the trash", async ({ page }) => {
-  await page.goto(`${BASE}#/board/${BOARD_KEY}`);
+  // A fresh board makes the current profile the owner, so the trash flow does
+  // not depend on which profile was active in an earlier test.
+  const boardName = `Trash board ${Date.now()}`;
+  await page.goto(`${BASE}#/`);
   const app = page.frameLocator("iframe");
-  await app.getByText("P480Private").first().waitFor({ timeout: 30_000 });
-  await ensureOwner(page);
+  await app.getByText("Select or Create Board", { exact: true }).click();
+  await app.getByRole("button", { name: "Create Board", exact: true }).click();
+  await app.getByPlaceholder("Enter board name").fill(boardName);
+  await app.getByPlaceholder("Enter your nickname").fill("TrashOwner");
+  await app.getByRole("checkbox", { name: "Private board" }).check();
+  await app.getByRole("button", { name: "Create Board" }).last().click();
+  await app.getByText(boardName, { exact: true }).first().waitFor({
+    timeout: 30_000,
+  });
+  const boardKey = new URL(page.url()).hash.match(/\/board\/([^/]+)/)?.[1];
+  expect(boardKey).toBeTruthy();
 
+  await app.getByRole("button", { name: /\+ Section/ }).first().click();
+  await app.locator("input").first().fill("General");
+  await app.getByRole("button", { name: "Create Section" }).click();
   await app.getByRole("heading", { name: "General" }).click();
+
   await app.getByRole("button", { name: /New Topic/ }).first().click();
   const title = `Trash test ${Date.now()}`;
   await app.getByPlaceholder("Add a title...").fill(title);
@@ -256,18 +272,14 @@ test.fixme("a hidden topic is restored from the trash", async ({ page }) => {
   await app.getByRole("button", { name: "Hide" }).click();
   await page.waitForTimeout(1_000);
 
-  await gotoRoute(page, `/board/${BOARD_KEY}`);
-  await app.getByText("P480Private").first().waitFor({ timeout: 30_000 });
-  await ensureOwner(page);
-  await gotoRoute(page, `/board/${BOARD_KEY}/admin/trash`);
+  await gotoRoute(page, `/board/${boardKey}/admin/trash`);
   await app.getByText("Trash", { exact: true }).first().waitFor({
     timeout: 30_000,
   });
   await app.getByRole("button", { name: "Restore" }).first().click();
   await page.waitForTimeout(1_000);
 
-  await gotoRoute(page, `/board/${BOARD_KEY}`);
-  await app.getByRole("heading", { name: "General" }).click();
+  await gotoRoute(page, `/board/${boardKey}`);
   await expect(
     app.getByText(title, { exact: true }).first(),
   ).toBeVisible({ timeout: 30_000 });
