@@ -41,10 +41,32 @@ pub fn NicknameField(member_info: AuthorizedMemberInfo) -> Element {
         .display_nickname(member_id)
         .unwrap_or_else(|| "Unknown".to_string());
     let original_nickname = initial_nickname.clone();
+    let mut existing_names: Vec<String> = board
+        .board_state
+        .member_info
+        .member_info
+        .iter()
+        .filter(|info| info.member_info.member_id != member_id)
+        .filter_map(|info| board.display_nickname(info.member_info.member_id))
+        .collect();
+    if let Some(owner) = board.display_nickname(MemberId::from(&board.owner_vk)) {
+        if !existing_names.contains(&owner) {
+            existing_names.push(owner);
+        }
+    }
     let mut temp_nickname = use_signal(|| initial_nickname);
     let mut input_element = use_signal(|| None as Option<Rc<MountedData>>);
     let mut requesting = use_signal(|| false);
     let mut requested_name = use_signal(String::new);
+    let candidate_name = if can_edit {
+        temp_nickname.read().clone()
+    } else {
+        requested_name.read().clone()
+    };
+    let similar_to = crate::util::mentions::similar_name(
+        &candidate_name,
+        existing_names.iter().map(String::as_str),
+    );
     let pending_request = board.pending_nickname_request(member_id).cloned();
     let latest_request = board.latest_nickname_request(member_id).cloned();
 
@@ -176,6 +198,11 @@ pub fn NicknameField(member_info: AuthorizedMemberInfo) -> Element {
                         class: "absolute right-3 top-1/2 -translate-y-1/2 text-text-muted",
                         Icon { icon: FaPencil, width: 14, height: 14 }
                     }
+                }
+            }
+            if let Some(other) = similar_to.clone() {
+                p { class: "mt-1 text-xs text-amber-400",
+                    "This name is visually similar to “{other}”. Add a distinguishing character or check that it is intentional."
                 }
             }
             if can_edit {

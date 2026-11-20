@@ -114,7 +114,14 @@ impl MentionDirectory {
     /// Markdown plus mention chips. Plain `@Nickname` and explicit tokens both
     /// become a `plaza-mention` span with a data-member-id.
     pub fn render_html(&self, text: &str, self_id: Option<MemberId>) -> String {
-        let (masked, chips) = self.mask_mentions(text);
+        let (masked, mut chips) = self.mask_mentions(text);
+        // Never trust the name written in a token: resolve it from the ID so
+        // `@[OwnerP](mention:<attacker>)` cannot render as the real owner.
+        for (id, name) in chips.iter_mut() {
+            if let Some(member) = self.members.iter().find(|member| member.id == *id) {
+                *name = member.name.clone();
+            }
+        }
         let html = crate::util::markdown::text_to_html(&masked);
         restore_chips(&html, &chips, self_id)
     }
@@ -347,6 +354,63 @@ pub fn replace_context(id: &str, context: &MentionAutocomplete, member: &Mention
     }
 }
 
+/// Skeleton used to compare lookalike names. It folds common Cyrillic/Greek
+/// homoglyphs, zero-width/combining characters and digit substitutions.
+pub fn confusable_key(name: &str) -> String {
+    let folded: String = name
+        .chars()
+        .filter(|ch| {
+            !matches!(
+                ch,
+                '\u{200B}'..='\u{200D}'
+                    | '\u{FEFF}'
+                    | '\u{0300}'..='\u{036F}'
+                    | '\u{1AB0}'..='\u{1AFF}'
+            )
+        })
+        .map(|ch| match ch {
+            'А' | 'Α' | 'а' | 'α' => 'a',
+            'В' | 'Β' | 'Ь' | 'β' => 'b',
+            'С' | 'Ϲ' | 'с' | 'ϲ' => 'c',
+            'Е' | 'Ε' | 'е' | 'ε' => 'e',
+            'Н' | 'Η' | 'н' | 'η' => 'h',
+            'І' | 'Ι' | 'і' | 'ι' => 'i',
+            'Ј' | 'ϳ' => 'j',
+            'К' | 'Κ' | 'к' | 'κ' => 'k',
+            'М' | 'Μ' | 'м' | 'μ' => 'm',
+            'О' | 'Ο' | 'о' | 'ο' => 'o',
+            'Р' | 'Ρ' | 'р' | 'ρ' => 'p',
+            'Ѕ' | 'ѕ' => 's',
+            'Т' | 'Τ' | 'т' | 'τ' => 't',
+            'Х' | 'Χ' | 'х' | 'χ' => 'x',
+            'У' | 'Υ' | 'у' | 'υ' => 'y',
+            'З' | 'Ζ' | 'з' | 'ζ' => 'z',
+            other => other,
+        })
+        .flat_map(|ch| ch.to_lowercase())
+        .collect();
+    folded
+        .replace('0', "o")
+        .replace('1', "l")
+        .replace("rn", "m")
+        .replace("vv", "w")
+}
+
+/// Return the existing name that `candidate` could be mistaken for.
+pub fn similar_name<'a>(
+    candidate: &str,
+    existing: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let key = confusable_key(candidate.trim());
+    if key.is_empty() {
+        return None;
+    }
+    existing.into_iter().find_map(|name| {
+        (confusable_key(name.trim()) == key && name.trim() != candidate.trim())
+            .then(|| name.to_string())
+    })
+}
+
 /// Turn explicit tokens back into readable `@Name` text for the edit form.
 pub fn readable_mentions(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
@@ -446,6 +510,28 @@ mod tests {
         let html = directory().render_html(&text, None);
         assert!(html.contains(">@Old Name</span>"), "{html}");
         assert!(html.contains(&format!(r#"data-member-id="{id}""#)), "{html}");
+    }
+
+    #[test]
+    fn lookalike_names_are_flagged() {
+        assert_eq!(confusable_key("Аlice"), confusable_key("Alice"));
+        assert_eq!(
+            similar_name("Аlice", ["Alice", "Bob"]),
+            Some("Alice".to_string())
+        );
+        assert!(similar_name("Carol", ["Alice", "Bob"]).is_none());
+    }
+
+    #[test]
+    fn a_token_cannot_spoof_another_name() {
+        let id = MemberId::from_bytes([7; 32]);
+        let directory = MentionDirectory::from_names(vec![(id, "Alice".to_string())]);
+        let html = directory.render_html(
+            &format!("@[OwnerP](mention:{id})"),
+            None,
+        );
+        assert!(html.contains(">@Alice</span>"), "{html}");
+        assert!(!html.contains(">@OwnerP</span>"), "{html}");
     }
 
     #[test]
