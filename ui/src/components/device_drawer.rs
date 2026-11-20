@@ -5,6 +5,7 @@ use crate::components::app::{BOARDS, CURRENT_BOARD};
 use crate::util::ecies::unseal_bytes_with_secrets;
 use crate::util::mail::{self, MailVisibility};
 use crate::util::message_actions::ActionContext;
+use dioxus::logger::tracing::warn;
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
 use web_sys::window;
@@ -149,6 +150,13 @@ fn persist_and_reload() {
         // Stay on the board. Reloading here raced the delegate load and left
         // the board on "Loading board…"; the in-memory signals already carry
         // the new identity.
+        // The DM identity follows the active profile; initialize it before the
+        // switch completes so a join link opened right after uses this profile.
+        if let Err(error) =
+            crate::components::app::dm_delegate::ensure_identity_after_profile_switch().await
+        {
+            warn!("Could not initialize the DM identity for the new profile: {error}");
+        }
         crate::components::app::toasts::show("Identity switched.");
         close();
     });

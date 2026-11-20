@@ -6,7 +6,7 @@
 
 use crate::components::app::{BOARDS, CURRENT_BOARD, WEB_API};
 use dioxus::logger::tracing::{error, info, warn};
-use dioxus::prelude::ReadableExt;
+use dioxus::prelude::{Global, GlobalSignal, ReadableExt};
 use freenet_stdlib::client_api::ClientRequest::DelegateOp;
 use freenet_stdlib::client_api::DelegateRequest;
 use freenet_stdlib::prelude::{
@@ -55,6 +55,35 @@ static DELEGATE_KEY: LazyLock<DelegateKey> = LazyLock::new(|| {
         _ => unreachable!("DM delegate is always a Wasm V1 container"),
     }
 });
+
+const ACTIVE_IDENTITY_STORAGE_KEY: &str = "plaza_dm_active_identity_v1";
+
+/// The active DM identity survives a reload even when the app opens directly
+/// on a join route, where no board is selected. Only the public identity id is
+/// stored, never a signing seed.
+pub static ACTIVE_IDENTITY_OVERRIDE: GlobalSignal<Option<DmIdentityId>> = Global::new(|| {
+    let value = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(ACTIVE_IDENTITY_STORAGE_KEY).ok().flatten())?;
+    let bytes = bs58::decode(value).into_vec().ok()?;
+    <[u8; 32]>::try_from(bytes.as_slice()).ok()
+});
+
+pub fn active_identity_for_ops() -> Option<DmIdentityId> {
+    identity_id_for_active_profile().or(*ACTIVE_IDENTITY_OVERRIDE.read())
+}
+
+fn remember_active_identity(identity: DmIdentityId) {
+    *ACTIVE_IDENTITY_OVERRIDE.write() = Some(identity);
+    if let Some(storage) = web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+    {
+        let _ = storage.set_item(
+            ACTIVE_IDENTITY_STORAGE_KEY,
+            &bs58::encode(identity).into_string(),
+        );
+    }
+}
 
 fn delegate_container() -> DelegateContainer {
     let bytes = include_bytes!("../../../public/contracts/plaza_dm_delegate.wasm");
@@ -134,6 +163,7 @@ pub async fn ensure_identity_and_device() -> Result<(), String> {
     let identity = ed25519_dalek::SigningKey::from_bytes(&identity_seed)
         .verifying_key()
         .to_bytes();
+    remember_active_identity(identity);
     match send_request(DmDelegateRequestMsg::InitIdentity { identity_seed }).await? {
         DmDelegateResponseMsg::Ok => {}
         DmDelegateResponseMsg::Error { message } => {
@@ -191,13 +221,19 @@ pub async fn ensure_identity_and_device() -> Result<(), String> {
 }
 
 fn active_profile_seed() -> Option<[u8; 32]> {
-    let current = CURRENT_BOARD.read().owner_key;
     let boards = BOARDS.read();
+    let current = CURRENT_BOARD
+        .read()
+        .owner_key
+        .or(boards.current_board_key);
     let board = current.and_then(|key| boards.map.get(&key));
     let profile = board
         .and_then(|board| boards.profile_for_board(board))
         .cloned()
         .or_else(|| boards.profiles.first().cloned());
+    if let Some(profile) = &profile {
+        info!("DM active profile: {}", profile.name);
+    }
     profile
         .map(|profile| profile.signing_key.to_bytes())
         .or_else(|| board.map(|board| board.self_sk.to_bytes()))
@@ -259,6 +295,14 @@ pub async fn send_request(
 
 pub async fn status(identity: DmIdentityId) -> Result<DmDelegateResponseMsg, String> {
     send_request(DmDelegateRequestMsg::GetStatus { identity }).await
+}
+
+pub async fn get_active_identity() -> Result<Option<DmIdentityId>, String> {
+    match send_request(DmDelegateRequestMsg::GetActiveIdentity).await? {
+        DmDelegateResponseMsg::ActiveIdentity { identity } => Ok(identity),
+        DmDelegateResponseMsg::Error { message } => Err(message),
+        other => Err(format!("unexpected GetActiveIdentity response: {other:?}")),
+    }
 }
 
 /// Clear all DM delegate material. Used by the local reset flow.
@@ -442,6 +486,7 @@ pub fn ensure_identity_for_active_board() {
             }
             match ensure_identity_and_device().await {
                 Ok(()) => {
+                    let _ = crate::components::app::dm_contract::load_conversations().await;
                     ENSURE_RUNNING.store(false, Ordering::SeqCst);
                     return;
                 }
@@ -452,4 +497,19 @@ pub fn ensure_identity_for_active_board() {
         }
         ENSURE_RUNNING.store(false, Ordering::SeqCst);
     });
+}
+
+/// Called after an in-place profile switch. Wait for any in-flight identity
+/// setup, then initialize the DM identity of the newly active profile before
+/// the switch toast/navigation lets the user leave the page.
+pub async fn ensure_identity_after_profile_switch() -> Result<(), String> {
+    for _ in 0..40 {
+        if !ENSURE_RUNNING.load(Ordering::SeqCst) {
+            break;
+        }
+        crate::util::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    ensure_identity_and_device().await?;
+    let _ = crate::components::app::dm_contract::load_conversations().await;
+    Ok(())
 }

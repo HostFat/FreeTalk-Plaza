@@ -517,18 +517,130 @@ test("the DM delegate registers and keeps a device", async ({ page }) => {
   expect(logs.join("\n")).not.toContain("DM delegate did not become ready");
 });
 
-test("a DM conversation contract is created", async ({ page }) => {
+test("a DM conversation contract is created and a message round-trips", async ({
+  page,
+}) => {
   await gotoRoute(page, `/board/${boardKey}`);
   const app = page.frameLocator("iframe");
   await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
 
   await app.getByRole("button", { name: "Messages" }).first().click();
   await app.getByRole("button", { name: "New conversation" }).click();
-  await expect(app.locator(".dm-conversation-row").first()).toBeVisible({
+  // A new conversation opens its chat view directly.
+  await expect(app.getByRole("button", { name: "Invite" })).toBeVisible({
     timeout: 60_000,
   });
-  await expect(app.getByText("Synced", { exact: true })).toBeVisible({
+  await expect(app.getByText(/1 member\(s\)/)).toBeVisible({
+    timeout: 30_000,
+  });
+
+  await app.getByPlaceholder("Write a message…").fill("hello from the DM test");
+  await app.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(app.getByText("hello from the DM test")).toBeVisible({
     timeout: 60_000,
+  });
+
+  await app.getByRole("button", { name: "Invite" }).click();
+  await expect(app.locator("#dm-invite-link")).toBeVisible({
+    timeout: 30_000,
+  });
+
+  // The conversation index and the conversation key live in the delegate, so
+  // the conversation and its plaintext come back after a reload.
+  await page.reload();
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await app.getByRole("button", { name: "Messages" }).first().click();
+  const restored = app.locator(".dm-conversation-row").first();
+  await expect(restored).toBeVisible({ timeout: 30_000 });
+  await restored.click();
+  await expect(app.getByText("hello from the DM test")).toBeVisible({
+    timeout: 30_000,
+  });
+});
+
+// Invite creation and the join route are implemented. The automated
+// two-identity flow still needs a deterministic way to carry the active DM
+// profile across the standalone join route; keep this fixme until then.
+test.fixme("an invited DM identity joins and sends a message", async ({ page }) => {
+  const joinLogs: string[] = [];
+  page.on("console", (message) => joinLogs.push(message.text()));
+  await gotoRoute(page, `/board/${boardKey}`);
+  const app = page.frameLocator("iframe");
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+
+  // Create a second profile deterministically instead of depending on a
+  // profile left by another test.
+  const boardInvite = await createInviteLink(page);
+  await page.goto(boardInvite);
+  await expect(
+    app.getByRole("heading", { name: "Join this board" }),
+  ).toBeVisible({ timeout: 30_000 });
+  await app.getByPlaceholder("Your nickname").fill("DMGuest");
+  await app.getByRole("button", { name: "Join" }).click();
+  await expect(app.getByText(MAIN_BOARD).first()).toBeVisible({
+    timeout: 30_000,
+  });
+  await switchToProfile(page, "OwnerP");
+
+  await app.getByRole("button", { name: "Messages" }).first().click();
+  await app.getByRole("button", { name: "New conversation" }).click();
+  await expect(app.getByRole("button", { name: "Invite" })).toBeVisible({
+    timeout: 60_000,
+  });
+  await app.getByRole("button", { name: "Invite" }).click();
+  const inviteInput = app.locator("#dm-invite-link");
+  await expect(inviteInput).toBeVisible({ timeout: 30_000 });
+  const inviteLink = await inviteInput.inputValue();
+  await page.waitForTimeout(3_000);
+  await app.getByRole("button", { name: "Close" }).first().click();
+
+  await page.goto(`${BASE}#/board/${boardKey}`);
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await switchToProfile(page, "DMGuest");
+
+  await page.goto(inviteLink);
+  await expect(
+    app.getByRole("button", { name: "Open conversation" }),
+  ).toBeVisible({ timeout: 90_000 });
+  await app.getByRole("button", { name: "Open conversation" }).click();
+  await gotoRoute(page, `/board/${boardKey}`);
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await app.getByRole("button", { name: "Messages" }).first().click();
+  try {
+    await expect(app.getByText(/2 member\(s\)/)).toBeVisible({
+      timeout: 60_000,
+    });
+  } catch (error) {
+    console.log(
+      "JOIN BODY:\n" + (await app.locator("body").innerText()).slice(-1800),
+    );
+    console.log(
+      "JOIN LOGS:\n" +
+        joinLogs
+          .filter((line) => /DM join|DM identity|profile/i.test(line))
+          .slice(-30)
+          .join("\n"),
+    );
+    throw error;
+  }
+  await app.getByPlaceholder("Write a message…").fill("hello from the invited DM");
+  await app.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(app.getByText("hello from the invited DM")).toBeVisible({
+    timeout: 60_000,
+  });
+
+  await app.getByRole("button", { name: "Close" }).first().click();
+  await gotoRoute(page, `/board/${boardKey}`);
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await switchToProfile(page, "OwnerP");
+  await page.reload();
+  await app.getByText(MAIN_BOARD).first().waitFor({ timeout: 30_000 });
+  await app.getByRole("button", { name: "Messages" }).first().click();
+  const restored = app.locator(".dm-conversation-row").first();
+  await expect(restored).toBeVisible({ timeout: 30_000 });
+  await restored.click();
+  await expect(app.getByText("hello from the invited DM")).toBeVisible({
+    timeout: 30_000,
   });
 });
 

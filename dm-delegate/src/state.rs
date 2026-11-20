@@ -12,7 +12,7 @@ use ml_kem::{B32, DecapsulationKey, EncapsulationKey, MlKem768, Seed};
 use plaza_dm_core::delegate::*;
 use plaza_dm_core::{
     AuthorizedDmDevice, AuthorizedDmMember, AuthorizedDmMessage, AuthorizedSealedDmKey,
-    DmContractId, DmDevice, DmDeviceId, DmIdentityId, DmMember, DmMembersV1, DmMessage,
+    DmContractId, DmDevice, DmDeviceId, DmIdentityId, DmInvite, DmMember, DmMembersV1, DmMessage,
     DmMessageId, DmMetaV1, DmRole, DmStateV1, SealedDmKey, CONTENT_TYPE_ATTACHMENT,
     CONTENT_TYPE_SYSTEM, CONTENT_TYPE_TEXT, KEY_SUITE_X25519_MLKEM768_XCHACHA20,
 };
@@ -47,6 +47,10 @@ pub struct DmIdentityStateV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct DmDelegateStateV1 {
     pub version: u32,
+    /// Last identity initialized on this device. Used by join links that open
+    /// without a selected board.
+    #[serde(default)]
+    pub active_identity: Option<DmIdentityId>,
     pub identities: Vec<DmIdentityStateV1>,
 }
 
@@ -189,6 +193,51 @@ impl DmIdentityStateV1 {
             ..Default::default()
         };
         DmDelegateResponseMsg::StateCreated { state }
+    }
+
+    fn create_invite(
+        &self,
+        invite_id: [u8; 32],
+        token: [u8; 32],
+        created_at: i64,
+        expires_at: i64,
+        bound_identity: Option<DmIdentityId>,
+    ) -> DmDelegateResponseMsg {
+        let identity_sk = SigningKey::from_bytes(&self.identity_seed);
+        let invite = DmInvite::new(
+            invite_id,
+            &identity_sk,
+            &token,
+            created_at,
+            expires_at,
+            bound_identity,
+        );
+        DmDelegateResponseMsg::InviteCreated { invite }
+    }
+
+    fn create_join_member(
+        &self,
+        device_id: DmDeviceId,
+        created_at: i64,
+    ) -> DmDelegateResponseMsg {
+        let local = match self.active_device(&device_id) {
+            Ok(local) => local,
+            Err(error) => return error,
+        };
+        let identity_sk = SigningKey::from_bytes(&self.identity_seed);
+        let authorized_device =
+            AuthorizedDmDevice::new(local.device.clone(), &identity_sk);
+        let member = DmMember {
+            identity: self.identity(),
+            version: 0,
+            role: DmRole::Member,
+            joined_at: created_at,
+            devices: vec![authorized_device],
+            left_at: None,
+        };
+        DmDelegateResponseMsg::JoinMemberCreated {
+            member: AuthorizedDmMember::new(member, &identity_sk),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -677,6 +726,9 @@ impl DmDelegateStateV1 {
 
     pub fn apply(&mut self, request: DmDelegateRequestMsg) -> DmDelegateResponseMsg {
         match request {
+            DmDelegateRequestMsg::GetActiveIdentity => DmDelegateResponseMsg::ActiveIdentity {
+                identity: self.active_identity,
+            },
             DmDelegateRequestMsg::GetStatus { identity } => {
                 let Some(state) = self.identity(&identity) else {
                     return DmDelegateResponseMsg::error("DM identity is not initialized");
@@ -691,8 +743,12 @@ impl DmDelegateStateV1 {
             DmDelegateRequestMsg::Reset { identity } => {
                 if let Some(identity) = identity {
                     self.identities.retain(|state| state.identity() != identity);
+                    if self.active_identity == Some(identity) {
+                        self.active_identity = None;
+                    }
                 } else {
                     self.identities.clear();
+                    self.active_identity = None;
                 }
                 self.version = self.version.saturating_add(1);
                 DmDelegateResponseMsg::Ok
@@ -714,6 +770,7 @@ impl DmDelegateStateV1 {
                         blocked: Vec::new(),
                     });
                 }
+                self.active_identity = Some(identity);
                 self.version = self.version.saturating_add(1);
                 DmDelegateResponseMsg::Ok
             }
@@ -785,6 +842,30 @@ impl DmDelegateStateV1 {
                     return DmDelegateResponseMsg::error("DM identity is not initialized");
                 };
                 state.create_conversation_state(device_id, conversation_id, created_at)
+            }
+            DmDelegateRequestMsg::CreateInvite {
+                identity,
+                invite_id,
+                token,
+                created_at,
+                expires_at,
+                bound_identity,
+            } => {
+                let Some(state) = self.identity(&identity) else {
+                    return DmDelegateResponseMsg::error("DM identity is not initialized");
+                };
+                state.create_invite(invite_id, token, created_at, expires_at, bound_identity)
+            }
+            DmDelegateRequestMsg::CreateJoinMember {
+                identity,
+                device_id,
+                conversation_id: _,
+                created_at,
+            } => {
+                let Some(state) = self.identity(&identity) else {
+                    return DmDelegateResponseMsg::error("DM identity is not initialized");
+                };
+                state.create_join_member(device_id, created_at)
             }
             DmDelegateRequestMsg::StoreConversationKey {
                 identity,

@@ -24,6 +24,7 @@ use crate::components::board_list::receive_invitation_modal::ReceiveInvitationMo
 use crate::components::category_create_modal::CategoryCreateModal;
 use crate::components::members::member_info_modal::MemberInfoModal;
 use crate::components::members::Invitation;
+use crate::components::messages_view::{DM_SELECTED, MESSAGES_OPEN};
 use crate::components::notifications_view::NotificationsView;
 use crate::components::posts_view::{PostsView, SinglePostView};
 use crate::components::profile_view::ProfileView;
@@ -49,6 +50,13 @@ pub enum Route {
     Invite { invite_code: String },
     #[route("/join/:token")]
     JoinBoard { token: String },
+    #[route("/dm/join/:contract_id/:token/:key_version/:key_b58")]
+    DmJoin {
+        contract_id: String,
+        token: String,
+        key_version: String,
+        key_b58: String,
+    },
     #[route("/view/:board_id")]
     ViewOnly { board_id: String },
     #[route("/board/:board_id")]
@@ -546,6 +554,108 @@ pub fn JoinBoard(token: String) -> Element {
     }
 }
 
+/// DM join link: register the conversation, verify the invite token and add
+/// the local identity as a member.
+#[component]
+fn DmJoin(
+    contract_id: String,
+    token: String,
+    key_version: String,
+    key_b58: String,
+) -> Element {
+    let mut status = use_signal(|| None::<String>);
+    let mut error = use_signal(|| None::<String>);
+    let mut started = use_signal(|| false);
+    let mut joined = use_signal(|| None::<freenet_stdlib::prelude::ContractInstanceId>);
+
+    use_effect(move || {
+        if *started.peek() {
+            return;
+        }
+        started.set(true);
+        let contract_id_text = contract_id.clone();
+        let token_text = token.clone();
+        let key_version_text = key_version.clone();
+        let key_text = key_b58.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let parsed_id = contract_id_text
+                .parse::<freenet_stdlib::prelude::ContractInstanceId>();
+            let Ok(contract_id) = parsed_id else {
+                error.set(Some("Il link DM non è valido.".to_string()));
+                return;
+            };
+            let token = bs58::decode(&token_text).into_vec();
+            let key = bs58::decode(&key_text).into_vec();
+            let version = key_version_text.parse::<u32>();
+            let (Ok(token), Ok(key), Ok(version)) = (token, key, version) else {
+                error.set(Some("Il link DM non è valido.".to_string()));
+                return;
+            };
+            let (Ok(token), Ok(key)) = (
+                <[u8; 32]>::try_from(token.as_slice()),
+                <[u8; 32]>::try_from(key.as_slice()),
+            ) else {
+                error.set(Some("Il link DM non è valido.".to_string()));
+                return;
+            };
+            status.set(Some("Joining the conversation…".to_string()));
+            match crate::components::app::dm_contract::join_from_link(
+                contract_id,
+                token,
+                version,
+                key,
+            )
+            .await
+            {
+                Ok(()) => {
+                    crate::util::defer(move || {
+                        status.set(Some(
+                            "Joined. Open the conversation to start chatting.".to_string(),
+                        ));
+                        joined.set(Some(contract_id));
+                    });
+                }
+                Err(message) => {
+                    error.set(Some(message));
+                    status.set(None);
+                }
+            }
+        });
+    });
+
+    rsx! {
+        div { class: "flex-1 flex flex-col items-center justify-center px-6 py-10 gap-3 text-center",
+            h1 { class: "text-2xl font-semibold text-text", "Direct message invite" }
+            if let Some(message) = status.read().as_ref() {
+                p { class: "text-sm text-text-muted", "{message}" }
+            }
+            if let Some(contract_id) = *joined.read() {
+                button {
+                    r#type: "button",
+                    class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white text-sm rounded-lg",
+                    onclick: move |_| {
+                        *DM_SELECTED.write() = Some(contract_id);
+                        *MESSAGES_OPEN.write() = true;
+                        navigator().push(Route::Home);
+                    },
+                    "Open conversation"
+                }
+            }
+            if let Some(message) = error.read().as_ref() {
+                p { class: "text-sm text-red-400 max-w-md", "{message}" }
+                button {
+                    r#type: "button",
+                    class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg",
+                    onclick: move |_| {
+                        navigator().push(Route::Home);
+                    },
+                    "Back to FreeTalk Plaza"
+                }
+            }
+        }
+    }
+}
+
 /// Route component: open a public board in read-only mode, without joining.
 #[component]
 fn ViewOnly(board_id: String) -> Element {
@@ -949,6 +1059,9 @@ pub fn select_board(board_id: Option<VerifyingKey>) {
         *CURRENT_BOARD.write() = CurrentBoard {
             owner_key: Some(resolved),
         };
+        BOARDS.with_mut(|boards| {
+            boards.current_board_key = Some(resolved);
+        });
     }
     dm_delegate::ensure_identity_for_active_board();
 }

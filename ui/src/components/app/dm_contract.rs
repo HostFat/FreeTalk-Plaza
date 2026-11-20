@@ -48,7 +48,7 @@ pub fn is_known_conversation(key: &ContractInstanceId) -> bool {
 /// Create a 1:1 conversation contract owned by the active DM identity.
 pub async fn create_conversation() -> Result<ContractInstanceId, String> {
     dm_delegate::ensure_identity_and_device().await?;
-    let identity = dm_delegate::identity_id_for_active_profile()
+    let identity = dm_delegate::active_identity_for_ops()
         .ok_or_else(|| "no active profile for the DM identity".to_string())?;
     let devices = dm_delegate::list_devices(identity).await?;
     let device = devices
@@ -295,4 +295,380 @@ pub fn conversations() -> Vec<(ContractInstanceId, DmConversation)> {
         std::cmp::Reverse(conversation.state.meta.created_at)
     });
     values
+}
+
+/// Create a signed single-use invite and return the join link.
+pub async fn create_invite(contract_id: ContractInstanceId) -> Result<String, String> {
+    let (contract_key, identity) = conversation_identity(contract_id)?;
+    let key_bytes: [u8; 32] = contract_key
+        .id()
+        .as_bytes()
+        .try_into()
+        .map_err(|_| "contract instance id is not 32 bytes".to_string())?;
+    let key_version = match dm_delegate::send_request(
+        DmDelegateRequestMsg::GetLatestConversationKey {
+            identity,
+            contract_key: key_bytes,
+        },
+    )
+    .await?
+    {
+        DmDelegateResponseMsg::ConversationKey {
+            key_version: Some(version),
+            ..
+        } => version,
+        DmDelegateResponseMsg::Error { message } => return Err(message),
+        _ => return Err("conversation key is not available".to_string()),
+    };
+    let key = match dm_delegate::send_request(DmDelegateRequestMsg::GetConversationKey {
+        identity,
+        contract_key: key_bytes,
+        key_version,
+    })
+    .await?
+    {
+        DmDelegateResponseMsg::ConversationKey { key: Some(key), .. } => key,
+        DmDelegateResponseMsg::Error { message } => return Err(message),
+        _ => return Err("conversation key is not available".to_string()),
+    };
+
+    let mut token = [0u8; 32];
+    let mut invite_id = [0u8; 32];
+    OsRng.fill_bytes(&mut token);
+    OsRng.fill_bytes(&mut invite_id);
+    let now = chrono::Utc::now().timestamp_millis();
+    let invite = match dm_delegate::send_request(DmDelegateRequestMsg::CreateInvite {
+        identity,
+        invite_id,
+        token,
+        created_at: now,
+        expires_at: now + 7 * 24 * 60 * 60 * 1000,
+        bound_identity: None,
+    })
+    .await?
+    {
+        DmDelegateResponseMsg::InviteCreated { invite } => invite,
+        DmDelegateResponseMsg::Error { message } => return Err(message),
+        other => return Err(format!("unexpected CreateInvite response: {other:?}")),
+    };
+
+    publish_delta(
+        contract_id,
+        DmStateDeltaV1 {
+            invites: Some(vec![invite]),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    // Build the link from the outer shell URL, which carries the cache-busting
+    // version query. The sandboxed iframe URL does not, and a link without it
+    // can load an older cached build on the join page.
+    let href = web_sys::window()
+        .and_then(|window| window.top().ok().flatten())
+        .and_then(|top| top.location().href().ok())
+        .or_else(|| {
+            web_sys::window().and_then(|window| window.location().href().ok())
+        });
+    let base = href
+        .and_then(|href| href.split('#').next().map(str::to_string))
+        .ok_or_else(|| "cannot build the invite link".to_string())?;
+    let separator = if base.contains('?') { '&' } else { '?' };
+    let base = format!("{base}{separator}nav={now}");
+    let token_b58 = bs58::encode(token).into_string();
+    let key_b58 = bs58::encode(key).into_string();
+    Ok(format!(
+        "{base}#/dm/join/{contract_id}/{token_b58}/{key_version}/{key_b58}"
+    ))
+}
+
+fn conversation_identity(
+    contract_id: ContractInstanceId,
+) -> Result<(ContractKey, plaza_dm_core::DmIdentityId), String> {
+    let key = DM_CONVERSATIONS
+        .read()
+        .get(&contract_id)
+        .map(|conversation| conversation.key)
+        .ok_or_else(|| "unknown DM conversation".to_string())?;
+    let identity = dm_delegate::active_identity_for_ops()
+        .ok_or_else(|| "no active profile for the DM identity".to_string())?;
+    Ok((key, identity))
+}
+
+/// Register a conversation from a join link and fetch its state.
+pub async fn join_conversation(
+    contract_id: ContractInstanceId,
+    key_version: u32,
+    key: [u8; 32],
+) -> Result<(), String> {
+    let code = ContractCode::from(DM_CONTRACT_WASM);
+    let contract_key = ContractKey::from_id_and_code(contract_id, *code.hash());
+    let params = DmParamsV1 {
+        protocol_version: DM_PROTOCOL_VERSION,
+        contract_secret: [0u8; 32],
+    };
+    DM_CONVERSATIONS.with_mut(|conversations| {
+        conversations.entry(contract_id).or_insert_with(|| DmConversation {
+            key: contract_key,
+            params: params.clone(),
+            state: DmStateV1::default(),
+            synced: false,
+        });
+    });
+
+    let identity = dm_delegate::active_identity_for_ops()
+        .ok_or_else(|| "no active profile for the DM identity".to_string())?;
+    let key_bytes: [u8; 32] = contract_id
+        .as_bytes()
+        .try_into()
+        .map_err(|_| "contract instance id is not 32 bytes".to_string())?;
+    match dm_delegate::send_request(DmDelegateRequestMsg::StoreConversationKey {
+        identity,
+        contract_key: key_bytes,
+        conversation_id: [0u8; 32],
+        key_version,
+        key,
+        peer: [0u8; 32],
+        title: None,
+        generation: 0,
+        created_at: chrono::Utc::now().timestamp_millis(),
+    })
+    .await?
+    {
+        DmDelegateResponseMsg::Ok => {}
+        DmDelegateResponseMsg::Error { message } => return Err(message),
+        other => return Err(format!("unexpected StoreConversationKey response: {other:?}")),
+    }
+    fetch_conversation(contract_id).await
+}
+
+/// Verify the invite token in the fetched state and add the local member.
+pub async fn accept_invite(
+    contract_id: ContractInstanceId,
+    token: [u8; 32],
+) -> Result<(), String> {
+    let state = DM_CONVERSATIONS
+        .read()
+        .get(&contract_id)
+        .map(|conversation| conversation.state.clone())
+        .ok_or_else(|| "unknown DM conversation".to_string())?;
+    let expected = plaza_dm_core::token_hash(&token);
+    if !state
+        .invites
+        .invites
+        .iter()
+        .any(|invite| invite.token_hash == expected && invite.used_at.is_none())
+    {
+        return Err("invite token is missing, expired or already used".to_string());
+    }
+    let identity = dm_delegate::active_identity_for_ops()
+        .ok_or_else(|| "no active profile for the DM identity".to_string())?;
+    if state
+        .members
+        .members
+        .iter()
+        .any(|member| member.member.identity == identity)
+    {
+        dioxus::logger::tracing::info!(
+            "DM join: identity {} is already a member",
+            bs58::encode(identity).into_string()
+        );
+        return Ok(());
+    }
+    dioxus::logger::tracing::info!(
+        "DM join: adding identity {}",
+        bs58::encode(identity).into_string()
+    );
+    let devices = dm_delegate::list_devices(identity).await?;
+    dioxus::logger::tracing::info!("DM join: {} local device(s)", devices.len());
+    let device = devices
+        .into_iter()
+        .find(|device| device.revoked_at.is_none())
+        .ok_or_else(|| "the DM identity has no active device".to_string())?;
+    dioxus::logger::tracing::info!("DM join: creating the join member");
+    let member = match dm_delegate::send_request(DmDelegateRequestMsg::CreateJoinMember {
+        identity,
+        device_id: device.device_id,
+        conversation_id: state.meta.conversation_id,
+        created_at: chrono::Utc::now().timestamp_millis(),
+    })
+    .await?
+    {
+        DmDelegateResponseMsg::JoinMemberCreated { member } => member,
+        DmDelegateResponseMsg::Error { message } => return Err(message),
+        other => return Err(format!("unexpected CreateJoinMember response: {other:?}")),
+    };
+    dioxus::logger::tracing::info!("DM join: publishing the member delta");
+    publish_delta(
+        contract_id,
+        DmStateDeltaV1 {
+            members: Some(vec![member]),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// Join from a link: register the key, fetch the state, verify the token and
+/// add the local member.
+pub async fn join_from_link(
+    contract_id: ContractInstanceId,
+    token: [u8; 32],
+    key_version: u32,
+    key: [u8; 32],
+) -> Result<(), String> {
+    dioxus::logger::tracing::info!("DM join: waiting for the active profile");
+    // The join route can load before the delegate has restored the boards and
+    // the active profile. The delegate remembers the last initialized
+    // identity, so use it when no board/profile is selected.
+    if dm_delegate::identity_id_for_active_profile().is_none() {
+        if let Ok(Some(identity)) = dm_delegate::get_active_identity().await {
+            *crate::components::app::dm_delegate::ACTIVE_IDENTITY_OVERRIDE.write() =
+                Some(identity);
+        }
+    }
+    for _ in 0..40 {
+        if dm_delegate::active_identity_for_ops().is_some() {
+            break;
+        }
+        crate::util::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    dioxus::logger::tracing::info!("DM join: ensuring the DM identity");
+    dm_delegate::ensure_identity_and_device().await?;
+    dioxus::logger::tracing::info!("DM join: registering the conversation");
+    join_conversation(contract_id, key_version, key).await?;
+    for _ in 0..120 {
+        let loaded = DM_CONVERSATIONS
+            .read()
+            .get(&contract_id)
+            .map(|conversation| !conversation.state.members.members.is_empty())
+            .unwrap_or(false);
+        if loaded {
+            break;
+        }
+        crate::util::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    dioxus::logger::tracing::info!("DM join: accepting the invite");
+    let result = accept_invite(contract_id, token).await;
+    match &result {
+        Ok(()) => dioxus::logger::tracing::info!("DM join: accepted"),
+        Err(error) => dioxus::logger::tracing::error!("DM join failed: {error}"),
+    }
+    result
+}
+
+pub async fn send_message(
+    contract_id: ContractInstanceId,
+    text: String,
+) -> Result<(), String> {
+    let (contract_key, identity) = conversation_identity(contract_id)?;
+    let key_bytes: [u8; 32] = contract_key
+        .id()
+        .as_bytes()
+        .try_into()
+        .map_err(|_| "contract instance id is not 32 bytes".to_string())?;
+    let key_version = match dm_delegate::send_request(
+        DmDelegateRequestMsg::GetLatestConversationKey {
+            identity,
+            contract_key: key_bytes,
+        },
+    )
+    .await?
+    {
+        DmDelegateResponseMsg::ConversationKey {
+            key_version: Some(version),
+            ..
+        } => version,
+        DmDelegateResponseMsg::Error { message } => return Err(message),
+        _ => return Err("conversation key is not available".to_string()),
+    };
+    let devices = dm_delegate::list_devices(identity).await?;
+    let device = devices
+        .into_iter()
+        .find(|device| device.revoked_at.is_none())
+        .ok_or_else(|| "the DM identity has no active device".to_string())?;
+    let mut nonce = [0u8; 24];
+    OsRng.fill_bytes(&mut nonce);
+    let message = match dm_delegate::send_request(DmDelegateRequestMsg::EncryptMessage {
+        identity,
+        device_id: device.device_id,
+        contract_key: key_bytes,
+        key_version,
+        plaintext: text.into_bytes(),
+        content_type: plaza_dm_core::CONTENT_TYPE_TEXT,
+        reply_to: None,
+        created_at: chrono::Utc::now().timestamp_millis(),
+        nonce,
+    })
+    .await?
+    {
+        DmDelegateResponseMsg::MessageCreated { message } => message,
+        DmDelegateResponseMsg::Error { message } => return Err(message),
+        other => return Err(format!("unexpected EncryptMessage response: {other:?}")),
+    };
+    publish_delta(
+        contract_id,
+        DmStateDeltaV1 {
+            messages: Some(vec![message]),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+pub async fn decrypt_message(
+    contract_id: ContractInstanceId,
+    message: plaza_dm_core::AuthorizedDmMessage,
+) -> Result<String, String> {
+    let (contract_key, identity) = conversation_identity(contract_id)?;
+    let key_bytes: [u8; 32] = contract_key
+        .id()
+        .as_bytes()
+        .try_into()
+        .map_err(|_| "contract instance id is not 32 bytes".to_string())?;
+    let bytes = dm_delegate::decrypt_message(identity, key_bytes, message).await?;
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+/// Rebuild the local conversation map from the delegate index after a reload
+/// or a profile switch, then fetch each state.
+pub async fn load_conversations() -> Result<(), String> {
+    let identity = dm_delegate::active_identity_for_ops()
+        .ok_or_else(|| "no active profile for the DM identity".to_string())?;
+    let conversations = match dm_delegate::send_request(
+        DmDelegateRequestMsg::ListConversations { identity },
+    )
+    .await?
+    {
+        DmDelegateResponseMsg::Conversations { conversations } => conversations,
+        DmDelegateResponseMsg::Error { message } => return Err(message),
+        other => return Err(format!("unexpected ListConversations response: {other:?}")),
+    };
+    let code = ContractCode::from(DM_CONTRACT_WASM);
+    let mut to_fetch = Vec::new();
+    for conversation in conversations {
+        let contract_id = ContractInstanceId::new(conversation.contract_key);
+        if !DM_CONVERSATIONS.read().contains_key(&contract_id) {
+            let key = ContractKey::from_id_and_code(contract_id, *code.hash());
+            DM_CONVERSATIONS.with_mut(|conversations| {
+                conversations.insert(
+                    contract_id,
+                    DmConversation {
+                        key,
+                        params: DmParamsV1 {
+                            protocol_version: DM_PROTOCOL_VERSION,
+                            contract_secret: [0u8; 32],
+                        },
+                        state: DmStateV1::default(),
+                        synced: false,
+                    },
+                );
+            });
+            to_fetch.push(contract_id);
+        }
+    }
+    for contract_id in to_fetch {
+        let _ = fetch_conversation(contract_id).await;
+    }
+    Ok(())
 }

@@ -32,6 +32,7 @@ pub enum DmDelegateRequestMsg {
     GetStatus {
         identity: DmIdentityId,
     },
+    GetActiveIdentity,
     /// Clear one identity, or every identity when `identity` is `None`.
     Reset {
         identity: Option<DmIdentityId>,
@@ -73,6 +74,20 @@ pub enum DmDelegateRequestMsg {
     /// Build the creator state for a new conversation. The delegate signs the
     /// creator member and its device with the identity key.
     CreateConversation {
+        identity: DmIdentityId,
+        device_id: DmDeviceId,
+        conversation_id: [u8; 32],
+        created_at: i64,
+    },
+    CreateInvite {
+        identity: DmIdentityId,
+        invite_id: [u8; 32],
+        token: [u8; 32],
+        created_at: i64,
+        expires_at: i64,
+        bound_identity: Option<DmIdentityId>,
+    },
+    CreateJoinMember {
         identity: DmIdentityId,
         device_id: DmDeviceId,
         conversation_id: [u8; 32],
@@ -232,6 +247,9 @@ pub enum DmDelegateResponseMsg {
         conversations: usize,
         blocked: usize,
     },
+    ActiveIdentity {
+        identity: Option<DmIdentityId>,
+    },
     DeviceCreated {
         device: DmDevice,
         label: String,
@@ -250,6 +268,12 @@ pub enum DmDelegateResponseMsg {
     },
     StateCreated {
         state: crate::DmStateV1,
+    },
+    InviteCreated {
+        invite: crate::DmInvite,
+    },
+    JoinMemberCreated {
+        member: crate::AuthorizedDmMember,
     },
     Plaintext {
         bytes: Vec<u8>,
