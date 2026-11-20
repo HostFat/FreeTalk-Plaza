@@ -5,6 +5,8 @@
 //! Encryption and delegate storage live outside this crate; this layer only
 //! verifies signatures, authorization, sizes and monotonic versions.
 
+pub mod delegate;
+
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -26,6 +28,14 @@ pub const CONTENT_TYPE_SYSTEM: u16 = 2;
 pub const CONTENT_TYPE_ATTACHMENT: u16 = 3;
 
 pub const KEY_SUITE_X25519_MLKEM768_XCHACHA20: u16 = 1;
+
+/// Domain-separated derivation of the DM identity from the profile root seed.
+pub const DM_IDENTITY_CONTEXT: &str = "plaza-dm-identity-v1";
+
+pub fn derive_identity_signing_key(profile_seed: &[u8; 32]) -> SigningKey {
+    let seed = blake3::derive_key(DM_IDENTITY_CONTEXT, profile_seed);
+    SigningKey::from_bytes(&seed)
+}
 
 pub type DmIdentityId = [u8; 32];
 pub type DmDeviceId = [u8; 32];

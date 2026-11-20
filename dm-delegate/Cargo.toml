@@ -1,0 +1,20 @@
+[package]
+name = "plaza-dm-delegate"
+version.workspace = true
+edition.workspace = true
+license = "LGPL-3.0"
+
+[dependencies]
+ciborium.workspace = true
+serde.workspace = true
+ed25519-dalek.workspace = true
+ml-kem = { version = "0.3.4", default-features = false }
+freenet-stdlib.workspace = true
+plaza-dm-core.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["freenet-main-delegate"]
+freenet-main-delegate = []

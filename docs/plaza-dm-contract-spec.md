@@ -9,8 +9,13 @@ Implementazione attuale:
   test di convergenza.
 - `dm-contract` (crate `plaza-dm-contract`): entry point Freenet, validate,
   update, summarize, delta; wasm compilabile.
-- Non ancora implementati: cifratura reale, sigilli X25519/ML-KEM, delegate,
-  indice locale, UI e deploy.
+- `dm-delegate` (crate `plaza-dm-delegate`): API request/response in
+  `dm-core::delegate`, stato persistente, identità e semi dei dispositivi,
+  firme, chiavi di conversazione, indice locale, blocco/draft, export/import
+  del backup; wasm compilabile. La registrazione dal client e il sigillo
+  X25519 + ML-KEM sono il passo successivo.
+- Non ancora implementati: cifratura reale end-to-end, sigilli X25519/ML-KEM,
+  registrazione del delegate nel client, indice UI, Messages UI e deploy.
 
 Documenti collegati:
 
