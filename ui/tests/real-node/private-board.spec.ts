@@ -13,16 +13,22 @@ async function createInviteLink(page: import("@playwright/test").Page) {
   });
   if (!(await app.getByRole("button", { name: /Manage/ }).count())) {
     await app.getByRole("button", { name: /FreeTalk Plaza/ }).click();
-    const useOwner = app.getByRole("button", { name: "Use on this board" });
-    if (await useOwner.count()) {
-      await useOwner.last().click();
-      await page.waitForTimeout(800);
+    const ownerRow = app
+      .getByText("OwnerP", { exact: true })
+      .first()
+      .locator("..");
+    if (await ownerRow.count()) {
+      await ownerRow
+        .getByRole("button", { name: "Use on this board" })
+        .click();
+      await page.waitForTimeout(1_500);
     }
   }
 
-  await page.goto(`${BASE}#/board/${BOARD_KEY}/admin/links`);
-  // Only the hash changed: reload so the shell frame follows it.
-  await page.reload();
+  const linksUrl = new URL(BASE);
+  linksUrl.searchParams.set("links", Date.now().toString());
+  linksUrl.hash = `/board/${BOARD_KEY}/admin/links`;
+  await page.goto(linksUrl.toString());
   const role = app.getByRole("combobox").first();
   await expect(role).toBeVisible({ timeout: 30_000 });
   await role.selectOption({ label: "Members" });
@@ -111,8 +117,9 @@ test("a valid invite opens the join and a new identity joins", async ({
   page,
 }) => {
   const invite = await createInviteLink(page);
-  await page.goto(invite);
-  await page.reload();
+  const joinUrl = new URL(invite);
+  joinUrl.searchParams.set("guest", Date.now().toString());
+  await page.goto(joinUrl.toString());
   const app = page.frameLocator("iframe");
 
   await expect(
@@ -133,8 +140,9 @@ test.fixme("an invited identity's first post survives a reload", async ({
   page,
 }) => {
   const invite = await createInviteLink(page);
-  await page.goto(invite);
-  await page.reload();
+  const joinUrl = new URL(invite);
+  joinUrl.searchParams.set("guest", Date.now().toString());
+  await page.goto(joinUrl.toString());
   const app = page.frameLocator("iframe");
   await expect(
     app.getByRole("heading", { name: "Join this board" }),
