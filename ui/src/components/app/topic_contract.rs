@@ -59,10 +59,43 @@ pub struct TopicConversation {
     pub params: TopicParamsV1,
     pub state: TopicStateV1,
     pub synced: bool,
+    /// Last time this topic was opened, used to bound the client cache.
+    pub last_used: i64,
 }
 
 pub static TOPIC_CACHE: GlobalSignal<HashMap<ContractInstanceId, TopicConversation>> =
     Global::new(HashMap::new);
+
+/// Keep the state of recently opened topics. The node subscription is not
+/// cancelled here; the client only drops the cached state.
+const MAX_CACHED_TOPICS: usize = 24;
+
+fn touch_topic(contract_id: ContractInstanceId) {
+    let now = system_time_ms(get_current_system_time());
+    TOPIC_CACHE.with_mut(|topics| {
+        if let Some(conversation) = topics.get_mut(&contract_id) {
+            conversation.last_used = now;
+        }
+    });
+}
+
+fn evict_topics(protect: ContractInstanceId) {
+    TOPIC_CACHE.with_mut(|topics| {
+        while topics.len() > MAX_CACHED_TOPICS {
+            let victim = topics
+                .iter()
+                .filter(|(id, conversation)| **id != protect && conversation.synced)
+                .min_by_key(|(_, conversation)| conversation.last_used)
+                .map(|(id, _)| *id);
+            match victim {
+                Some(id) => {
+                    topics.remove(&id);
+                }
+                None => break,
+            }
+        }
+    });
+}
 
 pub fn topic_key_for(owner: VerifyingKey, topic_id: MessageId, part: u32) -> ContractKey {
     let params = TopicParamsV1::new(owner, *topic_id.as_bytes(), part);
@@ -115,8 +148,10 @@ pub async fn load_topic(
                 params: TopicParamsV1::new(owner, *topic_id.as_bytes(), part),
                 state: TopicStateV1::default(),
                 synced: false,
+                last_used: system_time_ms(get_current_system_time()),
             });
         });
+        evict_topics(contract_id);
         send_contract_request(ContractRequest::Get {
             key: contract_id,
             return_contract_code: false,
@@ -125,6 +160,7 @@ pub async fn load_topic(
         })
         .await?;
     }
+    touch_topic(contract_id);
     Ok(contract_id)
 }
 
@@ -193,9 +229,11 @@ pub async fn continue_topic(
                 params: next_params.clone(),
                 state: next_state.clone(),
                 synced: false,
+                last_used: system_time_ms(get_current_system_time()),
             },
         );
     });
+    evict_topics(contract_id);
     let contract = ContractContainer::from(ContractWasmAPIVersion::V1(WrappedContract::new(
         Arc::new(ContractCode::from(TOPIC_CONTRACT_WASM)),
         Parameters::from(to_cbor_vec(&next_params)),
@@ -969,9 +1007,11 @@ pub async fn create_topic(
                 params: prepared.params.clone(),
                 state: prepared.state.clone(),
                 synced: false,
+                last_used: system_time_ms(get_current_system_time()),
             },
         );
     });
+    evict_topics(contract_id);
     let contract = ContractContainer::from(ContractWasmAPIVersion::V1(WrappedContract::new(
         Arc::new(ContractCode::from(TOPIC_CONTRACT_WASM)),
         Parameters::from(to_cbor_vec(&prepared.params)),
@@ -1705,6 +1745,7 @@ async fn publish_topic_delta(
         if let Some(conversation) = topics.get_mut(&contract_id) {
             conversation.state = next_state;
             conversation.synced = false;
+            conversation.last_used = system_time_ms(get_current_system_time());
         }
     });
 
@@ -1736,6 +1777,7 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 if let Some(conversation) = topics.get_mut(key.id()) {
                     conversation.state = state;
                     conversation.synced = true;
+                    conversation.last_used = system_time_ms(get_current_system_time());
                 }
             });
         }

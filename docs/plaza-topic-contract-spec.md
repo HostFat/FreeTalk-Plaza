@@ -1,7 +1,7 @@
 # Specifica del contratto `plaza-topic`
 
 Versione: 1 (implementata).
-Stato: fasi 0–4 completate e pubblicate nella build locale v613. Nessuna
+Stato: fasi 0–4 completate e pubblicate nella build locale v615. Nessuna
 migrazione delle vecchie board.
 
 ## Stato dell'implementazione
@@ -526,9 +526,13 @@ Le board nuove usano `BoardModeV1::TopicIndex`; le board legacy restano
   `last_synced_state`; solo la prima sincronizzazione di una board usa lo
   stato completo. I delta del solo indice prendono il percorso rapido del
   contratto.
-- Le modifiche di sola attività vengono salvate subito in locale e inviate
-  alla rete al massimo una volta ogni 10 secondi per board. Le altre modifiche
-  (topic, flag, report, permessi) sincronizzano subito.
+- Le modifiche di sola attività vengono salvate in locale con un debounce di
+  1 secondo e inviate alla rete al massimo una volta ogni 10 secondi per
+  board. Le altre modifiche (topic, flag, report, permessi) sincronizzano
+  subito.
+- `TOPIC_CACHE` tiene al massimo 24 topic, eliminando i più vecchi già
+  sincronizzati. La sottoscrizione sul nodo resta attiva: la stdlib attuale
+  non espone ancora un `Unsubscribe` nel client API.
 - Il mark-read usa il timestamp dell'entry quando manca l'attività, per
   evitare un loop di render.
 
