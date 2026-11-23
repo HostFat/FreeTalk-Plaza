@@ -755,6 +755,13 @@ pub async fn create_section(
     let mut id_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut id_bytes);
     let id = MessageId::from_bytes(id_bytes);
+    let sectioned = board.board_state.mode
+        == plaza_core::board_state::BoardModeV1::SectionedTopicIndex;
+    let child_key: Option<ContractKey> = if sectioned {
+        Some(crate::components::app::section_contract::section_key(owner, id))
+    } else {
+        None
+    };
     let now = get_current_system_time();
     let (public_name, sealed_name) = if board.is_private() {
         let (secret, version) = board
@@ -789,9 +796,18 @@ pub async fn create_section(
         auto_moderated_topics: None,
         generation: 1,
         deleted: false,
+        contract: child_key.map(|key| *key.id()),
         signed_at: now,
     };
     let authorized = AuthorizedSectionV1::new(section, board.owner_key(), None);
+    if child_key.is_some() {
+        crate::components::app::section_contract::create_section_board(
+            owner,
+            &authorized,
+            &board.board_state,
+        )
+        .await?;
+    }
     let delta = ChatBoardStateV1Delta {
         sections: Some(SectionsDelta {
             sections: vec![authorized],
@@ -937,7 +953,7 @@ const MAX_PROPAGATED_TOPICS: usize = 100;
 /// intentionally simple.
 pub async fn propagate_authority(owner: VerifyingKey) -> Result<(), String> {
     let board = board_for(owner)?;
-    if board.board_state.mode != BoardModeV1::TopicIndex {
+    if !board.board_state.mode.is_topic_index() {
         return Ok(());
     }
     let topics: Vec<(MessageId, u32)> = board

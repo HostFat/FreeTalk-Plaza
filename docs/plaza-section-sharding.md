@@ -1,7 +1,9 @@
 # Shard dell'indice per sezione
 
-Data: 2026-11-23. Stato: design approvato per l'implementazione a fasi; nessun
-codice di shard ancora in produzione.
+Data: 2026-11-23. Stato: fasi 1–2 implementate e pubblicate nella build
+locale v621. La creazione di una sezione su una board `SectionedTopicIndex`
+crea la board figlia e ne registra la chiave nella sezione; il routing di
+topic e risposte (fase 3) è ancora da fare.
 
 ## Problema
 
@@ -125,11 +127,15 @@ l'indice dei topic. La UI tratta ogni sezione come una board.
 
 ## Fasi
 
-1. **Contratto**: parametri con `section_id`, modo
-   `SectionedTopicIndex`, verifica della sezione, chiave della figlia e test
-   unitari. Nessuna UI.
-2. **Creazione e caricamento**: il client crea la figlia con la sezione,
-   registra la chiave nella madre e carica le figlie all'apertura della board.
+1. **Contratto** (fatto): `SectionParametersV1 { owner, section }`, nuovo
+   crate `plaza-section-contract`, modo `SectionedTopicIndex`, verifica della
+   sezione, `SectionV1.contract` e test unitari. La madre rifiuta i topic nel
+   proprio stato; la figlia accetta solo la propria sezione.
+2. **Creazione e caricamento** (fatto): `create_section` calcola la chiave
+   della figlia, la include nel record firmato della sezione, crea la figlia
+   e la carica all'apertura della board. Il test real-node
+   "a sectioned board creates a child index contract" verifica la chiave
+   pubblicata.
 3. **Topic e attività**: creazione topic, risposte, flag e report sulla figlia;
    la madre resta invariata. Test real-node.
 4. **Ricerca, notifiche e moderazione**: aggregazione delle figlie, cache,

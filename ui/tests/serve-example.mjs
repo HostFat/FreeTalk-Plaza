@@ -60,11 +60,19 @@ const topicContractWasm = path.resolve(
   "release",
   "plaza_topic_contract.wasm",
 );
+const sectionContractWasm = path.resolve(
+  "..",
+  "target",
+  "wasm32-unknown-unknown",
+  "release",
+  "plaza_section_contract.wasm",
+);
 if (
   !existsSync(delegateWasm) ||
   !existsSync(dmDelegateWasm) ||
   !existsSync(dmContractWasm) ||
-  !existsSync(topicContractWasm)
+  !existsSync(topicContractWasm) ||
+  !existsSync(sectionContractWasm)
 ) {
   console.log("Building the delegate WASM...");
   const step = spawnSync(

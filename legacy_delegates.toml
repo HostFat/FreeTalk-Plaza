@@ -82,3 +82,10 @@ description = "Baseline before per-topic contracts (DM, mail and device backup b
 date = "2026-11-23"
 delegate_key = "6e6443be740805a2e7507f467dcfa71cdfa7bd5b2ad4a42b13f538a2bad009b9"
 code_hash = "95ae5eed87cfd1139bcbf069a7634413126985bcb85b09aa6b21d5aac601e64b"
+
+[[entry]]
+version = "V10"
+description = "Baseline before section-sharded boards"
+date = "2026-11-23"
+delegate_key = "620c0eb51ad468e04602b36fe4e66d03df64cb32ae088573ff6d400392e0a5d0"
+code_hash = "30748a3307ce59b08521432b4995b881354303f63f13998c1fd527966c02b81f"

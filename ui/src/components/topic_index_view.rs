@@ -33,7 +33,10 @@ pub fn TopicIndexView(board_id: String) -> Element {
             div { class: "max-w-4xl mx-auto px-4 py-8 text-text-muted", "Loading board…" }
         };
     };
-    if board_data.board_state.mode != BoardModeV1::TopicIndex {
+    if !matches!(
+        board_data.board_state.mode,
+        BoardModeV1::TopicIndex | BoardModeV1::SectionedTopicIndex
+    ) {
         return rsx! {
             div { class: "max-w-4xl mx-auto px-4 py-8 text-text-muted",
                 "This board uses the legacy message layout."
@@ -109,6 +112,30 @@ pub fn TopicIndexView(board_id: String) -> Element {
         .collect();
 
     let owner = board_data.owner_vk;
+    let section_ids: Vec<_> = if board_data.board_state.mode
+        == plaza_core::board_state::BoardModeV1::SectionedTopicIndex
+    {
+        board_data
+            .board_state
+            .sections
+            .sections
+            .iter()
+            .filter_map(|entry| entry.section.contract.map(|_| entry.section.id))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    use_effect(move || {
+        let _ = BOARDS.read().map.len();
+        for section in section_ids.clone() {
+            crate::util::safe_spawn_local(async move {
+                let _ = crate::components::app::section_contract::load_section_board(
+                    owner, section,
+                )
+                .await;
+            });
+        }
+    });
     let submit_title = title.clone();
     let submit_body = body.clone();
 
@@ -188,7 +215,15 @@ pub fn TopicIndexView(board_id: String) -> Element {
                                 let label = topic_contract::section_name(&board_data, &id)
                                     .unwrap_or_else(|| "Section".to_string());
                                 rsx! {
-                                    option { value: "{value}", "{label}" }
+                                    option {
+                                        value: "{value}",
+                                        "data-contract": section
+                                            .section
+                                            .contract
+                                            .map(|id| id.to_string())
+                                            .unwrap_or_default(),
+                                        "{label}"
+                                    }
                                 }
                             }
                         }

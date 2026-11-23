@@ -33,7 +33,7 @@ impl ContractInterface for Contract {
             .map_err(|e| ContractError::Deser(e.to_string()))?;
 
         chat_state
-            .verify(&chat_state, &parameters)
+            .verify_with_section(&parameters, None)
             .map(|_| ValidateResult::Valid)
             .map_err(|e| ContractError::InvalidUpdateWithInfo {
                 reason: format!("State verification failed: {}", e),
@@ -135,11 +135,11 @@ impl ContractInterface for Contract {
         // index board can skip the full verification. The topic part already
         // validated every record it applied.
         if full_verify {
-            chat_state.verify(&chat_state, &parameters).map_err(|e| {
-                ContractError::InvalidUpdateWithInfo {
+            chat_state
+                .verify_with_section(&parameters, None)
+                .map_err(|e| ContractError::InvalidUpdateWithInfo {
                     reason: format!("Merged state does not verify: {}", e),
-                }
-            })?;
+                })?;
         }
 
         let mut updated_state = vec![];

@@ -219,6 +219,10 @@ pub struct ClientFeatures {
     /// the `?topics=1` developer flag until the topic UI is the default.
     #[serde(default)]
     pub topic_boards: bool,
+    /// New boards keep each section's topic index in a child contract.
+    /// Enabled by `?sections=1` for testing until the section UI is complete.
+    #[serde(default)]
+    pub sectioned_boards: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
@@ -3304,7 +3308,11 @@ impl Boards {
         let has_separate_profile = profile_vk != owner_vk;
         let mut board_state = ChatBoardStateV1::default();
         if self.client_features.topic_boards {
-            board_state.mode = plaza_core::board_state::BoardModeV1::TopicIndex;
+            board_state.mode = if self.client_features.sectioned_boards {
+                plaza_core::board_state::BoardModeV1::SectionedTopicIndex
+            } else {
+                plaza_core::board_state::BoardModeV1::TopicIndex
+            };
         }
 
         // Generate board secret if private
@@ -3376,7 +3384,11 @@ impl Boards {
 
         // New index boards start with a General section. The owner signs the
         // section record; topics created in it carry an owner-signed snapshot.
-        if board_state.mode == plaza_core::board_state::BoardModeV1::TopicIndex {
+        if matches!(
+        board_state.mode,
+        plaza_core::board_state::BoardModeV1::TopicIndex
+            | plaza_core::board_state::BoardModeV1::SectionedTopicIndex
+    ) {
             use plaza_core::board_state::message::MessageId;
             use plaza_core::board_state::privacy::SealedBytes;
             use plaza_core::board_state::sections::{
@@ -3408,6 +3420,7 @@ impl Boards {
                 auto_moderated_topics: None,
                 generation: 1,
                 deleted: false,
+                contract: None,
                 signed_at: get_current_system_time(),
             };
             board_state.sections.sections.push(AuthorizedSectionV1::new(

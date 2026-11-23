@@ -11,6 +11,7 @@ use crate::board_state::ChatBoardStateV1;
 use crate::util::{sign_struct, verify_struct};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
+use freenet_stdlib::prelude::ContractInstanceId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::time::SystemTime;
@@ -21,6 +22,20 @@ pub const MAX_SECTION_DESCRIPTION: usize = 2_000;
 pub const MAX_SECTION_CHAIN: usize = 64;
 
 pub type SectionId = MessageId;
+
+/// Parameters of a section child board. The parent board keeps its existing
+/// owner-only parameters.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct SectionParametersV1 {
+    pub owner: VerifyingKey,
+    pub section: SectionId,
+}
+
+impl SectionParametersV1 {
+    pub fn owner_id(&self) -> MemberId {
+        self.owner.into()
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct SectionV1 {
@@ -47,6 +62,9 @@ pub struct SectionV1 {
     pub generation: u64,
     #[serde(default)]
     pub deleted: bool,
+    /// Child board that owns this section's topic index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<ContractInstanceId>,
     #[serde(default = "epoch", skip_serializing_if = "is_epoch")]
     pub signed_at: SystemTime,
 }
@@ -437,6 +455,7 @@ mod tests {
             auto_moderated_topics: None,
             generation: 1,
             deleted: false,
+            contract: None,
             signed_at: SystemTime::UNIX_EPOCH,
         }
     }

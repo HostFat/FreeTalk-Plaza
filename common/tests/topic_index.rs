@@ -16,7 +16,7 @@ use plaza_core::board_state::sections::{
 use plaza_core::board_state::topics::{
     AuthorizedTopicActivityV1, AuthorizedTopicEntryV1,
     AuthorizedTopicFlagV1, AuthorizedTopicReportV1, TopicActivityV1, TopicEntryV1,
-    TopicFlagKind, TopicFlagV1, TopicIndexDelta, TopicReportV1,
+    TopicFlagKind, TopicFlagV1, TopicIndexDelta, TopicIndexV1, TopicReportV1,
 };
 use plaza_core::board_state::{
     BoardModeV1, ChatBoardParametersV1, ChatBoardStateV1,
@@ -56,6 +56,7 @@ fn section(id: u8) -> SectionV1 {
         auto_moderated_topics: None,
         generation: 1,
         deleted: false,
+        contract: None,
         signed_at: SystemTime::UNIX_EPOCH,
     }
 }
@@ -530,6 +531,36 @@ fn scale_board_benchmark() {
             );
         }
     }
+}
+
+#[test]
+fn a_sectioned_parent_keeps_no_topics() {
+    let mut state = indexed_board();
+    state.mode = BoardModeV1::SectionedTopicIndex;
+    let parent_params = params();
+    assert!(state
+        .verify_with_section(&parent_params, None)
+        .is_err());
+
+    state.topics = TopicIndexV1::default();
+    state
+        .verify_with_section(&parent_params, None)
+        .unwrap();
+}
+
+#[test]
+fn a_section_child_indexes_only_its_section() {
+    let mut state = indexed_board();
+    state.mode = BoardModeV1::SectionedTopicIndex;
+    let section_id = MessageId::from_bytes([5u8; 32]);
+    state
+        .verify_with_section(&params(), Some(section_id))
+        .unwrap();
+
+    let other = MessageId::from_bytes([6u8; 32]);
+    assert!(state
+        .verify_with_section(&params(), Some(other))
+        .is_err());
 }
 
 #[test]

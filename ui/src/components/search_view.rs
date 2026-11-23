@@ -19,7 +19,7 @@ pub fn SearchView() -> Element {
                     .read()
                     .map
                     .get(&key)
-                    .map(|board| board.board_state.mode == BoardModeV1::TopicIndex)
+                    .map(|board| board.board_state.mode.is_topic_index())
             })
             .unwrap_or(false)
     });

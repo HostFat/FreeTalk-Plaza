@@ -13,6 +13,9 @@ pub const DM_CONTRACT_WASM: &[u8] = include_bytes!("../public/contracts/plaza_dm
 pub const TOPIC_CONTRACT_WASM: &[u8] =
     include_bytes!("../public/contracts/plaza_topic_contract.wasm");
 
+pub const SECTION_CONTRACT_WASM: &[u8] =
+    include_bytes!("../public/contracts/plaza_section_contract.wasm");
+
 pub const CHAT_DELEGATE_WASM: &[u8] = include_bytes!("../public/contracts/plaza_delegate.wasm");
 
 // pub const board_CONTRACT_CODE_HASH: CodeHash = CodeHash::from_code(BOARD_CONTRACT_WASM);

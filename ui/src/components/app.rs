@@ -1,6 +1,7 @@
 pub mod chat_delegate;
 pub mod dm_contract;
 pub mod dm_delegate;
+pub mod section_contract;
 pub mod topic_contract;
 pub mod document_title;
 pub mod freenet_api;
@@ -54,6 +55,8 @@ pub enum Route {
     JoinBoard { token: String },
     #[route("/enable-topics")]
     EnableTopics,
+    #[route("/enable-sections")]
+    EnableSections,
     #[route("/dm/join/:contract_id/:token/:key_version/:key_b58")]
     DmJoin {
         contract_id: String,
@@ -637,6 +640,29 @@ fn Home() -> Element {
 /// from this session. The shell bridges the hash into the app iframe, so this
 /// works without changing the web container.
 #[component]
+fn EnableSections() -> Element {
+    let navigator = navigator();
+    let mut done = use_signal(|| false);
+    use_effect(move || {
+        if *done.read() || !*BOARDS_LOADED.read() {
+            return;
+        }
+        done.set(true);
+        BOARDS.with_mut(|boards| {
+            boards.client_features.topic_boards = true;
+            boards.client_features.sectioned_boards = true;
+        });
+        info!("Section-sharded topic boards enabled from the developer route");
+        navigator.push(Route::Home);
+    });
+    rsx! {
+        div { class: "min-h-screen flex items-center justify-center p-6 text-text-muted",
+            "Enabling section boards…"
+        }
+    }
+}
+
+#[component]
 fn EnableTopics() -> Element {
     let navigator = navigator();
     let mut done = use_signal(|| false);
@@ -952,7 +978,7 @@ fn BoardPosts(board_id: String) -> Element {
                     .read()
                     .map
                     .get(&key)
-                    .map(|board| board.board_state.mode == plaza_core::board_state::BoardModeV1::TopicIndex)
+                    .map(|board| board.board_state.mode.is_topic_index())
             })
             .unwrap_or(false)
     });
@@ -974,7 +1000,7 @@ fn BoardPost(board_id: String, post_id: String) -> Element {
                     .read()
                     .map
                     .get(&key)
-                    .map(|board| board.board_state.mode == plaza_core::board_state::BoardModeV1::TopicIndex)
+                    .map(|board| board.board_state.mode.is_topic_index())
             })
             .unwrap_or(false)
     });
@@ -1002,7 +1028,7 @@ fn PostsInCategory(board_id: String, category_id: String) -> Element {
                     .read()
                     .map
                     .get(&key)
-                    .map(|board| board.board_state.mode == plaza_core::board_state::BoardModeV1::TopicIndex)
+                    .map(|board| board.board_state.mode.is_topic_index())
             })
             .unwrap_or(false)
     });
@@ -1221,6 +1247,13 @@ fn enable_topic_boards_from_query() {
         if search.contains("topics=1") && !BOARDS.read().client_features.topic_boards {
             BOARDS.with_mut(|boards| boards.client_features.topic_boards = true);
             info!("Topic-contract boards enabled for new boards");
+        }
+        if search.contains("sections=1") && !BOARDS.read().client_features.sectioned_boards {
+            BOARDS.with_mut(|boards| {
+                boards.client_features.sectioned_boards = true;
+                boards.client_features.topic_boards = true;
+            });
+            info!("Section-sharded topic boards enabled for new boards");
         }
     }
 }

@@ -14,6 +14,14 @@ function withTopics(url: string): string {
   return next.toString();
 }
 
+function withSections(url: string): string {
+  const next = new URL(url);
+  next.searchParams.set("topics", "1");
+  next.searchParams.set("sections", "1");
+  next.searchParams.set("nav", Date.now().toString());
+  return next.toString();
+}
+
 async function appFrame(page: import("@playwright/test").Page) {
   const frame = page.frames().find((candidate) => candidate !== page.mainFrame());
   if (!frame) throw new Error("The app iframe is not available");
@@ -100,6 +108,26 @@ test.beforeAll(async ({ browser }) => {
   await reset.click();
   await page.waitForTimeout(3_000);
   await page.close();
+});
+
+test("a sectioned board creates a child index contract", async ({ page }) => {
+  test.setTimeout(240_000);
+  await page.goto(`${withSections(BASE)}#/enable-sections`);
+  const app = page.frameLocator("iframe");
+  await expect(app.getByText(/Select or Create Board/).first()).toBeVisible({
+    timeout: 30_000,
+  });
+  const suffix = Date.now().toString(36);
+  await createBoard(page, `SectionBoard-${suffix}`, `SectionOwner-${suffix}`);
+
+  await app.getByPlaceholder("New section name").fill("Shard section");
+  await app.getByRole("button", { name: "Create section" }).click();
+  const option = app.locator("option", { hasText: "Shard section" }).first();
+  await expect(option).toHaveCount(1, { timeout: 60_000 });
+  const contract = await option.getAttribute("data-contract");
+  expect(contract, "the section must point to a child contract").toMatch(
+    /^[1-9A-HJ-NP-Za-km-z]{43,44}$/,
+  );
 });
 
 test("a topic and its replies live in a separate contract", async ({ page }) => {

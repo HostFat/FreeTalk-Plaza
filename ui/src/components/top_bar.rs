@@ -54,9 +54,7 @@ pub fn TopBar() -> Element {
     // changes such as a new message.
     let authority_stamp = use_memo(move || {
         let board = current_board_data.read().clone()?;
-        if board.board_state.mode
-            != plaza_core::board_state::BoardModeV1::TopicIndex
-        {
+        if !board.board_state.mode.is_topic_index() {
             return None;
         }
         Some((
@@ -96,7 +94,7 @@ pub fn TopBar() -> Element {
         let Some(board) = boards.map.get(&key) else {
             return 0;
         };
-        if board.board_state.mode == plaza_core::board_state::BoardModeV1::TopicIndex {
+        if board.board_state.mode.is_topic_index() {
             board
                 .board_state
                 .topics
@@ -589,10 +587,7 @@ pub fn TopBar() -> Element {
                         let index_mode = current_board_data
                             .read()
                             .as_ref()
-                            .map(|board| {
-                                board.board_state.mode
-                                    == plaza_core::board_state::BoardModeV1::TopicIndex
-                            })
+                            .map(|board| board.board_state.mode.is_topic_index())
                             .unwrap_or(false);
                         if index_mode {
                             rsx! {

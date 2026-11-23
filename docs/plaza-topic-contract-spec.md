@@ -1,8 +1,8 @@
 # Specifica del contratto `plaza-topic`
 
 Versione: 1 (implementata).
-Stato: fasi 0–4 completate e pubblicate nella build locale v617. Nessuna
-migrazione delle vecchie board.
+Stato: fasi 0–4 completate; fasi 1–2 dello shard per sezione pubblicate nella
+build locale v621. Nessuna migrazione delle vecchie board.
 
 ## Stato dell'implementazione
 
@@ -13,8 +13,9 @@ migrazione delle vecchie board.
   attività, flag, report e risoluzioni.
 - Client `ui/src/components/app/topic_contract.rs`; UI
   `topic_index_view.rs`, `topic_view.rs`, ricerca, notifiche e code in Manage.
-- Test: 44 in `topic-core`, 328 in `plaza-core`, 10 scenari real-node dei
-  topic (draft e parti precedenti inclusi) e 116 test statici Playwright.
+- Test: 44 in `topic-core`, 330 in `plaza-core`, 11 scenari real-node dei
+  topic (shard della sezione, draft e parti precedenti inclusi) e 116 test
+  statici Playwright.
 
 Funzioni disponibili: topic creati dall'owner e dai membri, topic privati,
 modifica di topic e risposte, flag owner (pin/close/announce/hide/approve),
@@ -507,6 +508,11 @@ Le board nuove usano `BoardModeV1::TopicIndex`; le board legacy restano
 - La board non contiene i post: conserva solo indice, sezioni e stato di
   moderazione. L'indice è limitato a 2.000 topic, 2.000 righe di attività,
   16.000 flag e 2.000 report, perché viaggia in pieno con ogni update.
+- Con `BoardModeV1::SectionedTopicIndex` la board madre tiene solo le sezioni
+  e l'autorità; ogni sezione è una board figlia (`plaza-section-contract`)
+  con parametri `{ owner, section }`, la propria sezione e l'indice dei suoi
+  topic. La madre rifiuta i topic nel proprio stato; la figlia rifiuta entry
+  di altre sezioni.
 
 ## 10. Client e UI
 
@@ -536,6 +542,10 @@ Le board nuove usano `BoardModeV1::TopicIndex`; le board legacy restano
 - Se l'invio di un delta topic fallisce, il delta resta in una coda locale e
   viene ritentato ogni 20 secondi, fino a 5 volte. Lo stato locale è già
   applicato, quindi il post resta visibile; il retry è idempotente.
+- Le board `SectionedTopicIndex` creano la board figlia quando si crea una
+  sezione, registrano la sua chiave nel record firmato della sezione e la
+  caricano all'apertura della board. La creazione di topic e risposte resta
+  sulla madre finché non arriva la fase 3 del routing.
 - Il mark-read usa il timestamp dell'entry quando manca l'attività, per
   evitare un loop di render.
 

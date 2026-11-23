@@ -58,6 +58,16 @@ pub enum BoardModeV1 {
     LegacyMessages,
     /// New boards: the board keeps an index and each topic is a contract.
     TopicIndex,
+    /// Section-sharded boards: the parent keeps sections and authority, each
+    /// section is a child board with its own topic index.
+    SectionedTopicIndex,
+}
+
+impl BoardModeV1 {
+    /// Both index layouts keep posts outside the board contract.
+    pub fn is_topic_index(&self) -> bool {
+        matches!(self, Self::TopicIndex | Self::SectionedTopicIndex)
+    }
 }
 
 impl ComposableState for BoardModeV1 {
@@ -247,6 +257,62 @@ impl ChatBoardStateV1 {
 }
 
 impl ChatBoardStateV1 {
+    /// Full verification plus the layout rules of a section-sharded board.
+    /// `section` is `Some` for a child board and `None` for the parent.
+    pub fn verify_with_section(
+        &self,
+        parameters: &ChatBoardParametersV1,
+        section: Option<crate::board_state::sections::SectionId>,
+    ) -> Result<(), String> {
+        <Self as ComposableState>::verify(self, self, parameters)?;
+        self.verify_sectioned_layout(parameters, section)
+    }
+
+    fn verify_sectioned_layout(
+        &self,
+        _parameters: &ChatBoardParametersV1,
+        section: Option<crate::board_state::sections::SectionId>,
+    ) -> Result<(), String> {
+        if self.mode != BoardModeV1::SectionedTopicIndex {
+            return Ok(());
+        }
+        match section {
+            Some(section_id) => {
+                if self.sections.sections.len() != 1
+                    || self.sections.sections[0].section.id != section_id
+                {
+                    return Err(
+                        "a section board must contain exactly its own section".to_string()
+                    );
+                }
+                if !self.recent_messages.messages.is_empty() {
+                    return Err("a section board cannot carry legacy messages".to_string());
+                }
+                for entry in &self.topics.entries {
+                    if entry.entry.section != Some(section_id) {
+                        return Err("a section board cannot index topics of another section".to_string());
+                    }
+                }
+            }
+            None => {
+                if !self.topics.entries.is_empty()
+                    || !self.topics.activity.is_empty()
+                    || !self.topics.flags.is_empty()
+                    || !self.topics.reports.is_empty()
+                    || !self.topics.report_resolutions.is_empty()
+                {
+                    return Err(
+                        "a sectioned board keeps topics in its section boards".to_string()
+                    );
+                }
+                if !self.recent_messages.messages.is_empty() {
+                    return Err("a sectioned board cannot carry legacy messages".to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Verify a non-topic delta after it was applied. The topic part already
     /// verified its new records; re-verifying every topic on a member or
     /// authority change would scan the whole board index. Parts that can
