@@ -519,6 +519,10 @@ Le board nuove usano `BoardModeV1::TopicIndex`; le board legacy restano
 - Tutti gli invii al client API passano da `app::send_client_request`, che usa
   un mutex asincrono: nessun task tiene il guard di un segnale attraverso un
   await.
+- Le modifiche locali della board vengono inviate come delta rispetto a
+  `last_synced_state`; solo la prima sincronizzazione di una board usa lo
+  stato completo. I delta del solo indice prendono il percorso rapido del
+  contratto.
 - Il mark-read usa il timestamp dell'entry quando manca l'attività, per
   evitare un loop di render.
 

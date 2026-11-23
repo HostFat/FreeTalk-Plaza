@@ -360,6 +360,13 @@ impl SyncInfo {
         boards_needing_update
     }
 
+    /// Last state confirmed by the network for this board, if any.
+    pub fn last_synced_state(&self, owner_key: &VerifyingKey) -> Option<ChatBoardStateV1> {
+        self.map
+            .get(owner_key)
+            .and_then(|info| info.last_synced_state.clone())
+    }
+
     /// Register that the state's current value has been sent to the network
     pub fn state_updated(&mut self, owner_key: &VerifyingKey, new_state: ChatBoardStateV1) {
         if let Some(sync_info) = self.map.get_mut(owner_key) {

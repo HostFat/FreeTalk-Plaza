@@ -621,10 +621,24 @@ impl BoardSynchronizer {
             info!("Processing board: {:?}", MemberId::from(*board_vk));
 
             let contract_key = owner_vk_to_contract_key(board_vk);
-
+            let parameters = ChatBoardParametersV1 { owner: *board_vk };
+            let last_synced = SYNC_INFO.read().last_synced_state(board_vk);
+            let data = if let Some(last) = last_synced {
+                let summary = last.summarize(&last, &parameters);
+                match state.delta(&last, &parameters, &summary) {
+                    Some(delta) => UpdateData::Delta(to_cbor_vec(&delta).into()),
+                    None => {
+                        info!("Board {:?} has no delta to send", MemberId::from(*board_vk));
+                        continue;
+                    }
+                }
+            } else {
+                // The first update establishes the contract with a full state.
+                UpdateData::State(to_cbor_vec(state).into())
+            };
             let update_request = ContractRequest::Update {
                 key: contract_key,
-                data: UpdateData::State(to_cbor_vec(state).into()),
+                data,
             };
 
             let client_request = ClientRequest::ContractOp(update_request);
