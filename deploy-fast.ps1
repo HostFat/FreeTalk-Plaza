@@ -195,6 +195,7 @@ if (-not $SkipContractBuild) {
         'plaza_delegate.wasm' = @('plaza-delegate\src', 'common\src\chat_delegate.rs')
         'plaza_dm_delegate.wasm' = @('dm-delegate\src', 'dm-core\src')
         'plaza_dm_contract.wasm' = @('dm-contract\src', 'dm-core\src')
+        'plaza_topic_contract.wasm' = @('topic-contract\src', 'topic-core\src')
         'plaza_blob.wasm' = @('plaza-blob-core\src', 'plaza-blob\src')
     }
     $wasmProfile = if ($Production) { 'release' } else { 'release-fast' }
@@ -203,6 +204,7 @@ if (-not $SkipContractBuild) {
         @{ File = 'plaza_delegate.wasm'; Dest = 'plaza_delegate.wasm'; Package = 'plaza-delegate' },
         @{ File = 'plaza_dm_delegate.wasm'; Dest = 'plaza_dm_delegate.wasm'; Package = 'plaza-dm-delegate'; Profile = 'release' },
         @{ File = 'plaza_dm_contract.wasm'; Dest = 'plaza_dm_contract.wasm'; Package = 'plaza-dm-contract'; Profile = 'release' },
+        @{ File = 'plaza_topic_contract.wasm'; Dest = 'plaza_topic_contract.wasm'; Package = 'plaza-topic-contract'; Profile = 'release' },
         @{ File = 'plaza_blob.wasm'; Dest = 'blob_contract.wasm'; Package = 'plaza-blob' }
     )
     foreach ($artifact in $wasmArtifacts) {

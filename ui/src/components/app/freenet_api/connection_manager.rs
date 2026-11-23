@@ -226,7 +226,8 @@ mod imp {
             match result {
                 futures::future::Either::Left((Ok(_), _)) => {
                     info!("WebSocket connection established successfully");
-                    *WEB_API.write() = Some(web_api);
+                    *WEB_API.write() =
+                        Some(std::rc::Rc::new(futures::lock::Mutex::new(web_api)));
                     self.connected = true;
                     *SYNC_STATUS.write() = SynchronizerStatus::Connected;
                     Ok(())

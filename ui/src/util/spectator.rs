@@ -43,6 +43,8 @@ pub fn open_spectator_board(owner_vk: VerifyingKey) -> Result<(), String> {
         collapsed_groups: Vec::new(),
         last_visit: 0,
         read_categories: HashMap::new(),
+        topic_read: HashMap::new(),
+        topic_drafts: HashMap::new(),
         draft: None,
         drafts: Vec::new(),
         trash_retention_days: 0,
@@ -123,11 +125,10 @@ pub async fn fetch_pending_spectator_boards() {
             // Do not hold the request loop while a cold contract is routed.
             blocking_subscribe: false,
         };
-        let mut api = WEB_API.write();
-        let Some(api) = api.as_mut() else {
+        if WEB_API.read().is_none() {
             return;
-        };
-        match api.send(ClientRequest::ContractOp(request)).await {
+        }
+        match crate::components::app::send_client_request(ClientRequest::ContractOp(request)).await {
             Ok(_) => {
                 info!(
                     "Requesting state for read-only board {:?}",

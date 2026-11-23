@@ -9,10 +9,33 @@ use crate::util::notifications::{self, NoticeKind};
 use crate::util::subscriptions;
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
+use plaza_core::board_state::BoardModeV1;
 use wasm_bindgen_futures::spawn_local;
 
 #[component]
 pub fn NotificationsView() -> Element {
+    let index_mode = use_memo(move || {
+        CURRENT_BOARD
+            .read()
+            .owner_key
+            .and_then(|key| {
+                BOARDS
+                    .read()
+                    .map
+                    .get(&key)
+                    .map(|board| board.board_state.mode == BoardModeV1::TopicIndex)
+            })
+            .unwrap_or(false)
+    });
+    if index_mode() {
+        rsx! { TopicNotificationsView {} }
+    } else {
+        rsx! { LegacyNotificationsView {} }
+    }
+}
+
+#[component]
+fn LegacyNotificationsView() -> Element {
     let board = use_memo(move || {
         let current = CURRENT_BOARD.read().owner_key?;
         let boards = BOARDS.read();
@@ -269,4 +292,149 @@ fn current_permission_label() -> String {
 #[cfg(not(target_arch = "wasm32"))]
 fn current_permission_label() -> String {
     "System notifications unavailable".to_string()
+}
+
+#[component]
+fn TopicNotificationsView() -> Element {
+    let board = use_memo(move || {
+        let current = CURRENT_BOARD.read().owner_key?;
+        BOARDS.read().map.get(&current).cloned()
+    });
+    let Some(board_data) = board.read().clone() else {
+        return rsx! {};
+    };
+
+    let mut unread: Vec<_> = board_data
+        .board_state
+        .topics
+        .entries
+        .iter()
+        .filter(|entry| {
+            !board_data.board_state.topics.is_hidden(&entry.entry.topic_id)
+                && board_data
+                    .board_state
+                    .topics
+                    .merged_into(&entry.entry.topic_id)
+                    .is_none()
+        })
+        .filter_map(|entry| {
+            let topic_id = entry.entry.topic_id;
+            let last_at = board_data
+                .board_state
+                .topics
+                .activity_for(&topic_id)
+                .map(|activity| activity.activity.last_activity)
+                .unwrap_or(entry.entry.created_at);
+            if last_at <= board_data.topic_last_read(&topic_id) {
+                return None;
+            }
+            let title = crate::components::app::topic_contract::read_text(
+                &board_data,
+                &entry.entry.title,
+            )
+            .unwrap_or_else(|| "Untitled".to_string());
+            let author = board_data
+                .display_nickname(entry.entry.author)
+                .unwrap_or_else(|| entry.entry.author.to_string());
+            let (section, _) = board_data.board_state.topics.section_of(&topic_id);
+            let section = section.and_then(|id| {
+                crate::components::app::topic_contract::section_name(&board_data, &id)
+            });
+            Some((topic_id, title, author, last_at, section))
+        })
+        .collect();
+    unread.sort_by_key(|entry| std::cmp::Reverse(entry.3));
+
+    let board_id = bs58::encode(board_data.owner_vk.as_bytes()).into_string();
+    let result_board = board_id.clone();
+    let navigator = navigator();
+    let owner = board_data.owner_vk;
+    let mark_all = {
+        let entries = board_data.board_state.topics.entries.clone();
+        move |_| {
+            BOARDS.with_mut(|boards| {
+                if let Some(board) = boards.map.get_mut(&owner) {
+                    for entry in &entries {
+                        let last_at = board
+                            .board_state
+                            .topics
+                            .activity_for(&entry.entry.topic_id)
+                            .map(|activity| activity.activity.last_activity)
+                            .unwrap_or(entry.entry.created_at);
+                        board.mark_topic_read(entry.entry.topic_id, last_at);
+                    }
+                }
+            });
+            spawn(async {
+                let _ = save_boards_to_delegate().await;
+            });
+        }
+    };
+
+    rsx! {
+        div { class: "flex-1 flex flex-col min-w-0 min-h-0 bg-bg",
+            div { class: "flex items-center gap-2 px-6 py-3 border-b border-border",
+                button {
+                    r#type: "button",
+                    class: "text-accent hover:text-accent/80 text-sm font-medium",
+                    onclick: move |_| {
+                        let target = format!("/board/{board_id}");
+                        if let Some(window) = web_sys::window() {
+                            let _ = window.location().set_hash(&target);
+                        }
+                    },
+                    "← Back to topics"
+                }
+                h1 { class: "text-lg font-semibold text-text ml-2", "Notifications" }
+                div { class: "flex-1" }
+                if !unread.is_empty() {
+                    button {
+                        r#type: "button",
+                        class: "px-3 py-1.5 bg-surface border border-border rounded-lg text-xs text-text",
+                        onclick: mark_all,
+                        "Mark all read"
+                    }
+                }
+            }
+            div { class: "flex-1 overflow-y-auto",
+                div { class: "max-w-4xl mx-auto px-4 py-6",
+                    if unread.is_empty() {
+                        p { class: "text-text-muted text-sm", "No unread topics." }
+                    } else {
+                        p { class: "text-xs text-text-muted mb-2", "{unread.len()} unread topic(s)" }
+                        div { class: "space-y-2",
+                            for (topic_id, title, author, last_at, section) in unread {
+                                {
+                                    let topic = bs58::encode(topic_id.as_bytes()).into_string();
+                                    let nav = navigator.clone();
+                                    let nav_board = result_board.clone();
+                                    rsx! {
+                                        button {
+                                            key: "{topic}",
+                                            r#type: "button",
+                                            class: "w-full text-left bg-panel border border-border rounded-lg px-4 py-3 hover:border-accent/50 transition-colors",
+                                            onclick: move |_| {
+                                                nav.push(Route::Topic {
+                                                    board_id: nav_board.clone(),
+                                                    topic_id: topic.clone(),
+                                                });
+                                            },
+                                            div { class: "flex items-baseline gap-2 flex-wrap",
+                                                span { class: "text-base font-semibold text-text", "{title}" }
+                                                span { class: "text-xs text-text-muted", "by {author}" }
+                                                span { class: "text-xs text-text-muted", "· {format_utc_as_local_time(last_at)}" }
+                                                if let Some(section) = section {
+                                                    span { class: "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-surface border border-border text-text-muted", "{section}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

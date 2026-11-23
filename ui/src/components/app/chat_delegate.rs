@@ -1,4 +1,4 @@
-use crate::components::app::{BOARDS, CURRENT_BOARD, WEB_API};
+use crate::components::app::{BOARDS, CURRENT_BOARD};
 use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::*;
 use freenet_stdlib::client_api::ClientRequest::DelegateOp;
@@ -139,22 +139,15 @@ fn complete_pending_request_bytes(key_bytes: &[u8], response: ChatDelegateRespon
 pub async fn set_up_chat_delegate() -> Result<(), String> {
     let delegate = create_chat_delegate_container();
 
-    // Get a write lock on the API and use it directly
-    let api_result = {
-        let mut web_api = WEB_API.write();
-        if let Some(api) = web_api.as_mut() {
-            // Perform the operation while holding the lock
-            info!("Registering chat delegate");
-            api.send(DelegateOp(DelegateRequest::RegisterDelegate {
-                delegate,
-                cipher: DEFAULT_CIPHER,
-                nonce: DEFAULT_NONCE,
-            }))
-            .await
-        } else {
-            Err(freenet_stdlib::client_api::Error::ConnectionClosed)
-        }
-    };
+    info!("Registering chat delegate");
+    let api_result = crate::components::app::send_client_request(DelegateOp(
+        DelegateRequest::RegisterDelegate {
+            delegate,
+            cipher: DEFAULT_CIPHER,
+            nonce: DEFAULT_NONCE,
+        },
+    ))
+    .await;
 
     match api_result {
         Ok(_) => {
@@ -223,14 +216,7 @@ async fn fire_delegate_request(request: ChatDelegateRequestMsg) -> bool {
     });
 
     // Send without waiting for response
-    let api_result = {
-        let mut web_api = WEB_API.write();
-        if let Some(api) = web_api.as_mut() {
-            api.send(delegate_request).await
-        } else {
-            Err(freenet_stdlib::client_api::Error::ConnectionClosed)
-        }
-    };
+    let api_result = crate::components::app::send_client_request(delegate_request).await;
 
     if let Err(e) = api_result {
         error!("Failed to send delegate request: {}", e);
@@ -804,16 +790,8 @@ pub async fn send_delegate_request(
         inbound: vec![freenet_stdlib::prelude::InboundDelegateMsg::ApplicationMessage(app_msg)],
     });
 
-    // Get the API and send the request, releasing the lock before awaiting
-    let api_result = {
-        let mut web_api = WEB_API.write();
-        if let Some(api) = web_api.as_mut() {
-            // Send the request while holding the lock
-            api.send(delegate_request).await
-        } else {
-            Err(freenet_stdlib::client_api::Error::ConnectionClosed)
-        }
-    };
+    // Send through the shared API handle and wait cooperatively for it.
+    let api_result = crate::components::app::send_client_request(delegate_request).await;
 
     // Handle send errors - remove the pending request if send failed
     if let Err(e) = api_result {
@@ -944,14 +922,7 @@ async fn fire_legacy_migration_request() {
             inbound: vec![freenet_stdlib::prelude::InboundDelegateMsg::ApplicationMessage(app_msg)],
         });
 
-        let api_result = {
-            let mut web_api = WEB_API.write();
-            if let Some(api) = web_api.as_mut() {
-                api.send(delegate_request).await
-            } else {
-                Err(freenet_stdlib::client_api::Error::ConnectionClosed)
-            }
-        };
+        let api_result = crate::components::app::send_client_request(delegate_request).await;
 
         match api_result {
             Ok(_) => info!("Legacy migration request #{} sent", i),

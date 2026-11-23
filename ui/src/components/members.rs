@@ -1,7 +1,7 @@
 use crate::components::app::chat_delegate::save_boards_to_delegate;
 use crate::components::app::sync_info::SYNC_INFO;
 use crate::components::app::{
-    mark_needs_sync, BOARDS, CURRENT_BOARD, MEMBER_INFO_MODAL, WEB_API,
+    mark_needs_sync, BOARDS, CURRENT_BOARD, MEMBER_INFO_MODAL,
 };
 use crate::util::ecies::unseal_bytes_with_secrets;
 use dioxus::logger::tracing::{info, warn};
@@ -625,6 +625,8 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     collapsed_groups: Vec::new(),
                     last_visit: 0,
                     read_categories: HashMap::new(),
+                    topic_read: HashMap::new(),
+                    topic_drafts: HashMap::new(),
                     draft: None,
                     drafts: Vec::new(),
                     trash_retention_days: 0,
@@ -697,14 +699,10 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                         subscribe: true,
                         blocking_subscribe: true,
                     };
-                    let mut web_api = WEB_API.write();
-                    let Some(web_api) = web_api.as_mut() else {
-                        warn!("Import: WebAPI unavailable, state request skipped");
-                        return;
-                    };
-                    match web_api
-                        .send(ClientRequest::ContractOp(get_request))
-                        .await
+                    match crate::components::app::send_client_request(ClientRequest::ContractOp(
+                        get_request,
+                    ))
+                    .await
                     {
                         Ok(_) => info!("Import: GetRequest sent for contract {}", contract_id),
                         Err(e) => warn!("Import: GetRequest failed: {e}"),

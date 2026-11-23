@@ -48,6 +48,35 @@ pub fn TopBar() -> Element {
             .and_then(|key| BOARDS.read().map.get(&key).cloned())
     });
 
+    // Bans, roles, suspensions and the policy are mirrored inside each topic
+    // contract. When the board authority changes, push a snapshot to the
+    // topics in the index. The hash stops this from running on ordinary board
+    // changes such as a new message.
+    let authority_stamp = use_memo(move || {
+        let board = current_board_data.read().clone()?;
+        if board.board_state.mode
+            != plaza_core::board_state::BoardModeV1::TopicIndex
+        {
+            return None;
+        }
+        Some((
+            board.owner_vk,
+            crate::components::app::topic_contract::authority_hash(&board),
+        ))
+    });
+    use_effect(move || {
+        let Some((owner, hash)) = authority_stamp() else {
+            return;
+        };
+        if crate::components::app::topic_contract::mark_authority_seen(owner, hash) {
+            spawn(async move {
+                let _ =
+                    crate::components::app::topic_contract::propagate_authority(owner)
+                        .await;
+            });
+        }
+    });
+
     // Quotes belong to the board they were picked on.
     let mut quote_board = use_signal(|| CURRENT_BOARD.read().owner_key);
     use_effect(move || {
@@ -63,12 +92,37 @@ pub fn TopBar() -> Element {
         let Some(key) = CURRENT_BOARD.read().owner_key else {
             return 0;
         };
-        BOARDS
-            .read()
-            .map
-            .get(&key)
-            .map(crate::util::notifications::unread_count)
-            .unwrap_or(0)
+        let boards = BOARDS.read();
+        let Some(board) = boards.map.get(&key) else {
+            return 0;
+        };
+        if board.board_state.mode == plaza_core::board_state::BoardModeV1::TopicIndex {
+            board
+                .board_state
+                .topics
+                .entries
+                .iter()
+                .filter(|entry| {
+                    !board.board_state.topics.is_hidden(&entry.entry.topic_id)
+                        && board
+                            .board_state
+                            .topics
+                            .merged_into(&entry.entry.topic_id)
+                            .is_none()
+                })
+                .filter(|entry| {
+                    let last_at = board
+                        .board_state
+                        .topics
+                        .activity_for(&entry.entry.topic_id)
+                        .map(|activity| activity.activity.last_activity)
+                        .unwrap_or(entry.entry.created_at);
+                    last_at > board.topic_last_read(&entry.entry.topic_id)
+                })
+                .count()
+        } else {
+            crate::util::notifications::unread_count(board)
+        }
     });
 
     // Get category context for default reply (when viewing a category)
@@ -532,7 +586,21 @@ pub fn TopBar() -> Element {
                 // Post input
                 match can_participate {
                     Ok(()) => {
-                        if let Some(until) = suspended_until {
+                        let index_mode = current_board_data
+                            .read()
+                            .as_ref()
+                            .map(|board| {
+                                board.board_state.mode
+                                    == plaza_core::board_state::BoardModeV1::TopicIndex
+                            })
+                            .unwrap_or(false);
+                        if index_mode {
+                            rsx! {
+                                div { class: "px-4 py-2 bg-surface border border-border rounded-lg text-xs text-text-muted",
+                                    "Open a topic to reply, or create one from the board page."
+                                }
+                            }
+                        } else if let Some(until) = suspended_until {
                             rsx! {
                                 div { class: "px-4 py-2 bg-error-bg text-red-700 dark:text-red-400 rounded-lg text-sm",
                                     "You are suspended until {crate::util::format_utc_as_local_time(until)} and cannot post."

@@ -8,6 +8,8 @@ members = [
     "dm-core",
     "dm-contract",
     "dm-delegate",
+    "topic-core",
+    "topic-contract",
     "ui",
     "cli",
 ]
@@ -49,6 +51,7 @@ futures-timer = "3.0.2"
 plaza-core = { path = "common", package = "plaza-core", default-features = true }
 plaza-blob-core = { path = "plaza-blob-core", package = "plaza-blob-core" }
 plaza-dm-core = { path = "dm-core", package = "plaza-dm-core" }
+plaza-topic-core = { path = "topic-core", package = "plaza-topic-core" }
 
 # Freenet dependencies
 freenet-scaffold = "0.2.2"

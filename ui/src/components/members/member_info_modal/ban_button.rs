@@ -288,6 +288,7 @@ pub fn BanButton(
     let mut duration_days = use_signal(|| 0i64);
 
     let execute_ban = move |_| {
+        show_confirmation.set(false);
         let days = *duration_days.read();
         // Close the member modal immediately for better UX
         MEMBER_INFO_MODAL.with_mut(|modal| {

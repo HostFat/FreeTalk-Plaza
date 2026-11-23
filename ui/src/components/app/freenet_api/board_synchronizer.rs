@@ -400,8 +400,8 @@ impl BoardSynchronizer {
                 let client_request = ClientRequest::ContractOp(get_request);
 
                 // WebAPI availability was checked at the start of this function
-                if let Some(web_api) = WEB_API.write().as_mut() {
-                    match web_api.send(client_request).await {
+                if WEB_API.read().is_some() {
+                    match crate::components::app::send_client_request(client_request).await {
                         Ok(_) => {
                             info!("Sent GetRequest for board {:?}", MemberId::from(owner_vk));
                         }
@@ -480,8 +480,8 @@ impl BoardSynchronizer {
                     contract_id
                 );
 
-                if let Some(web_api) = WEB_API.write().as_mut() {
-                    match web_api.send(client_request).await {
+                if WEB_API.read().is_some() {
+                    match crate::components::app::send_client_request(client_request).await {
                         Ok(_) => {
                             info!("Sent PutRequest for board {:?}", MemberId::from(*owner_vk));
                             // Update the sync status to subscribing using with_mut
@@ -576,8 +576,8 @@ impl BoardSynchronizer {
 
                 let client_request = ClientRequest::ContractOp(update_request);
 
-                if let Some(web_api) = WEB_API.write().as_mut() {
-                    match web_api.send(client_request).await {
+                if WEB_API.read().is_some() {
+                    match crate::components::app::send_client_request(client_request).await {
                         Ok(_) => {
                             info!(
                                 "Sent upgrade pointer for board {:?} to old contract {}",
@@ -629,8 +629,8 @@ impl BoardSynchronizer {
 
             let client_request = ClientRequest::ContractOp(update_request);
 
-            if let Some(web_api) = WEB_API.write().as_mut() {
-                match web_api.send(client_request).await {
+            if WEB_API.read().is_some() {
+                match crate::components::app::send_client_request(client_request).await {
                     Ok(_) => {
                         info!(
                             "Successfully sent update for board: {:?}",
@@ -993,8 +993,8 @@ impl BoardSynchronizer {
 
             let client_request = ClientRequest::ContractOp(get_request);
 
-            if let Some(web_api) = WEB_API.write().as_mut() {
-                match web_api.send(client_request).await {
+            if WEB_API.read().is_some() {
+                match crate::components::app::send_client_request(client_request).await {
                     Ok(_) => {
                         info!(
                             "Sent refresh GET request for board {:?}",
@@ -1038,8 +1038,8 @@ impl BoardSynchronizer {
 
         let client_request = ClientRequest::ContractOp(get_request);
 
-        if let Some(web_api) = WEB_API.write().as_mut() {
-            match web_api.send(client_request).await {
+        if WEB_API.read().is_some() {
+            match crate::components::app::send_client_request(client_request).await {
                 Ok(_) => {
                     info!("Sent GET request for contract: {}", contract_key.id());
                     Ok(())
@@ -1069,8 +1069,8 @@ impl BoardSynchronizer {
 
         let client_request = ClientRequest::ContractOp(subscribe_request);
 
-        if let Some(web_api) = WEB_API.write().as_mut() {
-            match web_api.send(client_request).await {
+        if WEB_API.read().is_some() {
+            match crate::components::app::send_client_request(client_request).await {
                 Ok(_) => {
                     info!(
                         "Successfully sent subscription request for contract: {}",
@@ -1146,21 +1146,15 @@ pub async fn send_upgrade_pointers() -> usize {
                 to_cbor_vec(&upgrade_state).into(),
             ),
         };
-        match WEB_API.write().as_mut() {
-            Some(web_api) => {
-                if web_api
-                    .send(freenet_stdlib::client_api::ClientRequest::ContractOp(
-                        update_request,
-                    ))
-                    .await
-                    .is_ok()
-                {
-                    sent += 1;
-                } else {
-                    failed += 1;
-                }
-            }
-            None => failed += 1,
+        if crate::components::app::send_client_request(
+            freenet_stdlib::client_api::ClientRequest::ContractOp(update_request),
+        )
+        .await
+        .is_ok()
+        {
+            sent += 1;
+        } else {
+            failed += 1;
         }
     }
     if queued > 0 || sent > 0 || skipped > 0 || failed > 0 {

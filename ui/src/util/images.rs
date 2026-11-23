@@ -4,7 +4,7 @@
 //! then records only the instance id and the hash in the message. Downloads
 //! are on demand and verified against the hash in the message.
 
-use crate::components::app::{BOARDS, CURRENT_BOARD, WEB_API};
+use crate::components::app::{BOARDS, CURRENT_BOARD};
 use crate::constants::BLOB_CONTRACT_WASM;
 use crate::util::ecies::{decrypt_with_symmetric_key, encrypt_with_symmetric_key};
 use crate::util::to_cbor_vec;
@@ -424,16 +424,11 @@ pub async fn put_raw_blob(parameters: &[u8], state: &[u8]) -> Result<(), String>
     if let Ok(mut waiting) = PENDING_BLOB_PUTS.lock() {
         waiting.insert(instance, acknowledged);
     }
+    if let Err(error) =
+        crate::components::app::send_client_request(ClientRequest::ContractOp(request)).await
     {
-        let mut web_api = WEB_API.write();
-        let Some(web_api) = web_api.as_mut() else {
-            forget_blob_put(&instance);
-            return Err("Not connected to a Freenet node".to_string());
-        };
-        if let Err(error) = web_api.send(ClientRequest::ContractOp(request)).await {
-            forget_blob_put(&instance);
-            return Err(error.to_string());
-        }
+        forget_blob_put(&instance);
+        return Err(error.to_string());
     }
     await_blob_ack(instance, wait_for_node).await
 }
@@ -478,16 +473,11 @@ async fn send_blob(
         waiting.insert(instance, acknowledged);
     }
 
+    if let Err(error) =
+        crate::components::app::send_client_request(ClientRequest::ContractOp(request)).await
     {
-        let mut web_api = WEB_API.write();
-        let Some(web_api) = web_api.as_mut() else {
-            forget_blob_put(&instance);
-            return Err("Not connected to a Freenet node".to_string());
-        };
-        if let Err(error) = web_api.send(ClientRequest::ContractOp(request)).await {
-            forget_blob_put(&instance);
-            return Err(error.to_string());
-        }
+        forget_blob_put(&instance);
+        return Err(error.to_string());
     }
     Ok((instance, wait_for_node))
 }
@@ -590,12 +580,9 @@ pub fn request_image(instance: [u8; 32], expected_sha256: [u8; 32]) {
         blocking_subscribe: false,
     };
     crate::util::safe_spawn_local(async move {
-        let mut web_api = WEB_API.write();
-        let Some(web_api) = web_api.as_mut() else {
-            fail_image(instance, "Not connected to a Freenet node".to_string());
-            return;
-        };
-        if let Err(error) = web_api.send(ClientRequest::ContractOp(request)).await {
+        if let Err(error) =
+            crate::components::app::send_client_request(ClientRequest::ContractOp(request)).await
+        {
             fail_image(instance, error.to_string());
         }
     });
@@ -777,12 +764,9 @@ async fn fetch_blob_state(instance: [u8; 32]) -> Result<Vec<u8>, String> {
             subscribe: false,
             blocking_subscribe: false,
         };
-        let mut web_api = WEB_API.write();
-        let Some(web_api) = web_api.as_mut() else {
-            forget_get(instance);
-            return Err("Not connected to a Freenet node".to_string());
-        };
-        if let Err(error) = web_api.send(ClientRequest::ContractOp(request)).await {
+        if let Err(error) =
+            crate::components::app::send_client_request(ClientRequest::ContractOp(request)).await
+        {
             forget_get(instance);
             return Err(error.to_string());
         }
@@ -907,12 +891,7 @@ async fn send_retirement(instance: [u8; 32], retired: &BlobStateV1) -> Result<()
         key,
         data: UpdateData::State(to_cbor_vec(retired).into()),
     };
-    let mut web_api = WEB_API.write();
-    let Some(web_api) = web_api.as_mut() else {
-        return Err("Not connected to a Freenet node".to_string());
-    };
-    web_api
-        .send(ClientRequest::ContractOp(request))
+    crate::components::app::send_client_request(ClientRequest::ContractOp(request))
         .await
         .map_err(|error| error.to_string())
 }

@@ -162,6 +162,8 @@ pub async fn handle_get_response(
                         collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: std::collections::HashMap::new(),
+                        topic_read: std::collections::HashMap::new(),
+                        topic_drafts: std::collections::HashMap::new(),
                         draft: None,
                         drafts: Vec::new(),
                         trash_retention_days: 0,
@@ -353,8 +355,12 @@ pub async fn handle_get_response(
                 blocking_subscribe: false,
             };
 
-            let put_result = if let Some(web_api) = WEB_API.write().as_mut() {
-                match web_api.send(ClientRequest::ContractOp(put_request)).await {
+            let put_result = if WEB_API.read().is_some() {
+                match crate::components::app::send_client_request(ClientRequest::ContractOp(
+                    put_request,
+                ))
+                .await
+                {
                     Ok(_) => {
                         info!(
                             "Sent PUT+subscribe for invited board {:?}",

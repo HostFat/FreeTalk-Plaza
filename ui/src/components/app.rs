@@ -1,6 +1,7 @@
 pub mod chat_delegate;
 pub mod dm_contract;
 pub mod dm_delegate;
+pub mod topic_contract;
 pub mod document_title;
 pub mod freenet_api;
 pub mod notifications;
@@ -34,9 +35,10 @@ use dioxus::document::{Link, Stylesheet};
 use dioxus::logger::tracing::{debug, error, info};
 use dioxus::prelude::*;
 use ed25519_dalek::VerifyingKey;
-use freenet_stdlib::client_api::WebApi;
+use freenet_stdlib::client_api::{ClientRequest, WebApi};
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
+use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::window;
 
@@ -50,6 +52,8 @@ pub enum Route {
     Invite { invite_code: String },
     #[route("/join/:token")]
     JoinBoard { token: String },
+    #[route("/enable-topics")]
+    EnableTopics,
     #[route("/dm/join/:contract_id/:token/:key_version/:key_b58")]
     DmJoin {
         contract_id: String,
@@ -63,6 +67,8 @@ pub enum Route {
     Posts { board_id: String },
     #[route("/board/:board_id/post/:post_id")]
     Post { board_id: String, post_id: String },
+    #[route("/board/:board_id/topic/:topic_id")]
+    Topic { board_id: String, topic_id: String },
     #[route("/board/:board_id/category/:category_id")]
     PostsInCategory { board_id: String, category_id: String },
     #[route("/board/:board_id/conversation")]
@@ -152,7 +158,21 @@ pub static PENDING_INVITES: GlobalSignal<PendingInvites> = Global::new(PendingIn
 pub static SYNC_STATUS: GlobalSignal<SynchronizerStatus> =
     Global::new(|| SynchronizerStatus::Connecting);
 pub static SYNCHRONIZER: GlobalSignal<FreenetSynchronizer> = Global::new(FreenetSynchronizer::new);
-pub static WEB_API: GlobalSignal<Option<WebApi>> = Global::new(|| None);
+/// The client API is shared behind an async mutex: its users await their turn
+/// instead of blocking the single-threaded UI while another task is sending.
+pub type SharedWebApi = Rc<futures::lock::Mutex<WebApi>>;
+pub static WEB_API: GlobalSignal<Option<SharedWebApi>> = Global::new(|| None);
+
+/// Send one request through the shared client API.
+pub async fn send_client_request(
+    request: ClientRequest<'static>,
+) -> Result<(), freenet_stdlib::client_api::Error> {
+    let Some(api) = WEB_API.read().clone() else {
+        return Err(freenet_stdlib::client_api::Error::ConnectionClosed);
+    };
+    let mut api = api.lock().await;
+    api.send(request).await
+}
 pub static AUTH_TOKEN: GlobalSignal<Option<String>> = Global::new(|| None);
 
 // Tracks which boards need to be synced due to USER actions (not network updates)
@@ -340,6 +360,14 @@ pub fn App() -> Element {
                     crate::util::owned_images::retire_unused(false);
                 }
             });
+        }
+    });
+
+    // Developer flag for the topic-contract UI: `?topics=1` makes the next
+    // boards keep an index instead of the legacy message list.
+    use_effect(move || {
+        if *BOARDS_LOADED.read() {
+            enable_topic_boards_from_query();
         }
     });
 
@@ -553,6 +581,31 @@ fn Home() -> Element {
             p { class: "text-sm mt-1 mb-4", "Forums on Freenet" }
             p { class: "text-xl", "Select a board above or create one" }
             p { class: "text-sm mt-2", "Topics will appear here" }
+        }
+    }
+}
+
+/// Hidden developer route: enable the topic-contract layout for boards created
+/// from this session. The shell bridges the hash into the app iframe, so this
+/// works without changing the web container.
+#[component]
+fn EnableTopics() -> Element {
+    let navigator = navigator();
+    let mut done = use_signal(|| false);
+    use_effect(move || {
+        if *done.read() || !*BOARDS_LOADED.read() {
+            return;
+        }
+        done.set(true);
+        BOARDS.with_mut(|boards| {
+            boards.client_features.topic_boards = true;
+        });
+        info!("Topic-contract boards enabled from the developer route");
+        navigator.push(Route::Home);
+    });
+    rsx! {
+        div { class: "min-h-screen flex items-center justify-center p-6 text-text-muted",
+            "Enabling topic boards…"
         }
     }
 }
@@ -811,23 +864,109 @@ fn parse_board_key(board_id: &str) -> Option<VerifyingKey> {
     }
     VerifyingKey::from_bytes(&bytes.try_into().ok()?).ok()
 }
-/// Route component for posts list view
+/// Route component for the board home
 #[component]
 fn Posts(board_id: String) -> Element {
-    rsx! { BoardGate { board_id: board_id.clone(), PostsView {} } }
+    rsx! { BoardGate { board_id: board_id.clone(), BoardPosts { board_id } } }
 }
 
-/// Route component for single post view
+/// Route component for a single post or topic.
 #[component]
 fn Post(board_id: String, post_id: String) -> Element {
-    rsx! { BoardGate { board_id: board_id.clone(), SinglePostView { post_id: post_id } } }
+    rsx! {
+        BoardGate {
+            board_id: board_id.clone(),
+            BoardPost { board_id, post_id }
+        }
+    }
+}
+
+#[component]
+fn Topic(board_id: String, topic_id: String) -> Element {
+    rsx! {
+        BoardGate {
+            board_id: board_id.clone(),
+            crate::components::topic_view::TopicView { board_id, topic_id }
+        }
+    }
+}
+
+/// The board home uses the topic index for new boards and the legacy message
+/// view for old ones.
+#[component]
+fn BoardPosts(board_id: String) -> Element {
+    let index_mode = use_memo(move || {
+        CURRENT_BOARD
+            .read()
+            .owner_key
+            .and_then(|key| {
+                BOARDS
+                    .read()
+                    .map
+                    .get(&key)
+                    .map(|board| board.board_state.mode == plaza_core::board_state::BoardModeV1::TopicIndex)
+            })
+            .unwrap_or(false)
+    });
+    if index_mode() {
+        rsx! { crate::components::topic_index_view::TopicIndexView { board_id } }
+    } else {
+        rsx! { PostsView {} }
+    }
+}
+
+#[component]
+fn BoardPost(board_id: String, post_id: String) -> Element {
+    let index_mode = use_memo(move || {
+        CURRENT_BOARD
+            .read()
+            .owner_key
+            .and_then(|key| {
+                BOARDS
+                    .read()
+                    .map
+                    .get(&key)
+                    .map(|board| board.board_state.mode == plaza_core::board_state::BoardModeV1::TopicIndex)
+            })
+            .unwrap_or(false)
+    });
+    if index_mode() {
+        rsx! {
+            crate::components::topic_view::TopicView {
+                board_id,
+                topic_id: post_id
+            }
+        }
+    } else {
+        rsx! { SinglePostView { post_id } }
+    }
 }
 
 /// Route component for category view (uses PostsView with category_id)
 #[component]
 fn PostsInCategory(board_id: String, category_id: String) -> Element {
-    rsx! {
-        BoardGate { board_id: board_id.clone(), PostsView { category_id: Some(category_id) } }
+    let index_mode = use_memo(move || {
+        CURRENT_BOARD
+            .read()
+            .owner_key
+            .and_then(|key| {
+                BOARDS
+                    .read()
+                    .map
+                    .get(&key)
+                    .map(|board| board.board_state.mode == plaza_core::board_state::BoardModeV1::TopicIndex)
+            })
+            .unwrap_or(false)
+    });
+    if index_mode() {
+        rsx! { BoardGate { board_id: board_id.clone(), BoardPosts { board_id } } }
+    } else {
+        rsx! {
+            BoardGate {
+                board_id: board_id.clone(),
+                PostsView { category_id: Some(category_id) }
+            }
+        }
     }
 }
 
@@ -1015,6 +1154,25 @@ fn sync_board_from_url(board_id: &str) {
             if let Ok(vk) = VerifyingKey::from_bytes(&bytes.try_into().unwrap()) {
                 select_board(Some(vk));
             }
+        }
+    }
+}
+
+/// `?topics=1` turns on the index-board path for boards created in this
+/// session. The default stays the legacy message list until the topic UI has
+/// full parity.
+fn enable_topic_boards_from_query() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Ok(search) = window.location().search() else {
+            return;
+        };
+        if search.contains("topics=1") && !BOARDS.read().client_features.topic_boards {
+            BOARDS.with_mut(|boards| boards.client_features.topic_boards = true);
+            info!("Topic-contract boards enabled for new boards");
         }
     }
 }

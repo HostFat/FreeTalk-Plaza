@@ -4,7 +4,7 @@
 //! local map of conversation states, sends deltas and routes contract
 //! responses. The Messages UI is built on top of this module.
 
-use crate::components::app::{dm_delegate, WEB_API};
+use crate::components::app::dm_delegate;
 use crate::constants::DM_CONTRACT_WASM;
 use crate::util::to_cbor_vec;
 use dioxus::prelude::*;
@@ -276,11 +276,7 @@ fn mark_synced(key: &ContractKey) {
 
 async fn send_contract_request(request: ContractRequest<'static>) -> Result<(), String> {
     let client_request = ClientRequest::ContractOp(request);
-    let mut web_api = WEB_API.write();
-    let Some(api) = web_api.as_mut() else {
-        return Err("Freenet API is not available".to_string());
-    };
-    api.send(client_request)
+    crate::components::app::send_client_request(client_request)
         .await
         .map_err(|error| format!("send DM contract request: {error}"))
 }

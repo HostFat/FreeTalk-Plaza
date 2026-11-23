@@ -83,6 +83,15 @@ impl ResponseHandler {
                     .await?;
                     return Ok(flags);
                 }
+                if crate::components::app::topic_contract::is_topic_contract_response(
+                    &contract_response,
+                ) {
+                    crate::components::app::topic_contract::handle_contract_response(
+                        contract_response,
+                    )
+                    .await?;
+                    return Ok(flags);
+                }
                 match contract_response {
                 ContractResponse::GetResponse {
                     key,
@@ -824,12 +833,7 @@ async fn republish_board(
         subscribe: false,
         blocking_subscribe: false,
     };
-    let mut web_api = crate::components::app::WEB_API.write();
-    let Some(web_api) = web_api.as_mut() else {
-        return Err("WebAPI not available".to_string());
-    };
-    web_api
-        .send(ClientRequest::ContractOp(request))
+    crate::components::app::send_client_request(ClientRequest::ContractOp(request))
         .await
         .map_err(|error| error.to_string())
 }

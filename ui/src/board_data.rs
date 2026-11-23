@@ -215,6 +215,10 @@ pub struct ClientFeatures {
     /// Append the short member id in the member list.
     #[serde(default)]
     pub show_member_ids: bool,
+    /// New boards keep only an index and one contract per topic. Enabled by
+    /// the `?topics=1` developer flag until the topic UI is the default.
+    #[serde(default)]
+    pub topic_boards: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
@@ -279,6 +283,14 @@ pub struct BoardData {
     /// Last time each section was opened (milliseconds), for unread badges.
     #[serde(default)]
     pub read_categories: HashMap<MessageId, i64>,
+
+    /// Last time each topic was opened (milliseconds) for index boards.
+    #[serde(default)]
+    pub topic_read: HashMap<MessageId, i64>,
+
+    /// Unsent reply drafts per topic. Local UI state, never shared.
+    #[serde(default)]
+    pub topic_drafts: HashMap<MessageId, String>,
 
     /// What this device wants to be notified about on this board.
     #[serde(default)]
@@ -368,6 +380,58 @@ pub struct BoardData {
 }
 
 impl BoardData {
+    pub fn topic_last_read(&self, topic: &MessageId) -> i64 {
+        self.topic_read.get(topic).copied().unwrap_or(0)
+    }
+
+    pub fn mark_topic_read(&mut self, topic: MessageId, at: i64) {
+        if at > self.topic_last_read(&topic) {
+            self.topic_read.insert(topic, at);
+        }
+    }
+
+    pub fn topic_draft(&self, topic: &MessageId) -> String {
+        self.topic_drafts.get(topic).cloned().unwrap_or_default()
+    }
+
+    pub fn set_topic_draft(&mut self, topic: MessageId, text: &str) {
+        if text.trim().is_empty() {
+            self.topic_drafts.remove(&topic);
+        } else {
+            self.topic_drafts.insert(topic, text.to_string());
+        }
+    }
+
+    /// Whether the visible identity may delete/approve content in a section.
+    pub fn can_moderate(&self, scope_chain: &[MessageId]) -> bool {
+        let self_id = MemberId::from(&self.self_sk.verifying_key());
+        if self_id == MemberId::from(&self.owner_vk)
+            || self_id == self.current_owner_id()
+        {
+            return true;
+        }
+        let admin = self
+            .board_state
+            .admin
+            .admins
+            .iter()
+            .any(|entry| entry.admin.id() == self_id);
+        let revoked = self
+            .board_state
+            .admin
+            .revoked
+            .iter()
+            .any(|entry| entry.id() == self_id);
+        if admin && !revoked {
+            return true;
+        }
+        self.board_state.roles.has_moderation_power(
+            &self_id,
+            plaza_core::board_state::roles::ModerationPower::Delete,
+            scope_chain,
+        )
+    }
+
     /// Contract parameters for this board: the founding owner is the identity.
     pub fn board_parameters(&self) -> ChatBoardParametersV1 {
         ChatBoardParametersV1 {
@@ -3239,6 +3303,9 @@ impl Boards {
         let profile_vk = self_sk.verifying_key();
         let has_separate_profile = profile_vk != owner_vk;
         let mut board_state = ChatBoardStateV1::default();
+        if self.client_features.topic_boards {
+            board_state.mode = plaza_core::board_state::BoardModeV1::TopicIndex;
+        }
 
         // Generate board secret if private
         info!("🟢 Creating privacy mode and secrets...");
@@ -3306,6 +3373,47 @@ impl Boards {
             info!("🟢 Public board, no secret needed");
             (PrivacyMode::Public, None, None)
         };
+
+        // New index boards start with a General section. The owner signs the
+        // section record; topics created in it carry an owner-signed snapshot.
+        if board_state.mode == plaza_core::board_state::BoardModeV1::TopicIndex {
+            use plaza_core::board_state::message::MessageId;
+            use plaza_core::board_state::privacy::SealedBytes;
+            use plaza_core::board_state::sections::{
+                AuthorizedSectionV1, SectionV1,
+            };
+            use rand::RngCore;
+            let mut section_bytes = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut section_bytes);
+            let version = board_secret_version.unwrap_or(0);
+            let sealed_name = board_secret.map(|secret| {
+                let (ciphertext, nonce) =
+                    crate::util::ecies::encrypt_with_symmetric_key(
+                        &secret, b"General", version,
+                    );
+                SealedBytes::private(ciphertext, nonce, version, 7)
+            });
+            let section = SectionV1 {
+                id: MessageId::from_bytes(section_bytes),
+                parent: None,
+                name: "General".to_string(),
+                description: None,
+                icon: None,
+                color: "#6366f1".to_string(),
+                allowed_roles: Vec::new(),
+                sealed_name,
+                hidden: false,
+                is_group: false,
+                images_allowed: true,
+                auto_moderated_topics: None,
+                generation: 1,
+                deleted: false,
+                signed_at: get_current_system_time(),
+            };
+            board_state.sections.sections.push(AuthorizedSectionV1::new(
+                section, &owner_sk, None,
+            ));
+        }
 
         // Set initial configuration with privacy mode
         info!("🟢 Creating configuration...");
@@ -3435,6 +3543,8 @@ impl Boards {
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
+            topic_read: HashMap::new(),
+            topic_drafts: HashMap::new(),
             draft: None,
             drafts: Vec::new(),
             trash_retention_days: 0,
@@ -5483,6 +5593,8 @@ mod tests {
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
+            topic_read: HashMap::new(),
+            topic_drafts: HashMap::new(),
             draft: None,
             drafts: Vec::new(),
             trash_retention_days: 0,
@@ -5574,6 +5686,8 @@ mod tests {
             collapsed_groups: Vec::new(),
             last_visit: 0,
             read_categories: HashMap::new(),
+            topic_read: HashMap::new(),
+            topic_drafts: HashMap::new(),
             draft: None,
             drafts: Vec::new(),
             trash_retention_days: 0,
@@ -5657,6 +5771,8 @@ mod tests {
                 collapsed_groups: Vec::new(),
                 last_visit: 0,
                 read_categories: HashMap::new(),
+                topic_read: HashMap::new(),
+                topic_drafts: HashMap::new(),
                 draft: None,
                 drafts: Vec::new(),
                 trash_retention_days: 0,

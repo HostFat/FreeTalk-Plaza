@@ -4,7 +4,7 @@
 //! This module registers it, correlates request/response envelopes and exposes
 //! the operations the DM UI will use.
 
-use crate::components::app::{BOARDS, CURRENT_BOARD, WEB_API};
+use crate::components::app::{BOARDS, CURRENT_BOARD};
 use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::{Global, GlobalSignal, ReadableExt};
 use freenet_stdlib::client_api::ClientRequest::DelegateOp;
@@ -113,19 +113,14 @@ pub fn complete_dm_pending(request_id: u64, response: DmDelegateResponseMsg) -> 
 /// existing registration idempotently.
 pub async fn set_up_dm_delegate() -> Result<(), String> {
     let delegate = delegate_container();
-    let result = {
-        let mut web_api = WEB_API.write();
-        if let Some(api) = web_api.as_mut() {
-            api.send(DelegateOp(DelegateRequest::RegisterDelegate {
-                delegate,
-                cipher: DEFAULT_CIPHER,
-                nonce: DEFAULT_NONCE,
-            }))
-            .await
-        } else {
-            Err(freenet_stdlib::client_api::Error::ConnectionClosed)
-        }
-    };
+    let result = crate::components::app::send_client_request(DelegateOp(
+        DelegateRequest::RegisterDelegate {
+            delegate,
+            cipher: DEFAULT_CIPHER,
+            nonce: DEFAULT_NONCE,
+        },
+    ))
+    .await;
     result.map_err(|error| format!("register DM delegate: {error}"))?;
     DELEGATE_READY.store(true, Ordering::SeqCst);
     info!("DM delegate registered");
@@ -270,14 +265,7 @@ pub async fn send_request(
         params: Parameters::from(Vec::<u8>::new()),
         inbound: vec![InboundDelegateMsg::ApplicationMessage(app_msg)],
     });
-    let send_result = {
-        let mut web_api = WEB_API.write();
-        if let Some(api) = web_api.as_mut() {
-            api.send(request).await
-        } else {
-            Err(freenet_stdlib::client_api::Error::ConnectionClosed)
-        }
-    };
+    let send_result = crate::components::app::send_client_request(request).await;
     if let Err(error) = send_result {
         if let Ok(mut pending) = PENDING.lock() {
             pending.remove(&request_id);

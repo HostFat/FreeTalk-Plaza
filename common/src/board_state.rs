@@ -23,6 +23,8 @@ pub mod rate_limit;
 pub mod reports;
 pub mod roles;
 pub mod secret;
+pub mod sections;
+pub mod topics;
 pub mod trash;
 pub mod upgrade;
 pub mod version;
@@ -39,12 +41,70 @@ use crate::board_state::message::MessageId;
 use crate::board_state::message::MessagesV1;
 use crate::board_state::roles::RolesV1;
 use crate::board_state::secret::BoardSecretsV1;
+use crate::board_state::sections::SectionsV1;
+use crate::board_state::topics::TopicIndexV1;
 use crate::board_state::upgrade::OptionalUpgradeV1;
 use crate::board_state::version::StateVersion;
 use ed25519_dalek::VerifyingKey;
 use freenet_scaffold_macro::composable;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+
+/// How this board stores discussions.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BoardModeV1 {
+    /// Legacy boards: topics and replies live in `recent_messages`.
+    #[default]
+    LegacyMessages,
+    /// New boards: the board keeps an index and each topic is a contract.
+    TopicIndex,
+}
+
+impl ComposableState for BoardModeV1 {
+    type ParentState = ChatBoardStateV1;
+    type Summary = BoardModeV1;
+    type Delta = BoardModeV1;
+    type Parameters = ChatBoardParametersV1;
+
+    fn verify(
+        &self,
+        _parent_state: &Self::ParentState,
+        _parameters: &Self::Parameters,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn summarize(
+        &self,
+        _parent_state: &Self::ParentState,
+        _parameters: &Self::Parameters,
+    ) -> Self::Summary {
+        *self
+    }
+
+    fn delta(
+        &self,
+        _parent_state: &Self::ParentState,
+        _parameters: &Self::Parameters,
+        _old_state_summary: &Self::Summary,
+    ) -> Option<Self::Delta> {
+        None
+    }
+
+    fn apply_delta(
+        &mut self,
+        _parent_state: &Self::ParentState,
+        _parameters: &Self::Parameters,
+        delta: &Option<Self::Delta>,
+    ) -> Result<(), String> {
+        if let Some(mode) = delta {
+            if *mode != *self {
+                return Err("the board mode is immutable".to_string());
+            }
+        }
+        Ok(())
+    }
+}
 
 #[composable(post_apply_delta = "post_apply_cleanup")]
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
@@ -154,6 +214,19 @@ pub struct ChatBoardStateV1 {
     /// `None` address is a tombstone that clears the value.
     #[serde(default)]
     pub mail_addresses: MailAddressesV1,
+
+    /// Legacy boards keep discussions in `recent_messages`; new boards keep
+    /// only an index and one contract per topic.
+    #[serde(default)]
+    pub mode: BoardModeV1,
+
+    /// Sections and groups for index boards.
+    #[serde(default)]
+    pub sections: SectionsV1,
+
+    /// Topic index for index boards.
+    #[serde(default)]
+    pub topics: TopicIndexV1,
 }
 
 impl ChatBoardStateV1 {
@@ -267,89 +340,92 @@ impl ChatBoardStateV1 {
         // keep their messages alive in the steps below.
         self.enforce_invite_caps();
 
-        // 1. Collect message author IDs
-        let message_authors: HashSet<MemberId> = self
-            .recent_messages
-            .messages
-            .iter()
-            .map(|m| m.message.author)
-            .collect();
-
-        // 2. Compute required members: authors + their invite chains
-        let required_ids = {
-            let members_by_id = self.members.members_by_member_id();
-            let mut required_ids: HashSet<MemberId> = HashSet::new();
-
-            for author_id in &message_authors {
-                if *author_id != owner_id && members_by_id.contains_key(author_id) {
-                    required_ids.insert(*author_id);
-                }
-            }
-
-            // Token-joined members keep their record before their first
-            // message. Without this the membership delta is applied and then
-            // pruned by this same cleanup, so the join never reaches the
-            // contract.
-            required_ids.extend(
-                members_by_id
-                    .values()
-                    .filter(|member| member.member.join_proof.is_some())
-                    .map(|member| member.member.id())
-                    .filter(|member_id| *member_id != owner_id),
-            );
-
-            // The same for identities the owner invited directly, once they
-            // have joined and published a nickname: the invitation is
-            // deliberate and its first message may take a while.
-            let current_owner = self.ownership.current_owner(parameters);
-            let with_info: HashSet<MemberId> = self
-                .member_info
-                .member_info
+        let index_mode = self.mode == BoardModeV1::TopicIndex;
+        if !index_mode {
+            // 1. Collect message author IDs
+            let message_authors: HashSet<MemberId> = self
+                .recent_messages
+                .messages
                 .iter()
-                .map(|info| info.member_info.member_id)
+                .map(|m| m.message.author)
                 .collect();
-            required_ids.extend(
-                members_by_id
-                    .values()
-                    .filter(|member| {
-                        with_info.contains(&member.member.id())
-                            && (member.member.invited_by == owner_id
-                                || member.member.invited_by == current_owner)
-                    })
-                    .map(|member| member.member.id())
-                    .filter(|member_id| *member_id != owner_id),
-            );
 
-            // Walk invite chains upward, adding all ancestors (stop at owner)
-            let mut to_process: Vec<MemberId> = required_ids.iter().cloned().collect();
-            while let Some(member_id) = to_process.pop() {
-                if let Some(member) = members_by_id.get(&member_id) {
-                    let inviter_id = member.member.invited_by;
-                    if inviter_id != owner_id && !required_ids.contains(&inviter_id) {
-                        required_ids.insert(inviter_id);
-                        to_process.push(inviter_id);
+            // 2. Compute required members: authors + their invite chains
+            let required_ids = {
+                let members_by_id = self.members.members_by_member_id();
+                let mut required_ids: HashSet<MemberId> = HashSet::new();
+
+                for author_id in &message_authors {
+                    if *author_id != owner_id && members_by_id.contains_key(author_id) {
+                        required_ids.insert(*author_id);
                     }
                 }
-            }
 
-            required_ids
-        };
+                // Token-joined members keep their record before their first
+                // message. Without this the membership delta is applied and then
+                // pruned by this same cleanup, so the join never reaches the
+                // contract.
+                required_ids.extend(
+                    members_by_id
+                        .values()
+                        .filter(|member| member.member.join_proof.is_some())
+                        .map(|member| member.member.id())
+                        .filter(|member_id| *member_id != owner_id),
+                );
 
-        // 3. Prune members not in required set. A founding owner who handed the
-        // board over stays as an ordinary member, like any other former owner.
-        let founder_is_member = self.ownership.current_owner(parameters) != owner_id;
-        self.members
-            .members
-            .retain(|m| {
-                required_ids.contains(&m.member.id())
-                    || (founder_is_member && m.member.id() == owner_id)
+                // The same for identities the owner invited directly, once they
+                // have joined and published a nickname: the invitation is
+                // deliberate and its first message may take a while.
+                let current_owner = self.ownership.current_owner(parameters);
+                let with_info: HashSet<MemberId> = self
+                    .member_info
+                    .member_info
+                    .iter()
+                    .map(|info| info.member_info.member_id)
+                    .collect();
+                required_ids.extend(
+                    members_by_id
+                        .values()
+                        .filter(|member| {
+                            with_info.contains(&member.member.id())
+                                && (member.member.invited_by == owner_id
+                                    || member.member.invited_by == current_owner)
+                        })
+                        .map(|member| member.member.id())
+                        .filter(|member_id| *member_id != owner_id),
+                );
+
+                // Walk invite chains upward, adding all ancestors (stop at owner)
+                let mut to_process: Vec<MemberId> = required_ids.iter().cloned().collect();
+                while let Some(member_id) = to_process.pop() {
+                    if let Some(member) = members_by_id.get(&member_id) {
+                        let inviter_id = member.member.invited_by;
+                        if inviter_id != owner_id && !required_ids.contains(&inviter_id) {
+                            required_ids.insert(inviter_id);
+                            to_process.push(inviter_id);
+                        }
+                    }
+                }
+
+                required_ids
+            };
+
+            // 3. Prune members not in required set. A founding owner who handed the
+            // board over stays as an ordinary member, like any other former owner.
+            let founder_is_member = self.ownership.current_owner(parameters) != owner_id;
+            self.members
+                .members
+                .retain(|m| {
+                    required_ids.contains(&m.member.id())
+                        || (founder_is_member && m.member.id() == owner_id)
+                });
+
+            // 4. Clean member_info for pruned members
+            self.member_info.member_info.retain(|info| {
+                info.member_info.member_id == owner_id
+                    || required_ids.contains(&info.member_info.member_id)
             });
-
-        // 4. Clean member_info for pruned members
-        self.member_info.member_info.retain(|info| {
-            info.member_info.member_id == owner_id
-                || required_ids.contains(&info.member_info.member_id)
-        });
+        }
 
         // 5. Clean orphaned bans: only remove if banner was BANNED (not just pruned)
         // A ban is orphaned when:
@@ -503,32 +579,43 @@ impl ChatBoardStateV1 {
         // 5g. Invite-cap removal happens before the message cleanup. Re-run
         // the members/messages fixpoint so removed invitees do not leave
         // messages or orphaned descendants behind.
-        self.renormalize_members_and_messages(parameters);
+        if !index_mode {
+            self.renormalize_members_and_messages(parameters);
 
-        // 5h. Remove hidden messages from the live list. The encrypted trash
-        // bundle is the only copy until a restore re-adds it.
-        let trashed: HashSet<MessageId> = self
-            .trash
-            .items
-            .iter()
-            .filter(|item| self.trash.active_item(&item.item.id).is_some())
-            .flat_map(|item| item.item.messages.iter().copied())
-            .collect();
-        let purged: HashSet<MessageId> = self
-            .moderation
-            .illegal_purges
-            .iter()
-            .flat_map(|entry| entry.purge.message_ids.iter().copied())
-            .collect();
-        let hidden: HashSet<MessageId> = trashed.union(&purged).copied().collect();
-        if !hidden.is_empty() {
-            self.recent_messages
-                .messages
-                .retain(|message| !hidden.contains(&message.id()));
-            self.moderation
-                .routes
-                .retain(|route| !hidden.contains(&route.route.message_id));
+            // 5h. Remove hidden messages from the live list. The encrypted trash
+            // bundle is the only copy until a restore re-adds it.
+            let trashed: HashSet<MessageId> = self
+                .trash
+                .items
+                .iter()
+                .filter(|item| self.trash.active_item(&item.item.id).is_some())
+                .flat_map(|item| item.item.messages.iter().copied())
+                .collect();
+            let purged: HashSet<MessageId> = self
+                .moderation
+                .illegal_purges
+                .iter()
+                .flat_map(|entry| entry.purge.message_ids.iter().copied())
+                .collect();
+            let hidden: HashSet<MessageId> = trashed.union(&purged).copied().collect();
+            if !hidden.is_empty() {
+                self.recent_messages
+                    .messages
+                    .retain(|message| !hidden.contains(&message.id()));
+                self.moderation
+                    .routes
+                    .retain(|route| !hidden.contains(&route.route.message_id));
+            }
         }
+
+        // Index cleanup runs after members, bans and roles, because the topic
+        // entries resolve their author and moderation authority against them.
+        let mut sections = std::mem::take(&mut self.sections);
+        sections.cleanup(self, parameters);
+        self.sections = sections;
+        let mut topics = std::mem::take(&mut self.topics);
+        topics.cleanup(self, parameters);
+        self.topics = topics;
 
         // 6. Re-sort for deterministic ordering
         self.members.members.sort_by_key(|m| m.member.id());

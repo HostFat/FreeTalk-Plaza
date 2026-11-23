@@ -25,4 +25,6 @@ pub mod search_view;
 pub mod structure_view;
 pub mod system_notifications;
 pub mod top_bar;
+pub mod topic_index_view;
+pub mod topic_view;
 pub mod trash_view;

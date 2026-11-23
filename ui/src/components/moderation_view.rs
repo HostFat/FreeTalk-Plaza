@@ -44,7 +44,7 @@ pub fn ModerationView() -> Element {
     };
     let self_id = MemberId::from(&board.self_sk.verifying_key());
     let owner_id = MemberId::from(&board.owner_vk);
-    let is_owner = self_id == owner_id;
+    let is_owner = board.is_current_owner();
     let messages = get_all_messages(
         &board.board_state,
         self_id,
@@ -81,6 +81,56 @@ pub fn ModerationView() -> Element {
         .approval_required;
     let restricted = board.restricted_categories();
     let board_key = board.owner_vk;
+    let owner_vk = board.owner_vk;
+    let topic_approvals: Vec<_> = board
+        .board_state
+        .topics
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let count = board
+                .board_state
+                .topics
+                .activity_for(&entry.entry.topic_id)
+                .map(|activity| activity.activity.pending_approvals)
+                .unwrap_or(0);
+            if count == 0 {
+                return None;
+            }
+            let title = crate::components::app::topic_contract::read_text(
+                &board,
+                &entry.entry.title,
+            )
+            .unwrap_or_else(|| "Untitled".to_string());
+            Some((entry.entry.topic_id, title, count))
+        })
+        .collect();
+    let resolved_reports: std::collections::HashSet<_> = board
+        .board_state
+        .topics
+        .report_resolutions
+        .iter()
+        .map(|entry| {
+            (
+                entry.resolution.topic_id,
+                entry.resolution.post_id,
+                entry.resolution.reporter,
+            )
+        })
+        .collect();
+    let topic_reports: Vec<_> = board
+        .board_state
+        .topics
+        .reports
+        .iter()
+        .filter(|entry| {
+            !resolved_reports.contains(&(
+                entry.report.topic_id,
+                entry.report.post_id,
+                entry.report.reporter,
+            ))
+        })
+        .collect();
 
     rsx! {
         div { class: "flex flex-col gap-6",
@@ -187,6 +237,134 @@ pub fn ModerationView() -> Element {
                                                 }
                                             },
                                             "Reject"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Reports filed from topic contracts.
+            div { class: "bg-surface rounded-lg p-4",
+                h2 { class: "text-lg font-semibold text-text mb-3",
+                    "Topic reports ({topic_reports.len()})"
+                }
+                if topic_reports.is_empty() {
+                    p { class: "text-text-muted text-sm", "No topic reports." }
+                } else {
+                    div { class: "space-y-2",
+                        for entry in topic_reports.iter() {
+                            {
+                                let report = entry.report.clone();
+                                let title = board
+                                    .board_state
+                                    .topics
+                                    .entry(&report.topic_id)
+                                    .and_then(|topic| {
+                                        crate::components::app::topic_contract::read_text(
+                                            &board,
+                                            &topic.entry.title,
+                                        )
+                                    })
+                                    .unwrap_or_else(|| "Untitled".to_string());
+                                let reporter = board
+                                    .display_nickname(report.reporter)
+                                    .unwrap_or_else(|| report.reporter.to_string());
+                                let body = crate::components::app::topic_contract::report_body(
+                                    &board, &report,
+                                );
+                                let reason = format!("{:?}", report.reason);
+                                let topic = bs58::encode(report.topic_id.as_bytes()).into_string();
+                                let board_key = bs58::encode(board.owner_vk.as_bytes()).into_string();
+                                let link = format!("#/board/{board_key}/topic/{topic}");
+                                rsx! {
+                                    div { class: "bg-panel border border-border rounded-lg px-3 py-2",
+                                        div { class: "flex flex-wrap items-center gap-3",
+                                            div { class: "flex-1 min-w-48",
+                                                p { class: "text-text font-medium", "{title}" }
+                                                p { class: "text-xs text-text-muted",
+                                                    "by {reporter} · {reason}"
+                                                    if let Some(post) = report.post_id {
+                                                        " · reply {post}"
+                                                    }
+                                                }
+                                            }
+                                            button {
+                                                r#type: "button",
+                                                class: "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg",
+                                                onclick: move |_| {
+                                                    if let Some(window) = web_sys::window() {
+                                                        let _ = window.location().set_hash(&link);
+                                                    }
+                                                },
+                                                "Open"
+                                            }
+                                            button {
+                                                r#type: "button",
+                                                class: "px-3 py-1.5 bg-emerald-500/20 text-emerald-300 text-xs rounded-lg",
+                                                onclick: move |_| {
+                                                    let owner = owner_vk;
+                                                    let topic_id = report.topic_id;
+                                                    let post_id = report.post_id;
+                                                    let reporter = report.reporter;
+                                                    spawn(async move {
+                                                        if let Err(message) =
+                                                            crate::components::app::topic_contract::resolve_report(
+                                                                owner, topic_id, post_id, reporter,
+                                                            )
+                                                            .await
+                                                        {
+                                                            error.set(Some(message));
+                                                        }
+                                                    });
+                                                },
+                                                "Resolve"
+                                            }
+                                        }
+                                        if !body.trim().is_empty() {
+                                            p { class: "mt-2 text-sm text-text-muted", "{body}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Topic approvals for index boards.
+            div { class: "bg-surface rounded-lg p-4",
+                h2 { class: "text-lg font-semibold text-text mb-3",
+                    "Topic approvals ({topic_approvals.len()})"
+                }
+                if topic_approvals.is_empty() {
+                    p { class: "text-text-muted text-sm", "No topic replies are waiting." }
+                } else {
+                    div { class: "space-y-2",
+                        for (topic_id, title, count) in topic_approvals.iter() {
+                            {
+                                let topic = bs58::encode(topic_id.as_bytes()).into_string();
+                                let board_key = bs58::encode(board.owner_vk.as_bytes()).into_string();
+                                let link = format!("#/board/{board_key}/topic/{topic}");
+                                let title = title.clone();
+                                let count = *count;
+                                rsx! {
+                                    div { class: "flex flex-wrap items-center gap-3 bg-panel border border-border rounded-lg px-3 py-2",
+                                        div { class: "flex-1 min-w-48",
+                                            p { class: "text-text font-medium", "{title}" }
+                                            p { class: "text-xs text-text-muted", "{count} pending reply(ies)" }
+                                        }
+                                        button {
+                                            r#type: "button",
+                                            class: "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg",
+                                            onclick: move |_| {
+                                                if let Some(window) = web_sys::window() {
+                                                    let _ = window.location().set_hash(&link);
+                                                }
+                                            },
+                                            "Open"
                                         }
                                     }
                                 }
