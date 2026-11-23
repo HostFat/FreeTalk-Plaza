@@ -1,8 +1,8 @@
 # Specifica del contratto `plaza-topic`
 
 Versione: 1 (implementata).
-Stato: fasi 0–4 completate; fase 3 dello shard per sezione pubblicata nella
-build locale v624. Nessuna migrazione delle vecchie board.
+Stato: fasi 0–4 completate; fase 4 dello shard per sezione pubblicata nella
+build locale v628. Nessuna migrazione delle vecchie board.
 
 ## Stato dell'implementazione
 

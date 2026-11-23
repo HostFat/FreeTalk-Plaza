@@ -422,6 +422,41 @@ pub fn App() -> Element {
         }
     });
 
+    // Section children are needed by the board list, search, notifications and
+    // moderation, so load them for every route of a sectioned board.
+    use_effect(move || {
+        let current = CURRENT_BOARD.read();
+        let Some(owner) = current.owner_key else {
+            return;
+        };
+        let sections = {
+            let boards = BOARDS.read();
+            let Some(board) = boards.map.get(&owner) else {
+                return;
+            };
+            if board.board_state.mode
+                != plaza_core::board_state::BoardModeV1::SectionedTopicIndex
+            {
+                return;
+            }
+            board
+                .board_state
+                .sections
+                .sections
+                .iter()
+                .filter_map(|entry| entry.section.contract.map(|_| entry.section.id))
+                .collect::<Vec<_>>()
+        };
+        for section in sections {
+            crate::util::safe_spawn_local(async move {
+                let _ = crate::components::app::section_contract::load_section_board(
+                    owner, section,
+                )
+                .await;
+            });
+        }
+    });
+
     // If a GET or a restore sets CURRENT_BOARD before the delegate map is
     // loaded, the value may be the current owner or profile key. Once the map
     // arrives, resolve it back to the map key so the board renders.

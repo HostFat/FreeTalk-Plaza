@@ -1,11 +1,12 @@
 # Shard dell'indice per sezione
 
-Data: 2026-11-23. Stato: fase 3 implementata nella build locale v624. La
+Data: 2026-11-23. Stato: fase 4 implementata nella build locale v628. La
 creazione di una sezione su una board `SectionedTopicIndex` crea la board
 figlia e ne registra la chiave; topic, risposte, attività, flag e report
-vengono scritti sulla figlia. La UI unisce gli indici delle figlie. Restano
-l'aggregazione di ricerca/notifiche/moderazione e la propagazione
-dell'autorità (fase 4-5).
+vengono scritti sulla figlia. Lista, ricerca, notifiche, badge non letti e
+coda moderazione aggregano gli indici delle figlie. L'autorità viene copiata
+nelle figlie caricate quando cambia nella madre. Restano move/merge tra
+sezioni e un ambiente di test pulito.
 
 ## Problema
 
@@ -143,10 +144,13 @@ l'indice dei topic. La UI tratta ogni sezione come una board.
    unisce gli indici delle figlie per la lista, la ricerca del topic e la
    continuation. La sezione General crea la sua figlia alla creazione della
    board. Test real-node sectioned esteso a topic, risposta e reload.
-4. **Ricerca, notifiche e moderazione**: aggregazione delle figlie, cache,
-   code report/approvazioni.
-5. **Autorità**: propagazione di membri/ban/ruoli alle figlie, retry e test di
-   ban/ruolo su più sezioni.
+4. **Ricerca, notifiche e moderazione** (fatto): le viste usano
+   `BoardData::with_merged_topics`; le figlie vengono caricate per ogni route
+   della board sectioned. Read state e badge non letti usano l'indice unito.
+5. **Autorità** (fatto per le figlie caricate): `sync_section_authority`
+   copia configurazione, membri, ruoli, ban, sospensioni e segreti nella
+   figlia con un `UpdateData::State`. Restano retry e test di ban/ruolo su più
+   sezioni, e la propagazione alle figlie non ancora caricate.
 6. **Benchmark**: 10 sezioni × 200 topic; verificare che una risposta tocchi
    solo la figlia e che la madre resti piccola.
 

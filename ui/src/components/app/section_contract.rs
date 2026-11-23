@@ -149,6 +149,59 @@ fn merge_index(dst: &mut TopicIndexV1, src: &TopicIndexV1) {
     }
 }
 
+/// Copy the parent's authority, members and global settings into a loaded
+/// section child, keeping the section's own topic index and content.
+pub async fn sync_section_authority(
+    owner: VerifyingKey,
+    section: SectionId,
+    parent: &ChatBoardStateV1,
+) -> Result<(), String> {
+    let key = section_key(owner, section);
+    let contract_id = *key.id();
+    let Some(child) = SECTION_BOARDS
+        .read()
+        .get(&contract_id)
+        .map(|board| board.state.clone())
+    else {
+        return Ok(());
+    };
+    let mut state = child;
+    state.configuration = parent.configuration.clone();
+    state.admin = parent.admin.clone();
+    state.ownership = parent.ownership.clone();
+    state.bans = parent.bans.clone();
+    state.ban_revocations = parent.ban_revocations.clone();
+    state.roles = parent.roles.clone();
+    state.invites = parent.invites.clone();
+    state.members = parent.members.clone();
+    state.member_info = parent.member_info.clone();
+    state.category_secrets = parent.category_secrets.clone();
+    state.secrets = parent.secrets.clone();
+    state.pq_secrets = parent.pq_secrets.clone();
+    state.warnings = parent.warnings.clone();
+    state.suspensions = parent.suspensions.clone();
+    state.image_retirements = parent.image_retirements.clone();
+    state.upgrade = parent.upgrade.clone();
+    state.mail_addresses = parent.mail_addresses.clone();
+
+    let board_params = ChatBoardParametersV1 { owner };
+    state
+        .verify_with_section(&board_params, Some(section))
+        .map_err(|error| format!("section authority does not verify: {error}"))?;
+    SECTION_BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.get_mut(&contract_id) {
+            board.state = state.clone();
+            board.synced = false;
+        }
+    });
+    send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
+        key,
+        data: UpdateData::State(to_cbor_vec(&state).into()),
+    }))
+    .await
+    .map_err(|error| format!("send section authority: {error}"))
+}
+
 /// Apply a delta to a section child and publish it. The child contract
 /// verifies its own records and section layout.
 pub async fn apply_section_delta(

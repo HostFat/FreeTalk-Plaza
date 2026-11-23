@@ -141,7 +141,7 @@ test("a sectioned board creates a child index contract", async ({ page }) => {
     timeout: 60_000,
   });
   const topicId = await waitForTopicRoute(page);
-  await app.getByPlaceholder("Write a reply.").fill("Section reply");
+  await app.getByPlaceholder("Write a reply…").fill("Section reply");
   await app.getByRole("button", { name: "Reply", exact: true }).click();
   await expect(app.getByText("Section reply")).toBeVisible({ timeout: 60_000 });
 
@@ -151,6 +151,10 @@ test("a sectioned board creates a child index contract", async ({ page }) => {
     `${withSections(BASE)}#/board/${boardKey}/topic/${topicId}`,
   );
   await expect(app.getByText("Section reply")).toBeVisible({ timeout: 60_000 });
+
+  await page.goto(`${withSections(BASE)}#/board/${boardKey}/search`);
+  await app.getByPlaceholder("Search titles and previews").fill("Section topic");
+  await expect(app.getByText("Section topic")).toBeVisible({ timeout: 30_000 });
 });
 
 test("a topic and its replies live in a separate contract", async ({ page }) => {
@@ -229,6 +233,8 @@ test("a topic and its replies live in a separate contract", async ({ page }) => 
   await expect(app.getByText("First reply edited")).toBeVisible({
     timeout: 30_000,
   });
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, { timeout: 30_000 });
+  await page.waitForTimeout(3_000);
 
   await page.goto(
     `${withTopics(BASE)}#/board/${boardKey}/topic/${topicId}`,
@@ -710,6 +716,8 @@ test("a long topic continues in a new part", async ({ page }) => {
   await expect(app.getByText("Second part reply")).toBeVisible({
     timeout: 60_000,
   });
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, { timeout: 30_000 });
+  await page.waitForTimeout(3_000);
 
   await page.goto(`${withTopics(BASE)}#/board/${boardKey}/topic/${topicId}`);
   await expect(app.getByText("Part 2.")).toBeVisible({ timeout: 60_000 });

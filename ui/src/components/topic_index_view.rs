@@ -25,49 +25,12 @@ pub fn TopicIndexView(board_id: String) -> Element {
         let Some(key) = current.owner_key else {
             return None;
         };
-        let mut board = BOARDS.read().map.get(&key).cloned()?;
-        if board.board_state.mode
-            == plaza_core::board_state::BoardModeV1::SectionedTopicIndex
-        {
-            board.board_state.topics = crate::components::app::section_contract::merged_index(
-                board.owner_vk,
-                &board.board_state.topics,
-            );
-        }
-        Some(board)
-    });
-
-    use_effect(move || {
-        let current = CURRENT_BOARD.read();
-        let Some(owner) = current.owner_key else {
-            return;
-        };
-        let sections = {
-            let boards = BOARDS.read();
-            let Some(board) = boards.map.get(&owner) else {
-                return;
-            };
-            if board.board_state.mode
-                != plaza_core::board_state::BoardModeV1::SectionedTopicIndex
-            {
-                return;
-            }
-            board
-                .board_state
-                .sections
-                .sections
-                .iter()
-                .filter_map(|entry| entry.section.contract.map(|_| entry.section.id))
-                .collect::<Vec<_>>()
-        };
-        for section in sections {
-            crate::util::safe_spawn_local(async move {
-                let _ = crate::components::app::section_contract::load_section_board(
-                    owner, section,
-                )
-                .await;
-            });
-        }
+        BOARDS
+            .read()
+            .map
+            .get(&key)
+            .cloned()
+            .map(|board| board.with_merged_topics())
     });
 
     let Some(board_data) = board.read().clone() else {
@@ -111,7 +74,8 @@ pub fn TopicIndexView(board_id: String) -> Element {
         .filter(|entry| !entry.section.deleted)
         .cloned()
         .collect();
-    let default_section = if is_owner {
+    let sectioned = board_data.board_state.mode == BoardModeV1::SectionedTopicIndex;
+    let default_section = if is_owner || sectioned {
         sections.first().map(|entry| entry.section.id)
     } else {
         None
@@ -208,7 +172,7 @@ pub fn TopicIndexView(board_id: String) -> Element {
 
             div { class: "bg-surface border border-border rounded-xl p-4 flex flex-col gap-3",
                 h2 { class: "text-sm font-semibold text-text", "New topic" }
-                if is_owner {
+                if is_owner || sectioned {
                     select {
                         class: "w-full px-3 py-2 bg-panel border border-border rounded-lg text-text",
                         value: "{selected_value}",

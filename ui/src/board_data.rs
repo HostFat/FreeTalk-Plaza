@@ -384,6 +384,20 @@ pub struct BoardData {
 }
 
 impl BoardData {
+    /// For a sectioned board, present the union of the parent and child topic
+    /// indexes as one index for the read-only UI.
+    pub fn with_merged_topics(mut self) -> Self {
+        if self.board_state.mode
+            == plaza_core::board_state::BoardModeV1::SectionedTopicIndex
+        {
+            self.board_state.topics = crate::components::app::section_contract::merged_index(
+                self.owner_vk,
+                &self.board_state.topics,
+            );
+        }
+        self
+    }
+
     pub fn topic_last_read(&self, topic: &MessageId) -> i64 {
         self.topic_read.get(topic).copied().unwrap_or(0)
     }

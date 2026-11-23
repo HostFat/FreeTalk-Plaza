@@ -94,6 +94,7 @@ pub fn TopBar() -> Element {
         let Some(board) = boards.map.get(&key) else {
             return 0;
         };
+        let board = board.clone().with_merged_topics();
         if board.board_state.mode.is_topic_index() {
             board
                 .board_state
@@ -119,7 +120,7 @@ pub fn TopBar() -> Element {
                 })
                 .count()
         } else {
-            crate::util::notifications::unread_count(board)
+            crate::util::notifications::unread_count(&board)
         }
     });
 

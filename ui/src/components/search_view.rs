@@ -254,7 +254,12 @@ fn TopicSearchView() -> Element {
 
     let board = use_memo(move || {
         let current = CURRENT_BOARD.read().owner_key?;
-        BOARDS.read().map.get(&current).cloned()
+        BOARDS
+            .read()
+            .map
+            .get(&current)
+            .cloned()
+            .map(|board| board.with_merged_topics())
     });
     let Some(board_data) = board.read().clone() else {
         return rsx! {};

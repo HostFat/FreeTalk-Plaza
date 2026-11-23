@@ -956,6 +956,23 @@ pub async fn propagate_authority(owner: VerifyingKey) -> Result<(), String> {
     if !board.board_state.mode.is_topic_index() {
         return Ok(());
     }
+    if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
+        let sections: Vec<_> = board
+            .board_state
+            .sections
+            .sections
+            .iter()
+            .filter_map(|entry| entry.section.contract.map(|_| entry.section.id))
+            .collect();
+        for section in sections {
+            crate::components::app::section_contract::sync_section_authority(
+                owner,
+                section,
+                &board.board_state,
+            )
+            .await?;
+        }
+    }
     let topics: Vec<(MessageId, u32)> = board
         .board_state
         .topics
