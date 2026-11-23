@@ -42,8 +42,8 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// The contract returns the full state on every update and subscribers receive
 /// it, so a part must stay small enough to broadcast. Clients continue a topic
 /// at 7/8 of this budget.
-pub const MAX_TOPIC_STATE_BYTES: usize = 1024 * 1024;
-pub const MAX_POSTS: usize = 500;
+pub const MAX_TOPIC_STATE_BYTES: usize = 512 * 1024;
+pub const MAX_POSTS: usize = 200;
 pub const MAX_PARTICIPANTS: usize = 512;
 pub const MAX_POST_BYTES: usize = 16 * 1024;
 pub const MAX_PARTS: u32 = 64;
@@ -2420,7 +2420,7 @@ mod scale_bench {
     #[test]
     #[ignore = "scale benchmark; run in release"]
     fn scale_topic_benchmark() {
-        for count in [100usize, 500] {
+        for count in [100usize, 200] {
             let state = state_with_posts(count);
             let params = params();
             state.verify(&params).unwrap();

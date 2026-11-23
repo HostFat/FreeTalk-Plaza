@@ -11,6 +11,8 @@ use crate::util::ecies::{decrypt_with_symmetric_key, encrypt_with_symmetric_key}
 use crate::util::{get_current_system_time, to_cbor_vec};
 use dioxus::prelude::*;
 use ed25519_dalek::VerifyingKey;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use freenet_scaffold::ComposableState;
 use freenet_stdlib::client_api::{ClientRequest, ContractRequest, ContractResponse};
 use freenet_stdlib::prelude::{
@@ -1749,11 +1751,91 @@ async fn publish_topic_delta(
         }
     });
 
-    send_contract_request(ContractRequest::Update {
+    let retry_key = key;
+    let retry_bytes = bytes.clone();
+    match send_contract_request(ContractRequest::Update {
         key,
         data: UpdateData::Delta(bytes.into()),
     })
     .await
+    {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            PENDING_TOPIC_DELTAS
+                .lock()
+                .unwrap()
+                .push(PendingTopicDelta {
+                    key: retry_key,
+                    bytes: retry_bytes,
+                    attempts: 0,
+                });
+            dioxus::logger::tracing::warn!(
+                "topic delta could not be sent; queued for retry: {error}"
+            );
+            // The delta is already applied locally; the outbox will retry it.
+            Ok(())
+        }
+    }
+}
+
+struct PendingTopicDelta {
+    key: ContractKey,
+    bytes: Vec<u8>,
+    attempts: u8,
+}
+
+static PENDING_TOPIC_DELTAS: Mutex<Vec<PendingTopicDelta>> = Mutex::new(Vec::new());
+static RETRY_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Retry topic deltas that could not be sent. Applying the same delta again is
+/// idempotent: posts, actions and approvals are keyed by id or generation.
+pub async fn retry_pending_topic_deltas() {
+    if RETRY_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let pending = {
+        let mut queue = PENDING_TOPIC_DELTAS.lock().unwrap();
+        std::mem::take(&mut *queue)
+    };
+    let mut keep = Vec::new();
+    for mut item in pending {
+        let result = send_contract_request(ContractRequest::Update {
+            key: item.key,
+            data: UpdateData::Delta(item.bytes.clone().into()),
+        })
+        .await;
+        match result {
+            Ok(()) => {
+                dioxus::logger::tracing::info!("retried a queued topic delta");
+            }
+            Err(error) => {
+                item.attempts += 1;
+                if item.attempts < 5 {
+                    keep.push(item);
+                } else {
+                    dioxus::logger::tracing::warn!(
+                        "dropping a topic delta after 5 failed attempts: {error}"
+                    );
+                }
+            }
+        }
+    }
+    PENDING_TOPIC_DELTAS.lock().unwrap().extend(keep);
+    RETRY_RUNNING.store(false, Ordering::SeqCst);
+}
+
+/// Start the periodic retry loop once per page.
+pub fn start_topic_outbox() {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    crate::util::safe_spawn_local(async move {
+        loop {
+            crate::util::sleep(std::time::Duration::from_secs(20)).await;
+            retry_pending_topic_deltas().await;
+        }
+    });
 }
 
 fn mark_synced(key: &ContractKey) {

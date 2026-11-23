@@ -18,8 +18,8 @@ cargo test -p plaza-core --release --test topic_index scale_board_benchmark -- -
 
 | Post | Stato | Serializzazione | `verify` | `apply_delta` (1 post) | `apply_delta_incremental` |
 |---|---|---|---|---|---|
-| 100 | 37 KiB | 0.3 ms | 254 ms | 241 ms | 13.5 ms |
-| 500 | 180 KiB | 1.4 ms | ~1,15 s | ~1,15 s | 13.5 ms |
+| 100 | 37 KiB | 0.3 ms | 236 ms | 231 ms | 12.7 ms |
+| 200 | 73 KiB | 0.5 ms | 455 ms | 472 ms | 13.1 ms |
 
 ### Board (1.000 membri)
 
@@ -36,10 +36,10 @@ byte: con contenuti reali da 512 byte per campo lo stato cresce di circa
 ## Cosa dicono i numeri
 
 1. **La verifica completa resta il costo dominante.** `verify` costa 5,35 s
-   con 500 topic e 15,43 s con 2.000; 254 ms con 100 post e 1,15 s con 500.
+   con 500 topic e 15,43 s con 2.000; 236 ms con 100 post e 455 ms con 200.
    La serializzazione costa 1–23 ms: il tempo è quasi tutto firma.
 2. **Il percorso incrementale risolve il caso caldo.** Un post su un topic
-   già validato richiede 13,5 ms indipendentemente da 100 o 500 post
+   già validato richiede 13 ms indipendentemente da 100 o 200 post
    precedenti. Un delta che tocca solo l'indice della board richiede 2,5–3,6
    ms, contro 1,33–5,38 s del percorso completo. La suite real-node passa
    10/10 su questa build.
@@ -69,9 +69,9 @@ byte: con contenuti reali da 512 byte per campo lo stato cresce di circa
    membri, ban e ruoli per intero. Restano da rendere incrementali anche
    queste parti e da misurare il caso reale; i merge di stato completo
    richiedono ancora la verifica piena.
-3. **Non alzare i limiti attuali.** 500 post e 2.000 topic restano alti per
-   gli update completi. Se serve usabilità immediata, scendere a 200 post per
-   parte e 500 topic per board è un tampone.
+3. **Non alzare i limiti attuali.** La parte è scesa a 200 post / 512 KiB;
+   2.000 topic restano alti per gli update completi. Se serve usabilità
+   immediata, 500 topic per board è un tampone.
 4. **Shardare l'indice per sezione** e **dividere i post in pagine** per
    ridurre il broadcast dello stato completo.
 5. **Ripetere il benchmark con contenuti realistici, azioni, approvazioni e

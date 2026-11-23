@@ -1,7 +1,7 @@
 # Specifica del contratto `plaza-topic`
 
 Versione: 1 (implementata).
-Stato: fasi 0–4 completate e pubblicate nella build locale v615. Nessuna
+Stato: fasi 0–4 completate e pubblicate nella build locale v617. Nessuna
 migrazione delle vecchie board.
 
 ## Stato dell'implementazione
@@ -378,8 +378,8 @@ TopicGenerationV1 {
 
 | Limite | Valore |
 |---|---|
-| `MAX_TOPIC_STATE_BYTES` | 1 MiB |
-| `MAX_POSTS` | 500 per parte |
+| `MAX_TOPIC_STATE_BYTES` | 512 KiB |
+| `MAX_POSTS` | 200 per parte |
 | `MAX_PARTICIPANTS` | 512 |
 | `MAX_POST_BYTES` | 16 KiB |
 | `MAX_PARTS` | 64 |
@@ -533,6 +533,9 @@ Le board nuove usano `BoardModeV1::TopicIndex`; le board legacy restano
 - `TOPIC_CACHE` tiene al massimo 24 topic, eliminando i più vecchi già
   sincronizzati. La sottoscrizione sul nodo resta attiva: la stdlib attuale
   non espone ancora un `Unsubscribe` nel client API.
+- Se l'invio di un delta topic fallisce, il delta resta in una coda locale e
+  viene ritentato ogni 20 secondi, fino a 5 volte. Lo stato locale è già
+  applicato, quindi il post resta visibile; il retry è idempotente.
 - Il mark-read usa il timestamp dell'entry quando manca l'attività, per
   evitare un loop di render.
 
@@ -561,7 +564,7 @@ scenario passa se eseguito da solo.
 
 I benchmark di scala sono in `docs/plaza-scale-benchmark.md`: misurano
 `verify`, `apply_delta`, `apply_delta_incremental`, serializzazione e
-dimensione per 500/2.000 topic e 100/500 post. La verifica completa resta
-costosa (1,15 s per 500 post, 15,4 s per 2.000 topic), mentre il percorso
-incrementale scende a 13,5 ms per un post e 2,5–3,6 ms per un delta del solo
+dimensione per 500/2.000 topic e 100/200 post. La verifica completa resta
+costosa (455 ms per 200 post, 15,4 s per 2.000 topic), mentre il percorso
+incrementale scende a 13 ms per un post e 2,5–3,6 ms per un delta del solo
 indice.

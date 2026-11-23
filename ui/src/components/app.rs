@@ -360,6 +360,7 @@ pub fn App() -> Element {
     // Capture the Dioxus runtime for use in defer()/setTimeout callbacks.
     // Must be called from within a Dioxus component where the runtime is active.
     crate::util::capture_runtime();
+    crate::components::app::topic_contract::start_topic_outbox();
     #[cfg(all(feature = "example-data", target_arch = "wasm32"))]
     crate::test_hooks::install();
 
