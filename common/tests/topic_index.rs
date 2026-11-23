@@ -23,7 +23,8 @@ use plaza_core::board_state::{
     ChatBoardStateV1Delta,
 };
 use plaza_core::util::sign_struct;
-use std::time::SystemTime;
+use std::hint::black_box;
+use std::time::{Instant, SystemTime};
 
 fn owner() -> SigningKey {
     SigningKey::from_bytes(&[1u8; 32])
@@ -298,6 +299,227 @@ fn the_topic_creation_rate_is_enforced() {
     ));
     let error = state.verify(&state, &params()).unwrap_err();
     assert!(error.contains("too many topics"), "{error}");
+}
+
+fn member_key(index: usize) -> SigningKey {
+    let mut seed = [0u8; 32];
+    seed[..8].copy_from_slice(&(index as u64).to_le_bytes());
+    seed[8] = 0x42;
+    seed[9] = 0x7f;
+    SigningKey::from_bytes(&seed)
+}
+
+fn topic_seed(index: usize) -> [u8; 32] {
+    let mut seed = [0u8; 32];
+    seed[..8].copy_from_slice(&(index as u64).to_le_bytes());
+    seed[8] = 0x11;
+    seed
+}
+
+/// Build an index board with signed members, topics, activity, flags and
+/// reports. It is intentionally large; run the ignored benchmark in release.
+fn scale_board(topics: usize, members: usize, reports: usize) -> ChatBoardStateV1 {
+    let owner = owner();
+    let owner_id = MemberId::from(&owner.verifying_key());
+    let section_id = MessageId::from_bytes([5u8; 32]);
+    let mut state = ChatBoardStateV1 {
+        configuration: AuthorizedConfigurationV1::new(
+            Configuration {
+                owner_member_id: owner_id,
+                ..Configuration::default()
+            },
+            &owner,
+        ),
+        mode: BoardModeV1::TopicIndex,
+        ..Default::default()
+    };
+    state.sections.sections.push(AuthorizedSectionV1::new(
+        section(5),
+        &owner,
+        None,
+    ));
+
+    let keys: Vec<SigningKey> = (0..members).map(member_key).collect();
+    for sk in &keys {
+        state.members.members.push(AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk: sk.verifying_key(),
+                join_proof: None,
+            },
+            &owner,
+        ));
+    }
+
+    for index in 0..topics {
+        let sk = &keys[index % members];
+        let author = MemberId::from(&sk.verifying_key());
+        let topic_id = MessageId::from_bytes(topic_seed(index));
+        // One entry per hour per author keeps the creation rate limit happy.
+        let created_at = 1_000_000 + index as i64 * 3_600_001;
+        state.topics.entries.push(AuthorizedTopicEntryV1::new(
+            TopicEntryV1 {
+                topic_id,
+                part: 0,
+                protocol_version: 1,
+                author,
+                section: Some(section_id),
+                section_chain: vec![section_id],
+                title: SealedBytes::public(b"Title".to_vec()),
+                preview: SealedBytes::public(b"Preview".to_vec()),
+                header_hash: topic_seed(index),
+                created_at,
+                generation: 1,
+            },
+            sk,
+        ));
+
+        let activity = TopicActivityV1 {
+            topic_id,
+            last_activity: created_at + 1,
+            last_post_id: None,
+            reply_count: 1,
+            pending_approvals: 0,
+            generation: 1,
+        };
+        state.topics.activity.push(AuthorizedTopicActivityV1 {
+            signature: sign_struct(&activity, sk),
+            activity,
+            signer: Some(author),
+            signer_key: Some(sk.verifying_key()),
+        });
+
+        let flag = TopicFlagV1 {
+            topic_id,
+            kind: TopicFlagKind::Pinned,
+            value: true,
+            destination: None,
+            section: None,
+            section_chain: Vec::new(),
+            part: None,
+            scope_chain: vec![section_id],
+            generation: 1,
+            created_at,
+        };
+        state.topics.flags.push(AuthorizedTopicFlagV1 {
+            signature: sign_struct(&flag, &owner),
+            flag,
+            signer: Some(owner_id),
+            signer_key: Some(owner.verifying_key()),
+            authority: None,
+        });
+    }
+
+    for index in 0..reports {
+        let sk = &keys[index % members];
+        let author = MemberId::from(&sk.verifying_key());
+        let value = TopicReportV1 {
+            topic_id: MessageId::from_bytes(topic_seed(index % topics)),
+            post_id: None,
+            reporter: author,
+            reason: ReportReason::Spam,
+            body: SealedBytes::public(b"Report".to_vec()),
+            created_at: 2_000_000 + index as i64,
+            generation: 1,
+        };
+        state.topics.reports.push(AuthorizedTopicReportV1 {
+            signature: sign_struct(&value, sk),
+            report: value,
+        });
+    }
+
+    state
+}
+
+fn measure(label: &str, iterations: usize, mut f: impl FnMut()) {
+    let start = Instant::now();
+    for _ in 0..iterations {
+        black_box(f());
+    }
+    let elapsed = start.elapsed().as_secs_f64();
+    println!(
+        "{label}: {:.1} ms/op ({} ops)",
+        elapsed * 1000.0 / iterations as f64,
+        iterations
+    );
+}
+
+/// `cargo test -p plaza-core --test topic_index --release -- --ignored --nocapture`
+#[test]
+#[ignore = "scale benchmark; run in release"]
+fn scale_board_benchmark() {
+    for topics in [500usize, 2_000] {
+        let members = 1_000;
+        let reports = topics / 4;
+        let state = scale_board(topics, members, reports);
+        let params = params();
+        state.verify(&state, &params).unwrap();
+
+        println!(
+            "\nboard: {topics} topic, {members} membri, {reports} report, {} flag",
+            state.topics.flags.len()
+        );
+        let mut bytes = Vec::new();
+        let start = Instant::now();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        println!(
+            "serializzazione: {:.1} ms, {} KiB",
+            start.elapsed().as_secs_f64() * 1000.0,
+            bytes.len() / 1024
+        );
+        let decoded: ChatBoardStateV1 =
+            ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let start = Instant::now();
+        decoded.verify(&decoded, &params).unwrap();
+        println!(
+            "deserializzazione + verify: {:.1} ms",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+
+        measure("verify", 3, || {
+            state.verify(&state, &params).unwrap();
+        });
+
+        let delta = ChatBoardStateV1Delta {
+            topics: Some(TopicIndexDelta {
+                activity: vec![AuthorizedTopicActivityV1 {
+                    signature: sign_struct(
+                        &TopicActivityV1 {
+                            topic_id: MessageId::from_bytes(topic_seed(0)),
+                            last_activity: 9_000_000,
+                            last_post_id: None,
+                            reply_count: 2,
+                            pending_approvals: 0,
+                            generation: 2,
+                        },
+                        &member_key(0),
+                    ),
+                    activity: TopicActivityV1 {
+                        topic_id: MessageId::from_bytes(topic_seed(0)),
+                        last_activity: 9_000_000,
+                        last_post_id: None,
+                        reply_count: 2,
+                        pending_approvals: 0,
+                        generation: 2,
+                    },
+                    signer: Some(MemberId::from(&member_key(0).verifying_key())),
+                    signer_key: Some(member_key(0).verifying_key()),
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut applied = state.clone();
+        let start = Instant::now();
+        applied
+            .apply_delta(&state, &params, &Some(delta))
+            .unwrap();
+        println!(
+            "apply_delta (una activity): {:.1} ms",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 }
 
 #[test]

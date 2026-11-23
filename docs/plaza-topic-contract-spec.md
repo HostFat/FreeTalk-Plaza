@@ -539,3 +539,9 @@ passati e 12 saltati.
 
 La suite real-node sequenziale è instabile sul nodo locale carico: ogni
 scenario passa se eseguito da solo.
+
+I benchmark di scala sono in `docs/plaza-scale-benchmark.md`: misurano
+`verify`, `apply_delta`, serializzazione e dimensione per 500/2.000 topic e
+100/500 post. Mostrano che la verifica completa domina il costo e che
+`apply_delta` richiama ancora `verify` sull'intero stato; la verifica
+incrementale è il prossimo intervento necessario.

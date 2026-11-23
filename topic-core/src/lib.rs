@@ -2295,6 +2295,74 @@ pub fn decode_summary(bytes: &[u8]) -> Result<TopicStateSummaryV1, String> {
 }
 
 #[cfg(test)]
+mod scale_bench {
+    use super::tests::*;
+    use super::*;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    fn state_with_posts(count: usize) -> TopicStateV1 {
+        let mut state = base_state();
+        for index in 0..count {
+            let entry = post(
+                &member(),
+                "reply",
+                1_000 + index as i64 * 61_000,
+                (index % 256) as u8,
+            );
+            state.posts.insert(entry.post.id(), entry);
+        }
+        state
+    }
+
+    /// `cargo test -p plaza-topic-core --release --lib -- --ignored --nocapture`
+    #[test]
+    #[ignore = "scale benchmark; run in release"]
+    fn scale_topic_benchmark() {
+        for count in [100usize, 500] {
+            let state = state_with_posts(count);
+            let params = params();
+            state.verify(&params).unwrap();
+
+            let mut bytes = Vec::new();
+            let start = Instant::now();
+            ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+            println!(
+                "\ntopic: {count} post\nserializzazione: {:.1} ms, {} KiB",
+                start.elapsed().as_secs_f64() * 1000.0,
+                bytes.len() / 1024
+            );
+
+            let start = Instant::now();
+            for _ in 0..5 {
+                black_box(state.verify(&params).unwrap());
+            }
+            println!(
+                "verify: {:.1} ms/op",
+                start.elapsed().as_secs_f64() * 1000.0 / 5.0
+            );
+
+            let mut base = state_with_posts(count - 1);
+            let delta = TopicDeltaV1 {
+                posts: vec![post(
+                    &member(),
+                    "reply",
+                    1_000 + (count - 1) as i64 * 61_000,
+                    ((count - 1) % 256) as u8,
+                )],
+                ..Default::default()
+            };
+            let start = Instant::now();
+            base.apply_delta(&params, &delta).unwrap();
+            println!(
+                "apply_delta (un post): {:.1} ms",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use plaza_core::board_state::ban::{AuthorizedUserBan, UserBan};
@@ -2969,7 +3037,6 @@ mod phase1_policy_tests {
 #[cfg(test)]
 mod member_topic_tests {
     use super::tests::*;
-    use super::*;
     use plaza_core::board_state::configuration::{
         AuthorizedConfigurationV1, Configuration,
     };
@@ -3107,7 +3174,6 @@ mod approval_tests {
 #[cfg(test)]
 mod propagation_tests {
     use super::tests::*;
-    use super::*;
     use plaza_core::board_state::ban::{AuthorizedUserBan, UserBan};
 
     #[test]
