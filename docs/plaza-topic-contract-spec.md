@@ -1,7 +1,7 @@
 # Specifica del contratto `plaza-topic`
 
 Versione: 1 (implementata).
-Stato: fasi 0–4 completate e pubblicate nella build locale v605. Nessuna
+Stato: fasi 0–4 completate e pubblicate nella build locale v608. Nessuna
 migrazione delle vecchie board.
 
 ## Stato dell'implementazione
@@ -13,7 +13,7 @@ migrazione delle vecchie board.
   attività, flag, report e risoluzioni.
 - Client `ui/src/components/app/topic_contract.rs`; UI
   `topic_index_view.rs`, `topic_view.rs`, ricerca, notifiche e code in Manage.
-- Test: 40 in `topic-core`, 323 in `plaza-core`, 10 scenari real-node dei
+- Test: 40 in `topic-core`, 325 in `plaza-core`, 10 scenari real-node dei
   topic (draft e parti precedenti inclusi) e 116 test statici Playwright.
 
 Funzioni disponibili: topic creati dall'owner e dai membri, topic privati,
@@ -22,6 +22,10 @@ sezioni, propagazione di ban/ruoli/sospensioni, approvazioni anche da
 moderatori non owner, poll e reaction, move/merge/split, continuation,
 report con risoluzione, ricerca sull'indice, notifiche dei topic non letti e
 draft per topic.
+
+La build v608 riduce i limiti di topic e indice e aggiunge i rate limit: il
+nuovo WASM ri-chiave board e topic, quindi le board e i topic creati con le
+build precedenti vanno ricreati.
 
 Limiti noti: le approvazioni non-owner condividono il percorso owner ma non
 hanno uno scenario e2e dedicato; lo stato di lettura è per board/dispositivo;
@@ -372,18 +376,20 @@ TopicGenerationV1 {
 
 | Limite | Valore |
 |---|---|
-| `MAX_TOPIC_STATE_BYTES` | 8 MiB |
-| `MAX_POSTS` | 5.000 per parte |
+| `MAX_TOPIC_STATE_BYTES` | 1 MiB |
+| `MAX_POSTS` | 500 per parte |
 | `MAX_PARTICIPANTS` | 512 |
 | `MAX_POST_BYTES` | 16 KiB |
 | `MAX_PARTS` | 64 |
 | `MAX_TITLE_BYTES` | 512 |
 | `MAX_BODY_BYTES` | 64 KiB |
 | `MAX_IMAGES_PER_POST` | 4 |
-| `MAX_ACTIONS` | 10.000 |
-| `MAX_APPROVALS` | 10.000 |
+| `MAX_ACTIONS` | 2.000 |
+| `MAX_APPROVALS` | 2.000 |
 | `MAX_JOIN_DEPTH` | 64 |
-| Rate limit | dalla `TopicPolicyV1` |
+| Rate limit post | dalla `TopicPolicyV1` |
+| Creazione topic | 30 per autore/ora |
+| Report | 60 per reporter/ora |
 
 - Un post oltre i limiti viene rifiutato dal contratto.
 - Lo stato oltre `MAX_TOPIC_STATE_BYTES` viene rifiutato; serve una nuova
@@ -439,6 +445,9 @@ TopicDeltaV1 {
   o sospeso viene rifiutato.
 - Report: vivono nell'indice della board, non nel topic. La risoluzione è un
   record firmato da un moderatore con potere `Delete`.
+- Limiti di frequenza: 30 topic per autore/ora e 60 report per reporter/ora,
+  verificati dal contratto sui timestamp firmati; il client rifiuta prima di
+  pubblicare.
 - Sezione: `SectionSnapshotV1` con ACL; il topic verifica che il partecipante
   abbia un ruolo ammesso.
 - Propagazione: i client pubblicano i record di autorità aggiornati nei topic
@@ -488,7 +497,8 @@ Le board nuove usano `BoardModeV1::TopicIndex`; le board legacy restano
   richiedono l'autorità di moderazione. La sezione effettiva è quella
   dell'ultimo flag `Section`; la parte quella dell'ultimo flag `Part`.
 - La board non contiene i post: conserva solo indice, sezioni e stato di
-  moderazione.
+  moderazione. L'indice è limitato a 2.000 topic, 2.000 righe di attività,
+  16.000 flag e 2.000 report, perché viaggia in pieno con ogni update.
 
 ## 10. Client e UI
 
@@ -517,7 +527,8 @@ hide/restore/purge, poll e reaction, contenuto sigillato illeggibile al
 contratto, limiti di dimensione e numero, CBOR round-trip, firme manomesse e
 continuation.
 
-`plaza-core` ha 323 test, inclusi indice, sezioni, flag, report e risoluzioni.
+`plaza-core` ha 325 test, inclusi indice, sezioni, flag, report, risoluzioni e
+limiti di frequenza.
 
 La suite real-node `ui/tests/real-node/topics.spec.ts` ha 10 scenari: topic e
 risposte (con draft che sopravvive al reload), topic privato, topic creato da

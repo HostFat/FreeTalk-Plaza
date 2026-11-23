@@ -39,16 +39,19 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::SystemTime;
 
 pub const PROTOCOL_VERSION: u16 = 1;
-pub const MAX_TOPIC_STATE_BYTES: usize = 8 * 1024 * 1024;
-pub const MAX_POSTS: usize = 5_000;
+/// The contract returns the full state on every update and subscribers receive
+/// it, so a part must stay small enough to broadcast. Clients continue a topic
+/// at 7/8 of this budget.
+pub const MAX_TOPIC_STATE_BYTES: usize = 1024 * 1024;
+pub const MAX_POSTS: usize = 500;
 pub const MAX_PARTICIPANTS: usize = 512;
 pub const MAX_POST_BYTES: usize = 16 * 1024;
 pub const MAX_PARTS: u32 = 64;
 pub const MAX_TITLE_BYTES: usize = 512;
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 pub const MAX_IMAGES_PER_POST: usize = 4;
-pub const MAX_ACTIONS: usize = 10_000;
-pub const MAX_APPROVALS: usize = 10_000;
+pub const MAX_ACTIONS: usize = 2_000;
+pub const MAX_APPROVALS: usize = 2_000;
 pub const MAX_JOIN_DEPTH: usize = 64;
 
 pub type TopicId = MessageId;

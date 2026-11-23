@@ -4,6 +4,10 @@
 use crate::board_state::member::MemberId;
 use crate::board_state::message::MessageId;
 use crate::board_state::privacy::SealedBytes;
+use crate::board_state::rate_limit::{
+    exceeding_member, MAX_REPORTS_PER_WINDOW, MAX_TOPICS_PER_WINDOW, REPORT_RATE_WINDOW_MS,
+    TOPIC_RATE_WINDOW_MS,
+};
 use crate::board_state::reports::ReportReason;
 use crate::board_state::roles::{
     resolve_signer_key, verify_moderation_authority, AuthorityProof,
@@ -18,10 +22,14 @@ use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
-pub const MAX_TOPICS: usize = 20_000;
-pub const MAX_TOPIC_ACTIVITY: usize = 20_000;
-pub const MAX_TOPIC_FLAGS: usize = 120_000;
-pub const MAX_TOPIC_REPORTS: usize = 10_000;
+/// The index travels in full with every board update, so it is kept small
+/// enough to verify and broadcast. Larger boards use more sections or a new
+/// board.
+pub const MAX_TOPICS: usize = 2_000;
+pub const MAX_TOPIC_ACTIVITY: usize = 2_000;
+/// Eight flag kinds per topic.
+pub const MAX_TOPIC_FLAGS: usize = 8 * MAX_TOPICS;
+pub const MAX_TOPIC_REPORTS: usize = 2_000;
 pub const MAX_TOPIC_REPORT_BYTES: usize = 2_000;
 pub const MAX_TOPIC_TITLE_BYTES: usize = 512;
 pub const MAX_TOPIC_PREVIEW_BYTES: usize = 512;
@@ -693,6 +701,15 @@ impl ComposableState for TopicIndexV1 {
             }
             self.verify_entry(parent_state, parameters, entry)?;
         }
+        if let Some(author) = exceeding_member(
+            self.entries
+                .iter()
+                .map(|entry| (entry.entry.author, entry.entry.created_at)),
+            TOPIC_RATE_WINDOW_MS,
+            MAX_TOPICS_PER_WINDOW,
+        ) {
+            return Err(format!("too many topics from {author} in the window"));
+        }
         let mut activity = HashSet::new();
         for entry in &self.activity {
             if !activity.insert(entry.activity.topic_id) {
@@ -717,6 +734,15 @@ impl ComposableState for TopicIndexV1 {
                 return Err("duplicate topic report".to_string());
             }
             self.verify_report(parent_state, parameters, entry)?;
+        }
+        if let Some(reporter) = exceeding_member(
+            self.reports
+                .iter()
+                .map(|entry| (entry.report.reporter, entry.report.created_at)),
+            REPORT_RATE_WINDOW_MS,
+            MAX_REPORTS_PER_WINDOW,
+        ) {
+            return Err(format!("too many reports from {reporter} in the window"));
         }
         if self.report_resolutions.len() > MAX_TOPIC_REPORTS {
             return Err("too many report resolutions".to_string());

@@ -20,6 +20,26 @@ async function appFrame(page: import("@playwright/test").Page) {
   return frame;
 }
 
+async function waitForTopicRoute(
+  page: import("@playwright/test").Page,
+): Promise<string> {
+  let topicId = "";
+  await expect
+    .poll(
+      async () => {
+        const hash = await (await appFrame(page)).evaluate(() => location.hash);
+        const match = hash.match(
+          /#\/board\/[^/]+\/topic\/([1-9A-HJ-NP-Za-km-z]+)/,
+        );
+        if (match) topicId = match[1];
+        return Boolean(match);
+      },
+      { timeout: 60_000 },
+    )
+    .toBe(true);
+  return topicId;
+}
+
 async function gotoRoot(page: import("@playwright/test").Page) {
   await page.goto(`${BASE}#/enable-topics`);
   await expect(
@@ -107,10 +127,7 @@ test("a topic and its replies live in a separate contract", async ({ page }) => 
     app.getByText("The board keeps only the title and the index."),
   ).toBeVisible({ timeout: 30_000 });
 
-  const hash = await (await appFrame(page)).evaluate(() => location.hash);
-  const topicMatch = hash.match(/#\/board\/[^/]+\/topic\/([1-9A-HJ-NP-Za-km-z]+)/);
-  expect(topicMatch, `topic route not found in ${hash}`).not.toBeNull();
-  const topicId = topicMatch![1];
+  const topicId = await waitForTopicRoute(page);
 
   await app.getByPlaceholder("Write a reply…").fill("First reply");
   await app.getByRole("button", { name: "Reply", exact: true }).click();
@@ -222,10 +239,7 @@ test("a private topic keeps its text sealed", async ({ page }) => {
   await app.getByRole("button", { name: "Create topic" }).click();
   await expect(app.getByText("Sealed topic")).toBeVisible({ timeout: 60_000 });
 
-  const hash = await (await appFrame(page)).evaluate(() => location.hash);
-  const match = hash.match(/#\/board\/[^/]+\/topic\/([1-9A-HJ-NP-Za-km-z]+)/);
-  expect(match, `topic route not found in ${hash}`).not.toBeNull();
-  const topicId = match![1];
+  const topicId = await waitForTopicRoute(page);
 
   await app.getByPlaceholder("Write a reply…").fill("Sealed reply");
   await app.getByRole("button", { name: "Reply", exact: true }).click();
@@ -298,7 +312,11 @@ test("the owner approves a pending reply", async ({ page }) => {
   test.setTimeout(300_000);
   await gotoRoot(page);
   const app = page.frameLocator("iframe");
-  const boardKey = await createBoard(page, "ApprovalBoard", "ApprovalOwner");
+  const suffix = Date.now().toString(36);
+  const boardName = `ApprovalBoard-${suffix}`;
+  const ownerName = `ApprovalOwner-${suffix}`;
+  const memberName = `ApprovalMember-${suffix}`;
+  const boardKey = await createBoard(page, boardName, ownerName);
 
   // Turn the approval queue on before creating the topic, so the topic policy
   // carries approval_required.
@@ -330,10 +348,7 @@ test("the owner approves a pending reply", async ({ page }) => {
     .fill("Only approved replies are visible.");
   await app.getByRole("button", { name: "Create topic" }).click();
   await expect(app.getByText("Approval topic")).toBeVisible({ timeout: 60_000 });
-  const hash = await (await appFrame(page)).evaluate(() => location.hash);
-  const match = hash.match(/#\/board\/[^/]+\/topic\/([1-9A-HJ-NP-Za-km-z]+)/);
-  expect(match, `topic route not found in ${hash}`).not.toBeNull();
-  const topicId = match![1];
+  const topicId = await waitForTopicRoute(page);
 
   await page.goto(`${withTopics(BASE)}#/board/${boardKey}/admin/links`);
   await app.getByRole("button", { name: "Invite links" }).click();
@@ -355,9 +370,9 @@ test("the owner approves a pending reply", async ({ page }) => {
   await expect(
     app.getByRole("heading", { name: "Join this board" }),
   ).toBeVisible({ timeout: 30_000 });
-  await app.getByPlaceholder("Your nickname").fill("ApprovalMember");
+  await app.getByPlaceholder("Your nickname").fill(memberName);
   await app.getByRole("button", { name: "Join" }).click();
-  await expect(app.getByText("ApprovalBoard").first()).toBeVisible({
+  await expect(app.getByText(boardName).first()).toBeVisible({
     timeout: 60_000,
   });
   await expect(app.getByText(/Syncing\./)).toHaveCount(0, { timeout: 60_000 });
@@ -389,7 +404,11 @@ test("a ban propagates to an existing topic", async ({ page }) => {
   test.setTimeout(300_000);
   await gotoRoot(page);
   const app = page.frameLocator("iframe");
-  const boardKey = await createBoard(page, "BanBoard", "BanOwner");
+  const suffix = Date.now().toString(36);
+  const boardName = `BanBoard-${suffix}`;
+  const ownerName = `BanOwner-${suffix}`;
+  const memberName = `BanMember-${suffix}`;
+  const boardKey = await createBoard(page, boardName, ownerName);
 
   await page.goto(`${withTopics(BASE)}#/board/${boardKey}/admin/roles`);
   await app.getByRole("button", { name: "Roles", exact: true }).click();
@@ -408,10 +427,7 @@ test("a ban propagates to an existing topic", async ({ page }) => {
     .fill("A topic that outlives its author's access.");
   await app.getByRole("button", { name: "Create topic" }).click();
   await expect(app.getByText("Ban topic")).toBeVisible({ timeout: 60_000 });
-  const hash = await (await appFrame(page)).evaluate(() => location.hash);
-  const match = hash.match(/#\/board\/[^/]+\/topic\/([1-9A-HJ-NP-Za-km-z]+)/);
-  expect(match, `topic route not found in ${hash}`).not.toBeNull();
-  const topicId = match![1];
+  const topicId = await waitForTopicRoute(page);
 
   await page.goto(`${withTopics(BASE)}#/board/${boardKey}/admin/links`);
   await app.getByRole("button", { name: "Invite links" }).click();
@@ -431,9 +447,9 @@ test("a ban propagates to an existing topic", async ({ page }) => {
   await expect(
     app.getByRole("heading", { name: "Join this board" }),
   ).toBeVisible({ timeout: 30_000 });
-  await app.getByPlaceholder("Your nickname").fill("BanMember");
+  await app.getByPlaceholder("Your nickname").fill(memberName);
   await app.getByRole("button", { name: "Join" }).click();
-  await expect(app.getByText("BanBoard").first()).toBeVisible({
+  await expect(app.getByText(boardName).first()).toBeVisible({
     timeout: 60_000,
   });
   await expect(app.getByText("New topic")).toBeVisible({ timeout: 60_000 });
@@ -448,13 +464,13 @@ test("a ban propagates to an existing topic", async ({ page }) => {
 
   // Ban from the owner profile, then switch back to the member to verify the
   // propagated authority on the topic.
-  await switchProfile(page, "BanOwner");
+  await switchProfile(page, ownerName);
   await page.goto(`${withTopics(BASE)}#/board/${boardKey}/admin/banned`);
   await app.getByRole("button", { name: "Banned", exact: true }).click();
   const memberSelect = app.getByRole("combobox").last();
   await expect(memberSelect).toBeVisible({ timeout: 30_000 });
   const memberOption = memberSelect
-    .locator("option", { hasText: "BanMember" })
+    .locator("option", { hasText: memberName })
     .first();
   const memberValue = await memberOption.getAttribute("value");
   await memberSelect.selectOption(memberValue!);
@@ -508,10 +524,7 @@ test("reactions and polls survive a reload", async ({ page }) => {
   await expect(app.getByText("Poll and reactions")).toBeVisible({
     timeout: 60_000,
   });
-  const hash = await (await appFrame(page)).evaluate(() => location.hash);
-  const match = hash.match(/#\/board\/[^/]+\/topic\/([1-9A-HJ-NP-Za-km-z]+)/);
-  expect(match, `topic route not found in ${hash}`).not.toBeNull();
-  const topicId = match![1];
+  const topicId = await waitForTopicRoute(page);
 
   // React to the topic header.
   await app.getByRole("button", { name: /👍/ }).first().click();
@@ -637,10 +650,7 @@ test("a long topic continues in a new part", async ({ page }) => {
   await expect(app.getByRole("heading", { name: "Long topic" })).toBeVisible({
     timeout: 60_000,
   });
-  const hash = await (await appFrame(page)).evaluate(() => location.hash);
-  const match = hash.match(/#\/board\/[^/]+\/topic\/([1-9A-HJ-NP-Za-km-z]+)/);
-  expect(match).not.toBeNull();
-  const topicId = match![1];
+  const topicId = await waitForTopicRoute(page);
 
   await app.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(app.getByText("Part 2.")).toBeVisible({ timeout: 60_000 });

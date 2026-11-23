@@ -9,13 +9,14 @@ use plaza_core::board_state::configuration::{
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
 use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::privacy::SealedBytes;
+use plaza_core::board_state::reports::ReportReason;
 use plaza_core::board_state::sections::{
     AuthorizedSectionV1, SectionV1,
 };
 use plaza_core::board_state::topics::{
     AuthorizedTopicActivityV1, AuthorizedTopicEntryV1,
-    AuthorizedTopicFlagV1, TopicActivityV1, TopicEntryV1, TopicFlagKind,
-    TopicFlagV1, TopicIndexDelta,
+    AuthorizedTopicFlagV1, AuthorizedTopicReportV1, TopicActivityV1, TopicEntryV1,
+    TopicFlagKind, TopicFlagV1, TopicIndexDelta, TopicReportV1,
 };
 use plaza_core::board_state::{
     BoardModeV1, ChatBoardParametersV1, ChatBoardStateV1,
@@ -59,9 +60,13 @@ fn section(id: u8) -> SectionV1 {
 }
 
 fn topic_entry(section: MessageId) -> AuthorizedTopicEntryV1 {
+    topic_entry_at(7, section, 1)
+}
+
+fn topic_entry_at(id: u8, section: MessageId, created_at: i64) -> AuthorizedTopicEntryV1 {
     AuthorizedTopicEntryV1::new(
         TopicEntryV1 {
-            topic_id: MessageId::from_bytes([7u8; 32]),
+            topic_id: MessageId::from_bytes([id; 32]),
             part: 0,
             protocol_version: 1,
             author: MemberId::from(&member().verifying_key()),
@@ -70,11 +75,27 @@ fn topic_entry(section: MessageId) -> AuthorizedTopicEntryV1 {
             title: SealedBytes::public(b"Title".to_vec()),
             preview: SealedBytes::public(b"Preview".to_vec()),
             header_hash: [9u8; 32],
-            created_at: 1,
+            created_at,
             generation: 1,
         },
         &member(),
     )
+}
+
+fn report(index: u8, created_at: i64) -> AuthorizedTopicReportV1 {
+    let value = TopicReportV1 {
+        topic_id: MessageId::from_bytes([7u8; 32]),
+        post_id: Some(MessageId::from_bytes([index; 32])),
+        reporter: MemberId::from(&member().verifying_key()),
+        reason: ReportReason::Spam,
+        body: SealedBytes::public(b"Report".to_vec()),
+        created_at,
+        generation: 1,
+    };
+    AuthorizedTopicReportV1 {
+        signature: sign_struct(&value, &member()),
+        report: value,
+    }
 }
 
 fn activity() -> AuthorizedTopicActivityV1 {
@@ -255,4 +276,45 @@ fn an_entry_with_the_wrong_section_chain_is_rejected() {
     state.topics.entries[0].signature =
         sign_struct(&state.topics.entries[0].entry, &member());
     assert!(state.verify(&state, &params()).is_err());
+}
+
+#[test]
+fn the_topic_creation_rate_is_enforced() {
+    let mut state = indexed_board();
+    let section_id = MessageId::from_bytes([5u8; 32]);
+    state.topics.entries.clear();
+    for index in 0..plaza_core::board_state::rate_limit::MAX_TOPICS_PER_WINDOW {
+        state
+            .topics
+            .entries
+            .push(topic_entry_at(index as u8, section_id, 1_000 + index as i64));
+    }
+    state.verify(&state, &params()).unwrap();
+
+    state.topics.entries.push(topic_entry_at(
+        plaza_core::board_state::rate_limit::MAX_TOPICS_PER_WINDOW as u8,
+        section_id,
+        1_100,
+    ));
+    let error = state.verify(&state, &params()).unwrap_err();
+    assert!(error.contains("too many topics"), "{error}");
+}
+
+#[test]
+fn the_report_rate_is_enforced() {
+    let mut state = indexed_board();
+    for index in 0..plaza_core::board_state::rate_limit::MAX_REPORTS_PER_WINDOW {
+        state
+            .topics
+            .reports
+            .push(report(index as u8, 1_000 + index as i64));
+    }
+    state.verify(&state, &params()).unwrap();
+
+    state.topics.reports.push(report(
+        plaza_core::board_state::rate_limit::MAX_REPORTS_PER_WINDOW as u8,
+        1_100,
+    ));
+    let error = state.verify(&state, &params()).unwrap_err();
+    assert!(error.contains("too many reports"), "{error}");
 }

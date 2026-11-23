@@ -13,6 +13,15 @@ pub const DEFAULT_RATE_WINDOW_MS: u64 = 60_000;
 pub const DEFAULT_MAX_POSTS_PER_WINDOW: u32 = 120;
 pub const DEFAULT_MAX_BANS_PER_WINDOW: u32 = 10;
 
+/// Topic creation is capped per author: each entry grows the board index that
+/// every member downloads on every update.
+pub const TOPIC_RATE_WINDOW_MS: i64 = 60 * 60 * 1000;
+pub const MAX_TOPICS_PER_WINDOW: usize = 30;
+
+/// Reports are signed board records too; cap them per reporter.
+pub const REPORT_RATE_WINDOW_MS: i64 = 60 * 60 * 1000;
+pub const MAX_REPORTS_PER_WINDOW: usize = 60;
+
 /// Milliseconds since the epoch for a signed timestamp. Times before the
 /// epoch clamp to 0; the value only orders records from the same signer.
 pub fn system_time_ms(time: std::time::SystemTime) -> i64 {

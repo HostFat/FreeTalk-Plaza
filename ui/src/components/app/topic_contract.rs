@@ -23,7 +23,10 @@ use plaza_core::board_state::content::{
 use plaza_core::board_state::member::{AuthorizedMember, MemberId};
 use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::privacy::SealedBytes;
-use plaza_core::board_state::rate_limit::system_time_ms;
+use plaza_core::board_state::rate_limit::{
+    exceeds_window, system_time_ms, MAX_REPORTS_PER_WINDOW, MAX_TOPICS_PER_WINDOW,
+    REPORT_RATE_WINDOW_MS, TOPIC_RATE_WINDOW_MS,
+};
 use plaza_core::board_state::reports::ReportReason;
 use plaza_core::board_state::roles::{AuthorityProof, RoleGrantProof};
 use plaza_core::board_state::sections::{
@@ -547,6 +550,23 @@ pub async fn report_post(
         return Err("the report is too long".to_string());
     }
     let reporter = MemberId::from(&board.self_sk.verifying_key());
+    let now = system_time_ms(get_current_system_time());
+    let mut recent_reports: Vec<i64> = board
+        .board_state
+        .topics
+        .reports
+        .iter()
+        .filter(|entry| entry.report.reporter == reporter)
+        .map(|entry| entry.report.created_at)
+        .collect();
+    recent_reports.push(now);
+    if exceeds_window(
+        &recent_reports,
+        REPORT_RATE_WINDOW_MS,
+        MAX_REPORTS_PER_WINDOW,
+    ) {
+        return Err("too many reports sent in the last hour; wait before sending another".to_string());
+    }
     let generation = board
         .board_state
         .topics
@@ -566,7 +586,7 @@ pub async fn report_post(
         reporter,
         reason,
         body: seal_text(&board, &body)?,
-        created_at: system_time_ms(get_current_system_time()),
+        created_at: now,
         generation,
     };
     let authorized = AuthorizedTopicReportV1 {
@@ -973,6 +993,16 @@ pub async fn create_topic(
     if let Err(error) = apply_board_delta(owner, prepared.board_delta) {
         // The topic exists; the index can be retried on the next board sync.
         dioxus::logger::tracing::warn!("topic {} was put but not indexed: {}", prepared.topic_id, error);
+    } else if let Err(error) =
+        crate::components::app::chat_delegate::save_boards_and_wait().await
+    {
+        // The index is in memory; the periodic save retries, but a reload
+        // before it runs would hide the topic from search and the board list.
+        dioxus::logger::tracing::warn!(
+            "topic {} was indexed but the local board copy was not saved: {}",
+            prepared.topic_id,
+            error
+        );
     }
     Ok(prepared.topic_id)
 }
@@ -1238,6 +1268,24 @@ fn prepare_topic(
 
     let now = system_time_ms(get_current_system_time());
     let author = MemberId::from(&board.self_sk.verifying_key());
+    let mut recent_topics: Vec<i64> = board
+        .board_state
+        .topics
+        .entries
+        .iter()
+        .filter(|entry| entry.entry.author == author)
+        .map(|entry| entry.entry.created_at)
+        .collect();
+    recent_topics.push(now);
+    if exceeds_window(
+        &recent_topics,
+        TOPIC_RATE_WINDOW_MS,
+        MAX_TOPICS_PER_WINDOW,
+    ) {
+        return Err(
+            "too many topics created in the last hour; wait before creating another".to_string(),
+        );
+    }
     let is_owner = board.is_current_owner();
     let participant = participant_for(&board, author);
     if !is_owner && participant.is_none() {
