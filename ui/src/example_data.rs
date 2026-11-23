@@ -347,6 +347,8 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
             mail_visibility: crate::util::mail::MailVisibility::Hidden,
             nickname_requests: Vec::new(),
             spectator: false,
+            topic_read: std::collections::HashMap::new(),
+            topic_drafts: std::collections::HashMap::new(),
         },
     }
 }

@@ -75,3 +75,10 @@ description = "Phase 5: PQ KEM client for private boards"
 date = "2026-11-13"
 delegate_key = "e794bc87bda5f509c3e8b48727934347d7d84b18b455f775d6437223848ba8ee"
 code_hash = "1924c4945a568d419292f3405d67b156fd329a6584708c60bf4c31a6aa71fc08"
+
+[[entry]]
+version = "V9"
+description = "Baseline before per-topic contracts (DM, mail and device backup builds)"
+date = "2026-11-23"
+delegate_key = "6e6443be740805a2e7507f467dcfa71cdfa7bd5b2ad4a42b13f538a2bad009b9"
+code_hash = "95ae5eed87cfd1139bcbf069a7634413126985bcb85b09aa6b21d5aac601e64b"
