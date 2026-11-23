@@ -246,6 +246,89 @@ impl ChatBoardStateV1 {
     }
 }
 
+impl ChatBoardStateV1 {
+    /// Verify a non-topic delta after it was applied. The topic part already
+    /// verified its new records; re-verifying every topic on a member or
+    /// authority change would scan the whole board index. Parts that can
+    /// interact with each other are verified together whenever one changes.
+    pub fn verify_delta(
+        &self,
+        delta: &ChatBoardStateV1Delta,
+        parameters: &ChatBoardParametersV1,
+    ) -> Result<(), String> {
+        self.configuration.verify(self, parameters)?;
+        self.admin.verify(self, parameters)?;
+        self.ownership.verify(self, parameters)?;
+        self.mode.verify(self, parameters)?;
+
+        let authority_changed = delta.bans.is_some()
+            || delta.ban_revocations.is_some()
+            || delta.roles.is_some()
+            || delta.invites.is_some()
+            || delta.members.is_some()
+            || delta.admin.is_some()
+            || delta.ownership.is_some();
+        if authority_changed {
+            self.bans.verify(self, parameters)?;
+            self.ban_revocations.verify(self, parameters)?;
+            self.roles.verify(self, parameters)?;
+            self.invites.verify(self, parameters)?;
+            self.members.verify(self, parameters)?;
+            self.member_info.verify(self, parameters)?;
+        } else if delta.member_info.is_some() {
+            self.member_info.verify(self, parameters)?;
+        }
+
+        if delta.sections.is_some() {
+            self.sections.verify(self, parameters)?;
+        }
+        if delta.secrets.is_some() {
+            self.secrets.verify(self, parameters)?;
+        }
+        if delta.category_secrets.is_some() {
+            self.category_secrets.verify(self, parameters)?;
+        }
+        if delta.recent_messages.is_some() {
+            self.recent_messages.verify(self, parameters)?;
+        }
+        if delta.trash.is_some() {
+            self.trash.verify(self, parameters)?;
+        }
+        if delta.message_keys.is_some() {
+            self.message_keys.verify(self, parameters)?;
+        }
+        if delta.moderation.is_some() {
+            self.moderation.verify(self, parameters)?;
+        }
+        if delta.reports.is_some() {
+            self.reports.verify(self, parameters)?;
+        }
+        if delta.approvals.is_some() {
+            self.approvals.verify(self, parameters)?;
+        }
+        if delta.pq_secrets.is_some() {
+            self.pq_secrets.verify(self, parameters)?;
+        }
+        if delta.warnings.is_some() {
+            self.warnings.verify(self, parameters)?;
+        }
+        if delta.suspensions.is_some() {
+            self.suspensions.verify(self, parameters)?;
+        }
+        if delta.image_retirements.is_some() {
+            self.image_retirements.verify(self, parameters)?;
+        }
+        if delta.upgrade.is_some() {
+            self.upgrade.verify(self, parameters)?;
+        }
+        if delta.mail_addresses.is_some() {
+            self.mail_addresses.verify(self, parameters)?;
+        }
+        self.topics.verify_limits()?;
+        Ok(())
+    }
+}
+
 impl ChatBoardStateV1Delta {
     /// A delta that only changes the topic index has no cross-part authority,
     /// member or message changes. The contract can verify it without

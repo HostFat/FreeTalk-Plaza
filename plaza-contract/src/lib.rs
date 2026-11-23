@@ -100,12 +100,24 @@ impl ContractInterface for Contract {
                                 })?;
                         }
                     } else {
+                        let delta_verify = matches!(
+                            chat_state.mode,
+                            plaza_core::board_state::BoardModeV1::TopicIndex
+                        ) && delta.version.is_none();
                         chat_state
-                            .apply_delta(&chat_state.clone(), &parameters, &Some(delta))
+                            .apply_delta(&chat_state.clone(), &parameters, &Some(delta.clone()))
                             .map_err(|e| ContractError::InvalidUpdateWithInfo {
                                 reason: e.to_string(),
                             })?;
-                        full_verify = true;
+                        if delta_verify {
+                            chat_state
+                                .verify_delta(&delta, &parameters)
+                                .map_err(|e| ContractError::InvalidUpdateWithInfo {
+                                    reason: format!("Delta does not verify: {e}"),
+                                })?;
+                        } else {
+                            full_verify = true;
+                        }
                     }
                 }
                 UpdateData::RelatedState {

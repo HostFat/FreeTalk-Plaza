@@ -64,9 +64,11 @@ byte: con contenuti reali da 512 byte per campo lo stato cresce di circa
    ma ogni risposta scrive ancora l'indice globale e lo trasmette a tutti i
    membri. Un contatore separato, aggiornamenti periodici o un contratto
    attività shardato.
-2. **Gestire il percorso completo.** Ban, ruoli, ownership e merge di stato
-   verificano ancora tutta la board. Misurare questi casi e valutare una
-   verifica incrementale anche per loro, o almeno un limite più basso.
+2. **Gestire il percorso completo.** I delta di membri/autorità ora usano
+   `verify_delta`, che salta la rifirma di tutti i topic ma verifica ancora
+   membri, ban e ruoli per intero. Restano da rendere incrementali anche
+   queste parti e da misurare il caso reale; i merge di stato completo
+   richiedono ancora la verifica piena.
 3. **Non alzare i limiti attuali.** 500 post e 2.000 topic restano alti per
    gli update completi. Se serve usabilità immediata, scendere a 200 post per
    parte e 500 topic per board è un tampone.

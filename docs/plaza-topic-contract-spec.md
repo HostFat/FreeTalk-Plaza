@@ -1,7 +1,7 @@
 # Specifica del contratto `plaza-topic`
 
 Versione: 1 (implementata).
-Stato: fasi 0–4 completate e pubblicate nella build locale v609. Nessuna
+Stato: fasi 0–4 completate e pubblicate nella build locale v613. Nessuna
 migrazione delle vecchie board.
 
 ## Stato dell'implementazione
@@ -433,6 +433,9 @@ TopicDeltaV1 {
 - `validate_state` fa la verifica completa; `update_state` usa
   `apply_delta_incremental` per i delta e riserva `verify` ai merge di stato
   completo.
+- Sul lato board, un delta che non tocca solo l'indice passa da
+  `verify_delta`: verifica le parti cambiate e le interazioni
+  membri/ban/ruoli/admin, mentre non rifirma tutti i topic già validati.
 
 ## 6. Autorità e moderazione
 
