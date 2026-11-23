@@ -572,6 +572,25 @@ fn only_topic_index_deltas_use_the_fast_path() {
         ..Default::default()
     };
     assert!(topics_only.is_topics_only());
+    assert!(!topics_only.is_activity_only());
+
+    let activity_only = ChatBoardStateV1Delta {
+        topics: Some(TopicIndexDelta {
+            activity: vec![activity()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(activity_only.is_activity_only());
+
+    let with_entry = ChatBoardStateV1Delta {
+        topics: Some(TopicIndexDelta {
+            entries: vec![topic_entry(MessageId::from_bytes([5u8; 32]))],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(!with_entry.is_activity_only());
 
     let with_members = ChatBoardStateV1Delta {
         topics: Some(TopicIndexDelta::default()),

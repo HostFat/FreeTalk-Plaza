@@ -44,10 +44,11 @@ byte: con contenuti reali da 512 byte per campo lo stato cresce di circa
    ms, contro 1,33–5,38 s del percorso completo. La suite real-node passa
    10/10 su questa build.
 3. **La board resta un punto di scrittura globale.** Ora l'update costa pochi
-   millisecondi e il client invia un delta rispetto all'ultimo stato
-   confermato, non più lo stato completo. Ogni risposta aggiorna comunque
-   l'indice e il nodo trasmette lo stato risultante a tutti i membri.
-   Togliere l'attività o shardare l'indice resta il prossimo guadagno di rete.
+   millisecondi, il client invia un delta rispetto all'ultimo stato confermato
+   e le modifiche di sola attività vengono accorpate con un ritardo di 10
+   secondi. Ogni risposta aggiorna comunque l'indice e il nodo trasmette lo
+   stato risultante a tutti i membri. Shardare l'indice resta il prossimo
+   guadagno di rete.
 4. **Gli update che toccano membri, autorità o stato completo pagano ancora
    la verifica piena.** Un cambio di ruolo, ban o merge di stato su una board
    da 2.000 topic resta nell'ordine dei secondi. Sono eventi rari, ma vanno

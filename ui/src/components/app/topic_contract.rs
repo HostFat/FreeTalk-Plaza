@@ -5,7 +5,7 @@
 //! this module.
 
 use crate::board_data::BoardData;
-use crate::components::app::{mark_needs_sync, BOARDS};
+use crate::components::app::{mark_needs_sync, mark_needs_sync_later, BOARDS};
 use crate::constants::TOPIC_CONTRACT_WASM;
 use crate::util::ecies::{decrypt_with_symmetric_key, encrypt_with_symmetric_key};
 use crate::util::{get_current_system_time, to_cbor_vec};
@@ -1651,6 +1651,7 @@ fn conversation_for(
 }
 
 fn apply_board_delta(owner: VerifyingKey, delta: ChatBoardStateV1Delta) -> Result<(), String> {
+    let activity_only = delta.is_activity_only();
     let mut apply_error = None;
     BOARDS.with_mut(|boards| {
         let Some(board) = boards.map.get_mut(&owner) else {
@@ -1669,7 +1670,11 @@ fn apply_board_delta(owner: VerifyingKey, delta: ChatBoardStateV1Delta) -> Resul
     if let Some(error) = apply_error {
         return Err(error);
     }
-    mark_needs_sync(owner);
+    if activity_only {
+        mark_needs_sync_later(owner, std::time::Duration::from_secs(10));
+    } else {
+        mark_needs_sync(owner);
+    }
     Ok(())
 }
 

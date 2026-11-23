@@ -277,6 +277,40 @@ pub fn mark_needs_sync(board_key: ed25519_dalek::VerifyingKey) {
     });
 }
 
+static ACTIVITY_SYNC: std::sync::Mutex<Vec<ed25519_dalek::VerifyingKey>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Persist an activity-only board change now, but coalesce its network update.
+/// A busy topic can receive many replies in a few seconds; sending one board
+/// delta per reply would make the board contract the bottleneck.
+pub fn mark_needs_sync_later(
+    board_key: ed25519_dalek::VerifyingKey,
+    delay: std::time::Duration,
+) {
+    crate::util::defer(move || {
+        crate::util::safe_spawn_local(async {
+            if let Err(error) = chat_delegate::save_boards_and_wait().await {
+                dioxus::logger::tracing::warn!("Could not save boards: {error}");
+            }
+        });
+        {
+            let mut scheduled = ACTIVITY_SYNC.lock().unwrap();
+            if scheduled.contains(&board_key) {
+                return;
+            }
+            scheduled.push(board_key);
+        }
+        crate::util::safe_spawn_local(async move {
+            crate::util::sleep(delay).await;
+            {
+                let mut scheduled = ACTIVITY_SYNC.lock().unwrap();
+                scheduled.retain(|key| *key != board_key);
+            }
+            mark_needs_sync(board_key);
+        });
+    });
+}
+
 /// Send the queued user changes to the synchronizer and persist the boards.
 /// Safe to call when the queue is empty.
 pub fn flush_pending_sync() {

@@ -1027,6 +1027,18 @@ impl ComposableState for TopicIndexV1 {
     }
 }
 
+impl TopicIndexDelta {
+    /// A delta that only refreshes activity hints. These are frequent on busy
+    /// topics, so the client coalesces their network updates.
+    pub fn is_activity_only(&self) -> bool {
+        !self.activity.is_empty()
+            && self.entries.is_empty()
+            && self.flags.is_empty()
+            && self.reports.is_empty()
+            && self.report_resolutions.is_empty()
+    }
+}
+
 impl TopicIndexV1 {
     /// Caps and per-author frequency limits. These do not verify record
     /// signatures, so the delta fast path can run them after applying a

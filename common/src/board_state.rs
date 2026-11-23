@@ -279,6 +279,15 @@ impl ChatBoardStateV1Delta {
             && self.sections.is_none()
             && self.topics.is_some()
     }
+
+    /// True for a delta that only refreshes topic activity.
+    pub fn is_activity_only(&self) -> bool {
+        self.is_topics_only()
+            && self
+                .topics
+                .as_ref()
+                .is_some_and(|topics| topics.is_activity_only())
+    }
 }
 
 impl ChatBoardStateV1 {
