@@ -57,12 +57,14 @@ impl ContractInterface for Contract {
             decode_state(state.as_ref()).map_err(ContractError::Deser)?
         };
 
+        let mut full_verify = false;
         for update in data {
             match update {
                 UpdateData::State(new_state) => {
                     let incoming =
                         decode_state(new_state.as_ref()).map_err(ContractError::Deser)?;
                     current.merge(&params, &incoming).map_err(contract_error)?;
+                    full_verify = true;
                 }
                 UpdateData::Delta(delta) => {
                     if delta.as_ref().is_empty() {
@@ -70,7 +72,7 @@ impl ContractInterface for Contract {
                     }
                     let delta = decode_delta(delta.as_ref()).map_err(ContractError::Deser)?;
                     current
-                        .apply_delta(&params, &delta)
+                        .apply_delta_incremental(&params, &delta)
                         .map_err(contract_error)?;
                 }
                 UpdateData::RelatedState { .. } => {}
@@ -78,7 +80,9 @@ impl ContractInterface for Contract {
             }
         }
 
-        current.verify(&params).map_err(contract_error)?;
+        if full_verify {
+            current.verify(&params).map_err(contract_error)?;
+        }
         let bytes = state_bytes(&current)?;
         Ok(UpdateModification::valid(bytes.into()))
     }

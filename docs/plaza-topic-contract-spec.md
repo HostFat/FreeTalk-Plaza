@@ -1,7 +1,7 @@
 # Specifica del contratto `plaza-topic`
 
 Versione: 1 (implementata).
-Stato: fasi 0–4 completate e pubblicate nella build locale v608. Nessuna
+Stato: fasi 0–4 completate e pubblicate nella build locale v609. Nessuna
 migrazione delle vecchie board.
 
 ## Stato dell'implementazione
@@ -13,7 +13,7 @@ migrazione delle vecchie board.
   attività, flag, report e risoluzioni.
 - Client `ui/src/components/app/topic_contract.rs`; UI
   `topic_index_view.rs`, `topic_view.rs`, ricerca, notifiche e code in Manage.
-- Test: 40 in `topic-core`, 325 in `plaza-core`, 10 scenari real-node dei
+- Test: 44 in `topic-core`, 328 in `plaza-core`, 10 scenari real-node dei
   topic (draft e parti precedenti inclusi) e 116 test statici Playwright.
 
 Funzioni disponibili: topic creati dall'owner e dai membri, topic privati,
@@ -23,9 +23,11 @@ moderatori non owner, poll e reaction, move/merge/split, continuation,
 report con risoluzione, ricerca sull'indice, notifiche dei topic non letti e
 draft per topic.
 
-La build v608 riduce i limiti di topic e indice e aggiunge i rate limit: il
-nuovo WASM ri-chiave board e topic, quindi le board e i topic creati con le
-build precedenti vanno ricreati.
+La build v609 introduce la verifica incrementale dei delta e il percorso
+rapido per gli aggiornamenti che toccano solo l'indice della board. La build
+v608 aveva ridotto i limiti di topic e indice e aggiunto i rate limit. Ogni
+cambio del WASM ri-chiave board e topic, quindi le board e i topic creati con
+le build precedenti vanno ricreati.
 
 Limiti noti: le approvazioni non-owner condividono il percorso owner ma non
 hanno uno scenario e2e dedicato; lo stato di lettura è per board/dispositivo;
@@ -415,8 +417,10 @@ TopicDeltaV1 {
 }
 ```
 
-- `apply_delta` verifica i record nuovi e le invarianti risultanti; non
-  rifirma né ricontrolla tutti i record storici.
+- `apply_delta` mantiene la verifica completa per i chiamanti generici.
+- `apply_delta_incremental` verifica solo i record del delta, più i controlli
+  di forma, limiti e autorità quando cambiano. Il contratto lo usa per
+  `UpdateData::Delta`; `UpdateData::State` fa ancora la verifica completa.
 - `merge` unisce due stati: per i post vince l'id (immutabile); per azioni,
   approvazioni, trust e autorità vince la generazione più alta, poi il digest
   minore.
@@ -426,8 +430,9 @@ TopicDeltaV1 {
   generazione del topic. Cresce con i post ma resta molto più piccolo dello
   stato.
 - `delta(summary)` restituisce i record mancanti.
-- `validate_state` fa la verifica completa; `update_state` usa il percorso
-  incrementale e poi verifica le invarianti.
+- `validate_state` fa la verifica completa; `update_state` usa
+  `apply_delta_incremental` per i delta e riserva `verify` ai merge di stato
+  completo.
 
 ## 6. Autorità e moderazione
 
@@ -519,7 +524,7 @@ Le board nuove usano `BoardModeV1::TopicIndex`; le board legacy restano
 
 ## 11. Test
 
-`topic-core` ha 40 test: creazione, post, risposta, edit, delete, due client
+`topic-core` ha 44 test: creazione, post, risposta, edit, delete, due client
 convergenti, merge commutativo/associativo/idempotente, catena di invito e
 token join, moderatori con e senza prova, scope di sezione, ruolo revocato,
 ban prima e dopo il post, sospensione, pin/close/announce, move/merge/split,
@@ -527,8 +532,8 @@ hide/restore/purge, poll e reaction, contenuto sigillato illeggibile al
 contratto, limiti di dimensione e numero, CBOR round-trip, firme manomesse e
 continuation.
 
-`plaza-core` ha 325 test, inclusi indice, sezioni, flag, report, risoluzioni e
-limiti di frequenza.
+`plaza-core` ha 328 test, inclusi indice, sezioni, flag, report, risoluzioni,
+limiti di frequenza e percorso rapido dell'indice.
 
 La suite real-node `ui/tests/real-node/topics.spec.ts` ha 10 scenari: topic e
 risposte (con draft che sopravvive al reload), topic privato, topic creato da
@@ -541,7 +546,8 @@ La suite real-node sequenziale è instabile sul nodo locale carico: ogni
 scenario passa se eseguito da solo.
 
 I benchmark di scala sono in `docs/plaza-scale-benchmark.md`: misurano
-`verify`, `apply_delta`, serializzazione e dimensione per 500/2.000 topic e
-100/500 post. Mostrano che la verifica completa domina il costo e che
-`apply_delta` richiama ancora `verify` sull'intero stato; la verifica
-incrementale è il prossimo intervento necessario.
+`verify`, `apply_delta`, `apply_delta_incremental`, serializzazione e
+dimensione per 500/2.000 topic e 100/500 post. La verifica completa resta
+costosa (1,15 s per 500 post, 15,4 s per 2.000 topic), mentre il percorso
+incrementale scende a 13,5 ms per un post e 2,5–3,6 ms per un delta del solo
+indice.

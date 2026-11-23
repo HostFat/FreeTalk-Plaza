@@ -1,7 +1,8 @@
 # Benchmark di scala di FreeTalk Plaza
 
-Data: 2026-11-23. Build: release locale, Windows. Metodo: due test `#[ignore]`
-che costruiscono stati firmati e misurano `verify`, `apply_delta`,
+Data: 2026-11-23. Build: release locale, Windows; misure aggiornate dopo la
+verifica incrementale (v609). Metodo: due test `#[ignore]` che costruiscono
+stati firmati e misurano `verify`, `apply_delta`, `apply_delta_incremental`,
 serializzazione e dimensione.
 
 Comandi:
@@ -15,17 +16,17 @@ cargo test -p plaza-core --release --test topic_index scale_board_benchmark -- -
 
 ### Topic
 
-| Post | Stato | Serializzazione | `verify` | `apply_delta` (1 post) |
-|---|---|---|---|---|
-| 100 | 37 KiB | 0.3 ms | 254 ms | 241 ms |
-| 500 | 180 KiB | 1.4 ms | ~1,15 s | ~1,15 s |
+| Post | Stato | Serializzazione | `verify` | `apply_delta` (1 post) | `apply_delta_incremental` |
+|---|---|---|---|---|---|
+| 100 | 37 KiB | 0.3 ms | 254 ms | 241 ms | 13.5 ms |
+| 500 | 180 KiB | 1.4 ms | ~1,15 s | ~1,15 s | 13.5 ms |
 
 ### Board (1.000 membri)
 
-| Topic | Flag | Report | Stato | Serializzazione | `verify` | `apply_delta` (1 activity) |
-|---|---|---|---|---|---|---|
-| 500 | 500 | 125 | 1063 KiB | 7.4 ms | 5,35 s | 1,33 s |
-| 2.000 | 2.000 | 500 | 3253 KiB | 23.2 ms | 15,43 s | 5,38 s |
+| Topic | Flag | Report | Stato | Serializzazione | `verify` | `apply_delta` (1 activity) | `apply_topics_delta` |
+|---|---|---|---|---|---|---|---|
+| 500 | 500 | 125 | 1063 KiB | 7.4 ms | 5,35 s | 1,33 s | 2,5 ms |
+| 2.000 | 2.000 | 500 | 3253 KiB | 23.2 ms | 15,43 s | 5,38 s | 3,6 ms |
 
 I tempi sono per operazione, misurati sul computer locale; il costo per firma
 risulta circa 2–2,5 ms. Lo stato della board usa titoli e anteprime di pochi
@@ -34,22 +35,21 @@ byte: con contenuti reali da 512 byte per campo lo stato cresce di circa
 
 ## Cosa dicono i numeri
 
-1. **`apply_delta` non è incrementale.** `TopicStateV1::apply_delta` chiama
-   `self.verify(params)` alla fine; `TopicIndexV1::apply_delta` verifica ogni
-   record ma il contratto richiama poi `ChatBoardStateV1::verify`. Il costo di
-   un delta è quindi quello di una verifica completa, non quello del record
-   aggiunto.
-2. **`update_state` verifica due volte.** Il contratto applica il delta (che
-   verifica tutto) e poi chiama di nuovo `verify`. Il costo reale di una
-   risposta è circa il doppio di `apply_delta`: ~2,3 s per un topic da 500
-   post e ~20 s per una board da 2.000 topic.
-3. **Il collo di bottiglia è la verifica delle firme.** La serializzazione
-   costa 1–23 ms, la verifica 0,25–15 s. Con 1.000 membri, la sola lista
-   membri costa circa 2,5 s per ogni update della board.
-4. **I limiti attuali sono già alti per il modello attuale.** 2.000 topic
-   significano 15 s di verifica per ogni aggiornamento della board; 500 post
-   significano 1,15 s per ogni risposta al topic. Ogni risposta aggiorna anche
-   la board, quindi il costo si somma.
+1. **La verifica completa resta il costo dominante.** `verify` costa 5,35 s
+   con 500 topic e 15,43 s con 2.000; 254 ms con 100 post e 1,15 s con 500.
+   La serializzazione costa 1–23 ms: il tempo è quasi tutto firma.
+2. **Il percorso incrementale risolve il caso caldo.** Un post su un topic
+   già validato richiede 13,5 ms indipendentemente da 100 o 500 post
+   precedenti. Un delta che tocca solo l'indice della board richiede 2,5–3,6
+   ms, contro 1,33–5,38 s del percorso completo. La suite real-node passa
+   10/10 su questa build.
+3. **La board resta un punto di scrittura globale.** Ora l'update costa pochi
+   millisecondi, ma ogni risposta aggiorna comunque l'indice e lo trasmette a
+   tutti i membri. Toglierlo o shardarlo resta il prossimo guadagno di rete.
+4. **Gli update che toccano membri, autorità o stato completo pagano ancora
+   la verifica piena.** Un cambio di ruolo, ban o merge di stato su una board
+   da 2.000 topic resta nell'ordine dei secondi. Sono eventi rari, ma vanno
+   misurati e possibilmente resi incrementali.
 5. **Il caso peggiore reale è peggiore del benchmark.** Titoli e anteprime
    pieni, `section_chain` fino a 64 id e flag con scope aumentano lo stato e
    il tempo di serializzazione; le azioni e le approvazioni aggiungono altre
@@ -57,18 +57,18 @@ byte: con contenuti reali da 512 byte per campo lo stato cresce di circa
 
 ## Raccomandazioni
 
-1. **Verifica incrementale, priorità massima.** In `update_state` validare
-   solo i record del delta contro lo stato precedente già validato, più le
-   invarianti; togliere la seconda `verify` completa. In `apply_delta` non
-   richiamare `verify` sull'intero stato.
-2. **Togliere l'attività dal contratto board.** Ogni risposta non deve
-   riscrivere l'indice globale. Un contatore separato, aggiornamenti
-   periodici o un contratto attività shardato.
-3. **Non alzare i limiti attuali.** 500 post e 2.000 topic restano alti finché
-   la verifica è completa. Se serve usabilità immediata, scendere a 200 post
-   per parte e 500 topic per board è un tampone, non una soluzione.
-4. **Shardare l'indice per sezione** e **dividere i post in pagine** dopo la
-   verifica incrementale.
+1. **Togliere l'attività dal contratto board.** Ora la verifica è economica,
+   ma ogni risposta scrive ancora l'indice globale e lo trasmette a tutti i
+   membri. Un contatore separato, aggiornamenti periodici o un contratto
+   attività shardato.
+2. **Gestire il percorso completo.** Ban, ruoli, ownership e merge di stato
+   verificano ancora tutta la board. Misurare questi casi e valutare una
+   verifica incrementale anche per loro, o almeno un limite più basso.
+3. **Non alzare i limiti attuali.** 500 post e 2.000 topic restano alti per
+   gli update completi. Se serve usabilità immediata, scendere a 200 post per
+   parte e 500 topic per board è un tampone.
+4. **Shardare l'indice per sezione** e **dividere i post in pagine** per
+   ridurre il broadcast dello stato completo.
 5. **Ripetere il benchmark con contenuti realistici, azioni, approvazioni e
    1.000 membri attivi**, e su un secondo computer, per separare il costo
    algoritmico dalla velocità della CPU.

@@ -67,6 +67,7 @@ impl ContractInterface for Contract {
         let mut chat_state = from_reader::<ChatBoardStateV1, &[u8]>(state.as_ref())
             .map_err(|e| ContractError::Deser(e.to_string()))?;
 
+        let mut full_verify = false;
         for update in data {
             match update {
                 UpdateData::State(new_state) => {
@@ -77,6 +78,7 @@ impl ContractInterface for Contract {
                         .map_err(|e| ContractError::InvalidUpdateWithInfo {
                             reason: e.to_string(),
                         })?;
+                    full_verify = true;
                 }
                 UpdateData::Delta(d) => {
                     if d.as_ref().is_empty() {
@@ -84,11 +86,27 @@ impl ContractInterface for Contract {
                     }
                     let delta = from_reader::<ChatBoardStateV1Delta, &[u8]>(d.as_ref())
                         .map_err(|e| ContractError::Deser(e.to_string()))?;
-                    chat_state
-                        .apply_delta(&chat_state.clone(), &parameters, &Some(delta))
-                        .map_err(|e| ContractError::InvalidUpdateWithInfo {
-                            reason: e.to_string(),
-                        })?;
+                    let topics_only = delta.is_topics_only()
+                        && matches!(
+                            chat_state.mode,
+                            plaza_core::board_state::BoardModeV1::TopicIndex
+                        );
+                    if topics_only {
+                        if let Some(topic_delta) = delta.topics.as_ref() {
+                            chat_state
+                                .apply_topics_delta(&parameters, topic_delta)
+                                .map_err(|e| ContractError::InvalidUpdateWithInfo {
+                                    reason: e.to_string(),
+                                })?;
+                        }
+                    } else {
+                        chat_state
+                            .apply_delta(&chat_state.clone(), &parameters, &Some(delta))
+                            .map_err(|e| ContractError::InvalidUpdateWithInfo {
+                                reason: e.to_string(),
+                            })?;
+                        full_verify = true;
+                    }
                 }
                 UpdateData::RelatedState {
                     related_to: _,
@@ -100,14 +118,17 @@ impl ContractInterface for Contract {
             }
         }
 
-        // Merging two individually valid states or deltas can still produce an
-        // invalid one (e.g. a ban whose issuer the merge removed). Refuse the
-        // update instead of storing a state that every later peer rejects.
-        chat_state.verify(&chat_state, &parameters).map_err(|e| {
-            ContractError::InvalidUpdateWithInfo {
-                reason: format!("Merged state does not verify: {}", e),
-            }
-        })?;
+        // State merges and deltas that touch authority, members or messages
+        // can invalidate cross-part invariants; only a topic-index delta on an
+        // index board can skip the full verification. The topic part already
+        // validated every record it applied.
+        if full_verify {
+            chat_state.verify(&chat_state, &parameters).map_err(|e| {
+                ContractError::InvalidUpdateWithInfo {
+                    reason: format!("Merged state does not verify: {}", e),
+                }
+            })?;
+        }
 
         let mut updated_state = vec![];
         into_writer(&chat_state, &mut updated_state)

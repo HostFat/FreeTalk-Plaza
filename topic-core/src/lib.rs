@@ -714,6 +714,26 @@ impl Default for TopicStateSummaryV1 {
 
 impl TopicStateV1 {
     pub fn verify(&self, params: &TopicParamsV1) -> Result<(), String> {
+        if !self.verify_shape(params)? {
+            return Ok(());
+        }
+        let board_params = params.board_parameters();
+        self.verify_participants(params, &board_params)?;
+        let view = self.board_view(params);
+
+        self.verify_authority(&view, &board_params)?;
+        self.verify_section(&view, &board_params, params)?;
+        self.verify_trust(&view, &board_params)?;
+        self.verify_posts(&view, &board_params, params)?;
+        self.verify_actions(&view, &board_params)?;
+        self.verify_approvals(&view, &board_params)?;
+
+        Ok(())
+    }
+
+    /// Checks that do not depend on historical records. Returns `false` for an
+    /// empty topic without a header.
+    fn verify_shape(&self, params: &TopicParamsV1) -> Result<bool, String> {
         params.verify()?;
         if self.version != PROTOCOL_VERSION {
             return Err(format!("unsupported topic state version {}", self.version));
@@ -744,7 +764,7 @@ impl TopicStateV1 {
             {
                 return Err("a topic without a header cannot carry content".to_string());
             }
-            return Ok(());
+            return Ok(false);
         };
         header.verify(params)?;
         if header.header.author != params.owner_id() {
@@ -784,18 +804,41 @@ impl TopicStateV1 {
         if self.trust.len() > self.participants.len() {
             return Err("too many trust records".to_string());
         }
+        Ok(true)
+    }
 
+    fn verify_incremental(
+        &self,
+        params: &TopicParamsV1,
+        delta: &TopicDeltaV1,
+    ) -> Result<(), String> {
+        if !self.verify_shape(params)? {
+            return Ok(());
+        }
         let board_params = params.board_parameters();
-        self.verify_participants(params, &board_params)?;
         let view = self.board_view(params);
 
-        self.verify_authority(&view, &board_params)?;
-        self.verify_section(&view, &board_params, params)?;
-        self.verify_trust(&view, &board_params)?;
-        self.verify_posts(&view, &board_params, params)?;
-        self.verify_actions(&view, &board_params)?;
-        self.verify_approvals(&view, &board_params)?;
-
+        if delta.section.is_some() {
+            self.verify_section(&view, &board_params, params)?;
+        }
+        if delta.authority.is_some() {
+            self.verify_authority(&view, &board_params)?;
+        }
+        if !delta.participants.is_empty() {
+            self.verify_participants(params, &board_params)?;
+        }
+        if !delta.trust.is_empty() {
+            self.verify_trust(&view, &board_params)?;
+        }
+        for entry in &delta.posts {
+            self.verify_post_record(&entry.post.id(), entry, &view, &board_params, params)?;
+        }
+        for entry in &delta.actions {
+            self.verify_action_record(entry, &view, &board_params)?;
+        }
+        for entry in &delta.approvals {
+            self.verify_approval_record(entry, &view, &board_params)?;
+        }
         Ok(())
     }
 
@@ -1157,61 +1200,69 @@ impl TopicStateV1 {
         board_params: &ChatBoardParametersV1,
         params: &TopicParamsV1,
     ) -> Result<(), String> {
+        for (id, entry) in &self.posts {
+            self.verify_post_record(id, entry, view, board_params, params)?;
+        }
+        Ok(())
+    }
+
+    fn verify_post_record(
+        &self,
+        id: &MessageId,
+        entry: &AuthorizedTopicPostV1,
+        view: &ChatBoardStateV1,
+        board_params: &ChatBoardParametersV1,
+        params: &TopicParamsV1,
+    ) -> Result<(), String> {
         let policy = self.authority.policy();
         let owner_id = params.owner_id();
-        for (id, entry) in &self.posts {
-            let post = &entry.post;
-            if post.id() != *id {
-                return Err("post id does not match its content".to_string());
+        let post = &entry.post;
+        if post.id() != *id {
+            return Err("post id does not match its content".to_string());
+        }
+        if post.content.declared_len() > policy.max_post_size
+            || post.content.declared_len() > MAX_POST_BYTES
+        {
+            return Err("post content is too large".to_string());
+        }
+        if post.images.len() > MAX_IMAGES_PER_POST {
+            return Err("too many images in a post".to_string());
+        }
+        if !post.images.is_empty() && !policy.images_allowed {
+            return Err("images are disabled by the topic policy".to_string());
+        }
+        if !post.images.is_empty() && !self.section_images_allowed() {
+            return Err("images are disabled in this section".to_string());
+        }
+        if let Some(parent) = post.parent {
+            if !self.posts.contains_key(&parent) {
+                return Err("post parent does not exist".to_string());
             }
-            if post.content.declared_len() > policy.max_post_size
-                || post.content.declared_len() > MAX_POST_BYTES
-            {
-                return Err("post content is too large".to_string());
-            }
-            if post.images.len() > MAX_IMAGES_PER_POST {
-                return Err("too many images in a post".to_string());
-            }
-            if !post.images.is_empty()
-                && !policy.images_allowed
-            {
-                return Err("images are disabled by the topic policy".to_string());
-            }
-            if !post.images.is_empty()
-                && !self.section_images_allowed()
-            {
-                return Err("images are disabled in this section".to_string());
-            }
-            if let Some(parent) = post.parent {
-                if !self.posts.contains_key(&parent) {
-                    return Err("post parent does not exist".to_string());
-                }
-            }
-            if post_cycle(&self.posts, *id) {
-                return Err("circular reply chain".to_string());
-            }
+        }
+        if post_cycle(&self.posts, *id) {
+            return Err("circular reply chain".to_string());
+        }
 
-            let author_key = self.author_key(post.author, view, board_params, post.created_at, params)?;
-            verify_struct(post, &entry.signature, &author_key)
-                .map_err(|error| format!("invalid post signature: {error}"))?;
+        let author_key = self.author_key(post.author, view, board_params, post.created_at, params)?;
+        verify_struct(post, &entry.signature, &author_key)
+            .map_err(|error| format!("invalid post signature: {error}"))?;
 
-            if post.author == owner_id {
-                continue;
-            }
-            if self.is_banned(post.author, post.created_at) {
-                return Err("a banned member cannot post".to_string());
-            }
-            if self.is_suspended(post.author, post.created_at) {
-                return Err("a suspended member cannot post".to_string());
-            }
-            if policy.read_only
-                && !view.admin.admins.iter().any(|admin| admin.admin.id() == post.author)
-            {
-                return Err("the topic is read-only".to_string());
-            }
-            if !self.section_allows(post.author, view, board_params, params) {
-                return Err("the author cannot write in this section".to_string());
-            }
+        if post.author == owner_id {
+            return Ok(());
+        }
+        if self.is_banned(post.author, post.created_at) {
+            return Err("a banned member cannot post".to_string());
+        }
+        if self.is_suspended(post.author, post.created_at) {
+            return Err("a suspended member cannot post".to_string());
+        }
+        if policy.read_only
+            && !view.admin.admins.iter().any(|admin| admin.admin.id() == post.author)
+        {
+            return Err("the topic is read-only".to_string());
+        }
+        if !self.section_allows(post.author, view, board_params, params) {
+            return Err("the author cannot write in this section".to_string());
         }
         Ok(())
     }
@@ -1221,81 +1272,91 @@ impl TopicStateV1 {
         view: &ChatBoardStateV1,
         board_params: &ChatBoardParametersV1,
     ) -> Result<(), String> {
-        let header = self.header.as_ref().ok_or("missing header")?;
         for entry in &self.actions {
-            let action = &entry.action;
-            if action.payload.declared_len() > MAX_BODY_BYTES {
-                return Err("action payload is too large".to_string());
+            self.verify_action_record(entry, view, board_params)?;
+        }
+        Ok(())
+    }
+
+    fn verify_action_record(
+        &self,
+        entry: &AuthorizedTopicActionV1,
+        view: &ChatBoardStateV1,
+        board_params: &ChatBoardParametersV1,
+    ) -> Result<(), String> {
+        let header = self.header.as_ref().ok_or("missing header")?;
+        let action = &entry.action;
+        if action.payload.declared_len() > MAX_BODY_BYTES {
+            return Err("action payload is too large".to_string());
+        }
+        let target_author = if action.target == header.header.id() {
+            Some(header.header.author)
+        } else {
+            self.posts.get(&action.target).map(|post| post.post.author)
+        };
+        let target_author = target_author.ok_or("action target does not exist")?;
+
+        let signer = action.signer;
+        let key = resolve_signer_key(view, board_params, &signer, entry.signer_key.as_ref())?;
+        verify_struct(action, &entry.signature, &key)
+            .map_err(|error| format!("invalid action signature: {error}"))?;
+
+        if matches!(
+            action.kind,
+            TopicActionKind::React | TopicActionKind::Unreact | TopicActionKind::Vote
+        ) {
+            let is_member = signer == board_params.owner_id()
+                || self
+                    .participants
+                    .iter()
+                    .any(|participant| participant.record.member_id == signer);
+            if !is_member {
+                return Err("only a board member can react or vote".to_string());
             }
-            let target_author = if action.target == header.header.id() {
-                Some(header.header.author)
-            } else {
-                self.posts.get(&action.target).map(|post| post.post.author)
-            };
-            let target_author = target_author.ok_or("action target does not exist")?;
-
-            let signer = action.signer;
-            let key = resolve_signer_key(view, board_params, &signer, entry.signer_key.as_ref())?;
-            verify_struct(action, &entry.signature, &key)
-                .map_err(|error| format!("invalid action signature: {error}"))?;
-
-            if matches!(
-                action.kind,
-                TopicActionKind::React | TopicActionKind::Unreact | TopicActionKind::Vote
-            ) {
-                let is_member = signer == board_params.owner_id()
-                    || self
-                        .participants
-                        .iter()
-                        .any(|participant| participant.record.member_id == signer);
-                if !is_member {
-                    return Err("only a board member can react or vote".to_string());
-                }
-                if self.is_banned(signer, action.created_at)
-                    || self.is_suspended(signer, action.created_at)
-                {
-                    return Err(
-                        "a banned or suspended member cannot react or vote".to_string()
-                    );
-                }
-                continue;
-            }
-
-            if signer == target_author
-                && matches!(
-                    action.kind,
-                    TopicActionKind::Edit | TopicActionKind::Delete | TopicActionKind::EditPoll
-                )
+            if self.is_banned(signer, action.created_at)
+                || self.is_suspended(signer, action.created_at)
             {
-                continue;
+                return Err(
+                    "a banned or suspended member cannot react or vote".to_string()
+                );
             }
+            return Ok(());
+        }
 
-            let at = system_time_from_ms(action.created_at);
-            if action.kind == TopicActionKind::Purge {
-                verify_owner_or_admin(
-                    view,
-                    board_params,
-                    &signer,
-                    entry.authority.as_deref(),
-                    at,
-                )?;
-                continue;
-            }
-            let power = action
-                .kind
-                .power()
-                .ok_or("the action has no moderation power")?;
-            let chain = self.section_chain();
-            verify_moderation_authority(
+        if signer == target_author
+            && matches!(
+                action.kind,
+                TopicActionKind::Edit | TopicActionKind::Delete | TopicActionKind::EditPoll
+            )
+        {
+            return Ok(());
+        }
+
+        let at = system_time_from_ms(action.created_at);
+        if action.kind == TopicActionKind::Purge {
+            verify_owner_or_admin(
                 view,
                 board_params,
                 &signer,
-                power,
-                &chain,
                 entry.authority.as_deref(),
                 at,
             )?;
+            return Ok(());
         }
+        let power = action
+            .kind
+            .power()
+            .ok_or("the action has no moderation power")?;
+        let chain = self.section_chain();
+        verify_moderation_authority(
+            view,
+            board_params,
+            &signer,
+            power,
+            &chain,
+            entry.authority.as_deref(),
+            at,
+        )?;
         Ok(())
     }
 
@@ -1304,41 +1365,49 @@ impl TopicStateV1 {
         view: &ChatBoardStateV1,
         board_params: &ChatBoardParametersV1,
     ) -> Result<(), String> {
-        let header = self.header.as_ref().ok_or("missing header")?;
         for entry in &self.approvals {
-            let approval = &entry.approval;
-            if approval.target != header.header.id()
-                && !self.posts.contains_key(&approval.target)
-            {
-                return Err("approval targets a missing post".to_string());
-            }
-            if approval.generation == 0 {
-                return Err("approval generation must be positive".to_string());
-            }
-            if let Some(scope) = approval.scope {
-                if !self.section_chain().contains(&scope) {
-                    return Err("approval scope is not the topic section".to_string());
-                }
-            }
-            let signer = approval.signed_by;
-            let key = resolve_signer_key(view, board_params, &signer, entry.signer_key.as_ref())?;
-            verify_struct(approval, &entry.signature, &key)
-                .map_err(|error| format!("invalid approval signature: {error}"))?;
-            let chain = self.section_chain();
-            verify_moderation_authority(
-                view,
-                board_params,
-                &signer,
-                ModerationPower::Delete,
-                &chain,
-                entry.authority.as_deref(),
-                system_time_from_ms(approval.created_at),
-            )?;
+            self.verify_approval_record(entry, view, board_params)?;
         }
         Ok(())
     }
 
-    pub fn apply_delta(
+    fn verify_approval_record(
+        &self,
+        entry: &AuthorizedTopicApprovalV1,
+        view: &ChatBoardStateV1,
+        board_params: &ChatBoardParametersV1,
+    ) -> Result<(), String> {
+        let header = self.header.as_ref().ok_or("missing header")?;
+        let approval = &entry.approval;
+        if approval.target != header.header.id() && !self.posts.contains_key(&approval.target) {
+            return Err("approval targets a missing post".to_string());
+        }
+        if approval.generation == 0 {
+            return Err("approval generation must be positive".to_string());
+        }
+        if let Some(scope) = approval.scope {
+            if !self.section_chain().contains(&scope) {
+                return Err("approval scope is not the topic section".to_string());
+            }
+        }
+        let signer = approval.signed_by;
+        let key = resolve_signer_key(view, board_params, &signer, entry.signer_key.as_ref())?;
+        verify_struct(approval, &entry.signature, &key)
+            .map_err(|error| format!("invalid approval signature: {error}"))?;
+        let chain = self.section_chain();
+        verify_moderation_authority(
+            view,
+            board_params,
+            &signer,
+            ModerationPower::Delete,
+            &chain,
+            entry.authority.as_deref(),
+            system_time_from_ms(approval.created_at),
+        )?;
+        Ok(())
+    }
+
+    fn apply_delta_merge(
         &mut self,
         params: &TopicParamsV1,
         delta: &TopicDeltaV1,
@@ -1351,7 +1420,13 @@ impl TopicStateV1 {
                 Some(_) => return Err("topic header is immutable".to_string()),
             }
         }
-        if self.generation.closed_at.is_some() && !delta.posts.is_empty() {
+        if (self.generation.closed_at.is_some()
+            || delta
+                .generation
+                .as_ref()
+                .is_some_and(|generation| generation.closed_at.is_some()))
+            && !delta.posts.is_empty()
+        {
             return Err("the topic is closed to new posts".to_string());
         }
         if let Some(section) = &delta.section {
@@ -1389,7 +1464,33 @@ impl TopicStateV1 {
         if !delta.posts.is_empty() {
             self.check_rate_limit(&delta.posts)?;
         }
+        Ok(())
+    }
+
+    /// Apply a delta and verify the whole state.
+    ///
+    /// Callers that already validated the previous state can use
+    /// [`Self::apply_delta_incremental`], which verifies only the records in
+    /// the delta.
+    pub fn apply_delta(
+        &mut self,
+        params: &TopicParamsV1,
+        delta: &TopicDeltaV1,
+    ) -> Result<(), String> {
+        self.apply_delta_merge(params, delta)?;
         self.verify(params)
+    }
+
+    /// Apply a delta and verify only its records plus the invariants they can
+    /// change. The previous state is assumed to have been validated when it
+    /// was stored.
+    pub fn apply_delta_incremental(
+        &mut self,
+        params: &TopicParamsV1,
+        delta: &TopicDeltaV1,
+    ) -> Result<(), String> {
+        self.apply_delta_merge(params, delta)?;
+        self.verify_incremental(params, delta)
     }
 
     pub fn merge(&mut self, params: &TopicParamsV1, other: &TopicStateV1) -> Result<(), String> {
@@ -2358,7 +2459,86 @@ mod scale_bench {
                 "apply_delta (un post): {:.1} ms",
                 start.elapsed().as_secs_f64() * 1000.0
             );
+
+            let mut incremental = state_with_posts(count - 1);
+            let start = Instant::now();
+            incremental
+                .apply_delta_incremental(&params, &delta)
+                .unwrap();
+            println!(
+                "apply_delta_incremental (un post): {:.1} ms",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
         }
+    }
+}
+
+#[cfg(test)]
+mod incremental_tests {
+    use super::tests::*;
+    use super::*;
+
+    fn delta_with_post(entry: AuthorizedTopicPostV1) -> TopicDeltaV1 {
+        TopicDeltaV1 {
+            posts: vec![entry],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_incremental_reply_is_accepted() {
+        let mut state = base_state();
+        let entry = post(&member(), "incremental", 1_000, 1);
+        let id = entry.post.id();
+        state
+            .apply_delta_incremental(&params(), &delta_with_post(entry))
+            .unwrap();
+        assert!(state.posts.contains_key(&id));
+        state.verify(&params()).unwrap();
+    }
+
+    #[test]
+    fn an_incremental_post_with_a_bad_signature_is_rejected() {
+        let mut state = base_state();
+        let mut entry = post(&member(), "original", 1_000, 1);
+        entry.post.content = SealedBytes::public(b"tampered".to_vec());
+        let error = state
+            .apply_delta_incremental(&params(), &delta_with_post(entry))
+            .unwrap_err();
+        assert!(error.contains("signature"), "{error}");
+    }
+
+    #[test]
+    fn an_incremental_post_with_a_missing_parent_is_rejected() {
+        let mut state = base_state();
+        let mut value = post(&member(), "child", 1_000, 1).post;
+        value.parent = Some(MessageId::from_bytes([9u8; 32]));
+        let entry = AuthorizedTopicPostV1::new(value, &member());
+        let error = state
+            .apply_delta_incremental(&params(), &delta_with_post(entry))
+            .unwrap_err();
+        assert!(error.contains("parent"), "{error}");
+    }
+
+    #[test]
+    fn an_incremental_action_without_authority_is_rejected() {
+        let mut state = base_state();
+        let owner_post = post(&owner(), "owner post", 1_000, 1);
+        let target = owner_post.post.id();
+        state.posts.insert(target, owner_post.clone());
+        let delta = TopicDeltaV1 {
+            actions: vec![action(
+                &member(),
+                TopicActionKind::Delete,
+                target,
+                1,
+            )],
+            ..Default::default()
+        };
+        let error = state
+            .apply_delta_incremental(&params(), &delta)
+            .unwrap_err();
+        assert!(!error.is_empty(), "the action must be rejected");
     }
 }
 

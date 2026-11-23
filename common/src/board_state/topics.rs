@@ -682,33 +682,13 @@ impl ComposableState for TopicIndexV1 {
         parent_state: &Self::ParentState,
         parameters: &Self::Parameters,
     ) -> Result<(), String> {
-        if self.entries.len() > MAX_TOPICS {
-            return Err("too many topics".to_string());
-        }
-        if self.activity.len() > MAX_TOPIC_ACTIVITY {
-            return Err("too many topic activity records".to_string());
-        }
-        if self.flags.len() > MAX_TOPIC_FLAGS {
-            return Err("too many topic flags".to_string());
-        }
-        if self.reports.len() > MAX_TOPIC_REPORTS {
-            return Err("too many topic reports".to_string());
-        }
+        self.verify_limits()?;
         let mut topics = HashSet::new();
         for entry in &self.entries {
             if !topics.insert(entry.entry.topic_id) {
                 return Err("duplicate topic".to_string());
             }
             self.verify_entry(parent_state, parameters, entry)?;
-        }
-        if let Some(author) = exceeding_member(
-            self.entries
-                .iter()
-                .map(|entry| (entry.entry.author, entry.entry.created_at)),
-            TOPIC_RATE_WINDOW_MS,
-            MAX_TOPICS_PER_WINDOW,
-        ) {
-            return Err(format!("too many topics from {author} in the window"));
         }
         let mut activity = HashSet::new();
         for entry in &self.activity {
@@ -734,18 +714,6 @@ impl ComposableState for TopicIndexV1 {
                 return Err("duplicate topic report".to_string());
             }
             self.verify_report(parent_state, parameters, entry)?;
-        }
-        if let Some(reporter) = exceeding_member(
-            self.reports
-                .iter()
-                .map(|entry| (entry.report.reporter, entry.report.created_at)),
-            REPORT_RATE_WINDOW_MS,
-            MAX_REPORTS_PER_WINDOW,
-        ) {
-            return Err(format!("too many reports from {reporter} in the window"));
-        }
-        if self.report_resolutions.len() > MAX_TOPIC_REPORTS {
-            return Err("too many report resolutions".to_string());
         }
         let mut resolutions = HashSet::new();
         for entry in &self.report_resolutions {
@@ -1036,12 +1004,6 @@ impl ComposableState for TopicIndexV1 {
                 }
             }
         }
-        if self.entries.len() > MAX_TOPICS {
-            return Err("too many topics".to_string());
-        }
-        if self.reports.len() > MAX_TOPIC_REPORTS {
-            return Err("too many topic reports".to_string());
-        }
         self.sort();
         self.entries.dedup_by_key(|entry| entry.entry.topic_id);
         self.activity.dedup_by_key(|entry| entry.activity.topic_id);
@@ -1061,11 +1023,51 @@ impl ComposableState for TopicIndexV1 {
                 entry.resolution.reporter,
             )
         });
-        Ok(())
+        self.verify_limits()
     }
 }
 
 impl TopicIndexV1 {
+    /// Caps and per-author frequency limits. These do not verify record
+    /// signatures, so the delta fast path can run them after applying a
+    /// topics-only update.
+    pub fn verify_limits(&self) -> Result<(), String> {
+        if self.entries.len() > MAX_TOPICS {
+            return Err("too many topics".to_string());
+        }
+        if self.activity.len() > MAX_TOPIC_ACTIVITY {
+            return Err("too many topic activity records".to_string());
+        }
+        if self.flags.len() > MAX_TOPIC_FLAGS {
+            return Err("too many topic flags".to_string());
+        }
+        if self.reports.len() > MAX_TOPIC_REPORTS {
+            return Err("too many topic reports".to_string());
+        }
+        if self.report_resolutions.len() > MAX_TOPIC_REPORTS {
+            return Err("too many report resolutions".to_string());
+        }
+        if let Some(author) = exceeding_member(
+            self.entries
+                .iter()
+                .map(|entry| (entry.entry.author, entry.entry.created_at)),
+            TOPIC_RATE_WINDOW_MS,
+            MAX_TOPICS_PER_WINDOW,
+        ) {
+            return Err(format!("too many topics from {author} in the window"));
+        }
+        if let Some(reporter) = exceeding_member(
+            self.reports
+                .iter()
+                .map(|entry| (entry.report.reporter, entry.report.created_at)),
+            REPORT_RATE_WINDOW_MS,
+            MAX_REPORTS_PER_WINDOW,
+        ) {
+            return Err(format!("too many reports from {reporter} in the window"));
+        }
+        Ok(())
+    }
+
     pub fn cleanup(
         &mut self,
         state: &ChatBoardStateV1,

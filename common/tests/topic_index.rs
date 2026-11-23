@@ -6,7 +6,7 @@ use freenet_scaffold::ComposableState;
 use plaza_core::board_state::configuration::{
     AuthorizedConfigurationV1, Configuration,
 };
-use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
+use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId, MembersDelta};
 use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::privacy::SealedBytes;
 use plaza_core::board_state::reports::ReportReason;
@@ -513,13 +513,74 @@ fn scale_board_benchmark() {
         let mut applied = state.clone();
         let start = Instant::now();
         applied
-            .apply_delta(&state, &params, &Some(delta))
+            .apply_delta(&state, &params, &Some(delta.clone()))
             .unwrap();
         println!(
             "apply_delta (una activity): {:.1} ms",
             start.elapsed().as_secs_f64() * 1000.0
         );
+
+        let mut fast = state.clone();
+        if let Some(topic_delta) = delta.topics.as_ref() {
+            let start = Instant::now();
+            fast.apply_topics_delta(&params, topic_delta).unwrap();
+            println!(
+                "apply_topics_delta (una activity): {:.1} ms",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
     }
+}
+
+#[test]
+fn a_topics_only_delta_skips_the_full_cleanup() {
+    let mut state = indexed_board();
+    let delta = TopicIndexDelta {
+        activity: vec![activity()],
+        ..Default::default()
+    };
+    state.apply_topics_delta(&params(), &delta).unwrap();
+    state.verify(&state, &params()).unwrap();
+}
+
+#[test]
+fn the_topics_fast_path_enforces_the_creation_rate() {
+    let mut state = indexed_board();
+    let section_id = MessageId::from_bytes([5u8; 32]);
+    state.topics.entries.clear();
+    for index in 0..plaza_core::board_state::rate_limit::MAX_TOPICS_PER_WINDOW {
+        state
+            .topics
+            .entries
+            .push(topic_entry_at(index as u8, section_id, 1_000 + index as i64));
+    }
+    let delta = TopicIndexDelta {
+        entries: vec![topic_entry_at(
+            plaza_core::board_state::rate_limit::MAX_TOPICS_PER_WINDOW as u8,
+            section_id,
+            1_100,
+        )],
+        ..Default::default()
+    };
+    assert!(state.apply_topics_delta(&params(), &delta).is_err());
+}
+
+#[test]
+fn only_topic_index_deltas_use_the_fast_path() {
+    let topics_only = ChatBoardStateV1Delta {
+        topics: Some(TopicIndexDelta::default()),
+        ..Default::default()
+    };
+    assert!(topics_only.is_topics_only());
+
+    let with_members = ChatBoardStateV1Delta {
+        topics: Some(TopicIndexDelta::default()),
+        members: Some(MembersDelta::new(Vec::new())),
+        ..Default::default()
+    };
+    assert!(!with_members.is_topics_only());
+
+    assert!(!ChatBoardStateV1Delta::default().is_topics_only());
 }
 
 #[test]

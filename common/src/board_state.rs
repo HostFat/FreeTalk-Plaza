@@ -230,6 +230,58 @@ pub struct ChatBoardStateV1 {
 }
 
 impl ChatBoardStateV1 {
+    /// Apply a delta that only changes the topic index. Members, authority,
+    /// sections and messages are unchanged, so the full cleanup (which
+    /// re-verifies every entry and report) can be skipped. The topic part
+    /// verifies every record in the delta and the index limits.
+    pub fn apply_topics_delta(
+        &mut self,
+        parameters: &ChatBoardParametersV1,
+        delta: &crate::board_state::topics::TopicIndexDelta,
+    ) -> Result<(), String> {
+        let mut topics = std::mem::take(&mut self.topics);
+        let result = topics.apply_delta(self, parameters, &Some(delta.clone()));
+        self.topics = topics;
+        result
+    }
+}
+
+impl ChatBoardStateV1Delta {
+    /// A delta that only changes the topic index has no cross-part authority,
+    /// member or message changes. The contract can verify it without
+    /// re-verifying the whole board.
+    pub fn is_topics_only(&self) -> bool {
+        self.configuration.is_none()
+            && self.admin.is_none()
+            && self.ownership.is_none()
+            && self.bans.is_none()
+            && self.ban_revocations.is_none()
+            && self.roles.is_none()
+            && self.invites.is_none()
+            && self.members.is_none()
+            && self.member_info.is_none()
+            && self.category_secrets.is_none()
+            && self.secrets.is_none()
+            && self.recent_messages.is_none()
+            && self.trash.is_none()
+            && self.message_keys.is_none()
+            && self.moderation.is_none()
+            && self.reports.is_none()
+            && self.approvals.is_none()
+            && self.pq_secrets.is_none()
+            && self.warnings.is_none()
+            && self.suspensions.is_none()
+            && self.image_retirements.is_none()
+            && self.upgrade.is_none()
+            && self.version.is_none()
+            && self.mail_addresses.is_none()
+            && self.mode.is_none()
+            && self.sections.is_none()
+            && self.topics.is_some()
+    }
+}
+
+impl ChatBoardStateV1 {
     /// Fixpoint for members and messages after invite-cap removal or any
     /// cleanup that drops a member. Messages by absent members are removed,
     /// then members without messages or invite-chain descendants are pruned.
