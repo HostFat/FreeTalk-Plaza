@@ -43,10 +43,11 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     };
 
     let owner = board_data.owner_vk;
-    let part = board_data
-        .board_state
-        .topics
-        .part_of(&topic_id_value);
+    let part = crate::components::app::section_contract::merged_index(
+        owner,
+        &board_data.board_state.topics,
+    )
+    .part_of(&topic_id_value);
     let mut error = use_signal(|| None::<String>);
     let mut reply = use_signal(String::new);
     let mut busy = use_signal(|| false);
@@ -135,7 +136,13 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
             .read()
             .map
             .get(&owner)
-            .map(|board| board.board_state.topics.part_of(&topic_id_value))
+            .map(|board| {
+                crate::components::app::section_contract::merged_index(
+                    owner,
+                    &board.board_state.topics,
+                )
+                .part_of(&topic_id_value)
+            })
             .unwrap_or(part);
         if *loaded_part.read() == Some(part_now) {
             return;

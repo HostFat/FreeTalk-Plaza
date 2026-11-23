@@ -3384,6 +3384,11 @@ impl Boards {
 
         // New index boards start with a General section. The owner signs the
         // section record; topics created in it carry an owner-signed snapshot.
+        let mut general_section: Option<
+            plaza_core::board_state::sections::AuthorizedSectionV1,
+        > = None;
+        let sectioned = board_state.mode
+            == plaza_core::board_state::BoardModeV1::SectionedTopicIndex;
         if matches!(
         board_state.mode,
         plaza_core::board_state::BoardModeV1::TopicIndex
@@ -3405,8 +3410,18 @@ impl Boards {
                     );
                 SealedBytes::private(ciphertext, nonce, version, 7)
             });
+            let section_id = MessageId::from_bytes(section_bytes);
+            let child_contract = if sectioned {
+                Some(*crate::components::app::section_contract::section_key(
+                    owner_vk,
+                    section_id,
+                )
+                .id())
+            } else {
+                None
+            };
             let section = SectionV1 {
-                id: MessageId::from_bytes(section_bytes),
+                id: section_id,
                 parent: None,
                 name: "General".to_string(),
                 description: None,
@@ -3420,12 +3435,12 @@ impl Boards {
                 auto_moderated_topics: None,
                 generation: 1,
                 deleted: false,
-                contract: None,
+                contract: child_contract,
                 signed_at: get_current_system_time(),
             };
-            board_state.sections.sections.push(AuthorizedSectionV1::new(
-                section, &owner_sk, None,
-            ));
+            let authorized = AuthorizedSectionV1::new(section, &owner_sk, None);
+            board_state.sections.sections.push(authorized.clone());
+            general_section = Some(authorized);
         }
 
         // Set initial configuration with privacy mode
@@ -3577,6 +3592,27 @@ impl Boards {
         info!("🟢 Inserting board into map...");
         self.removed.retain(|vk| *vk != owner_vk);
         self.map.insert(owner_vk, board_data);
+        if let Some(section) = general_section {
+            if let Some(state) = self
+                .map
+                .get(&owner_vk)
+                .map(|board| board.board_state.clone())
+            {
+                crate::util::safe_spawn_local(async move {
+                    if let Err(error) = crate::components::app::section_contract::create_section_board(
+                        owner_vk,
+                        &section,
+                        &state,
+                    )
+                    .await
+                    {
+                        dioxus::logger::tracing::warn!(
+                            "General section child was not created: {error}"
+                        );
+                    }
+                });
+            }
+        }
         info!("🟢 create_new_board_with_name completed successfully, returning owner_vk");
         owner_vk
     }

@@ -1,9 +1,11 @@
 # Shard dell'indice per sezione
 
-Data: 2026-11-23. Stato: fasi 1–2 implementate e pubblicate nella build
-locale v621. La creazione di una sezione su una board `SectionedTopicIndex`
-crea la board figlia e ne registra la chiave nella sezione; il routing di
-topic e risposte (fase 3) è ancora da fare.
+Data: 2026-11-23. Stato: fase 3 implementata nella build locale v624. La
+creazione di una sezione su una board `SectionedTopicIndex` crea la board
+figlia e ne registra la chiave; topic, risposte, attività, flag e report
+vengono scritti sulla figlia. La UI unisce gli indici delle figlie. Restano
+l'aggregazione di ricerca/notifiche/moderazione e la propagazione
+dell'autorità (fase 4-5).
 
 ## Problema
 
@@ -136,8 +138,11 @@ l'indice dei topic. La UI tratta ogni sezione come una board.
    e la carica all'apertura della board. Il test real-node
    "a sectioned board creates a child index contract" verifica la chiave
    pubblicata.
-3. **Topic e attività**: creazione topic, risposte, flag e report sulla figlia;
-   la madre resta invariata. Test real-node.
+3. **Topic e attività** (fatto): creazione topic, risposte, flag e report
+   vanno sulla figlia della sezione; la madre resta invariata. Il client
+   unisce gli indici delle figlie per la lista, la ricerca del topic e la
+   continuation. La sezione General crea la sua figlia alla creazione della
+   board. Test real-node sectioned esteso a topic, risposta e reload.
 4. **Ricerca, notifiche e moderazione**: aggregazione delle figlie, cache,
    code report/approvazioni.
 5. **Autorità**: propagazione di membri/ban/ruoli alle figlie, retry e test di

@@ -42,6 +42,153 @@ pub fn is_known_section_board(key: &ContractInstanceId) -> bool {
     SECTION_BOARDS.read().contains_key(key)
 }
 
+pub fn section_state(owner: VerifyingKey, section: SectionId) -> Option<ChatBoardStateV1> {
+    let key = section_key(owner, section);
+    SECTION_BOARDS
+        .read()
+        .get(key.id())
+        .map(|board| board.state.clone())
+}
+
+/// Merge the parent index (used by non-sharded boards) with every loaded
+/// child index of this owner. The UI reads the union as one index.
+pub fn merged_index(
+    owner: VerifyingKey,
+    parent: &TopicIndexV1,
+) -> TopicIndexV1 {
+    let mut merged = parent.clone();
+    let boards = SECTION_BOARDS.read();
+    for board in boards
+        .values()
+        .filter(|board| board.params.owner == owner)
+    {
+        merge_index(&mut merged, &board.state.topics);
+    }
+    merged
+}
+
+fn merge_index(dst: &mut TopicIndexV1, src: &TopicIndexV1) {
+    for entry in &src.entries {
+        match dst
+            .entries
+            .iter_mut()
+            .find(|existing| existing.entry.topic_id == entry.entry.topic_id)
+        {
+            Some(existing) => {
+                let take = entry.entry.generation > existing.entry.generation
+                    || (entry.entry.generation == existing.entry.generation
+                        && entry.digest() < existing.digest());
+                if take {
+                    *existing = entry.clone();
+                }
+            }
+            None => dst.entries.push(entry.clone()),
+        }
+    }
+    for entry in &src.activity {
+        match dst
+            .activity
+            .iter_mut()
+            .find(|existing| existing.activity.topic_id == entry.activity.topic_id)
+        {
+            Some(existing) => {
+                if entry.activity.generation > existing.activity.generation {
+                    *existing = entry.clone();
+                }
+            }
+            None => dst.activity.push(entry.clone()),
+        }
+    }
+    for entry in &src.flags {
+        match dst.flags.iter_mut().find(|existing| {
+            existing.flag.topic_id == entry.flag.topic_id
+                && existing.flag.kind == entry.flag.kind
+        }) {
+            Some(existing) => {
+                let take = entry.flag.generation > existing.flag.generation
+                    || (entry.flag.generation == existing.flag.generation
+                        && entry.flag.value == false
+                        && existing.flag.value)
+                    || (entry.flag.generation == existing.flag.generation
+                        && entry.flag.value == existing.flag.value
+                        && entry.digest() < existing.digest());
+                if take {
+                    *existing = entry.clone();
+                }
+            }
+            None => dst.flags.push(entry.clone()),
+        }
+    }
+    for entry in &src.reports {
+        match dst.reports.iter_mut().find(|existing| {
+            existing.report.topic_id == entry.report.topic_id
+                && existing.report.post_id == entry.report.post_id
+                && existing.report.reporter == entry.report.reporter
+        }) {
+            Some(existing) => {
+                if entry.report.generation > existing.report.generation {
+                    *existing = entry.clone();
+                }
+            }
+            None => dst.reports.push(entry.clone()),
+        }
+    }
+    for entry in &src.report_resolutions {
+        match dst.report_resolutions.iter_mut().find(|existing| {
+            existing.resolution.topic_id == entry.resolution.topic_id
+                && existing.resolution.post_id == entry.resolution.post_id
+                && existing.resolution.reporter == entry.resolution.reporter
+        }) {
+            Some(existing) => {
+                if entry.resolution.generation > existing.resolution.generation {
+                    *existing = entry.clone();
+                }
+            }
+            None => dst.report_resolutions.push(entry.clone()),
+        }
+    }
+}
+
+/// Apply a delta to a section child and publish it. The child contract
+/// verifies its own records and section layout.
+pub async fn apply_section_delta(
+    owner: VerifyingKey,
+    section: SectionId,
+    delta: plaza_core::board_state::ChatBoardStateV1Delta,
+) -> Result<(), String> {
+    let key = section_key(owner, section);
+    let contract_id = *key.id();
+    if !SECTION_BOARDS.read().contains_key(&contract_id) {
+        load_section_board(owner, section).await?;
+    }
+    let parent = SECTION_BOARDS
+        .read()
+        .get(&contract_id)
+        .map(|board| board.state.clone())
+        .ok_or("the section board is not loaded")?;
+    let mut state = parent.clone();
+    state
+        .apply_delta(
+            &parent,
+            &ChatBoardParametersV1 { owner },
+            &Some(delta.clone()),
+        )
+        .map_err(|error| format!("apply section delta: {error}"))?;
+    SECTION_BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.get_mut(&contract_id) {
+            board.state = state;
+            board.synced = false;
+        }
+    });
+    let bytes = to_cbor_vec(&delta);
+    send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
+        key,
+        data: UpdateData::Delta(bytes.into()),
+    }))
+    .await
+    .map_err(|error| format!("send section delta: {error}"))
+}
+
 pub fn is_section_contract_response(response: &ContractResponse) -> bool {
     match response {
         ContractResponse::GetResponse { key, .. }
@@ -81,6 +228,18 @@ pub async fn create_section_board(
     child.reports = Default::default();
     child.approvals = Default::default();
     child.invites = Default::default();
+
+    let board_params = ChatBoardParametersV1 { owner };
+    child
+        .verify_with_section(&board_params, Some(section_id))
+        .map_err(|error| format!("section state does not verify: {error}"))?;
+    let mut normalized = child.clone();
+    normalized
+        .normalize(&board_params)
+        .map_err(|error| format!("section state cleanup failed: {error}"))?;
+    if normalized != child {
+        return Err("section state is not normalized".to_string());
+    }
 
     let params = SectionParametersV1 { owner, section: section_id };
     let contract = ContractContainer::from(ContractWasmAPIVersion::V1(WrappedContract::new(

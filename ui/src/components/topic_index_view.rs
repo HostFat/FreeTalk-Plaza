@@ -25,7 +25,49 @@ pub fn TopicIndexView(board_id: String) -> Element {
         let Some(key) = current.owner_key else {
             return None;
         };
-        BOARDS.read().map.get(&key).cloned()
+        let mut board = BOARDS.read().map.get(&key).cloned()?;
+        if board.board_state.mode
+            == plaza_core::board_state::BoardModeV1::SectionedTopicIndex
+        {
+            board.board_state.topics = crate::components::app::section_contract::merged_index(
+                board.owner_vk,
+                &board.board_state.topics,
+            );
+        }
+        Some(board)
+    });
+
+    use_effect(move || {
+        let current = CURRENT_BOARD.read();
+        let Some(owner) = current.owner_key else {
+            return;
+        };
+        let sections = {
+            let boards = BOARDS.read();
+            let Some(board) = boards.map.get(&owner) else {
+                return;
+            };
+            if board.board_state.mode
+                != plaza_core::board_state::BoardModeV1::SectionedTopicIndex
+            {
+                return;
+            }
+            board
+                .board_state
+                .sections
+                .sections
+                .iter()
+                .filter_map(|entry| entry.section.contract.map(|_| entry.section.id))
+                .collect::<Vec<_>>()
+        };
+        for section in sections {
+            crate::util::safe_spawn_local(async move {
+                let _ = crate::components::app::section_contract::load_section_board(
+                    owner, section,
+                )
+                .await;
+            });
+        }
     });
 
     let Some(board_data) = board.read().clone() else {
@@ -112,30 +154,6 @@ pub fn TopicIndexView(board_id: String) -> Element {
         .collect();
 
     let owner = board_data.owner_vk;
-    let section_ids: Vec<_> = if board_data.board_state.mode
-        == plaza_core::board_state::BoardModeV1::SectionedTopicIndex
-    {
-        board_data
-            .board_state
-            .sections
-            .sections
-            .iter()
-            .filter_map(|entry| entry.section.contract.map(|_| entry.section.id))
-            .collect()
-    } else {
-        Vec::new()
-    };
-    use_effect(move || {
-        let _ = BOARDS.read().map.len();
-        for section in section_ids.clone() {
-            crate::util::safe_spawn_local(async move {
-                let _ = crate::components::app::section_contract::load_section_board(
-                    owner, section,
-                )
-                .await;
-            });
-        }
-    });
     let submit_title = title.clone();
     let submit_body = body.clone();
 

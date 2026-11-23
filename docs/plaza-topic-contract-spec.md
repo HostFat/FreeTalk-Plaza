@@ -1,8 +1,8 @@
 # Specifica del contratto `plaza-topic`
 
 Versione: 1 (implementata).
-Stato: fasi 0–4 completate; fasi 1–2 dello shard per sezione pubblicate nella
-build locale v621. Nessuna migrazione delle vecchie board.
+Stato: fasi 0–4 completate; fase 3 dello shard per sezione pubblicata nella
+build locale v624. Nessuna migrazione delle vecchie board.
 
 ## Stato dell'implementazione
 
@@ -544,8 +544,9 @@ Le board nuove usano `BoardModeV1::TopicIndex`; le board legacy restano
   applicato, quindi il post resta visibile; il retry è idempotente.
 - Le board `SectionedTopicIndex` creano la board figlia quando si crea una
   sezione, registrano la sua chiave nel record firmato della sezione e la
-  caricano all'apertura della board. La creazione di topic e risposte resta
-  sulla madre finché non arriva la fase 3 del routing.
+  caricano all'apertura della board. Topic, risposte, attività, flag e report
+  vengono scritti sulla figlia; la UI unisce gli indici delle figlie.
+  Ricerca, notifiche e coda moderazione aggregate sono la fase 4.
 - Il mark-read usa il timestamp dell'entry quando manca l'attività, per
   evitare un loop di render.
 

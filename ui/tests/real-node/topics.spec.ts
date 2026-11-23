@@ -118,7 +118,11 @@ test("a sectioned board creates a child index contract", async ({ page }) => {
     timeout: 30_000,
   });
   const suffix = Date.now().toString(36);
-  await createBoard(page, `SectionBoard-${suffix}`, `SectionOwner-${suffix}`);
+  const boardKey = await createBoard(
+    page,
+    `SectionBoard-${suffix}`,
+    `SectionOwner-${suffix}`,
+  );
 
   await app.getByPlaceholder("New section name").fill("Shard section");
   await app.getByRole("button", { name: "Create section" }).click();
@@ -128,6 +132,25 @@ test("a sectioned board creates a child index contract", async ({ page }) => {
   expect(contract, "the section must point to a child contract").toMatch(
     /^[1-9A-HJ-NP-Za-km-z]{43,44}$/,
   );
+
+  // The topic and its activity live in the section child, not the parent.
+  await app.getByPlaceholder("Title").fill("Section topic");
+  await app.getByPlaceholder("Write the first message…").fill("Section body");
+  await app.getByRole("button", { name: "Create topic" }).click();
+  await expect(app.getByRole("heading", { name: "Section topic" })).toBeVisible({
+    timeout: 60_000,
+  });
+  const topicId = await waitForTopicRoute(page);
+  await app.getByPlaceholder("Write a reply.").fill("Section reply");
+  await app.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect(app.getByText("Section reply")).toBeVisible({ timeout: 60_000 });
+
+  await page.goto(`${withSections(BASE)}#/board/${boardKey}`);
+  await expect(app.getByText("Section topic")).toBeVisible({ timeout: 60_000 });
+  await page.goto(
+    `${withSections(BASE)}#/board/${boardKey}/topic/${topicId}`,
+  );
+  await expect(app.getByText("Section reply")).toBeVisible({ timeout: 60_000 });
 });
 
 test("a topic and its replies live in a separate contract", async ({ page }) => {

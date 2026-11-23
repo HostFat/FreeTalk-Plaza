@@ -298,7 +298,7 @@ pub async fn continue_topic(
         }),
         ..Default::default()
     };
-    apply_board_delta(owner, board_delta)?;
+    apply_topic_board_delta(owner, topic_id, board_delta).await?;
     Ok(next_part)
 }
 
@@ -413,7 +413,7 @@ pub async fn move_topic(
         }),
         ..Default::default()
     };
-    apply_board_delta(owner, board_delta)
+    apply_topic_board_delta(owner, topic_id, board_delta).await
 }
 
 /// Merge a topic into another one as a link. Replies stay in the source
@@ -508,7 +508,7 @@ pub async fn merge_topic(
         }),
         ..Default::default()
     };
-    apply_board_delta(owner, board_delta)
+    apply_topic_board_delta(owner, topic_id, board_delta).await
 }
 
 /// Split one text reply into a new topic and mark the original reply as moved.
@@ -640,7 +640,7 @@ pub async fn report_post(
         }),
         ..Default::default()
     };
-    apply_board_delta(owner, board_delta)
+    apply_topic_board_delta(owner, topic_id, board_delta).await
 }
 
 
@@ -713,7 +713,7 @@ pub async fn resolve_report(
         }),
         ..Default::default()
     };
-    apply_board_delta(owner, board_delta)
+    apply_topic_board_delta(owner, topic_id, board_delta).await
 }
 
 pub fn topic_reports(
@@ -1014,7 +1014,23 @@ pub async fn create_topic(
     body: String,
     section: Option<MessageId>,
 ) -> Result<MessageId, String> {
-    let prepared = prepare_topic(owner, &title, &body, section)?;
+    let board = board_for(owner)?;
+    let sectioned = board.board_state.mode == BoardModeV1::SectionedTopicIndex;
+    let target_section = if sectioned {
+        Some(section.ok_or("choose a section for the topic")?)
+    } else {
+        section
+    };
+    if let Some(section_id) = target_section {
+        if sectioned
+            && crate::components::app::section_contract::section_state(owner, section_id)
+                .is_none()
+        {
+            crate::components::app::section_contract::load_section_board(owner, section_id)
+                .await?;
+        }
+    }
+    let prepared = prepare_topic(owner, &title, &body, target_section)?;
     let contract_id = *prepared.key.id();
 
     TOPIC_CACHE.with_mut(|topics| {
@@ -1048,7 +1064,23 @@ pub async fn create_topic(
         return Err(error);
     }
 
-    if let Err(error) = apply_board_delta(owner, prepared.board_delta) {
+    if sectioned {
+        if let Some(section_id) = target_section {
+            if let Err(error) = crate::components::app::section_contract::apply_section_delta(
+                owner,
+                section_id,
+                prepared.board_delta,
+            )
+            .await
+            {
+                dioxus::logger::tracing::warn!(
+                    "topic {} was put but not indexed in its section: {}",
+                    prepared.topic_id,
+                    error
+                );
+            }
+        }
+    } else if let Err(error) = apply_board_delta(owner, prepared.board_delta) {
         // The topic exists; the index can be retried on the next board sync.
         dioxus::logger::tracing::warn!("topic {} was put but not indexed: {}", prepared.topic_id, error);
     } else if let Err(error) =
@@ -1147,7 +1179,9 @@ async fn publish_prepared_reply(
     let contract_id = prepared.contract_id;
     publish_topic_delta(contract_id, prepared.topic_delta).await?;
     if let Some(board_delta) = prepared.board_delta {
-        if let Err(error) = apply_board_delta(owner, board_delta) {
+        if let Err(error) =
+            apply_topic_board_delta(owner, prepared.topic_id, board_delta).await
+        {
             dioxus::logger::tracing::warn!(
                 "reply sent but activity not indexed: {}",
                 error
@@ -1299,7 +1333,7 @@ pub async fn set_flag(
         }),
         ..Default::default()
     };
-    apply_board_delta(owner, board_delta)
+    apply_topic_board_delta(owner, topic_id, board_delta).await
 }
 
 struct PreparedTopic {
@@ -1316,9 +1350,15 @@ fn prepare_topic(
     body: &str,
     section: Option<MessageId>,
 ) -> Result<PreparedTopic, String> {
-    let board = board_for(owner)?;
-    if board.board_state.mode != BoardModeV1::TopicIndex {
+    let mut board = board_for(owner)?;
+    if !board.board_state.mode.is_topic_index() {
         return Err("this board does not use topic contracts".to_string());
+    }
+    if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
+        let section_id = section.ok_or("choose a section for the topic")?;
+        let child = crate::components::app::section_contract::section_state(owner, section_id)
+            .ok_or("the section board is still loading")?;
+        board.board_state.topics = child.topics;
     }
     if title.trim().is_empty() {
         return Err("the topic needs a title".to_string());
@@ -1464,6 +1504,7 @@ fn prepare_topic(
 
 struct PreparedReply {
     contract_id: ContractInstanceId,
+    topic_id: MessageId,
     topic_delta: TopicDeltaV1,
     board_delta: Option<ChatBoardStateV1Delta>,
 }
@@ -1583,6 +1624,7 @@ fn prepare_reply(
 
     Ok(PreparedReply {
         contract_id,
+        topic_id,
         topic_delta,
         board_delta,
     })
@@ -1706,6 +1748,55 @@ fn conversation_for(
         .get(key.id())
         .cloned()
         .ok_or_else(|| "the topic is not loaded".to_string())
+}
+
+fn section_for_topic(owner: VerifyingKey, topic_id: MessageId) -> Option<MessageId> {
+    let board = board_for(owner).ok()?;
+    if let Some(entry) = board.board_state.topics.entry(&topic_id) {
+        return entry.entry.section;
+    }
+    if let Some(board) = crate::components::app::section_contract::SECTION_BOARDS
+        .read()
+        .values()
+        .find(|board| {
+            board.params.owner == owner
+                && board.state.topics.entry(&topic_id).is_some()
+        })
+    {
+        return Some(board.params.section);
+    }
+    TOPIC_CACHE
+        .read()
+        .values()
+        .find(|conversation| {
+            conversation
+                .state
+                .header
+                .as_ref()
+                .is_some_and(|header| header.header.id() == topic_id)
+        })
+        .and_then(|conversation| {
+            conversation
+                .state
+                .section
+                .as_ref()
+                .map(|section| section.snapshot.section)
+        })
+}
+
+async fn apply_topic_board_delta(
+    owner: VerifyingKey,
+    topic_id: MessageId,
+    delta: ChatBoardStateV1Delta,
+) -> Result<(), String> {
+    let board = board_for(owner)?;
+    if board.board_state.mode != BoardModeV1::SectionedTopicIndex {
+        return apply_board_delta(owner, delta);
+    }
+    let section =
+        section_for_topic(owner, topic_id).ok_or("the topic section is not loaded")?;
+    crate::components::app::section_contract::apply_section_delta(owner, section, delta)
+        .await
 }
 
 fn apply_board_delta(owner: VerifyingKey, delta: ChatBoardStateV1Delta) -> Result<(), String> {
@@ -2282,7 +2373,7 @@ pub async fn edit_topic(
             }),
             ..Default::default()
         };
-        apply_board_delta(owner, board_delta)?;
+        apply_topic_board_delta(owner, topic_id, board_delta).await?;
     }
     Ok(())
 }
@@ -2503,7 +2594,7 @@ pub async fn approve_post(
             }),
             ..Default::default()
         };
-        if let Err(error) = apply_board_delta(owner, board_delta) {
+        if let Err(error) = apply_topic_board_delta(owner, topic_id, board_delta).await {
             dioxus::logger::tracing::warn!(
                 "approval sent but the board pending count was not updated: {}",
                 error
