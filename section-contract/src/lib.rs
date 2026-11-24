@@ -22,7 +22,7 @@ fn verify_section_layout(
     section: plaza_core::board_state::sections::SectionId,
 ) -> Result<(), String> {
     if state.mode != plaza_core::board_state::BoardModeV1::SectionedTopicIndex {
-        return Ok(());
+        return Err("a section board must use the sectioned layout".to_string());
     }
     if !state
         .sections
@@ -70,6 +70,11 @@ impl ContractInterface for SectionContract {
             .map_err(|e| ContractError::InvalidUpdateWithInfo {
                 reason: format!("State verification failed: {e}"),
             })?;
+        verify_section_layout(&chat_state, section_params.section).map_err(|e| {
+            ContractError::InvalidUpdateWithInfo {
+                reason: format!("Section layout does not verify: {e}"),
+            }
+        })?;
 
         let mut normalized = chat_state.clone();
         normalized
@@ -167,6 +172,11 @@ impl ContractInterface for SectionContract {
                 .map_err(|e| ContractError::InvalidUpdateWithInfo {
                     reason: format!("Merged state does not verify: {e}"),
                 })?;
+            verify_section_layout(&chat_state, section_params.section).map_err(|e| {
+                ContractError::InvalidUpdateWithInfo {
+                    reason: format!("Section layout does not verify: {e}"),
+                }
+            })?;
         }
 
         let mut updated_state = vec![];
