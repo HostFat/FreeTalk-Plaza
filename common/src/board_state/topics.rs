@@ -480,12 +480,26 @@ impl TopicIndexV1 {
                 return Err("a topic cannot merge into itself".to_string());
             }
             if let Some(destination) = value.destination {
-                if self.entry(&destination).is_none() {
-                    return Err("the merge destination is not indexed".to_string());
+                if self.entry(&destination).is_some() {
+                    if value.section.is_some() || !value.section_chain.is_empty() {
+                        return Err("a local merge flag cannot move the section".to_string());
+                    }
+                } else {
+                    // A cross-section merge points into another child board.
+                    // The owner signs the destination section; the source
+                    // child can only validate that the section exists.
+                    let section = value.section.ok_or(
+                        "a cross-section merge needs the destination section",
+                    )?;
+                    if !state.sections.exists(&section) {
+                        return Err("the merge destination section does not exist".to_string());
+                    }
+                    if state.sections.chain(&section) != value.section_chain {
+                        return Err(
+                            "the merge destination section chain does not match".to_string()
+                        );
+                    }
                 }
-            }
-            if value.section.is_some() || !value.section_chain.is_empty() {
-                return Err("a merge flag cannot move the section".to_string());
             }
         } else if value.kind == TopicFlagKind::Section {
             if !value.value {

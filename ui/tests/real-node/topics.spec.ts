@@ -185,6 +185,30 @@ test("a sectioned board creates a child index contract", async ({ page }) => {
   await expect(
     app.locator("span", { hasText: "Target section" }).first(),
   ).toBeVisible({ timeout: 60_000 });
+
+  // A second topic in Shard can merge into the moved topic in Target.
+  await page.goto(`${withSections(BASE)}#/board/${boardKey}`);
+  const sectionSelect = app.getByRole("combobox").first();
+  await sectionSelect.selectOption({ label: "Shard section" });
+  await app.getByPlaceholder("Title").fill("Merge source");
+  await app.getByPlaceholder("Write the first message…").fill("Cross-section merge");
+  await app.getByRole("button", { name: "Create topic" }).click();
+  await expect(app.getByRole("heading", { name: "Merge source" })).toBeVisible({
+    timeout: 60_000,
+  });
+  const mergeSourceId = await waitForTopicRoute(page);
+  const mergeSelect = app
+    .locator("select")
+    .filter({ has: app.locator(`option[value="${topicId}"]`) })
+    .first();
+  await mergeSelect.selectOption(topicId);
+  await app.getByRole("button", { name: "Merge", exact: true }).click();
+  await page.waitForTimeout(4_000);
+  await expect(app.getByText(/Merged into/)).toBeVisible({ timeout: 60_000 });
+  await page.goto(
+    `${withSections(BASE)}#/board/${boardKey}/topic/${mergeSourceId}`,
+  );
+  await expect(app.getByText(/Merged into/)).toBeVisible({ timeout: 60_000 });
 });
 
 test("a topic and its replies live in a separate contract", async ({ page }) => {

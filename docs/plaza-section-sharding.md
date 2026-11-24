@@ -147,11 +147,12 @@ l'indice dei topic. La UI tratta ogni sezione come una board.
 4. **Ricerca, notifiche e moderazione** (fatto): le viste usano
    `BoardData::with_merged_topics`; le figlie vengono caricate per ogni route
    della board sectioned. Read state e badge non letti usano l'indice unito.
-5. **Move tra sezioni** (fatto): le figlie contengono tutte le sezioni, l'entry
-   resta nella sezione di origine e il flag `Section` sulla figlia sposta la
-   vista nella destinazione; l'indice aggregato usa `section_of`. Il merge tra
-   sezioni diverse resta rifiutato finché il flag `Merged` non può riferirsi a
-   un topic di un'altra figlia.
+5. **Move e merge tra sezioni** (fatto): le figlie contengono tutte le sezioni,
+   l'entry resta nella sezione di origine e il flag `Section` sposta la vista
+   nella destinazione. Un flag `Merged` verso un'altra figlia porta la sezione
+   di destinazione e la sua chain; la figlia di origine verifica che la sezione
+   esista. Report e flag del topic spostato restano nella figlia di origine,
+   perché l'entry firmata non può essere ricreata da un moderatore.
 6. **Autorità** (fatto): `sync_section_authority` copia configurazione,
    membri, ruoli, ban, sospensioni, sezioni e segreti nella figlia con un
    `UpdateData::State`. Ogni `GetResponse` di una figlia riallinea l'autorità

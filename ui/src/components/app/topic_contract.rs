@@ -436,9 +436,19 @@ pub async fn merge_topic(
     if index.entry(&destination).is_none() {
         return Err("the destination topic is not indexed".to_string());
     }
-    if index.section_of(&topic_id).0 != index.section_of(&destination).0 {
-        return Err("cross-section merge is not supported yet".to_string());
-    }
+    let source_section = index.section_of(&topic_id).0;
+    let destination_section = index.section_of(&destination).0;
+    let (flag_section, flag_section_chain) = if board.board_state.mode
+        == BoardModeV1::SectionedTopicIndex
+        && source_section != destination_section
+    {
+        let section = destination_section
+            .ok_or("a cross-section merge needs a destination section")?;
+        let chain = board.board_state.sections.chain(&section);
+        (Some(section), chain)
+    } else {
+        (None, Vec::new())
+    };
     let conversation = conversation_for(owner, topic_id, part)?;
     let header = conversation
         .state
@@ -486,8 +496,8 @@ pub async fn merge_topic(
         kind: TopicFlagKind::Merged,
         value: true,
         destination: Some(destination),
-        section: None,
-        section_chain: Vec::new(),
+        section: flag_section,
+        section_chain: flag_section_chain,
         part: None,
         scope_chain: base.entry.section_chain.clone(),
         generation: current_generation + 1,

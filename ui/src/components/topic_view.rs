@@ -34,7 +34,12 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
         let Some(key) = current.owner_key else {
             return None;
         };
-        BOARDS.read().map.get(&key).cloned()
+        BOARDS
+            .read()
+            .map
+            .get(&key)
+            .cloned()
+            .map(|board| board.with_merged_topics())
     });
     let Some(board_data) = board.read().clone() else {
         return rsx! {
