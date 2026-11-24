@@ -264,9 +264,10 @@ fn apply_and_sync(
     if applied {
         // A role change can put new members in a restricted category's ACL;
         // the owner owes them the category key.
-        if !crate::util::messaging::distribute_category_secrets(board_key) {
-            mark_needs_sync(board_key);
-        }
+        let _ = crate::util::messaging::distribute_category_secrets(board_key);
+        // Persist and publish role/policy changes even when no category key
+        // needs redistribution.
+        mark_needs_sync(board_key);
     }
     match error {
         Some(e) => Err(e),

@@ -190,6 +190,74 @@ test("a member joins a sectioned board and replies", async ({ page }) => {
   });
 });
 
+test("a member joins a General section topic", async ({ page }) => {
+  test.setTimeout(300_000);
+  await page.goto(`${withSections(BASE)}#/enable-sections`);
+  const app = page.frameLocator("iframe");
+  await expect(app.getByText(/Select or Create Board/).first()).toBeVisible({
+    timeout: 30_000,
+  });
+  const suffix = Date.now().toString(36);
+  const boardName = `GeneralMemberBoard-${suffix}`;
+  const ownerName = `GeneralMemberOwner-${suffix}`;
+  const memberName = `GeneralMemberUser-${suffix}`;
+  const boardKey = await createBoard(page, boardName, ownerName);
+
+  const generalOption = app.locator("option", { hasText: "General" }).first();
+  await expect(generalOption).toHaveCount(1, { timeout: 30_000 });
+  expect(await generalOption.getAttribute("data-contract")).toMatch(
+    /^[1-9A-HJ-NP-Za-km-z]{43,44}$/,
+  );
+
+  await app.getByPlaceholder("Title").fill("General member topic");
+  await app.getByPlaceholder("Write the first message…").fill("General body");
+  await app.getByRole("button", { name: "Create topic" }).click();
+  await expect(
+    app.getByRole("heading", { name: "General member topic" }),
+  ).toBeVisible({ timeout: 60_000 });
+  const topicId = await waitForTopicRoute(page);
+
+  await page.goto(`${withSections(BASE)}#/board/${boardKey}/admin/roles`);
+  await app.getByRole("button", { name: "Roles", exact: true }).click();
+  await app.getByPlaceholder("New role name").fill("Members");
+  await app.getByRole("button", { name: "Create", exact: true }).click();
+  await expect(app.getByPlaceholder("New role name")).toHaveValue("", {
+    timeout: 30_000,
+  });
+  await page.waitForTimeout(3_000);
+
+  await page.goto(`${withSections(BASE)}#/board/${boardKey}/admin/links`);
+  await app.getByRole("button", { name: "Invite links" }).click();
+  const role = app.getByRole("combobox").first();
+  await expect(role.locator("option", { hasText: "Members" })).toHaveCount(1, {
+    timeout: 30_000,
+  });
+  await role.selectOption({ label: "Members" });
+  await app.getByRole("button", { name: "Create link" }).click();
+  const link = app.locator("input[readonly]").last();
+  await expect(link).toBeVisible({ timeout: 30_000 });
+  const inviteLink = await link.inputValue();
+  await page.waitForTimeout(3_000);
+
+  await page.goto(inviteLink);
+  await expect(
+    app.getByRole("heading", { name: "Join this board" }),
+  ).toBeVisible({ timeout: 30_000 });
+  await app.getByPlaceholder("Your nickname").fill(memberName);
+  await app.getByRole("button", { name: "Join" }).click();
+  await expect(app.getByText(boardName).first()).toBeVisible({
+    timeout: 60_000,
+  });
+  await page.waitForTimeout(6_000);
+
+  await page.goto(
+    `${withSections(BASE)}#/board/${boardKey}/topic/${topicId}`,
+  );
+  await expect(
+    app.getByRole("heading", { name: "General member topic" }),
+  ).toBeVisible({ timeout: 60_000 });
+});
+
 test("a sectioned board creates a child index contract", async ({ page }) => {
   test.setTimeout(240_000);
   await page.goto(`${withSections(BASE)}#/enable-sections`);
@@ -333,7 +401,7 @@ test("a topic and its replies live in a separate contract", async ({ page }) => 
 
   // A reply draft is stored with the board and comes back after a reload.
   await app.getByPlaceholder("Write a reply…").fill("A draft that survives");
-  await page.waitForTimeout(2_000);
+  await page.waitForTimeout(4_000);
   await page.goto(`${withTopics(BASE)}#/board/${boardKey}/topic/${topicId}`);
   await expect(app.getByPlaceholder("Write a reply…")).toHaveValue(
     "A draft that survives",
@@ -807,8 +875,11 @@ test("move, merge and split keep the index consistent", async ({ page }) => {
   await page.goto(
     `${withTopics(BASE)}#/board/${boardKey}/topic/${moveTopicId}`,
   );
-  const mergeSelect = app.locator("select").nth(1);
-  await mergeSelect.selectOption({ value: destinationTopicId });
+  const mergeSelect = app
+    .locator("select")
+    .filter({ has: app.locator(`option[value="${destinationTopicId}"]`) })
+    .first();
+  await mergeSelect.selectOption(destinationTopicId);
   await app.getByRole("button", { name: "Merge", exact: true }).click();
   await expect(app.getByText(/Merged into/)).toBeVisible({ timeout: 30_000 });
 

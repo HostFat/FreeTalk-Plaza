@@ -3,12 +3,14 @@
 Data: 2026-11-24. Stato: fasi 1–4 e move/merge tra sezioni implementati; lo
 shard resta **opt-in** (`#/enable-sections`). Le figlie ora hanno uno stato
 `ready`/`syncing`: `ensure_section_loaded` attende stato e copia dell'autorità.
-Il test "a member joins a sectioned board and replies" passa su una sezione
-esplicita. Il default resta `TopicIndex`: con una board sectioned di default,
-i topic nella sezione General non si aprono per il membro dopo il join. Il
-problema è circoscritto alla figlia General, non alle sezioni create dopo.
-L'attività delle figlie viene inviata subito, in attesa della persistenza
-locale delle figlie. La
+I test "a member joins a sectioned board and replies" e "a member joins a
+General section topic" passano. Il default resta `TopicIndex`: in sequenza,
+con una board sectioned di default, approvazione e ban restano instabili
+(membro che non vede il topic o il badge pending). Il problema non è la
+figlia General in sé, che funziona in isolamento. L'attività delle figlie
+viene inviata subito, in attesa della persistenza locale delle figlie.
+Le modifiche di ruolo/policy ora vengono sempre salvate e sincronizzate;
+`TopicView` ritenta il caricamento del topic tre volte. La
 creazione di una sezione su una board `SectionedTopicIndex` crea la board
 figlia e ne registra la chiave; topic, risposte, attività, flag e report
 vengono scritti sulla figlia. Lista, ricerca, notifiche, badge non letti e

@@ -154,16 +154,32 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
         }
         loaded_part.set(Some(part_now));
         spawn(async move {
-            match topic_contract::load_topic(owner, topic_id_value, part_now).await {
-                Ok(_) => {
-                    if let Err(message) =
-                        topic_contract::sync_topic_authority(owner, topic_id_value, part_now)
-                            .await
-                    {
-                        error.set(Some(message));
+            for attempt in 0..3 {
+                match topic_contract::load_topic(owner, topic_id_value, part_now).await {
+                    Ok(_) => {
+                        if let Err(message) = topic_contract::sync_topic_authority(
+                            owner,
+                            topic_id_value,
+                            part_now,
+                        )
+                        .await
+                        {
+                            error.set(Some(message));
+                        }
+                        return;
+                    }
+                    Err(message) => {
+                        dioxus::logger::tracing::warn!(
+                            "load_topic failed for part {part_now} (attempt {}): {message}",
+                            attempt + 1
+                        );
+                        if attempt + 1 == 3 {
+                            error.set(Some(message));
+                            return;
+                        }
+                        crate::util::sleep(std::time::Duration::from_secs(1)).await;
                     }
                 }
-                Err(message) => error.set(Some(message)),
             }
         });
     });
