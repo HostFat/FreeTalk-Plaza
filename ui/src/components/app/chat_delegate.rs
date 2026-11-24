@@ -882,6 +882,28 @@ static LEGACY_MIGRATION_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 /// Fire requests to load boards from all known legacy delegates (fire and forget).
 /// If any legacy delegate has board data, the response handler will migrate it.
 async fn fire_legacy_migration_request() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(window) = web_sys::window() {
+            let hash = window.location().hash().unwrap_or_default();
+            if hash.starts_with("#/test-") || hash.starts_with("#/enable-") {
+                info!("Legacy migration skipped on a developer/test route");
+                return;
+            }
+            if let Ok(Some(storage)) = window.local_storage() {
+                if storage
+                    .get_item("plaza-skip-legacy")
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    == Some("1")
+                {
+                    info!("Legacy migration disabled for this test device");
+                    return;
+                }
+            }
+        }
+    }
     // Check if migration has already been done (persistent across sessions)
     if is_legacy_migration_done() {
         info!("Legacy migration already done, skipping");

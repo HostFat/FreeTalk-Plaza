@@ -101,7 +101,7 @@ async function createBoard(
 test.beforeAll(async ({ browser }) => {
   const page = await browser.newPage();
   page.on("dialog", (dialog) => dialog.accept());
-  await page.goto(`${BASE}#/board/${RESET_KEY}`);
+  await page.goto(`${BASE}#/test-reset`);
   const app = page.frameLocator("iframe");
   const reset = app.getByRole("button", { name: "Reset local data" });
   await expect(reset).toBeVisible({ timeout: 30_000 });

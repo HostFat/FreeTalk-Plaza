@@ -57,6 +57,8 @@ pub enum Route {
     EnableTopics,
     #[route("/enable-sections")]
     EnableSections,
+    #[route("/test-reset")]
+    TestReset,
     #[route("/dm/join/:contract_id/:token/:key_version/:key_b58")]
     DmJoin {
         contract_id: String,
@@ -674,6 +676,32 @@ fn Home() -> Element {
 /// Hidden developer route: enable the topic-contract layout for boards created
 /// from this session. The shell bridges the hash into the app iframe, so this
 /// works without changing the web container.
+/// Test-only entry point: disables legacy delegate migration for this device
+/// and offers the same reset as the board-not-found page.
+#[component]
+fn TestReset() -> Element {
+    rsx! {
+        div { class: "min-h-screen flex items-center justify-center p-6",
+            button {
+                r#type: "button",
+                class: "px-4 py-2 border border-red-500/50 text-red-400 hover:bg-red-500/10 rounded-lg",
+                onclick: move |_| {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        if let Some(window) = web_sys::window() {
+                            if let Ok(Some(storage)) = window.local_storage() {
+                                let _ = storage.set_item("plaza-skip-legacy", "1");
+                            }
+                        }
+                    }
+                    crate::util::reset::confirm_and_reset();
+                },
+                "Reset local data"
+            }
+        }
+    }
+}
+
 #[component]
 fn EnableSections() -> Element {
     let navigator = navigator();
