@@ -16,12 +16,112 @@ use plaza_core::board_state::topics::TopicIndexV1;
 use plaza_core::board_state::{
     BoardModeV1, ChatBoardParametersV1, ChatBoardStateV1,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::components::app::chat_delegate::{
+    send_delegate_request, SECTION_BOARDS_STORAGE_KEY,
+};
+use plaza_core::chat_delegate::{
+    ChatDelegateKey, ChatDelegateRequestMsg, ChatDelegateResponseMsg,
+};
 use crate::components::app::send_client_request;
 use crate::constants::SECTION_CONTRACT_WASM;
 use crate::util::to_cbor_vec;
+
+#[derive(Serialize, Deserialize)]
+struct PersistedSectionBoard {
+    owner: VerifyingKey,
+    section: SectionId,
+    state: ChatBoardStateV1,
+}
+
+static SECTION_SAVE_SCHEDULED: AtomicBool = AtomicBool::new(false);
+static SECTION_LOAD_STARTED: AtomicBool = AtomicBool::new(false);
+
+fn schedule_section_save() {
+    if crate::components::app::chat_delegate::LOCAL_RESET.load(Ordering::SeqCst) {
+        return;
+    }
+    if SECTION_SAVE_SCHEDULED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    crate::util::safe_spawn_local(async {
+        crate::util::sleep(std::time::Duration::from_secs(1)).await;
+        if let Err(error) = save_section_boards_now().await {
+            dioxus::logger::tracing::warn!("could not save section boards: {error}");
+        }
+        SECTION_SAVE_SCHEDULED.store(false, Ordering::SeqCst);
+    });
+}
+
+async fn save_section_boards_now() -> Result<(), String> {
+    let entries: Vec<PersistedSectionBoard> = SECTION_BOARDS
+        .read()
+        .values()
+        .map(|board| PersistedSectionBoard {
+            owner: board.params.owner,
+            section: board.params.section,
+            state: board.state.clone(),
+        })
+        .collect();
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&entries, &mut bytes)
+        .map_err(|error| format!("serialize section boards: {error}"))?;
+    match send_delegate_request(ChatDelegateRequestMsg::StoreRequest {
+        key: ChatDelegateKey::new(SECTION_BOARDS_STORAGE_KEY.to_vec()),
+        value: bytes,
+    })
+    .await
+    {
+        Ok(ChatDelegateResponseMsg::StoreResponse { result, .. }) => result,
+        Ok(other) => Err(format!("unexpected section store response: {other:?}")),
+        Err(error) => Err(error),
+    }
+}
+
+/// Load cached section boards so the UI shows the last known index before the
+/// network GET completes. Network state replaces them as soon as it arrives.
+pub async fn load_persisted_section_boards() {
+    if SECTION_LOAD_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let response = send_delegate_request(ChatDelegateRequestMsg::GetRequest {
+        key: ChatDelegateKey::new(SECTION_BOARDS_STORAGE_KEY.to_vec()),
+    })
+    .await;
+    let bytes = match response {
+        Ok(ChatDelegateResponseMsg::GetResponse { value: Some(bytes), .. }) => bytes,
+        _ => return,
+    };
+    let entries: Vec<PersistedSectionBoard> = match ciborium::de::from_reader(bytes.as_slice()) {
+        Ok(entries) => entries,
+        Err(error) => {
+            dioxus::logger::tracing::warn!("could not decode section boards: {error}");
+            return;
+        }
+    };
+    SECTION_BOARDS.with_mut(|boards| {
+        for entry in entries {
+            let contract_id = *section_key(entry.owner, entry.section).id();
+            boards.entry(contract_id).or_insert(SectionBoard {
+                params: SectionParametersV1 {
+                    owner: entry.owner,
+                    section: entry.section,
+                },
+                state: entry.state,
+                synced: false,
+                ready: false,
+                syncing: false,
+            });
+        }
+    });
+}
 
 pub struct SectionBoard {
     pub params: SectionParametersV1,
@@ -213,6 +313,7 @@ pub async fn sync_section_authority(
             board.ready = false;
         }
     });
+    schedule_section_save();
     let result = send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
         key,
         data: UpdateData::State(to_cbor_vec(&state).into()),
@@ -263,6 +364,7 @@ pub async fn apply_section_delta(
             board.synced = false;
         }
     });
+    schedule_section_save();
     let bytes = to_cbor_vec(&delta);
     send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
         key,
@@ -351,6 +453,7 @@ pub async fn create_section_board(
             },
         );
     });
+    schedule_section_save();
     send_client_request(ClientRequest::ContractOp(ContractRequest::Put {
         contract,
         state,
@@ -502,6 +605,7 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                     board.synced = true;
                 }
             });
+            schedule_section_save();
             if let Some(parent_state) = parent_state {
                 if parent_state.mode == BoardModeV1::SectionedTopicIndex {
                     let section = SECTION_BOARDS
@@ -562,6 +666,7 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                     board.synced = true;
                 }
             });
+            schedule_section_save();
         }
         _ => {}
     }

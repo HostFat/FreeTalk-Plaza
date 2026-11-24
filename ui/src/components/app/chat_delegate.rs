@@ -22,6 +22,7 @@ pub const BOARDS_STORAGE_KEY: &[u8] = b"boards_data";
 /// Images this device uploaded, kept apart from the board map: the raw blob
 /// state can reach 24 MiB and must not delay the board list at startup.
 pub const OWNED_IMAGES_STORAGE_KEY: &[u8] = b"owned_images_data";
+pub const SECTION_BOARDS_STORAGE_KEY: &[u8] = b"section_boards_data";
 
 /// Image uploads waiting in the composer, kept apart from the board map for
 /// the same reason: the queued file bytes can reach 24 MiB.
@@ -268,6 +269,7 @@ pub async fn reset_local_data() -> Result<(), String> {
         BOARDS_STORAGE_KEY,
         OWNED_IMAGES_STORAGE_KEY,
         PENDING_UPLOADS_STORAGE_KEY,
+        SECTION_BOARDS_STORAGE_KEY,
     ] {
         let sent = fire_delegate_request(ChatDelegateRequestMsg::DeleteRequest {
             key: ChatDelegateKey::new(key.to_vec()),

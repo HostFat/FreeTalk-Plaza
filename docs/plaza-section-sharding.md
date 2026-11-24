@@ -7,9 +7,11 @@ I test "a member joins a sectioned board and replies" e "a member joins a
 General section topic" passano. Il default resta `TopicIndex`: in sequenza,
 con una board sectioned di default, approvazione e ban restano instabili
 (membro che non vede il topic o il badge pending). Il problema non è la
-figlia General in sé, che funziona in isolamento. L'attività delle figlie
-viene inviata subito, in attesa della persistenza locale delle figlie.
-Le modifiche di ruolo/policy ora vengono sempre salvate e sincronizzate;
+figlia General in sé, che funziona in isolamento. Lo stato delle figlie viene ora persistito nel delegate (`section_boards_data`)
+con debounce e ripristinato all'avvio prima dei GET di rete. L'attività delle
+figlie viene ancora inviata subito: un GET di rete sostituirebbe lo stato
+locale più recente, quindi il coalescing richiede una regola di merge/dirty.
+Le modifiche di ruolo/policy vengono sempre salvate e sincronizzate;
 `TopicView` ritenta il caricamento del topic tre volte. La
 creazione di una sezione su una board `SectionedTopicIndex` crea la board
 figlia e ne registra la chiave; topic, risposte, attività, flag e report

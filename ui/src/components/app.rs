@@ -424,6 +424,16 @@ pub fn App() -> Element {
         }
     });
 
+    // Restore cached section indexes before the network GETs finish, so the
+    // board list and search show the last known content immediately.
+    use_effect(move || {
+        if *BOARDS_LOADED.read() {
+            crate::util::safe_spawn_local(
+                crate::components::app::section_contract::load_persisted_section_boards(),
+            );
+        }
+    });
+
     // Section children are needed by the board list, search, notifications and
     // moderation, so load them for every route of a sectioned board.
     use_effect(move || {
