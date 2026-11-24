@@ -78,6 +78,13 @@ byte: con contenuti reali da 512 byte per campo lo stato cresce di circa
    1.000 membri attivi**, e su un secondo computer, per separare il costo
    algoritmico dalla velocità della CPU.
 
+Aggiornamento 2026-11-24: il contratto section ora applica un delta di soli
+topic e verifica solo il layout, senza rifirmare membri e argomenti. Su una
+figlia con 1.000 membri, 100 sezioni e 200 topic un activity delta costa
+circa 2 ms invece dei 3,5 s della verifica completa. Il costo che resta è il
+broadcast dello stato completo della figlia e la sua duplicazione di membri e
+sezioni; i numeri sono in `docs/plaza-multi-client-benchmark.md`.
+
 ## Test
 
 I benchmark sono test ignorati: la CI normale non li esegue. I test

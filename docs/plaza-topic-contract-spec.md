@@ -489,8 +489,9 @@ TopicDeltaV1 {
 
 ## 9. Indice della board
 
-Le board nuove usano `BoardModeV1::TopicIndex`; le board legacy restano
-`LegacyMessages` e non vengono migrate.
+Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
+`TopicIndex` esistenti restano leggibili e le board legacy restano
+`LegacyMessages`. Nessuna migrazione automatica.
 
 - `SectionsV1`: sezioni con parent, nome (sigillato sulle private), ruoli
   ammessi, `hidden`, `is_group`, `images_allowed`, `auto_moderated_topics`,
@@ -506,8 +507,9 @@ Le board nuove usano `BoardModeV1::TopicIndex`; le board legacy restano
   richiedono l'autorità di moderazione. La sezione effettiva è quella
   dell'ultimo flag `Section`; la parte quella dell'ultimo flag `Part`.
 - La board non contiene i post: conserva solo indice, sezioni e stato di
-  moderazione. L'indice è limitato a 2.000 topic, 2.000 righe di attività,
-  16.000 flag e 2.000 report, perché viaggia in pieno con ogni update.
+  moderazione. Ogni indice (madre o figlia) è limitato a 2.000 topic, 2.000
+  righe di attività, 16.000 flag e 2.000 report, perché viaggia in pieno con
+  ogni update della sua sezione.
 - Con `BoardModeV1::SectionedTopicIndex` la board madre tiene solo le sezioni
   e l'autorità; ogni sezione è una board figlia (`plaza-section-contract`)
   con parametri `{ owner, section }`, la propria sezione e l'indice dei suoi

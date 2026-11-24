@@ -14,6 +14,35 @@ use plaza_core::board_state::{
 };
 use plaza_core::ChatBoardStateV1;
 
+/// Layout rules only. A topics-only delta already verified its records in
+/// `apply_topics_delta`; re-verifying every member and topic here would turn
+/// each activity refresh back into a full-state verification.
+fn verify_section_layout(
+    state: &ChatBoardStateV1,
+    section: plaza_core::board_state::sections::SectionId,
+) -> Result<(), String> {
+    if state.mode != plaza_core::board_state::BoardModeV1::SectionedTopicIndex {
+        return Ok(());
+    }
+    if !state
+        .sections
+        .sections
+        .iter()
+        .any(|entry| entry.section.id == section)
+    {
+        return Err("a section board must contain its own section".to_string());
+    }
+    if !state.recent_messages.messages.is_empty() {
+        return Err("a section board cannot carry legacy messages".to_string());
+    }
+    for entry in &state.topics.entries {
+        if entry.entry.section != Some(section) {
+            return Err("a section board cannot index topics of another section".to_string());
+        }
+    }
+    Ok(())
+}
+
 #[allow(dead_code)]
 struct SectionContract;
 
@@ -96,11 +125,11 @@ impl ContractInterface for SectionContract {
                                     reason: e.to_string(),
                                 })?;
                         }
-                        chat_state
-                            .verify_with_section(&board_params, Some(section_params.section))
-                            .map_err(|e| ContractError::InvalidUpdateWithInfo {
-                                reason: format!("Delta does not verify: {e}"),
-                            })?;
+                        verify_section_layout(&chat_state, section_params.section).map_err(
+                            |e| ContractError::InvalidUpdateWithInfo {
+                                reason: format!("Section layout does not verify: {e}"),
+                            },
+                        )?;
                     } else {
                         let delta_verify = delta.version.is_none();
                         chat_state
@@ -118,8 +147,7 @@ impl ContractInterface for SectionContract {
                                 .map_err(|e| ContractError::InvalidUpdateWithInfo {
                                     reason: format!("Delta does not verify: {e}"),
                                 })?;
-                            chat_state
-                                .verify_with_section(&board_params, Some(section_params.section))
+                            verify_section_layout(&chat_state, section_params.section)
                                 .map_err(|e| ContractError::InvalidUpdateWithInfo {
                                     reason: format!("Section layout does not verify: {e}"),
                                 })?;
