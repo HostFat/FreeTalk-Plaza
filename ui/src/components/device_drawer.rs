@@ -104,6 +104,7 @@ fn switch_state(profile: &crate::board_data::IdentityProfile) -> (bool, bool) {
     };
     let vk = profile.signing_key.verifying_key();
     let is_current = board.self_sk.verifying_key() == vk;
+    let is_owner = board.owner_vk == vk;
     let is_member = board.board_state.members.members.iter().any(|member| {
         member.member.member_vk == vk
             && !board
@@ -111,7 +112,7 @@ fn switch_state(profile: &crate::board_data::IdentityProfile) -> (bool, bool) {
                 .ownership
                 .is_deactivated_now(&member.member.id())
     });
-    (is_member && !is_current, is_current)
+    ((is_owner || is_member) && !is_current, is_current)
 }
 
 /// Read one selected file and merge it into the local store, then reload.

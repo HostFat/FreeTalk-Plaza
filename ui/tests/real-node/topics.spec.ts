@@ -588,7 +588,7 @@ test("a ban propagates to an existing topic", async ({ page }) => {
   await app.getByRole("button", { name: "Ban User", exact: true }).click();
   await app.getByRole("button", { name: "Yes, Ban User", exact: true }).click();
   await expect(app.getByText(/Banned Users/)).toBeVisible({ timeout: 30_000 });
-  await page.waitForTimeout(5_000);
+  await page.waitForTimeout(10_000);
 
   await page.goto(`${withTopics(BASE)}#/board/${boardKey}/topic/${topicId}`);
   await expect(app.getByText("Banned author")).toBeVisible({ timeout: 60_000 });

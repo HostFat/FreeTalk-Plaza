@@ -10,10 +10,12 @@ use freenet_stdlib::prelude::{
     Parameters, UpdateData, WrappedContract, WrappedState,
 };
 use plaza_core::board_state::sections::{
-    AuthorizedSectionV1, SectionId, SectionParametersV1, SectionsV1,
+    AuthorizedSectionV1, SectionId, SectionParametersV1,
 };
 use plaza_core::board_state::topics::TopicIndexV1;
-use plaza_core::board_state::{BoardModeV1, ChatBoardParametersV1, ChatBoardStateV1};
+use plaza_core::board_state::{
+    BoardModeV1, ChatBoardParametersV1, ChatBoardStateV1,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -158,6 +160,14 @@ pub async fn sync_section_authority(
 ) -> Result<(), String> {
     let key = section_key(owner, section);
     let contract_id = *key.id();
+    if !SECTION_BOARDS
+        .read()
+        .get(&contract_id)
+        .map(|board| board.synced)
+        .unwrap_or(false)
+    {
+        ensure_section_loaded(owner, section).await?;
+    }
     let Some(child) = SECTION_BOARDS
         .read()
         .get(&contract_id)
@@ -212,8 +222,13 @@ pub async fn apply_section_delta(
 ) -> Result<(), String> {
     let key = section_key(owner, section);
     let contract_id = *key.id();
-    if !SECTION_BOARDS.read().contains_key(&contract_id) {
-        load_section_board(owner, section).await?;
+    if !SECTION_BOARDS
+        .read()
+        .get(&contract_id)
+        .map(|board| board.synced)
+        .unwrap_or(false)
+    {
+        ensure_section_loaded(owner, section).await?;
     }
     let parent = SECTION_BOARDS
         .read()
@@ -363,6 +378,39 @@ pub async fn load_section_board(
     .await
     .map_err(|error| format!("get section board: {error}"))?;
     Ok(contract_id)
+}
+
+/// Wait until a section child state has arrived. A GET is retried because the
+/// child PUT may still be in flight right after the board or section is created.
+pub async fn ensure_section_loaded(
+    owner: VerifyingKey,
+    section: SectionId,
+) -> Result<(), String> {
+    let key = section_key(owner, section);
+    let contract_id = *key.id();
+    for _ in 0..12 {
+        if SECTION_BOARDS
+            .read()
+            .get(&contract_id)
+            .map(|board| board.synced)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        load_section_board(owner, section).await?;
+        for _ in 0..10 {
+            crate::util::sleep(std::time::Duration::from_millis(200)).await;
+            if SECTION_BOARDS
+                .read()
+                .get(&contract_id)
+                .map(|board| board.synced)
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
+        }
+    }
+    Err("the section board is not available yet".to_string())
 }
 
 pub async fn handle_contract_response(response: ContractResponse) -> Result<(), String> {

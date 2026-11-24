@@ -265,9 +265,11 @@ pub async fn continue_topic(
     )
     .await?;
 
-    let current_generation = board
-        .board_state
-        .topics
+    let index = crate::components::app::section_contract::merged_index(
+        owner,
+        &board.board_state.topics,
+    );
+    let current_generation = index
         .flag(&topic_id, TopicFlagKind::Part)
         .map(|flag| flag.generation)
         .unwrap_or(0);
@@ -591,7 +593,11 @@ pub async fn report_post(
     body: String,
 ) -> Result<(), String> {
     let board = board_for(owner)?;
-    if board.board_state.topics.entry(&topic_id).is_none() {
+    let index = crate::components::app::section_contract::merged_index(
+        owner,
+        &board.board_state.topics,
+    );
+    if index.entry(&topic_id).is_none() {
         return Err("the topic is not indexed".to_string());
     }
     let body = body.trim().to_string();
@@ -600,9 +606,7 @@ pub async fn report_post(
     }
     let reporter = MemberId::from(&board.self_sk.verifying_key());
     let now = system_time_ms(get_current_system_time());
-    let mut recent_reports: Vec<i64> = board
-        .board_state
-        .topics
+    let mut recent_reports: Vec<i64> = index
         .reports
         .iter()
         .filter(|entry| entry.report.reporter == reporter)
@@ -616,9 +620,7 @@ pub async fn report_post(
     ) {
         return Err("too many reports sent in the last hour; wait before sending another".to_string());
     }
-    let generation = board
-        .board_state
-        .topics
+    let generation = index
         .reports
         .iter()
         .filter(|entry| {
@@ -660,9 +662,11 @@ pub async fn resolve_report(
     reporter: MemberId,
 ) -> Result<(), String> {
     let board = board_for(owner)?;
-    let report = board
-        .board_state
-        .topics
+    let index = crate::components::app::section_contract::merged_index(
+        owner,
+        &board.board_state.topics,
+    );
+    let report = index
         .reports
         .iter()
         .find(|entry| {
@@ -674,7 +678,7 @@ pub async fn resolve_report(
     let _ = report;
     let self_id = MemberId::from(&board.self_sk.verifying_key());
     let owner_id = board.current_owner_id();
-    let chain = board.board_state.topics.section_of(&topic_id).1;
+    let chain = index.section_of(&topic_id).1;
     let (signer_sk, signer, authority) = if self_id != owner_id
         && board.can_moderate(&chain)
     {
@@ -688,9 +692,7 @@ pub async fn resolve_report(
     } else {
         return Err("only a moderator can resolve a report".to_string());
     };
-    let generation = board
-        .board_state
-        .topics
+    let generation = index
         .report_resolutions
         .iter()
         .filter(|entry| {
@@ -1068,12 +1070,11 @@ pub async fn create_topic(
         section
     };
     if let Some(section_id) = target_section {
-        if sectioned
-            && crate::components::app::section_contract::section_state(owner, section_id)
-                .is_none()
-        {
-            crate::components::app::section_contract::load_section_board(owner, section_id)
-                .await?;
+        if sectioned {
+            crate::components::app::section_contract::ensure_section_loaded(
+                owner, section_id,
+            )
+            .await?;
         }
     }
     let prepared = prepare_topic(owner, &title, &body, target_section)?;
@@ -1347,9 +1348,11 @@ pub async fn set_flag(
         .as_ref()
         .map(|section| section.snapshot.chain.clone())
         .unwrap_or_default();
-    let current_generation = board
-        .board_state
-        .topics
+    let index = crate::components::app::section_contract::merged_index(
+        owner,
+        &board.board_state.topics,
+    );
+    let current_generation = index
         .flag(&topic_id, kind)
         .map(|flag| flag.generation)
         .unwrap_or(0);
@@ -1615,14 +1618,14 @@ fn prepare_reply(
     // Activity hint for the board list. If the board update fails the reply is
     // still valid; the next successful one refreshes the count.
     let contract_id = *conversation.key.id();
-    let board_delta = board
-        .board_state
-        .topics
+    let activity_index = crate::components::app::section_contract::merged_index(
+        owner,
+        &board.board_state.topics,
+    );
+    let board_delta = activity_index
         .entry(&topic_id)
         .map(|entry| {
-            let current = board
-                .board_state
-                .topics
+            let current = activity_index
                 .activity_for(&topic_id)
                 .map(|activity| activity.activity.clone());
             let value = TopicActivityV1 {
@@ -2405,7 +2408,11 @@ pub async fn edit_topic(
     )
     .await?;
 
-    if let Some(entry) = board.board_state.topics.entry(&topic_id) {
+    let index = crate::components::app::section_contract::merged_index(
+        owner,
+        &board.board_state.topics,
+    );
+    if let Some(entry) = index.entry(&topic_id) {
         let mut next = entry.entry.clone();
         next.title = seal_text(&board, &title)?;
         let preview: String = body.chars().take(200).collect();
@@ -2613,9 +2620,11 @@ pub async fn approve_post(
     }
     publish_topic_delta(*conversation.key.id(), delta).await?;
 
-    if let Some(current) = board
-        .board_state
-        .topics
+    let index = crate::components::app::section_contract::merged_index(
+        owner,
+        &board.board_state.topics,
+    );
+    if let Some(current) = index
         .activity_for(&topic_id)
         .map(|entry| entry.activity.clone())
     {
