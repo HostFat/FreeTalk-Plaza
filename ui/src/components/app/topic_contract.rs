@@ -975,12 +975,39 @@ pub async fn sync_topic_authority(
     Ok(true)
 }
 
-const MAX_PROPAGATED_TOPICS: usize = 100;
+/// Send the board authority to one topic without loading its state. The node
+/// applies the delta to the contract; the local cache is updated only if the
+/// topic is already loaded.
+async fn publish_topic_authority(
+    owner: VerifyingKey,
+    topic_id: MessageId,
+    part: u32,
+    authority: &plaza_topic_core::TopicAuthorityV1,
+) -> Result<(), String> {
+    let key = topic_key_for(owner, topic_id, part);
+    let delta = TopicDeltaV1 {
+        authority: Some(authority.clone()),
+        ..Default::default()
+    };
+    let bytes = to_cbor_vec(&delta);
+    send_contract_request(ContractRequest::Update {
+        key,
+        data: UpdateData::Delta(bytes.into()),
+    })
+    .await?;
+    TOPIC_CACHE.with_mut(|topics| {
+        if let Some(conversation) = topics.get_mut(key.id()) {
+            conversation.state.authority =
+                conversation.state.authority.merged_with(authority);
+            conversation.synced = true;
+        }
+    });
+    Ok(())
+}
 
-/// Push bans, suspensions, roles, admins, ownership and the policy to the
-/// topics in the board index. Topics not in the local cache are fetched first,
-/// with a short bounded wait. Bans and role changes are rare, so this pass is
-/// intentionally simple.
+/// Push bans, suspensions, roles, admins, ownership and the policy to every
+/// topic in the board index. The updates are authority-only and do not need a
+/// GET, so the pass is no longer capped at a fixed number of topics.
 pub async fn propagate_authority(owner: VerifyingKey) -> Result<(), String> {
     let board = board_for(owner)?;
     if !board.board_state.mode.is_topic_index() {
@@ -1005,39 +1032,22 @@ pub async fn propagate_authority(owner: VerifyingKey) -> Result<(), String> {
         owner,
         &board.board_state.topics,
     );
+    let authority = authority_from_board(&board, board.is_current_owner())?;
     let topics: Vec<(MessageId, u32)> = index
         .entries
         .iter()
-        .take(MAX_PROPAGATED_TOPICS)
         .map(|entry| (entry.entry.topic_id, index.part_of(&entry.entry.topic_id)))
         .collect();
-    for (topic_id, part) in topics {
-        let key = topic_key_for(owner, topic_id, part);
-        let loaded = TOPIC_CACHE
-            .read()
-            .get(key.id())
-            .map(|conversation| conversation.state.header.is_some())
-            .unwrap_or(false);
-        if !loaded {
-            let _ = load_topic(owner, topic_id, part).await;
-            for _ in 0..30 {
-                let ready = TOPIC_CACHE
-                    .read()
-                    .get(key.id())
-                    .map(|conversation| conversation.state.header.is_some())
-                    .unwrap_or(false);
-                if ready {
-                    break;
-                }
-                crate::util::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
-        if let Err(error) = sync_topic_authority(owner, topic_id, part).await {
+    for (position, (topic_id, part)) in topics.into_iter().enumerate() {
+        if let Err(error) = publish_topic_authority(owner, topic_id, part, &authority).await {
             dioxus::logger::tracing::warn!(
                 "authority propagation failed for topic {}: {}",
                 topic_id,
                 error
             );
+        }
+        if position % 50 == 49 {
+            crate::util::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
     Ok(())

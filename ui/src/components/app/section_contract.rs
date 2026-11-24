@@ -9,8 +9,12 @@ use freenet_stdlib::prelude::{
     ContractCode, ContractContainer, ContractInstanceId, ContractKey, ContractWasmAPIVersion,
     Parameters, UpdateData, WrappedContract, WrappedState,
 };
+use plaza_core::board_state::ban::{AuthorizedBanRevocation, AuthorizedUserBan};
+use plaza_core::board_state::member::{AuthorizedMember, MemberId, MembersDelta};
+use plaza_core::board_state::member_moderation::{AuthorizedSuspension, SuspensionsDelta};
+use plaza_core::board_state::roles::{AuthorizedRole, AuthorizedRoleAssignment, RolesDelta};
 use plaza_core::board_state::sections::{
-    AuthorizedSectionV1, SectionId, SectionParametersV1,
+    AuthorizedSectionV1, SectionId, SectionParametersV1, SectionsDelta,
 };
 use plaza_core::board_state::topics::{
     AuthorizedTopicActivityV1, TopicIndexDelta, TopicIndexV1,
@@ -19,7 +23,7 @@ use plaza_core::board_state::{
     BoardModeV1, ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -63,6 +67,9 @@ async fn save_section_boards_now() -> Result<(), String> {
     let entries: Vec<PersistedSectionBoard> = SECTION_BOARDS
         .read()
         .values()
+        // A placeholder inserted by `load_section_board` has a default state;
+        // saving it would restore an invalid child on the next load.
+        .filter(|board| board.state.mode == BoardModeV1::SectionedTopicIndex)
         .map(|board| PersistedSectionBoard {
             owner: board.params.owner,
             section: board.params.section,
@@ -108,22 +115,45 @@ pub async fn load_persisted_section_boards() {
             return;
         }
     };
+    let mut restored_activity = Vec::new();
     SECTION_BOARDS.with_mut(|boards| {
         for entry in entries {
-            let contract_id = *section_key(entry.owner, entry.section).id();
-            boards.entry(contract_id).or_insert(SectionBoard {
-                params: SectionParametersV1 {
-                    owner: entry.owner,
-                    section: entry.section,
+            // Older blobs could contain a placeholder with the default state;
+            // it has no signatures to verify.
+            if entry.state.mode != BoardModeV1::SectionedTopicIndex {
+                continue;
+            }
+            let key = section_key(entry.owner, entry.section);
+            let contract_id = *key.id();
+            let activity = entry.state.topics.activity.clone();
+            let has_local_activity = !activity.is_empty();
+            if has_local_activity {
+                restored_activity.push((contract_id, key, activity));
+            }
+            // Replace a placeholder inserted by the route effect; otherwise
+            // the persisted state would lose to an empty default.
+            boards.insert(
+                contract_id,
+                SectionBoard {
+                    params: SectionParametersV1 {
+                        owner: entry.owner,
+                        section: entry.section,
+                    },
+                    state: entry.state,
+                    synced: false,
+                    ready: false,
+                    syncing: false,
+                    dirty: has_local_activity,
                 },
-                state: entry.state,
-                synced: false,
-                ready: false,
-                syncing: false,
-                dirty: true,
-            });
+            );
         }
     });
+    // Activity applied locally before the reload still has to reach the
+    // network. Queue it again; otherwise the next GET overwrites the restored
+    // reply count with the older network state.
+    for (contract_id, key, activity) in restored_activity {
+        queue_section_activity(contract_id, key, activity);
+    }
 }
 
 pub struct SectionBoard {
@@ -149,14 +179,6 @@ struct PendingSectionActivity {
 static SECTION_ACTIVITY: Mutex<Vec<(ContractInstanceId, PendingSectionActivity)>> =
     Mutex::new(Vec::new());
 static SECTION_ACTIVITY_TIMERS: Mutex<Vec<ContractInstanceId>> = Mutex::new(Vec::new());
-
-fn has_pending_activity(contract_id: ContractInstanceId) -> bool {
-    SECTION_ACTIVITY
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|(id, _)| *id == contract_id)
-}
 
 async fn flush_section_activity(contract_id: ContractInstanceId) {
     SECTION_ACTIVITY_TIMERS
@@ -188,10 +210,9 @@ async fn flush_section_activity(contract_id: ContractInstanceId) {
     .await;
     match result {
         Ok(()) => {
-            let still_pending = has_pending_activity(contract_id);
             SECTION_BOARDS.with_mut(|boards| {
                 if let Some(board) = boards.get_mut(&contract_id) {
-                    board.dirty = still_pending;
+                    board.dirty = true;
                 }
             });
             schedule_section_save();
@@ -378,6 +399,218 @@ fn merge_index(dst: &mut TopicIndexV1, src: &TopicIndexV1) {
 
 /// Copy the parent's authority, members and global settings into a loaded
 /// section child, keeping the section's own topic index and content.
+/// Members whose records a section child needs: topic authors, activity
+/// signers, flag moderators, reporters and report resolvers.
+fn section_member_ids(state: &ChatBoardStateV1) -> HashSet<MemberId> {
+    let mut ids = HashSet::new();
+    for entry in &state.topics.entries {
+        ids.insert(entry.entry.author);
+    }
+    for entry in &state.topics.activity {
+        if let Some(signer) = entry.signer {
+            ids.insert(signer);
+        }
+    }
+    for entry in &state.topics.flags {
+        if let Some(signer) = entry.signer {
+            ids.insert(signer);
+        }
+    }
+    for entry in &state.topics.reports {
+        ids.insert(entry.report.reporter);
+    }
+    for entry in &state.topics.report_resolutions {
+        ids.insert(entry.resolution.resolved_by);
+    }
+    ids
+}
+
+fn delta_member_ids(
+    delta: &ChatBoardStateV1Delta,
+    owner_id: MemberId,
+) -> HashSet<MemberId> {
+    let mut ids = HashSet::new();
+    if let Some(topics) = &delta.topics {
+        for entry in &topics.entries {
+            ids.insert(entry.entry.author);
+        }
+        for entry in &topics.activity {
+            if let Some(signer) = entry.signer {
+                ids.insert(signer);
+            }
+        }
+        for entry in &topics.flags {
+            if let Some(signer) = entry.signer {
+                ids.insert(signer);
+            }
+        }
+        for entry in &topics.reports {
+            ids.insert(entry.report.reporter);
+        }
+        for entry in &topics.report_resolutions {
+            ids.insert(entry.resolution.resolved_by);
+        }
+    }
+    ids.remove(&owner_id);
+    ids
+}
+
+fn relevant_roles(parent: &ChatBoardStateV1, ids: &HashSet<MemberId>) -> RolesDelta {
+    let mut roles: Vec<AuthorizedRole> = Vec::new();
+    let mut assignments: Vec<AuthorizedRoleAssignment> = Vec::new();
+    let mut role_ids = HashSet::new();
+    for id in ids {
+        for role in parent.roles.active_roles_of(id) {
+            role_ids.insert(role.id);
+        }
+        assignments.extend(
+            parent
+                .roles
+                .assignments
+                .iter()
+                .filter(|assignment| assignment.assignment.member_id == *id)
+                .cloned(),
+        );
+    }
+    for entry in &parent.roles.roles {
+        if role_ids.contains(&entry.role.id) {
+            roles.push(entry.clone());
+        }
+    }
+    RolesDelta { roles, assignments }
+}
+
+fn relevant_bans(parent: &ChatBoardStateV1, ids: &HashSet<MemberId>) -> Vec<AuthorizedUserBan> {
+    parent
+        .bans
+        .0
+        .iter()
+        .filter(|ban| ids.contains(&ban.ban.banned_user))
+        .cloned()
+        .collect()
+}
+
+fn relevant_revocations(
+    parent: &ChatBoardStateV1,
+    ids: &HashSet<MemberId>,
+) -> Vec<AuthorizedBanRevocation> {
+    parent
+        .ban_revocations
+        .revocations
+        .iter()
+        .filter(|revocation| ids.contains(&revocation.revocation.banned_user))
+        .cloned()
+        .collect()
+}
+
+fn relevant_suspensions(
+    parent: &ChatBoardStateV1,
+    ids: &HashSet<MemberId>,
+) -> Vec<AuthorizedSuspension> {
+    parent
+        .suspensions
+        .suspensions
+        .iter()
+        .filter(|suspension| ids.contains(&suspension.suspension.target))
+        .cloned()
+        .collect()
+}
+
+/// Add the member, role and moderation records that a section delta needs to
+/// verify its new topic records. A member that the child already knows costs
+/// nothing.
+fn with_section_records(
+    owner: VerifyingKey,
+    parent: &ChatBoardStateV1,
+    child: &ChatBoardStateV1,
+    mut delta: ChatBoardStateV1Delta,
+) -> ChatBoardStateV1Delta {
+    let owner_id = MemberId::from(&owner);
+    let ids = delta_member_ids(&delta, owner_id);
+    if ids.is_empty() {
+        return delta;
+    }
+    let known: HashSet<MemberId> = child
+        .members
+        .members
+        .iter()
+        .map(|member| member.member.id())
+        .collect();
+    let added: Vec<AuthorizedMember> = parent
+        .members
+        .members
+        .iter()
+        .filter(|member| ids.contains(&member.member.id()) && !known.contains(&member.member.id()))
+        .cloned()
+        .collect();
+    if !added.is_empty() {
+        delta.members = Some(MembersDelta::new(added));
+    }
+    let roles = relevant_roles(parent, &ids);
+    let new_roles: Vec<_> = roles
+        .roles
+        .into_iter()
+        .filter(|role| {
+            !child.roles.roles.iter().any(|known| {
+                known.role.id == role.role.id
+                    && known.role.generation == role.role.generation
+                    && known.role.deleted == role.role.deleted
+            })
+        })
+        .collect();
+    let new_assignments: Vec<_> = roles
+        .assignments
+        .into_iter()
+        .filter(|assignment| {
+            !child.roles.assignments.iter().any(|known| {
+                known.assignment.role_id == assignment.assignment.role_id
+                    && known.assignment.member_id == assignment.assignment.member_id
+                    && known.assignment.generation == assignment.assignment.generation
+                    && known.assignment.revoked == assignment.assignment.revoked
+            })
+        })
+        .collect();
+    if !new_roles.is_empty() || !new_assignments.is_empty() {
+        delta.roles = Some(RolesDelta {
+            roles: new_roles,
+            assignments: new_assignments,
+        });
+    }
+    let bans: Vec<_> = relevant_bans(parent, &ids)
+        .into_iter()
+        .filter(|ban| !child.bans.0.iter().any(|known| known.id() == ban.id()))
+        .collect();
+    if !bans.is_empty() {
+        delta.bans = Some(bans);
+    }
+    let revocations: Vec<_> = relevant_revocations(parent, &ids)
+        .into_iter()
+        .filter(|revocation| {
+            !child
+                .ban_revocations
+                .revocations
+                .iter()
+                .any(|known| known.revocation.ban_id == revocation.revocation.ban_id)
+        })
+        .collect();
+    if !revocations.is_empty() {
+        delta.ban_revocations = Some(revocations);
+    }
+    let suspensions: Vec<_> = relevant_suspensions(parent, &ids)
+        .into_iter()
+        .filter(|suspension| {
+            !child.suspensions.suspensions.iter().any(|known| {
+                known.suspension.target == suspension.suspension.target
+                    && known.suspension.generation == suspension.suspension.generation
+            })
+        })
+        .collect();
+    if !suspensions.is_empty() {
+        delta.suspensions = Some(SuspensionsDelta { suspensions });
+    }
+    delta
+}
+
 pub async fn sync_section_authority(
     owner: VerifyingKey,
     section: SectionId,
@@ -404,30 +637,105 @@ pub async fn sync_section_authority(
             board.ready = false;
         }
     });
-    let mut state = child;
-    state.configuration = parent.configuration.clone();
-    state.admin = parent.admin.clone();
-    state.ownership = parent.ownership.clone();
-    state.bans = parent.bans.clone();
-    state.ban_revocations = parent.ban_revocations.clone();
-    state.roles = parent.roles.clone();
-    state.invites = parent.invites.clone();
-    state.members = parent.members.clone();
-    state.member_info = parent.member_info.clone();
-    state.category_secrets = parent.category_secrets.clone();
-    state.secrets = parent.secrets.clone();
-    state.pq_secrets = parent.pq_secrets.clone();
-    state.warnings = parent.warnings.clone();
-    state.suspensions = parent.suspensions.clone();
-    state.image_retirements = parent.image_retirements.clone();
-    state.upgrade = parent.upgrade.clone();
-    state.mail_addresses = parent.mail_addresses.clone();
-    state.sections = parent.sections.clone();
-
     let board_params = ChatBoardParametersV1 { owner };
-    state
-        .verify_with_section(&board_params, Some(section))
-        .map_err(|error| format!("section authority does not verify: {error}"))?;
+    let ids = section_member_ids(&child);
+
+    // Admin and ownership changes are rare and touch the whole chain; keep the
+    // existing full-state path for them. Everything else travels as a delta
+    // with only the records this section actually needs.
+    let full_state = parent.admin != child.admin || parent.ownership != child.ownership;
+    let mut state = child.clone();
+    let data = if full_state {
+        state.configuration = parent.configuration.clone();
+        state.admin = parent.admin.clone();
+        state.ownership = parent.ownership.clone();
+        state.sections = parent.sections.clone();
+        state.members = parent.members.clone();
+        state.roles = parent.roles.clone();
+        state.bans = parent.bans.clone();
+        state.ban_revocations = parent.ban_revocations.clone();
+        state.suspensions = parent.suspensions.clone();
+        state
+            .verify_with_section(&board_params, Some(section))
+            .map_err(|error| format!("section authority does not verify: {error}"))?;
+        UpdateData::State(to_cbor_vec(&state).into())
+    } else {
+        let mut delta = ChatBoardStateV1Delta::default();
+        if parent.configuration != child.configuration {
+            delta.configuration = Some(parent.configuration.clone());
+        }
+        if parent.sections != child.sections {
+            delta.sections = Some(SectionsDelta {
+                sections: parent.sections.sections.clone(),
+            });
+        }
+        let known: HashSet<MemberId> = child
+            .members
+            .members
+            .iter()
+            .map(|member| member.member.id())
+            .collect();
+        let added: Vec<AuthorizedMember> = parent
+            .members
+            .members
+            .iter()
+            .filter(|member| {
+                ids.contains(&member.member.id()) && !known.contains(&member.member.id())
+            })
+            .cloned()
+            .collect();
+        if !added.is_empty() {
+            delta.members = Some(MembersDelta::new(added));
+        }
+        let roles = relevant_roles(parent, &ids);
+        if !roles.roles.is_empty() || !roles.assignments.is_empty() {
+            delta.roles = Some(roles);
+        }
+        let bans = relevant_bans(parent, &ids);
+        if !bans.is_empty() {
+            delta.bans = Some(bans);
+        }
+        let revocations = relevant_revocations(parent, &ids);
+        if !revocations.is_empty() {
+            delta.ban_revocations = Some(revocations);
+        }
+        let suspensions = relevant_suspensions(parent, &ids);
+        if !suspensions.is_empty() {
+            delta.suspensions = Some(SuspensionsDelta { suspensions });
+        }
+        let has_changes = delta.configuration.is_some()
+            || delta.sections.is_some()
+            || delta.members.is_some()
+            || delta.roles.is_some()
+            || delta.bans.is_some()
+            || delta.ban_revocations.is_some()
+            || delta.suspensions.is_some();
+        if !has_changes {
+            SECTION_BOARDS.with_mut(|boards| {
+                if let Some(board) = boards.get_mut(&contract_id) {
+                    board.syncing = false;
+                    board.ready = true;
+                }
+            });
+            return Ok(());
+        }
+        state
+            .apply_delta(&child, &board_params, &Some(delta.clone()))
+            .map_err(|error| format!("apply section authority: {error}"))?;
+        state
+            .verify_delta(&delta, &board_params)
+            .map_err(|error| format!("section authority does not verify: {error}"))?;
+        if state
+            .topics
+            .entries
+            .iter()
+            .any(|entry| entry.entry.section != Some(section))
+        {
+            return Err("section authority put a topic in another section".to_string());
+        }
+        UpdateData::Delta(to_cbor_vec(&delta).into())
+    };
+
     SECTION_BOARDS.with_mut(|boards| {
         if let Some(board) = boards.get_mut(&contract_id) {
             board.state = state.clone();
@@ -439,14 +747,16 @@ pub async fn sync_section_authority(
     schedule_section_save();
     let result = send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
         key,
-        data: UpdateData::State(to_cbor_vec(&state).into()),
+        data,
     }))
     .await;
     SECTION_BOARDS.with_mut(|boards| {
         if let Some(board) = boards.get_mut(&contract_id) {
             board.syncing = false;
             board.ready = result.is_ok();
-            board.dirty = has_pending_activity(contract_id);
+            // The UpdateResponse clears this; until then a Get that still has
+            // the older authority must not replace the local copy.
+            board.dirty = true;
         }
     });
     result.map_err(|error| format!("send section authority: {error}"))
@@ -474,14 +784,28 @@ pub async fn apply_section_delta(
         .get(&contract_id)
         .map(|board| board.state.clone())
         .ok_or("the section board is not loaded")?;
+    let delta = {
+        let boards = crate::components::app::BOARDS.read();
+        match boards.map.get(&owner) {
+            Some(board) => with_section_records(owner, &board.board_state, &parent, delta),
+            None => delta,
+        }
+    };
     let mut state = parent.clone();
+    let board_params = ChatBoardParametersV1 { owner };
     state
-        .apply_delta(
-            &parent,
-            &ChatBoardParametersV1 { owner },
-            &Some(delta.clone()),
-        )
+        .apply_delta(&parent, &board_params, &Some(delta.clone()))
         .map_err(|error| format!("apply section delta: {error}"))?;
+    if delta.members.is_some()
+        || delta.roles.is_some()
+        || delta.bans.is_some()
+        || delta.ban_revocations.is_some()
+        || delta.suspensions.is_some()
+    {
+        state
+            .verify_with_section(&board_params, Some(section))
+            .map_err(|error| format!("section delta does not verify: {error}"))?;
+    }
     SECTION_BOARDS.with_mut(|boards| {
         if let Some(board) = boards.get_mut(&contract_id) {
             board.state = state;
@@ -504,7 +828,9 @@ pub async fn apply_section_delta(
     .await;
     SECTION_BOARDS.with_mut(|boards| {
         if let Some(board) = boards.get_mut(&contract_id) {
-            board.dirty = has_pending_activity(contract_id);
+            // Keep the cache marked until the node acknowledges this update;
+            // a Get that still carries the older state must not drop it.
+            board.dirty = true;
         }
     });
     result.map_err(|error| format!("send section delta: {error}"))
@@ -558,6 +884,26 @@ pub async fn create_section_board(
     child.reports = Default::default();
     child.approvals = Default::default();
     child.invites = Default::default();
+    // The child starts without a copy of the board authority. Members, roles
+    // and moderation records are added as the section index needs them, so a
+    // board with many members does not pay for all of them in every section.
+    // A board with ownership transfers keeps the member/role lists: the
+    // transfer target must be resolvable from the child.
+    if parent.ownership.transfers.is_empty() {
+        child.members = Default::default();
+        child.member_info = Default::default();
+        child.roles = Default::default();
+    }
+    child.bans = Default::default();
+    child.ban_revocations = Default::default();
+    child.suspensions = Default::default();
+    child.category_secrets = Default::default();
+    child.secrets = Default::default();
+    child.pq_secrets = Default::default();
+    child.warnings = Default::default();
+    child.image_retirements = Default::default();
+    child.upgrade = Default::default();
+    child.mail_addresses = Default::default();
 
     let board_params = ChatBoardParametersV1 { owner };
     child
@@ -730,17 +1076,24 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
             network
                 .verify_with_section(&params, Some(section))
                 .map_err(|error| format!("section state does not verify: {error}"))?;
-            let pending = has_pending_activity(*key.id());
-            let state = if dirty && pending {
+            // Any unconfirmed local change (a new entry, a flag or activity)
+            // must survive a Get that still carries the older state.
+            let state = if dirty {
                 let mut merged = cached.clone();
                 match merged.merge(&cached, &params, &network) {
                     Ok(()) => {
-                        merged
-                            .verify_with_section(&params, Some(section))
-                            .map_err(|error| {
-                                format!("merged section state does not verify: {error}")
-                            })?;
-                        merged
+                        if let Err(error) = merged.verify_with_section(&params, Some(section))
+                        {
+                            // The cached copy can be a stale placeholder. The
+                            // network state has already been verified; use it
+                            // and let the queued activity reach the contract.
+                            dioxus::logger::tracing::warn!(
+                                "ignoring an unverifiable cached section state: {error}"
+                            );
+                            network
+                        } else {
+                            merged
+                        }
                     }
                     Err(error) => {
                         dioxus::logger::tracing::warn!(
@@ -770,7 +1123,9 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 if let Some(board) = boards.get_mut(key.id()) {
                     board.state = state;
                     board.synced = true;
-                    board.dirty = pending;
+                    // Keep a local change marked until our UpdateResponse
+                    // confirms it; a stale Get must not clear it.
+                    board.dirty = dirty;
                 }
             });
             schedule_section_save();
@@ -795,6 +1150,7 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
             SECTION_BOARDS.with_mut(|boards| {
                 if let Some(board) = boards.get_mut(key.id()) {
                     board.synced = true;
+                    board.dirty = false;
                 }
             });
         }
@@ -820,10 +1176,21 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                         .get(key.id())
                         .map(|board| board.dirty)
                         .unwrap_or(false);
-                    if dirty && has_pending_activity(*key.id()) {
+                    if dirty {
                         let mut merged = cached.clone();
                         match merged.merge(&cached, &params, &network) {
-                            Ok(()) => state = merged,
+                            Ok(()) => {
+                                if let Err(error) =
+                                    merged.verify_with_section(&params, Some(entry.1))
+                                {
+                                    dioxus::logger::tracing::warn!(
+                                        "ignoring an unverifiable merged section notification: {error}"
+                                    );
+                                    state = network;
+                                } else {
+                                    state = merged;
+                                }
+                            }
                             Err(error) => {
                                 dioxus::logger::tracing::warn!(
                                     "could not merge section notification: {error}"
@@ -852,7 +1219,9 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 if let Some(board) = boards.get_mut(key.id()) {
                     board.state = state;
                     board.synced = true;
-                    board.dirty = has_pending_activity(*key.id());
+                    // Keep dirty as it was: only the UpdateResponse for our
+                    // own request confirms that the local change reached the
+                    // node.
                 }
             });
             schedule_section_save();

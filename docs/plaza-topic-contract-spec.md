@@ -550,11 +550,19 @@ Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
   attività, flag e report vengono scritti sulla figlia; la UI unisce gli
   indici delle figlie. Ricerca, notifiche e coda moderazione leggono lo stesso
   indice aggregato. Le board `TopicIndex` esistenti restano leggibili.
+- La figlia non copia tutta l'autorità: conserva configurazione, admin,
+  ownership, sezioni e solo i membri/ruoli/ban che il suo indice referenzia.
+  La sincronizzazione dell'autorità viaggia come delta; un cambio di admin o
+  ownership usa ancora lo stato completo. Contratto board alla revisione 26.
+- L'attività della figlia viene accorpata per 10 s. Lo stato locale resta
+  `dirty` fino all'`UpdateResponse` del nodo; un `Get` che porta ancora lo
+  stato precedente fa merge invece di scartare l'entry o l'attività locale.
+  Le attività ripristinate dal delegate vengono rimesse in coda al reload.
 - Un membro può creare un topic in una sezione aperta (nessun ruolo
   richiesto, non nascosta, immagini ammesse, senza auto-moderazione). Il
   topic non porta lo snapshot firmato dall'owner, quindi le policy
   solo-sezione restano riservate all'owner. L'indice della board verifica
-  comunque i ruoli della sezione per ogni entry (revisione 25).
+  comunque i ruoli della sezione per ogni entry (revisione 26).
 - La creazione di un topic attende la conferma del nodo prima di indicizzarlo:
   il nodo pu� rispondere con `PutResponse` oppure con il `GetResponse` che
   avvia la sottoscrizione (`subscribe: true`). `wait_topic_synced` accetta
@@ -582,8 +590,8 @@ un membro, board e sezioni con membri, ruolo creato prima del topic,
 approvazione, propagazione del ban, reaction e poll, move/merge/split,
 continuation con caricamento delle parti precedenti, report con risoluzione,
 report in una sezione e ricerca sull'indice. Con lo shard come default la
-suite passa 15/15 in 4.8 minuti. La suite statica Playwright ha 116 test
-passati e 12 saltati. Il contratto della board e' alla revisione 25: l'indice
+suite passa 15/15 in 5.6 minuti. La suite statica Playwright ha 116 test
+passati e 12 saltati. Il contratto della board e' alla revisione 26: l'indice
 verifica i ruoli della sezione per ogni entry.
 
 Il reset di test scrive un marker nel delegate (`skip_legacy_migration`)

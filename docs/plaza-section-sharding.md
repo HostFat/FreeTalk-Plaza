@@ -30,10 +30,21 @@ sandboxata non espone `localStorage`; senza il marker i delegati legacy
 ripopolano le vecchie board e i loro update con firma non valida rallentano
 ogni test. Con l'isolamento la suite completa passa 15/15 in circa 5 minuti,
 compreso il caso ruolo-prima-del-topic che prima restava su "Loading topic".
-Con lo shard come default la suite real-node passa 15/15 in 4.8 minuti,
+Con lo shard come default la suite real-node passa 15/15 in 5.6 minuti,
 compresi ban, approvazioni, move/merge e il topic creato da un membro nella
-sezione General. Il contratto della board e' alla revisione 25: l'indice
-verifica i ruoli della sezione per ogni entry. Il PUT di un topic puo' essere
+sezione General. Il contratto della board e' alla revisione 26: l'indice
+verifica i ruoli della sezione per ogni entry.
+
+Aggiornamento successivo: la figlia non copia piu' tutta l'autorita'. Al
+momento della creazione conserva configurazione, admin, ownership e sezioni;
+membri, ruoli, ban e sospensioni vengono aggiunti solo per gli autori e i
+firmatari presenti nel suo indice. La sincronizzazione dell'autorita' viaggia
+come delta (lo stato completo resta per admin/ownership). Su un benchmark con
+1.000 membri, 100 sezioni e 200 topic la figlia scende da 674 a 406 KiB e la
+verifica piena da 3,5 a 1,9 s. Lo stato locale resta `dirty` fino
+all'`UpdateResponse`; un `Get` con lo stato precedente fa merge invece di
+scartare entry e attivita' locali, e le attività ripristinate dal delegate
+vengono rimesse in coda al reload. Il PUT di un topic puo' essere
 confermato da un `GetResponse` (stato della sottoscrizione) invece che da un
 `PutResponse`; `wait_topic_synced` accetta entrambi.
 

@@ -23,15 +23,18 @@ copia l'autorita' della madre e aggiunge l'indice della propria sezione.
 
 ## Risultati
 
-| Sezioni | Madre | Verify madre | Figlia | Verify figlia | Activity delta | Layout scan |
+| Sezioni | Madre | Figlia piena | Verify piena | Figlia pruned | Verify pruned | Activity delta |
 |---:|---:|---:|---:|---:|---:|---:|
-| 20 | 345 KiB | 2,14 s | 639 KiB | 3,50 s | 2,1 ms | 0,0 ms |
-| 100 | 380 KiB | 2,29 s | 674 KiB | 3,53 s | 2,0 ms | 0,0 ms |
+| 20 | 345 KiB | 639 KiB | 3,50 s | 371 KiB | 1,75 s | 2,1 ms |
+| 100 | 380 KiB | 674 KiB | 3,53 s | 406 KiB | 1,90 s | 2,0 ms |
 
-| Sezioni | Storage figlie | Activity fan-out (50 sub) | Authority sync a tutte le figlie |
+| Sezioni | Storage figlie (pruned) | Activity fan-out (50 sub) | Authority sync a tutte le figlie |
 |---:|---:|---:|---:|
-| 20 | 12,5 MiB | 31,2 MiB per finestra di 10 s | 12,5 MiB |
-| 100 | 65,9 MiB | 32,9 MiB per finestra di 10 s | 65,9 MiB |
+| 20 | 7,3 MiB | 18,1 MiB per finestra di 10 s | 7,3 MiB |
+| 100 | 39,7 MiB | 19,8 MiB per finestra di 10 s | 39,7 MiB |
+
+Prima del pruning le figlie erano 639/674 KiB, lo storage 12,5/65,9 MiB,
+il fan-out 31,2/32,9 MiB e la sincronizzazione dell'autorita' 12,5/65,9 MiB.
 
 ## Cosa dicono i numeri
 
@@ -45,22 +48,25 @@ copia l'autorita' della madre e aggiunge l'indice della propria sezione.
    indice a pagine.
 3. **Il broadcast e' il vero collo di bottiglia.** Il nodo restituisce lo
    stato completo della figlia (639-674 KiB) a ogni subscriber. Con 50
-   subscriber sono 31-33 MiB per finestra di activity, anche se il calcolo
-   del contratto costa 2 ms. Togliere l'activity dalla figlia o restituire
-   solo il delta elimina questo traffico.
-4. **Le figlie duplicano membri e sezioni.** Lo storage cresce con
-   `O(sezioni x membri + sezioni^2)`: 100 figlie con 1.000 membri e 100
-   sezioni occupano circa 66 MiB. Una autorita' condivisa o un root compatto
-   riduce lo stato a pochi KiB per figlia.
+   subscriber sono 18-20 MiB per finestra di activity (31-33 prima del
+   pruning), anche se il calcolo del contratto costa 2 ms. Togliere
+   l'activity dalla figlia o restituire solo il delta elimina questo traffico.
+4. **Il pruning taglia circa il 40% della figlia.** La figlia conserva solo i
+   membri che il suo indice referenzia: 371-406 KiB invece di 639-674 KiB,
+   con una verifica piena di 1,75-1,90 s invece di 3,5 s. Restano le sezioni
+   copiate in ogni figlia (`O(sezioni^2)`) e le copie nei topic. Un authority
+   root con prove di inclusione eliminera' anche quelle.
 5. **La propagazione dell'autorita' e' il caso peggiore.** Un cambio di
-   ruolo o un ban sincronizza tutte le figlie (66 MiB nello scenario da 100
-   sezioni) e poi propaga ai topic, con il limite attuale di 100 topic per
-   passata. Serve un epoch/root con prove, non una copia completa per topic.
+   ruolo o un ban sincronizza tutte le figlie (39,7 MiB nello scenario da 100
+   sezioni dopo il pruning) e poi invia l'autorita' a ogni topic. Il limite di
+   100 topic e' stato rimosso; resta la copia completa di roles/bans in ogni
+   topic. Serve un epoch/root con prove, non una copia per topic.
 
 ## Prossimi passi
 
-1. Authority root + prove di inclusione al posto di members/roles/bans
-   copiati in ogni figlia e topic.
+1. Authority root + prove di inclusione al posto delle copie ancora presenti
+   (tutte le sezioni in ogni figlia, roles/bans nei topic). Il pruning delle
+   figlie e' gia' implementato.
 2. Activity fuori dall'indice della figlia (nel topic o in un contratto
    activity separato).
 3. Indice a pagine con manifest; aggiornamenti limitati alla pagina.

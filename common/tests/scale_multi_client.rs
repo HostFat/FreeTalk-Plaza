@@ -258,6 +258,21 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
     let child_size = serialized_len(&child);
     let child_verify = verify_time(&child, Some(section_id));
 
+    // The client now gives a child only the members its index references.
+    let mut pruned = child.clone();
+    let needed: std::collections::HashSet<MemberId> = child
+        .topics
+        .entries
+        .iter()
+        .map(|entry| entry.entry.author)
+        .collect();
+    pruned
+        .members
+        .members
+        .retain(|member| needed.contains(&member.member.id()));
+    let pruned_size = serialized_len(&pruned);
+    let pruned_verify = verify_time(&pruned, Some(section_id));
+
     let delta = TopicIndexDelta {
         activity: vec![activity(section_id, 0, members, 2)],
         ..Default::default()
@@ -272,7 +287,7 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
     }
     let layout_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    let child_mib = child_size as f64 / (1024.0 * 1024.0);
+    let pruned_mib = pruned_size as f64 / (1024.0 * 1024.0);
     let parent_kib = parent_size as f64 / 1024.0;
 
     println!("\n=== scenario ===");
@@ -289,28 +304,34 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
         child_verify
     );
     println!(
+        "pruned:   {:>7.1} KiB   verify {:>8.1} ms   (only members the index references)",
+        pruned_size as f64 / 1024.0,
+        pruned_verify
+    );
+    println!(
         "activity delta: {:>6.1} ms + {:>5.1} ms layout scan (vs full verify above)",
         delta_ms, layout_ms
     );
     println!(
-        "storage:  {:>7.1} MiB across {sections} children (O(sections x members + sections^2))",
-        child_mib * sections as f64
+        "storage:  {:>7.1} MiB across {sections} pruned children (O(sections x referenced members + sections^2))",
+        pruned_mib * sections as f64
     );
     println!(
-        "activity update: {:.2} MiB per coalesced window (child state x {subscribers} subscribers)",
-        child_mib * subscribers as f64
+        "activity update: {:.2} MiB per coalesced window (pruned state x {subscribers} subscribers)",
+        pruned_mib * subscribers as f64
     );
     println!(
-        "new topic:       {:.2} MiB per subscriber fan-out",
-        child_mib * subscribers as f64
+        "new topic:       {:.2} MiB per subscriber fan-out (pruned state)",
+        pruned_mib * subscribers as f64
     );
     println!(
-        "authority sync:  {:.2} MiB to all children (child state x {sections})",
-        child_mib * sections as f64
+        "authority sync:  {:.2} MiB to all children (pruned state x {sections})",
+        pruned_mib * sections as f64
     );
+
     println!(
-        "authority propagation to topics is capped at 100 topics today; \
-         each topic also carries a copy of roles/bans/suspensions"
+        "authority propagation now reaches every topic; each topic still \
+         carries a copy of roles/bans/suspensions"
     );
 }
 

@@ -549,6 +549,56 @@ fn a_sectioned_parent_keeps_no_topics() {
 }
 
 #[test]
+fn a_section_child_survives_with_only_the_members_it_needs() {
+    let owner = owner();
+    let owner_id = MemberId::from(&owner.verifying_key());
+    let section_id = MessageId::from_bytes([5u8; 32]);
+    let mut state = ChatBoardStateV1 {
+        configuration: AuthorizedConfigurationV1::new(
+            Configuration {
+                owner_member_id: owner_id,
+                ..Configuration::default()
+            },
+            &owner,
+        ),
+        mode: BoardModeV1::SectionedTopicIndex,
+        ..Default::default()
+    };
+    state.sections.sections.push(AuthorizedSectionV1::new(
+        section(5),
+        &owner,
+        None,
+    ));
+
+    // An empty child (authority not copied yet) is valid.
+    state
+        .verify_with_section(&params(), Some(section_id))
+        .unwrap();
+
+    state.members.members.push(AuthorizedMember::new(
+        Member {
+            owner_member_id: owner_id,
+            invited_by: owner_id,
+            member_vk: member().verifying_key(),
+            join_proof: None,
+        },
+        &owner,
+    ));
+    state.topics.entries.push(topic_entry(section_id));
+    state.topics.activity.push(activity());
+
+    state
+        .verify_with_section(&params(), Some(section_id))
+        .unwrap();
+    let mut normalized = state.clone();
+    normalized.normalize(&params()).unwrap();
+    assert_eq!(
+        normalized, state,
+        "the index cleanup must not prune the author the child needs"
+    );
+}
+
+#[test]
 fn a_section_child_indexes_only_its_section() {
     let mut state = indexed_board();
     state.mode = BoardModeV1::SectionedTopicIndex;

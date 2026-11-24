@@ -551,7 +551,10 @@ impl ChatBoardStateV1 {
         // keep their messages alive in the steps below.
         self.enforce_invite_caps();
 
-        let index_mode = self.mode == BoardModeV1::TopicIndex;
+        // Both index layouts keep their members in the topic index rather than
+        // in legacy messages. A section child has no messages at all; pruning
+        // members here would drop the authors it needs to verify its entries.
+        let index_mode = self.mode.is_topic_index();
         if !index_mode {
             // 1. Collect message author IDs
             let message_authors: HashSet<MemberId> = self
