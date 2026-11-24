@@ -633,6 +633,13 @@ test("a board member can create a topic", async ({ page }) => {
 
   await page.goto(`${withTopics(BASE)}#/board/${boardKey}`);
   await expect(app.getByText("New topic")).toBeVisible({ timeout: 60_000 });
+  // New topic boards are section-sharded by default: the member starts in
+  // General and the section points at its child contract.
+  const general = app.locator("option", { hasText: "General" }).first();
+  await expect(general).toHaveCount(1, { timeout: 30_000 });
+  expect(await general.getAttribute("data-contract")).toMatch(
+    /^[1-9A-HJ-NP-Za-km-z]{43,44}$/,
+  );
   await app.getByPlaceholder("Title").fill("Member topic");
   await app
     .getByPlaceholder("Write the first message…")
@@ -642,6 +649,9 @@ test("a board member can create a topic", async ({ page }) => {
   await expect(
     app.getByText("Written by an invited member, not the owner."),
   ).toBeVisible({ timeout: 60_000 });
+  await expect(
+    app.locator("span", { hasText: "General" }).first(),
+  ).toBeVisible({ timeout: 30_000 });
 });
 
 test("the owner approves a pending reply", async ({ page }) => {
@@ -813,6 +823,9 @@ test("a ban propagates to an existing topic", async ({ page }) => {
   await app.getByRole("button", { name: "Ban User", exact: true }).click();
   await app.getByRole("button", { name: "Yes, Ban User", exact: true }).click();
   await expect(app.getByText(/Banned Users/)).toBeVisible({ timeout: 30_000 });
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, { timeout: 30_000 });
+  // The ban reaches the board first and the topic contracts through the
+  // authority propagation pass; give that pass time before reopening.
   await page.waitForTimeout(10_000);
 
   await page.goto(`${withTopics(BASE)}#/board/${boardKey}/topic/${topicId}`);

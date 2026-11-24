@@ -1,13 +1,15 @@
 # Shard dell'indice per sezione
 
-Data: 2026-11-24. Stato: fasi 1–4 e move/merge tra sezioni implementati; lo
-shard resta **opt-in** (`#/enable-sections`). Le figlie ora hanno uno stato
-`ready`/`syncing`: `ensure_section_loaded` attende stato e copia dell'autorità.
-I test "a member joins a sectioned board and replies" e "a member joins a
-General section topic" passano. Il default resta `TopicIndex`: in sequenza,
-con una board sectioned di default, approvazione e ban restano instabili
-(membro che non vede il topic o il badge pending). Il problema non è la
-figlia General in sé, che funziona in isolamento. Lo stato delle figlie viene persistito nel delegate (`section_boards_data`)
+Data: 2026-11-24. Stato: fasi 1–4 e move/merge tra sezioni implementati. Le
+nuove board topic usano `SectionedTopicIndex` come default; `TopicIndex`
+resta per le board esistenti e per i test del percorso piatto. Le figlie
+hanno uno stato `ready`/`syncing`: `ensure_section_loaded` attende stato e
+copia dell'autorità. I test "a member joins a sectioned board and replies",
+"a member joins a General section topic" e "a board member can create a
+topic" passano con lo shard attivo. Un membro può creare un topic in una
+sezione aperta (senza ruoli, non nascosta, immagini ammesse, senza
+auto-moderazione); il topic non porta lo snapshot firmato dall'owner, quindi
+le policy solo-sezione restano riservate all'owner. Lo stato delle figlie viene persistito nel delegate (`section_boards_data`)
 con debounce e ripristinato all'avvio prima dei GET di rete. Le attività delle
 figlie sono accorpate per 10 s: `SectionBoard.dirty` segna lo stato locale non
 confermato, i GET e le notifiche di stato fanno merge con lo stato di rete
@@ -28,11 +30,12 @@ sandboxata non espone `localStorage`; senza il marker i delegati legacy
 ripopolano le vecchie board e i loro update con firma non valida rallentano
 ogni test. Con l'isolamento la suite completa passa 15/15 in circa 5 minuti,
 compreso il caso ruolo-prima-del-topic che prima restava su "Loading topic".
-Il default resta `TopicIndex`: lo shard e' ancora opt-in e la sua promozione
-a default va decisa dopo una passata della suite con lo shard sempre attivo.
-Il PUT di un topic puo' essere confermato da un `GetResponse` (stato della
-sottoscrizione) invece che da un `PutResponse`; `wait_topic_synced` accetta
-entrambi.
+Con lo shard come default la suite real-node passa 15/15 in 4.8 minuti,
+compresi ban, approvazioni, move/merge e il topic creato da un membro nella
+sezione General. Il contratto della board e' alla revisione 25: l'indice
+verifica i ruoli della sezione per ogni entry. Il PUT di un topic puo' essere
+confermato da un `GetResponse` (stato della sottoscrizione) invece che da un
+`PutResponse`; `wait_topic_synced` accetta entrambi.
 
 ## Problema
 
@@ -149,8 +152,9 @@ l'indice dei topic. La UI tratta ogni sezione come una board.
 ## Migrazione
 
 - Le board `TopicIndex` esistenti restano leggibili e non vengono migrate.
-- Le board create con `#/enable-sections` usano `SectionedTopicIndex`; le
-  altre restano su `TopicIndex`.
+- Le nuove board topic usano `SectionedTopicIndex`; le board `TopicIndex`
+  esistenti restano leggibili. La revisione 25 cambia la chiave del contratto
+  board, quindi le board vanno ricreate.
 - Il passaggio è coperto da un nuovo `CONTRACT_REVISION` e da un nuovo WASM;
   le board vecchie vanno ricreate, come per i cambi precedenti.
 

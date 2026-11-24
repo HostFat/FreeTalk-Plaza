@@ -2,7 +2,8 @@
 
 Versione: 1 (implementata).
 Stato: fasi 0–4 completate; move e merge tra sezioni pubblicati nella build
-locale v635. Nessuna migrazione delle vecchie board.
+locale v678. Le nuove board topic usano lo shard per sezione come default.
+Nessuna migrazione delle vecchie board.
 
 ## Stato dell'implementazione
 
@@ -541,11 +542,17 @@ Le board nuove usano `BoardModeV1::TopicIndex`; le board legacy restano
 - Se l'invio di un delta topic fallisce, il delta resta in una coda locale e
   viene ritentato ogni 20 secondi, fino a 5 volte. Lo stato locale è già
   applicato, quindi il post resta visibile; il retry è idempotente.
-- Le board `SectionedTopicIndex` creano la board figlia quando si crea una
-  sezione, registrano la sua chiave nel record firmato della sezione e la
-  caricano all'apertura della board. Topic, risposte, attività, flag e report
-  vengono scritti sulla figlia; la UI unisce gli indici delle figlie.
-  Ricerca, notifiche e coda moderazione leggono lo stesso indice aggregato.
+- Le nuove board topic sono `SectionedTopicIndex`: creano la board figlia
+  quando si crea una sezione, registrano la sua chiave nel record firmato
+  della sezione e la caricano all'apertura della board. Topic, risposte,
+  attività, flag e report vengono scritti sulla figlia; la UI unisce gli
+  indici delle figlie. Ricerca, notifiche e coda moderazione leggono lo stesso
+  indice aggregato. Le board `TopicIndex` esistenti restano leggibili.
+- Un membro può creare un topic in una sezione aperta (nessun ruolo
+  richiesto, non nascosta, immagini ammesse, senza auto-moderazione). Il
+  topic non porta lo snapshot firmato dall'owner, quindi le policy
+  solo-sezione restano riservate all'owner. L'indice della board verifica
+  comunque i ruoli della sezione per ogni entry (revisione 25).
 - La creazione di un topic attende la conferma del nodo prima di indicizzarlo:
   il nodo pu� rispondere con `PutResponse` oppure con il `GetResponse` che
   avvia la sottoscrizione (`subscribe: true`). `wait_topic_synced` accetta
@@ -572,8 +579,10 @@ risposte (con draft che sopravvive al reload), topic privato, topic creato da
 un membro, board e sezioni con membri, ruolo creato prima del topic,
 approvazione, propagazione del ban, reaction e poll, move/merge/split,
 continuation con caricamento delle parti precedenti, report con risoluzione,
-report in una sezione e ricerca sull'indice. La suite statica Playwright ha
-116 test passati e 12 saltati.
+report in una sezione e ricerca sull'indice. Con lo shard come default la
+suite passa 15/15 in 4.8 minuti. La suite statica Playwright ha 116 test
+passati e 12 saltati. Il contratto della board e' alla revisione 25: l'indice
+verifica i ruoli della sezione per ogni entry.
 
 Il reset di test scrive un marker nel delegate (`skip_legacy_migration`)
 perché la shell sandboxata non espone `localStorage`: senza il marker i

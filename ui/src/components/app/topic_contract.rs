@@ -1451,40 +1451,53 @@ fn prepare_topic(
         return Err("the active identity is not a member of this board".to_string());
     }
     let (section_snapshot, section_chain) = if let Some(section_id) = section {
-        if !is_owner {
-            return Err(
-                "only the board owner can create a topic in a section for now".to_string(),
-            );
-        }
         let section_data = board
             .board_state
             .sections
             .section(&section_id)
             .ok_or("the section does not exist")?;
         let chain = board.board_state.sections.chain(&section_id);
-        let snapshot = SectionSnapshotV1 {
-            section: section_id,
-            parent: section_data.parent,
-            chain: chain.clone(),
-            allowed_roles: section_data.allowed_roles.clone(),
-            sealed_name: section_data.sealed_name.clone(),
-            hidden: section_data.hidden,
-            images_allowed: section_data.images_allowed,
-            auto_moderated_topics: section_data.auto_moderated_topics,
-            generation: section_data.generation,
-            signed_at: system_time_ms(section_data.signed_at),
-        };
-        (
-            Some(AuthorizedSectionSnapshotV1::new(
-                snapshot,
-                board.owner_key(),
-                None,
-            )),
-            chain,
-        )
+        if is_owner {
+            let snapshot = SectionSnapshotV1 {
+                section: section_id,
+                parent: section_data.parent,
+                chain: chain.clone(),
+                allowed_roles: section_data.allowed_roles.clone(),
+                sealed_name: section_data.sealed_name.clone(),
+                hidden: section_data.hidden,
+                images_allowed: section_data.images_allowed,
+                auto_moderated_topics: section_data.auto_moderated_topics,
+                generation: section_data.generation,
+                signed_at: system_time_ms(section_data.signed_at),
+            };
+            (
+                Some(AuthorizedSectionSnapshotV1::new(
+                    snapshot,
+                    board.owner_key(),
+                    None,
+                )),
+                chain,
+            )
+        } else {
+            // A member can start a topic in a section that is open to every
+            // member. The index enforces the section roles; without an
+            // owner-signed snapshot the topic contract cannot apply the
+            // section-only policies, so those sections stay owner-only.
+            if !section_data.allowed_roles.is_empty()
+                || section_data.hidden
+                || !section_data.images_allowed
+                || section_data.auto_moderated_topics == Some(true)
+            {
+                return Err(
+                    "only the board owner can create a topic in this section".to_string(),
+                );
+            }
+            (None, chain)
+        }
     } else {
         (None, Vec::new())
     };
+    let topic_section = if section_snapshot.is_some() { section } else { None };
     let mut topic_id_bytes = [0u8; 32];
     let mut nonce = [0u8; 16];
     OsRng.fill_bytes(&mut topic_id_bytes);
@@ -1497,8 +1510,12 @@ fn prepare_topic(
         topic_id: topic_id_bytes,
         author,
         author_key: board.self_sk.verifying_key(),
-        section: section,
-        section_chain: section_chain.clone(),
+        section: topic_section,
+        section_chain: if topic_section.is_some() {
+            section_chain.clone()
+        } else {
+            Vec::new()
+        },
         title: sealed_title.clone(),
         body: sealed_body.clone(),
         auto_moderated: false,

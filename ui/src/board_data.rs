@@ -219,8 +219,8 @@ pub struct ClientFeatures {
     /// the `?topics=1` developer flag until the topic UI is the default.
     #[serde(default)]
     pub topic_boards: bool,
-    /// New boards keep each section's topic index in a child contract.
-    /// Enabled by `?sections=1` for testing until the section UI is complete.
+    /// Older devices stored this flag. New topic boards are always
+    /// section-sharded; the field stays so old blobs still deserialize.
     #[serde(default)]
     pub sectioned_boards: bool,
 }
@@ -3322,11 +3322,10 @@ impl Boards {
         let has_separate_profile = profile_vk != owner_vk;
         let mut board_state = ChatBoardStateV1::default();
         if self.client_features.topic_boards {
-            board_state.mode = if self.client_features.sectioned_boards {
-                plaza_core::board_state::BoardModeV1::SectionedTopicIndex
-            } else {
-                plaza_core::board_state::BoardModeV1::TopicIndex
-            };
+            // Topic boards are section-sharded by default. The older
+            // `sectioned_boards` flag stays in the stored features so a
+            // device that predates this change still deserializes.
+            board_state.mode = plaza_core::board_state::BoardModeV1::SectionedTopicIndex;
         }
 
         // Generate board secret if private

@@ -424,11 +424,24 @@ impl TopicIndexV1 {
         verify_struct(value, &entry.signature, &author_key)
             .map_err(|error| format!("invalid topic entry signature: {error}"))?;
         if let Some(section) = value.section {
-            if !state.sections.exists(&section) {
+            let Some(section_value) = state.sections.section(&section) else {
                 return Err("topic section does not exist".to_string());
-            }
+            };
             if state.sections.chain(&section) != value.section_chain {
                 return Err("topic section chain does not match the board".to_string());
+            }
+            if !section_value.allowed_roles.is_empty() {
+                let owner = state.ownership.current_owner(parameters);
+                if value.author != owner && value.author != parameters.owner_id() {
+                    let allowed = state
+                        .roles
+                        .active_roles_of(&value.author)
+                        .iter()
+                        .any(|role| section_value.allowed_roles.contains(&role.id));
+                    if !allowed {
+                        return Err("topic author cannot post in this section".to_string());
+                    }
+                }
             }
         }
         Ok(())
@@ -1365,6 +1378,39 @@ pub(crate) mod tests {
             .entries
             .push(topic(&member(), Some(section), Vec::new()));
         assert!(wrong.verify(&state, &params()).is_err());
+    }
+
+    #[test]
+    fn a_role_protected_section_rejects_a_member_without_the_role() {
+        let mut state = board();
+        let section = SectionId::from_bytes([10u8; 32]);
+        state.sections.sections.push(AuthorizedSectionV1::new(
+            SectionV1 {
+                id: section,
+                parent: None,
+                name: "Staff".to_string(),
+                description: None,
+                icon: None,
+                color: "#fff".to_string(),
+                allowed_roles: vec![[5u8; 16]],
+                sealed_name: None,
+                hidden: false,
+                is_group: false,
+                images_allowed: true,
+                auto_moderated_topics: None,
+                generation: 1,
+                deleted: false,
+                contract: None,
+                signed_at: SystemTime::UNIX_EPOCH,
+            },
+            &owner(),
+            None,
+        ));
+        let mut index = TopicIndexV1::default();
+        index
+            .entries
+            .push(topic(&member(), Some(section), vec![section]));
+        assert!(index.verify(&state, &params()).is_err());
     }
 
     #[test]

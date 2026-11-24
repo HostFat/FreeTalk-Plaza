@@ -189,7 +189,9 @@ pub fn TopicIndexView(board_id: String) -> Element {
                             };
                             section_choice.set(Some(parsed));
                         },
-                        option { value: "", "Board root" }
+                        if !sectioned {
+                            option { value: "", "Board root" }
+                        }
                         for section in sections.iter() {
                             {
                                 let id = section.section.id;
