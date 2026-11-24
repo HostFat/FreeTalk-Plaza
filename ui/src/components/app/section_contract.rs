@@ -27,6 +27,10 @@ pub struct SectionBoard {
     pub params: SectionParametersV1,
     pub state: ChatBoardStateV1,
     pub synced: bool,
+    /// State has arrived and the parent authority has been copied in.
+    pub ready: bool,
+    /// An authority sync is in flight.
+    pub syncing: bool,
 }
 
 pub static SECTION_BOARDS: GlobalSignal<HashMap<ContractInstanceId, SectionBoard>> =
@@ -159,21 +163,25 @@ pub async fn sync_section_authority(
 ) -> Result<(), String> {
     let key = section_key(owner, section);
     let contract_id = *key.id();
-    if !SECTION_BOARDS
+    let Some((child, synced, syncing)) = SECTION_BOARDS
         .read()
         .get(&contract_id)
-        .map(|board| board.synced)
-        .unwrap_or(false)
-    {
-        ensure_section_loaded(owner, section).await?;
-    }
-    let Some(child) = SECTION_BOARDS
-        .read()
-        .get(&contract_id)
-        .map(|board| board.state.clone())
+        .map(|board| (board.state.clone(), board.synced, board.syncing))
     else {
-        return Ok(());
+        return Err("the section board is not loaded".to_string());
     };
+    if !synced {
+        return Err("the section state has not arrived yet".to_string());
+    }
+    if syncing {
+        return Ok(());
+    }
+    SECTION_BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.get_mut(&contract_id) {
+            board.syncing = true;
+            board.ready = false;
+        }
+    });
     let mut state = child;
     state.configuration = parent.configuration.clone();
     state.admin = parent.admin.clone();
@@ -201,15 +209,22 @@ pub async fn sync_section_authority(
     SECTION_BOARDS.with_mut(|boards| {
         if let Some(board) = boards.get_mut(&contract_id) {
             board.state = state.clone();
-            board.synced = false;
+            board.synced = true;
+            board.ready = false;
         }
     });
-    send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
+    let result = send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
         key,
         data: UpdateData::State(to_cbor_vec(&state).into()),
     }))
-    .await
-    .map_err(|error| format!("send section authority: {error}"))
+    .await;
+    SECTION_BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.get_mut(&contract_id) {
+            board.syncing = false;
+            board.ready = result.is_ok();
+        }
+    });
+    result.map_err(|error| format!("send section authority: {error}"))
 }
 
 /// Apply a delta to a section child and publish it. The child contract
@@ -331,6 +346,8 @@ pub async fn create_section_board(
                 params: params.clone(),
                 state: child.clone(),
                 synced: false,
+                ready: false,
+                syncing: false,
             },
         );
     });
@@ -369,6 +386,8 @@ pub async fn load_section_board(
                     params: SectionParametersV1 { owner, section },
                     state: ChatBoardStateV1::default(),
                     synced: false,
+                    ready: false,
+                    syncing: false,
                 },
             );
         }
@@ -396,25 +415,55 @@ pub async fn ensure_section_loaded(
         if SECTION_BOARDS
             .read()
             .get(&contract_id)
-            .map(|board| board.synced)
+            .map(|board| board.ready)
             .unwrap_or(false)
         {
             return Ok(());
         }
-        load_section_board(owner, section).await?;
+        let synced = SECTION_BOARDS
+            .read()
+            .get(&contract_id)
+            .map(|board| board.synced)
+            .unwrap_or(false);
+        if !synced {
+            load_section_board(owner, section).await?;
+            for _ in 0..10 {
+                crate::util::sleep(std::time::Duration::from_millis(200)).await;
+                if SECTION_BOARDS
+                    .read()
+                    .get(&contract_id)
+                    .map(|board| board.synced)
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+            }
+            continue;
+        }
+        let parent = {
+            let boards = crate::components::app::BOARDS.read();
+            boards
+                .map
+                .get(&owner)
+                .map(|board| board.board_state.clone())
+        };
+        let Some(parent) = parent else {
+            return Err("the parent board is not loaded".to_string());
+        };
+        let _ = sync_section_authority(owner, section, &parent).await;
         for _ in 0..10 {
             crate::util::sleep(std::time::Duration::from_millis(200)).await;
             if SECTION_BOARDS
                 .read()
                 .get(&contract_id)
-                .map(|board| board.synced)
+                .map(|board| board.ready)
                 .unwrap_or(false)
             {
                 return Ok(());
             }
         }
     }
-    Err("the section board is not available yet".to_string())
+    Err("the section board is not ready yet".to_string())
 }
 
 pub async fn handle_contract_response(response: ContractResponse) -> Result<(), String> {

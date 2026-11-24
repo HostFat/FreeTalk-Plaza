@@ -110,6 +110,86 @@ test.beforeAll(async ({ browser }) => {
   await page.close();
 });
 
+test("a member joins a sectioned board and replies", async ({ page }) => {
+  test.setTimeout(300_000);
+  await page.goto(`${withSections(BASE)}#/enable-sections`);
+  const app = page.frameLocator("iframe");
+  await expect(app.getByText(/Select or Create Board/).first()).toBeVisible({
+    timeout: 30_000,
+  });
+  const suffix = Date.now().toString(36);
+  const boardName = `MemberSectionBoard-${suffix}`;
+  const ownerName = `MemberSectionOwner-${suffix}`;
+  const memberName = `MemberSectionUser-${suffix}`;
+  const boardKey = await createBoard(page, boardName, ownerName);
+
+  await app.getByPlaceholder("New section name").fill("Member section");
+  await app.getByRole("button", { name: "Create section" }).click();
+  await expect(app.locator("option", { hasText: "Member section" })).toHaveCount(
+    1,
+    { timeout: 60_000 },
+  );
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, { timeout: 30_000 });
+  await page.waitForTimeout(3_000);
+  await app.getByPlaceholder("Title").fill("Member section topic");
+  await app.getByPlaceholder("Write the first message…").fill("Member section body");
+  await app.getByRole("button", { name: "Create topic" }).click();
+  await expect(
+    app.getByRole("heading", { name: "Member section topic" }),
+  ).toBeVisible({ timeout: 60_000 });
+  const topicId = await waitForTopicRoute(page);
+
+  await page.goto(`${withSections(BASE)}#/board/${boardKey}/admin/roles`);
+  await app.getByRole("button", { name: "Roles", exact: true }).click();
+  await app.getByPlaceholder("New role name").fill("Members");
+  await app.getByRole("button", { name: "Create", exact: true }).click();
+  await expect(app.getByPlaceholder("New role name")).toHaveValue("", {
+    timeout: 30_000,
+  });
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, { timeout: 30_000 });
+  await page.waitForTimeout(3_000);
+
+  await page.goto(`${withSections(BASE)}#/board/${boardKey}/admin/links`);
+  await app.getByRole("button", { name: "Invite links" }).click();
+  const role = app.getByRole("combobox").first();
+  await expect(role.locator("option", { hasText: "Members" })).toHaveCount(1, {
+    timeout: 30_000,
+  });
+  await role.selectOption({ label: "Members" });
+  await app.getByRole("button", { name: "Create link" }).click();
+  const link = app.locator("input[readonly]").last();
+  await expect(link).toBeVisible({ timeout: 30_000 });
+  const inviteLink = await link.inputValue();
+  await page.waitForTimeout(3_000);
+
+  await page.goto(inviteLink);
+  await expect(
+    app.getByRole("heading", { name: "Join this board" }),
+  ).toBeVisible({ timeout: 30_000 });
+  await app.getByPlaceholder("Your nickname").fill(memberName);
+  await app.getByRole("button", { name: "Join" }).click();
+  await expect(app.getByText(boardName).first()).toBeVisible({
+    timeout: 60_000,
+  });
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, { timeout: 60_000 });
+  await page.waitForTimeout(6_000);
+
+  await page.goto(
+    `${withSections(BASE)}#/board/${boardKey}/topic/${topicId}`,
+  );
+  await expect(
+    app.getByRole("heading", { name: "Member section topic" }),
+  ).toBeVisible({ timeout: 60_000 });
+  await expect(app.getByPlaceholder("Write a reply…")).toBeVisible({
+    timeout: 60_000,
+  });
+  await app.getByPlaceholder("Write a reply…").fill("Member section reply");
+  await app.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect(app.getByText("Member section reply")).toBeVisible({
+    timeout: 60_000,
+  });
+});
+
 test("a sectioned board creates a child index contract", async ({ page }) => {
   test.setTimeout(240_000);
   await page.goto(`${withSections(BASE)}#/enable-sections`);

@@ -994,12 +994,10 @@ pub async fn propagate_authority(owner: VerifyingKey) -> Result<(), String> {
             .filter_map(|entry| entry.section.contract.map(|_| entry.section.id))
             .collect();
         for section in sections {
-            crate::components::app::section_contract::sync_section_authority(
-                owner,
-                section,
-                &board.board_state,
+            let _ = crate::components::app::section_contract::ensure_section_loaded(
+                owner, section,
             )
-            .await?;
+            .await;
         }
     }
     let index = crate::components::app::section_contract::merged_index(

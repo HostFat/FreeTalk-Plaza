@@ -1,11 +1,14 @@
 # Shard dell'indice per sezione
 
 Data: 2026-11-24. Stato: fasi 1–4 e move/merge tra sezioni implementati; lo
-shard resta **opt-in** (`#/enable-sections`). Il tentativo di renderlo default
-ha mostrato regressioni nei flussi dei membri (topic non visibile dopo il
-join), quindi il default è stato riportato a `TopicIndex`. L'attività delle
-figlie viene inviata subito: lo stato figlio non è ancora persistito in
-locale, e un debounce faceva perdere il conteggio al reload. La
+shard resta **opt-in** (`#/enable-sections`). Le figlie ora hanno uno stato
+`ready`/`syncing`: `ensure_section_loaded` attende stato e copia dell'autorità.
+Il test "a member joins a sectioned board and replies" passa su una sezione
+esplicita. Il default resta `TopicIndex`: con una board sectioned di default,
+i topic nella sezione General non si aprono per il membro dopo il join. Il
+problema è circoscritto alla figlia General, non alle sezioni create dopo.
+L'attività delle figlie viene inviata subito, in attesa della persistenza
+locale delle figlie. La
 creazione di una sezione su una board `SectionedTopicIndex` crea la board
 figlia e ne registra la chiave; topic, risposte, attività, flag e report
 vengono scritti sulla figlia. Lista, ricerca, notifiche, badge non letti e
