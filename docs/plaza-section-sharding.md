@@ -1,6 +1,6 @@
 # Shard dell'indice per sezione
 
-Data: 2026-11-23. Stato: fase 4 implementata nella build locale v628. La
+Data: 2026-11-23. Stato: fase 4 e move tra sezioni implementati nella build locale v631. La
 creazione di una sezione su una board `SectionedTopicIndex` crea la board
 figlia e ne registra la chiave; topic, risposte, attività, flag e report
 vengono scritti sulla figlia. Lista, ricerca, notifiche, badge non letti e
@@ -147,7 +147,12 @@ l'indice dei topic. La UI tratta ogni sezione come una board.
 4. **Ricerca, notifiche e moderazione** (fatto): le viste usano
    `BoardData::with_merged_topics`; le figlie vengono caricate per ogni route
    della board sectioned. Read state e badge non letti usano l'indice unito.
-5. **Autorità** (fatto per le figlie caricate): `sync_section_authority`
+5. **Move tra sezioni** (fatto): le figlie contengono tutte le sezioni, l'entry
+   resta nella sezione di origine e il flag `Section` sulla figlia sposta la
+   vista nella destinazione; l'indice aggregato usa `section_of`. Il merge tra
+   sezioni diverse resta rifiutato finché il flag `Merged` non può riferirsi a
+   un topic di un'altra figlia.
+6. **Autorità** (fatto per le figlie caricate): `sync_section_authority`
    copia configurazione, membri, ruoli, ban, sospensioni e segreti nella
    figlia con un `UpdateData::State`. Restano retry e test di ban/ruolo su più
    sezioni, e la propagazione alle figlie non ancora caricate.

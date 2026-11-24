@@ -183,6 +183,7 @@ pub async fn sync_section_authority(
     state.image_retirements = parent.image_retirements.clone();
     state.upgrade = parent.upgrade.clone();
     state.mail_addresses = parent.mail_addresses.clone();
+    state.sections = parent.sections.clone();
 
     let board_params = ChatBoardParametersV1 { owner };
     state
@@ -270,9 +271,18 @@ pub async fn create_section_board(
 
     let mut child = parent.clone();
     child.mode = BoardModeV1::SectionedTopicIndex;
-    child.sections = SectionsV1 {
-        sections: vec![section.clone()],
-    };
+    let mut sections = parent.sections.clone();
+    if !sections
+        .sections
+        .iter()
+        .any(|entry| entry.section.id == section_id)
+    {
+        sections.sections.push(section.clone());
+    }
+    sections
+        .sections
+        .sort_by_key(|entry| (*entry.section.id.as_bytes(), entry.section.generation));
+    child.sections = sections;
     child.topics = TopicIndexV1::default();
     child.recent_messages = Default::default();
     child.trash = Default::default();

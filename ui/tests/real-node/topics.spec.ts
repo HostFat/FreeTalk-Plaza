@@ -155,6 +155,36 @@ test("a sectioned board creates a child index contract", async ({ page }) => {
   await page.goto(`${withSections(BASE)}#/board/${boardKey}/search`);
   await app.getByPlaceholder("Search titles and previews").fill("Section topic");
   await expect(app.getByText("Section topic")).toBeVisible({ timeout: 30_000 });
+
+  // Move the topic from Shard section to another section.
+  await page.goto(`${withSections(BASE)}#/board/${boardKey}`);
+  await app.getByPlaceholder("New section name").fill("Target section");
+  await app.getByRole("button", { name: "Create section" }).click();
+  await expect(app.locator("option", { hasText: "Target section" })).toHaveCount(
+    1,
+    { timeout: 60_000 },
+  );
+  await expect(app.getByText(/Syncing\./)).toHaveCount(0, { timeout: 30_000 });
+  await page.waitForTimeout(3_000);
+  await page.goto(
+    `${withSections(BASE)}#/board/${boardKey}/topic/${topicId}`,
+  );
+  const moveSelect = app
+    .locator("select")
+    .filter({ has: app.locator("option", { hasText: "Target section" }) })
+    .first();
+  await moveSelect.selectOption({ label: "Target section" });
+  await app.getByRole("button", { name: "Move", exact: true }).click();
+  await page.waitForTimeout(4_000);
+  await expect(
+    app.locator("span", { hasText: "Target section" }).first(),
+  ).toBeVisible({ timeout: 60_000 });
+  await page.goto(
+    `${withSections(BASE)}#/board/${boardKey}/topic/${topicId}`,
+  );
+  await expect(
+    app.locator("span", { hasText: "Target section" }).first(),
+  ).toBeVisible({ timeout: 60_000 });
 });
 
 test("a topic and its replies live in a separate contract", async ({ page }) => {

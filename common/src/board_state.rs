@@ -278,12 +278,13 @@ impl ChatBoardStateV1 {
         }
         match section {
             Some(section_id) => {
-                if self.sections.sections.len() != 1
-                    || self.sections.sections[0].section.id != section_id
+                if !self
+                    .sections
+                    .sections
+                    .iter()
+                    .any(|entry| entry.section.id == section_id)
                 {
-                    return Err(
-                        "a section board must contain exactly its own section".to_string()
-                    );
+                    return Err("a section board must contain its own section".to_string());
                 }
                 if !self.recent_messages.messages.is_empty() {
                     return Err("a section board cannot carry legacy messages".to_string());

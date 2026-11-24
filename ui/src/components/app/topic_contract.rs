@@ -376,14 +376,12 @@ pub async fn move_topic(
     )
     .await?;
 
-    let base = board
-        .board_state
-        .topics
-        .entry(&topic_id)
-        .ok_or("the topic is not indexed")?;
-    let current_generation = board
-        .board_state
-        .topics
+    let index = crate::components::app::section_contract::merged_index(
+        owner,
+        &board.board_state.topics,
+    );
+    let base = index.entry(&topic_id).ok_or("the topic is not indexed")?;
+    let current_generation = index
         .flag(&topic_id, TopicFlagKind::Section)
         .map(|flag| flag.generation)
         .unwrap_or(0);
@@ -431,8 +429,15 @@ pub async fn merge_topic(
     if topic_id == destination {
         return Err("a topic cannot merge into itself".to_string());
     }
-    if board.board_state.topics.entry(&destination).is_none() {
+    let index = crate::components::app::section_contract::merged_index(
+        owner,
+        &board.board_state.topics,
+    );
+    if index.entry(&destination).is_none() {
         return Err("the destination topic is not indexed".to_string());
+    }
+    if index.section_of(&topic_id).0 != index.section_of(&destination).0 {
+        return Err("cross-section merge is not supported yet".to_string());
     }
     let conversation = conversation_for(owner, topic_id, part)?;
     let header = conversation
@@ -471,14 +476,8 @@ pub async fn merge_topic(
     )
     .await?;
 
-    let base = board
-        .board_state
-        .topics
-        .entry(&topic_id)
-        .ok_or("the topic is not indexed")?;
-    let current_generation = board
-        .board_state
-        .topics
+    let base = index.entry(&topic_id).ok_or("the topic is not indexed")?;
+    let current_generation = index
         .flag(&topic_id, TopicFlagKind::Merged)
         .map(|flag| flag.generation)
         .unwrap_or(0);
@@ -815,6 +814,24 @@ pub async fn create_section(
         ..Default::default()
     };
     apply_board_delta(owner, delta)?;
+    if sectioned {
+        let refreshed = board_for(owner)?;
+        let sections: Vec<_> = refreshed
+            .board_state
+            .sections
+            .sections
+            .iter()
+            .filter_map(|entry| entry.section.contract.map(|_| entry.section.id))
+            .collect();
+        for section in sections {
+            let _ = crate::components::app::section_contract::sync_section_authority(
+                owner,
+                section,
+                &refreshed.board_state,
+            )
+            .await;
+        }
+    }
     Ok(id)
 }
 
