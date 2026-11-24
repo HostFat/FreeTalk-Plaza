@@ -10,7 +10,7 @@ use crate::board_data::Boards;
 use crate::components::app::chat_delegate::{
     complete_pending_public_key_request, complete_pending_request, complete_pending_sign_request,
     complete_pending_signing_key_request, is_legacy_delegate_key, mark_legacy_migration_done,
-    save_boards_to_delegate, BOARDS_STORAGE_KEY,
+    save_boards_to_delegate, set_skip_legacy_cached, BOARDS_STORAGE_KEY, SKIP_LEGACY_STORAGE_KEY,
 };
 use crate::components::app::dm_delegate::{complete_dm_pending, is_dm_delegate_key};
 use crate::components::app::document_title::{mark_current_board_as_read, update_document_title};
@@ -319,6 +319,13 @@ impl ResponseHandler {
                                             String::from_utf8_lossy(key.as_bytes()),
                                             value.is_some()
                                         );
+
+                                        if key.as_bytes() == SKIP_LEGACY_STORAGE_KEY {
+                                            let skip = value.is_some();
+                                            set_skip_legacy_cached(skip);
+                                            info!("Legacy migration skip marker present: {skip}");
+                                            continue;
+                                        }
 
                                         // Check if this is the boards data. A save reads it
                                         // first to merge boards added by another tab; that

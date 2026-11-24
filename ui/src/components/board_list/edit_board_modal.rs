@@ -337,7 +337,7 @@ pub fn EditBoardModal() -> Element {
                         }
                         button {
                             class: "px-4 py-2 border border-red-500/50 text-red-400 hover:bg-red-500/10 rounded-lg transition-colors text-sm",
-                            onclick: move |_| crate::util::reset::confirm_and_reset(),
+                            onclick: move |_| crate::util::reset::confirm_and_reset(false),
                             "Reset all local data"
                         }
                     }

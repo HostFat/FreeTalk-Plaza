@@ -9,7 +9,7 @@ use crate::components::app::{toasts, BOARDS, CURRENT_BOARD};
 use std::time::Duration;
 
 /// Ask for confirmation, then delete the local stores and reload.
-pub fn confirm_and_reset() {
+pub fn confirm_and_reset(skip_legacy: bool) {
     let Some(window) = web_sys::window() else {
         return;
     };
@@ -27,7 +27,7 @@ pub fn confirm_and_reset() {
         if let Err(error) = crate::components::app::dm_delegate::reset().await {
             dioxus::logger::tracing::warn!("Could not reset the DM delegate: {error}");
         }
-        match reset_local_data().await {
+        match reset_local_data(skip_legacy).await {
             Ok(()) => {
                 BOARDS.with_mut(|boards| {
                     boards.map.clear();

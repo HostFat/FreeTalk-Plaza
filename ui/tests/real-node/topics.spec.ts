@@ -11,6 +11,7 @@ function withTopics(url: string): string {
   const next = new URL(url);
   next.searchParams.set("topics", "1");
   next.searchParams.set("nav", Date.now().toString());
+  next.searchParams.set("skipLegacy", "1");
   return next.toString();
 }
 
@@ -19,6 +20,7 @@ function withSections(url: string): string {
   next.searchParams.set("topics", "1");
   next.searchParams.set("sections", "1");
   next.searchParams.set("nav", Date.now().toString());
+  next.searchParams.set("skipLegacy", "1");
   return next.toString();
 }
 
@@ -106,7 +108,10 @@ test.beforeAll(async ({ browser }) => {
   const reset = app.getByRole("button", { name: "Reset local data" });
   await expect(reset).toBeVisible({ timeout: 30_000 });
   await reset.click();
-  await page.waitForTimeout(3_000);
+  // The reset also stores a delegate marker that keeps the legacy delegates
+  // out of the next load; without it they repopulate the old boards and their
+  // invalid-signature updates slow every later test.
+  await page.waitForTimeout(8_000);
   await page.close();
 });
 
@@ -258,9 +263,8 @@ test("a member joins a General section topic", async ({ page }) => {
   ).toBeVisible({ timeout: 60_000 });
 });
 
-// Known issue: with a role created before the topic, the member sometimes
-// stays on "Loading topic…". Kept as a reproduction until the cause is fixed.
-test.fixme("a member joins a topic created after a role", async ({ page }) => {
+// A role created before the topic must not break the member's topic load.
+test("a member joins a topic created after a role", async ({ page }) => {
   test.setTimeout(300_000);
   await page.goto(`${withSections(BASE)}#/enable-sections`);
   const app = page.frameLocator("iframe");
@@ -290,7 +294,10 @@ test.fixme("a member joins a topic created after a role", async ({ page }) => {
     app.getByRole("heading", { name: "Role first topic" }),
   ).toBeVisible({ timeout: 60_000 });
   const topicId = await waitForTopicRoute(page);
-  await page.reload();
+  // Reload the topic's own URL. The shell mirrors the app route into the
+  // address bar asynchronously, so an immediate `page.reload()` can race it
+  // and reopen the board page instead.
+  await page.goto(`${withSections(BASE)}#/board/${boardKey}/topic/${topicId}`);
   await expect(
     app.getByRole("heading", { name: "Role first topic" }),
   ).toBeVisible({ timeout: 30_000 });

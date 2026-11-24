@@ -1109,7 +1109,20 @@ pub async fn create_topic(
         });
         return Err(error);
     }
-
+    if let Err(error) = wait_topic_synced(contract_id).await {
+        dioxus::logger::tracing::warn!(
+            "topic PUT not confirmed id={} topic={}: {error}",
+            contract_id,
+            prepared.topic_id
+        );
+        TOPIC_CACHE.with_mut(|topics| {
+            topics.remove(&contract_id);
+        });
+        return Err(format!(
+            "topic {:?} was not accepted by the node: {error}",
+            prepared.topic_id
+        ));
+    }
     if sectioned {
         if let Some(section_id) = target_section {
             if let Err(error) = crate::components::app::section_contract::apply_section_delta(
@@ -1993,6 +2006,24 @@ pub fn start_topic_outbox() {
     });
 }
 
+/// A new topic is confirmed either by a `PutResponse` or by the state a
+/// `subscribe: true` PUT starts streaming back (`GetResponse`); the node does
+/// not always send both.
+async fn wait_topic_synced(contract_id: ContractInstanceId) -> Result<(), String> {
+    for _ in 0..150 {
+        if TOPIC_CACHE
+            .read()
+            .get(&contract_id)
+            .map(|conversation| conversation.synced)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        crate::util::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err("the node did not confirm the topic contract".to_string())
+}
+
 fn mark_synced(key: &ContractKey) {
     TOPIC_CACHE.with_mut(|topics| {
         if let Some(conversation) = topics.get_mut(key.id()) {
@@ -2018,7 +2049,10 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 }
             });
         }
-        ContractResponse::PutResponse { key } | ContractResponse::UpdateResponse { key, .. } => {
+        ContractResponse::PutResponse { key } => {
+            mark_synced(&key);
+        }
+        ContractResponse::UpdateResponse { key, .. } => {
             mark_synced(&key);
         }
         ContractResponse::UpdateNotification { key, .. } => {

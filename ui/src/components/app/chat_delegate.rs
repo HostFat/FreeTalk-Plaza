@@ -28,6 +28,21 @@ pub const SECTION_BOARDS_STORAGE_KEY: &[u8] = b"section_boards_data";
 /// the same reason: the queued file bytes can reach 24 MiB.
 pub const PENDING_UPLOADS_STORAGE_KEY: &[u8] = b"pending_uploads_data";
 
+/// Set by the test reset page. The deployed shell runs the app in a sandboxed
+/// frame with no same-origin storage, so a delegate key is the only place the
+/// test can persist this choice across the reload.
+pub const SKIP_LEGACY_STORAGE_KEY: &[u8] = b"skip_legacy_migration";
+
+static SKIP_LEGACY: AtomicBool = AtomicBool::new(false);
+
+pub fn skip_legacy_cached() -> bool {
+    SKIP_LEGACY.load(Ordering::SeqCst)
+}
+
+pub(crate) fn set_skip_legacy_cached(value: bool) {
+    SKIP_LEGACY.store(value, Ordering::SeqCst);
+}
+
 // Cipher material for `DelegateRequest::RegisterDelegate`. freenet-stdlib 0.12
 // dropped the `DEFAULT_CIPHER`/`DEFAULT_NONCE` associated constants, but the
 // values are wire-visible: the node derives the storage key for the delegate's
@@ -161,9 +176,18 @@ pub async fn set_up_chat_delegate() -> Result<(), String> {
             // The response handler will process GetResponse and populate boards.
             fire_load_boards_request().await;
 
+            // Read the test opt-out before any legacy request. The response
+            // handler stores it in `SKIP_LEGACY`; the migration below runs
+            // after a short delay so this message loop stays free to deliver
+            // that response.
+            fire_skip_legacy_request().await;
+
             // Also try to migrate from legacy delegate (fire and forget)
             // TODO: Remove this after 2026-03-01
-            fire_legacy_migration_request().await;
+            wasm_bindgen_futures::spawn_local(async {
+                futures_timer::Delay::new(std::time::Duration::from_millis(2000)).await;
+                fire_legacy_migration_request().await;
+            });
 
             // The first load request can race the delegate channel setup and
             // its response is dropped. Retry once if nothing arrived.
@@ -237,6 +261,13 @@ async fn fire_load_boards_request() {
     .await;
 }
 
+async fn fire_skip_legacy_request() {
+    let _ = fire_delegate_request(ChatDelegateRequestMsg::GetRequest {
+        key: ChatDelegateKey::new(SKIP_LEGACY_STORAGE_KEY.to_vec()),
+    })
+    .await;
+}
+
 /// Load the image index after the board list is already on screen.
 pub(crate) async fn fire_load_owned_images_request() {
     info!("Firing request to load owned images from delegate storage");
@@ -263,7 +294,7 @@ pub(crate) static LOCAL_RESET: AtomicBool = AtomicBool::new(false);
 ///
 /// The deletes are fire-and-forget: the app reloads right after, and waiting
 /// for a response would collide with a pending Get for the same key.
-pub async fn reset_local_data() -> Result<(), String> {
+pub async fn reset_local_data(skip_legacy: bool) -> Result<(), String> {
     LOCAL_RESET.store(true, Ordering::SeqCst);
     for key in [
         BOARDS_STORAGE_KEY,
@@ -283,6 +314,28 @@ pub async fn reset_local_data() -> Result<(), String> {
             ));
         }
     }
+    // The test reset keeps the legacy delegates out of the next load: the
+    // migration would otherwise repopulate the old boards and bury the run in
+    // invalid-signature update storms.
+    let marker = if skip_legacy {
+        set_skip_legacy_cached(true);
+        ChatDelegateRequestMsg::StoreRequest {
+            key: ChatDelegateKey::new(SKIP_LEGACY_STORAGE_KEY.to_vec()),
+            value: vec![1],
+        }
+    } else {
+        set_skip_legacy_cached(false);
+        ChatDelegateRequestMsg::DeleteRequest {
+            key: ChatDelegateKey::new(SKIP_LEGACY_STORAGE_KEY.to_vec()),
+        }
+    };
+    if !fire_delegate_request(marker).await {
+        LOCAL_RESET.store(false, Ordering::SeqCst);
+        return Err("could not store the legacy migration choice".to_string());
+    }
+    // The deletes are fire-and-forget. Give the delegate a moment to process
+    // them before the reload starts a fresh Get for the same keys.
+    crate::util::sleep(std::time::Duration::from_secs(2)).await;
     Ok(())
 }
 
@@ -884,12 +937,23 @@ static LEGACY_MIGRATION_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 /// Fire requests to load boards from all known legacy delegates (fire and forget).
 /// If any legacy delegate has board data, the response handler will migrate it.
 async fn fire_legacy_migration_request() {
+    if skip_legacy_cached() {
+        info!("Legacy migration disabled by the stored test choice");
+        return;
+    }
     #[cfg(target_arch = "wasm32")]
     {
         if let Some(window) = web_sys::window() {
             let hash = window.location().hash().unwrap_or_default();
             if hash.starts_with("#/test-") || hash.starts_with("#/enable-") {
                 info!("Legacy migration skipped on a developer/test route");
+                return;
+            }
+            // The deployed shell runs the app in a sandboxed frame without
+            // same-origin storage, so a test cannot set the localStorage flag.
+            let search = window.location().search().unwrap_or_default();
+            if search.contains("skipLegacy=1") {
+                info!("Legacy migration disabled by the URL");
                 return;
             }
             if let Ok(Some(storage)) = window.local_storage() {

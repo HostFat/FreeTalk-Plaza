@@ -13,9 +13,9 @@ locale v635. Nessuna migrazione delle vecchie board.
   attività, flag, report e risoluzioni.
 - Client `ui/src/components/app/topic_contract.rs`; UI
   `topic_index_view.rs`, `topic_view.rs`, ricerca, notifiche e code in Manage.
-- Test: 44 in `topic-core`, 330 in `plaza-core`, 11 scenari real-node dei
-  topic (shard della sezione, draft e parti precedenti inclusi) e 116 test
-  statici Playwright.
+- Test: 44 in `topic-core`, 330 in `plaza-core`, 15 scenari real-node dei
+  topic (shard della sezione, ruolo-prima-del-topic, draft e parti precedenti
+  inclusi) e 116 test statici Playwright.
 
 Funzioni disponibili: topic creati dall'owner e dai membri, topic privati,
 modifica di topic e risposte, flag owner (pin/close/announce/hide/approve),
@@ -32,9 +32,8 @@ le build precedenti vanno ricreati.
 
 Limiti noti: le approvazioni non-owner condividono il percorso owner ma non
 hanno uno scenario e2e dedicato; lo stato di lettura è per board/dispositivo;
-la ricerca copre i metadati dell'indice, non il testo completo; la suite
-real-node sequenziale è instabile sul nodo locale carico (ogni scenario passa
-da solo).
+la ricerca copre i metadati dell'indice, non il testo completo. La suite
+real-node è isolata da un marker nel delegate e passa 15/15 in sequenza.
 
 ## 1. Scopo
 
@@ -546,7 +545,12 @@ Le board nuove usano `BoardModeV1::TopicIndex`; le board legacy restano
   sezione, registrano la sua chiave nel record firmato della sezione e la
   caricano all'apertura della board. Topic, risposte, attività, flag e report
   vengono scritti sulla figlia; la UI unisce gli indici delle figlie.
-  Ricerca, notifiche e coda moderazione aggregate sono la fase 4.
+  Ricerca, notifiche e coda moderazione leggono lo stesso indice aggregato.
+- La creazione di un topic attende la conferma del nodo prima di indicizzarlo:
+  il nodo pu� rispondere con `PutResponse` oppure con il `GetResponse` che
+  avvia la sottoscrizione (`subscribe: true`). `wait_topic_synced` accetta
+  entrambi; senza conferma il topic viene rimosso dalla cache e l'utente vede
+  l'errore.
 - Il mark-read usa il timestamp dell'entry quando manca l'attività, per
   evitare un loop di render.
 
@@ -563,15 +567,20 @@ continuation.
 `plaza-core` ha 328 test, inclusi indice, sezioni, flag, report, risoluzioni,
 limiti di frequenza e percorso rapido dell'indice.
 
-La suite real-node `ui/tests/real-node/topics.spec.ts` ha 10 scenari: topic e
+La suite real-node `ui/tests/real-node/topics.spec.ts` ha 15 scenari: topic e
 risposte (con draft che sopravvive al reload), topic privato, topic creato da
-un membro, approvazione, propagazione del ban, reaction e poll, move/merge/
-split, continuation con caricamento delle parti precedenti, report con
-risoluzione e ricerca sull'indice. La suite statica Playwright ha 116 test
-passati e 12 saltati.
+un membro, board e sezioni con membri, ruolo creato prima del topic,
+approvazione, propagazione del ban, reaction e poll, move/merge/split,
+continuation con caricamento delle parti precedenti, report con risoluzione,
+report in una sezione e ricerca sull'indice. La suite statica Playwright ha
+116 test passati e 12 saltati.
 
-La suite real-node sequenziale è instabile sul nodo locale carico: ogni
-scenario passa se eseguito da solo.
+Il reset di test scrive un marker nel delegate (`skip_legacy_migration`)
+perché la shell sandboxata non espone `localStorage`: senza il marker i
+delegati legacy ripopolano le vecchie board e i loro update con firma non
+valida rallentano la suite. Con l'isolamento i 15 scenari passano in sequenza
+in circa 5 minuti; il caso ruolo-prima-del-topic non resta più su "Loading
+topic".
 
 I benchmark di scala sono in `docs/plaza-scale-benchmark.md`: misurano
 `verify`, `apply_delta`, `apply_delta_incremental`, serializzazione e

@@ -19,8 +19,20 @@ creazione di una sezione su una board `SectionedTopicIndex` crea la board
 figlia e ne registra la chiave; topic, risposte, attività, flag e report
 vengono scritti sulla figlia. Lista, ricerca, notifiche, badge non letti e
 coda moderazione aggregano gli indici delle figlie. L'autorità viene copiata
-nelle figlie caricate quando cambia nella madre. Restano move/merge tra
-sezioni e un ambiente di test pulito.
+nelle figlie caricate quando cambia nella madre. Move e merge tra sezioni
+sono implementati.
+
+Aggiornamento 2026-11-24: la suite real-node e' isolata. Il reset di test
+scrive un marker nel delegate (`skip_legacy_migration`) perche' la shell
+sandboxata non espone `localStorage`; senza il marker i delegati legacy
+ripopolano le vecchie board e i loro update con firma non valida rallentano
+ogni test. Con l'isolamento la suite completa passa 15/15 in circa 5 minuti,
+compreso il caso ruolo-prima-del-topic che prima restava su "Loading topic".
+Il default resta `TopicIndex`: lo shard e' ancora opt-in e la sua promozione
+a default va decisa dopo una passata della suite con lo shard sempre attivo.
+Il PUT di un topic puo' essere confermato da un `GetResponse` (stato della
+sottoscrizione) invece che da un `PutResponse`; `wait_topic_synced` accetta
+entrambi.
 
 ## Problema
 
@@ -137,8 +149,8 @@ l'indice dei topic. La UI tratta ogni sezione come una board.
 ## Migrazione
 
 - Le board `TopicIndex` esistenti restano leggibili e non vengono migrate.
-- Le nuove board usano `SectionedTopicIndex` e la UI non mostra il vecchio
-  indice.
+- Le board create con `#/enable-sections` usano `SectionedTopicIndex`; le
+  altre restano su `TopicIndex`.
 - Il passaggio è coperto da un nuovo `CONTRACT_REVISION` e da un nuovo WASM;
   le board vecchie vanno ricreate, come per i cambi precedenti.
 
