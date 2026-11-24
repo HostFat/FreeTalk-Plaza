@@ -292,8 +292,9 @@ pub(crate) static LOCAL_RESET: AtomicBool = AtomicBool::new(false);
 /// Delete the local board list and image index. The boards stay on the
 /// network; this only clears this device.
 ///
-/// The deletes are fire-and-forget: the app reloads right after, and waiting
-/// for a response would collide with a pending Get for the same key.
+/// The deletes are fire-and-forget; a short wait lets the delegate process
+/// them before the reload starts a fresh Get for the same keys. `skip_legacy`
+/// is set by the test reset so the legacy delegates are not migrated back.
 pub async fn reset_local_data(skip_legacy: bool) -> Result<(), String> {
     LOCAL_RESET.store(true, Ordering::SeqCst);
     for key in [
