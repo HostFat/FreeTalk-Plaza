@@ -24,7 +24,6 @@ use crate::constants::SECTION_CONTRACT_WASM;
 use crate::util::to_cbor_vec;
 
 pub struct SectionBoard {
-    pub key: ContractKey,
     pub params: SectionParametersV1,
     pub state: ChatBoardStateV1,
     pub synced: bool,
@@ -329,7 +328,6 @@ pub async fn create_section_board(
         boards.insert(
             child_id,
             SectionBoard {
-                key,
                 params: params.clone(),
                 state: child.clone(),
                 synced: false,
@@ -355,20 +353,26 @@ pub async fn load_section_board(
 ) -> Result<ContractInstanceId, String> {
     let key = section_key(owner, section);
     let contract_id = *key.id();
-    let known = SECTION_BOARDS.read().contains_key(&contract_id);
-    if !known {
-        SECTION_BOARDS.with_mut(|boards| {
+    let known = SECTION_BOARDS
+        .read()
+        .get(&contract_id)
+        .map(|board| board.synced)
+        .unwrap_or(false);
+    if known {
+        return Ok(contract_id);
+    }
+    SECTION_BOARDS.with_mut(|boards| {
+        if !boards.contains_key(&contract_id) {
             boards.insert(
                 contract_id,
                 SectionBoard {
-                    key,
                     params: SectionParametersV1 { owner, section },
                     state: ChatBoardStateV1::default(),
                     synced: false,
                 },
             );
-        });
-    }
+        }
+    });
     send_client_request(ClientRequest::ContractOp(ContractRequest::Get {
         key: contract_id,
         return_contract_code: false,
