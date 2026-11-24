@@ -12,14 +12,16 @@ use freenet_stdlib::prelude::{
 use plaza_core::board_state::sections::{
     AuthorizedSectionV1, SectionId, SectionParametersV1,
 };
-use plaza_core::board_state::topics::TopicIndexV1;
+use plaza_core::board_state::topics::{
+    AuthorizedTopicActivityV1, TopicIndexDelta, TopicIndexV1,
+};
 use plaza_core::board_state::{
-    BoardModeV1, ChatBoardParametersV1, ChatBoardStateV1,
+    BoardModeV1, ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::components::app::chat_delegate::{
     send_delegate_request, SECTION_BOARDS_STORAGE_KEY,
@@ -118,6 +120,7 @@ pub async fn load_persisted_section_boards() {
                 synced: false,
                 ready: false,
                 syncing: false,
+                dirty: true,
             });
         }
     });
@@ -131,10 +134,129 @@ pub struct SectionBoard {
     pub ready: bool,
     /// An authority sync is in flight.
     pub syncing: bool,
+    /// Local activity has not been confirmed by the network yet.
+    pub dirty: bool,
 }
 
 pub static SECTION_BOARDS: GlobalSignal<HashMap<ContractInstanceId, SectionBoard>> =
     Global::new(HashMap::new);
+
+struct PendingSectionActivity {
+    key: ContractKey,
+    activity: HashMap<plaza_core::board_state::message::MessageId, AuthorizedTopicActivityV1>,
+}
+
+static SECTION_ACTIVITY: Mutex<Vec<(ContractInstanceId, PendingSectionActivity)>> =
+    Mutex::new(Vec::new());
+static SECTION_ACTIVITY_TIMERS: Mutex<Vec<ContractInstanceId>> = Mutex::new(Vec::new());
+
+fn has_pending_activity(contract_id: ContractInstanceId) -> bool {
+    SECTION_ACTIVITY
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(id, _)| *id == contract_id)
+}
+
+async fn flush_section_activity(contract_id: ContractInstanceId) {
+    SECTION_ACTIVITY_TIMERS
+        .lock()
+        .unwrap()
+        .retain(|id| *id != contract_id);
+    let pending = {
+        let mut queue = SECTION_ACTIVITY.lock().unwrap();
+        queue
+            .iter()
+            .position(|(id, _)| *id == contract_id)
+            .map(|index| queue.remove(index).1)
+    };
+    let Some(pending) = pending else {
+        return;
+    };
+    let delta = ChatBoardStateV1Delta {
+        topics: Some(TopicIndexDelta {
+            activity: pending.activity.values().cloned().collect(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = to_cbor_vec(&delta);
+    let result = send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
+        key: pending.key,
+        data: UpdateData::Delta(bytes.into()),
+    }))
+    .await;
+    match result {
+        Ok(()) => {
+            let still_pending = has_pending_activity(contract_id);
+            SECTION_BOARDS.with_mut(|boards| {
+                if let Some(board) = boards.get_mut(&contract_id) {
+                    board.dirty = still_pending;
+                }
+            });
+            schedule_section_save();
+        }
+        Err(error) => {
+            dioxus::logger::tracing::warn!("section activity was not sent: {error}");
+            let retry_key = pending.key;
+            {
+                let mut queue = SECTION_ACTIVITY.lock().unwrap();
+                queue.push((contract_id, pending));
+            }
+            SECTION_BOARDS.with_mut(|boards| {
+                if let Some(board) = boards.get_mut(&contract_id) {
+                    board.dirty = true;
+                }
+            });
+            queue_section_activity(contract_id, retry_key, Vec::new());
+        }
+    }
+}
+
+fn queue_section_activity(
+    contract_id: ContractInstanceId,
+    key: ContractKey,
+    activity: Vec<AuthorizedTopicActivityV1>,
+) {
+    {
+        let mut pending = SECTION_ACTIVITY.lock().unwrap();
+        if let Some(index) = pending.iter().position(|(id, _)| *id == contract_id) {
+            for record in activity {
+                pending[index]
+                    .1
+                    .activity
+                    .insert(record.activity.topic_id, record);
+            }
+        } else {
+            let mut activity_map = HashMap::new();
+            for record in activity {
+                activity_map.insert(record.activity.topic_id, record);
+            }
+            pending.push((
+                contract_id,
+                PendingSectionActivity {
+                    key,
+                    activity: activity_map,
+                },
+            ));
+        }
+    }
+    SECTION_BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.get_mut(&contract_id) {
+            board.dirty = true;
+        }
+    });
+    let mut timers = SECTION_ACTIVITY_TIMERS.lock().unwrap();
+    if timers.contains(&contract_id) {
+        return;
+    }
+    timers.push(contract_id);
+    drop(timers);
+    crate::util::safe_spawn_local(async move {
+        crate::util::sleep(std::time::Duration::from_secs(10)).await;
+        flush_section_activity(contract_id).await;
+    });
+}
 
 pub fn section_key(owner: VerifyingKey, section: SectionId) -> ContractKey {
     let params = SectionParametersV1 { owner, section };
@@ -311,6 +433,7 @@ pub async fn sync_section_authority(
             board.state = state.clone();
             board.synced = true;
             board.ready = false;
+            board.dirty = true;
         }
     });
     schedule_section_save();
@@ -323,6 +446,7 @@ pub async fn sync_section_authority(
         if let Some(board) = boards.get_mut(&contract_id) {
             board.syncing = false;
             board.ready = result.is_ok();
+            board.dirty = has_pending_activity(contract_id);
         }
     });
     result.map_err(|error| format!("send section authority: {error}"))
@@ -362,16 +486,28 @@ pub async fn apply_section_delta(
         if let Some(board) = boards.get_mut(&contract_id) {
             board.state = state;
             board.synced = false;
+            board.dirty = true;
         }
     });
     schedule_section_save();
+    if delta.is_activity_only() {
+        if let Some(topics) = delta.topics.as_ref() {
+            queue_section_activity(contract_id, key, topics.activity.clone());
+        }
+        return Ok(());
+    }
     let bytes = to_cbor_vec(&delta);
-    send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
+    let result = send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
         key,
         data: UpdateData::Delta(bytes.into()),
     }))
-    .await
-    .map_err(|error| format!("send section delta: {error}"))
+    .await;
+    SECTION_BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.get_mut(&contract_id) {
+            board.dirty = has_pending_activity(contract_id);
+        }
+    });
+    result.map_err(|error| format!("send section delta: {error}"))
 }
 
 pub fn is_section_contract_response(response: &ContractResponse) -> bool {
@@ -450,6 +586,7 @@ pub async fn create_section_board(
                 synced: false,
                 ready: false,
                 syncing: false,
+                dirty: true,
             },
         );
     });
@@ -491,6 +628,7 @@ pub async fn load_section_board(
                     synced: false,
                     ready: false,
                     syncing: false,
+                    dirty: false,
                 },
             );
         }
@@ -572,26 +710,55 @@ pub async fn ensure_section_loaded(
 pub async fn handle_contract_response(response: ContractResponse) -> Result<(), String> {
     match response {
         ContractResponse::GetResponse { key, state, .. } => {
-            let state = ciborium::de::from_reader::<ChatBoardStateV1, _>(state.as_ref())
+            let network = ciborium::de::from_reader::<ChatBoardStateV1, _>(state.as_ref())
                 .map_err(|error| format!("decode section state: {error}"))?;
-            let owner = SECTION_BOARDS
+            let Some((owner, section, cached, dirty)) = SECTION_BOARDS
                 .read()
                 .get(key.id())
-                .map(|board| board.params.owner)
-                .ok_or("unknown section board")?;
+                .map(|board| {
+                    (
+                        board.params.owner,
+                        board.params.section,
+                        board.state.clone(),
+                        board.dirty,
+                    )
+                })
+            else {
+                return Err("unknown section board".to_string());
+            };
             let params = ChatBoardParametersV1 { owner };
-            state
-                .verify_with_section(
-                    &params,
-                    Some(
-                        SECTION_BOARDS
-                            .read()
-                            .get(key.id())
-                            .map(|board| board.params.section)
-                            .ok_or("unknown section board")?,
-                    ),
-                )
+            network
+                .verify_with_section(&params, Some(section))
                 .map_err(|error| format!("section state does not verify: {error}"))?;
+            let pending = has_pending_activity(*key.id());
+            let state = if dirty && pending {
+                let mut merged = cached.clone();
+                match merged.merge(&cached, &params, &network) {
+                    Ok(()) => {
+                        merged
+                            .verify_with_section(&params, Some(section))
+                            .map_err(|error| {
+                                format!("merged section state does not verify: {error}")
+                            })?;
+                        merged
+                    }
+                    Err(error) => {
+                        dioxus::logger::tracing::warn!(
+                            "could not merge cached section state: {error}"
+                        );
+                        network
+                    }
+                }
+            } else {
+                network
+            };
+            match (|| -> Result<(), String> {
+                state.verify_with_section(&params, Some(section))?;
+                Ok(())
+            })() {
+                Ok(()) => {}
+                Err(error) => return Err(error),
+            }
             let parent_state = {
                 let boards = crate::components::app::BOARDS.read();
                 boards
@@ -603,6 +770,7 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 if let Some(board) = boards.get_mut(key.id()) {
                     board.state = state;
                     board.synced = true;
+                    board.dirty = pending;
                 }
             });
             schedule_section_save();
@@ -644,8 +812,28 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 .ok_or("unknown section board")?;
             match update {
                 UpdateData::State(bytes) => {
-                    state = ciborium::de::from_reader(bytes.as_ref())
+                    let network = ciborium::de::from_reader(bytes.as_ref())
                         .map_err(|error| format!("decode section update: {error}"))?;
+                    let cached = state.clone();
+                    let dirty = SECTION_BOARDS
+                        .read()
+                        .get(key.id())
+                        .map(|board| board.dirty)
+                        .unwrap_or(false);
+                    if dirty && has_pending_activity(*key.id()) {
+                        let mut merged = cached.clone();
+                        match merged.merge(&cached, &params, &network) {
+                            Ok(()) => state = merged,
+                            Err(error) => {
+                                dioxus::logger::tracing::warn!(
+                                    "could not merge section notification: {error}"
+                                );
+                                state = network;
+                            }
+                        }
+                    } else {
+                        state = network;
+                    }
                 }
                 UpdateData::Delta(bytes) => {
                     let delta = ciborium::de::from_reader(bytes.as_ref())
@@ -664,6 +852,7 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 if let Some(board) = boards.get_mut(key.id()) {
                     board.state = state;
                     board.synced = true;
+                    board.dirty = has_pending_activity(*key.id());
                 }
             });
             schedule_section_save();
