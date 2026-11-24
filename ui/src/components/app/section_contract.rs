@@ -388,12 +388,33 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                     ),
                 )
                 .map_err(|error| format!("section state does not verify: {error}"))?;
+            let parent_state = {
+                let boards = crate::components::app::BOARDS.read();
+                boards
+                    .map
+                    .get(&owner)
+                    .map(|board| board.board_state.clone())
+            };
             SECTION_BOARDS.with_mut(|boards| {
                 if let Some(board) = boards.get_mut(key.id()) {
                     board.state = state;
                     board.synced = true;
                 }
             });
+            if let Some(parent_state) = parent_state {
+                if parent_state.mode == BoardModeV1::SectionedTopicIndex {
+                    let section = SECTION_BOARDS
+                        .read()
+                        .get(key.id())
+                        .map(|board| board.params.section);
+                    if let Some(section) = section {
+                        crate::util::safe_spawn_local(async move {
+                            let _ = sync_section_authority(owner, section, &parent_state)
+                                .await;
+                        });
+                    }
+                }
+            }
         }
         ContractResponse::PutResponse { key }
         | ContractResponse::UpdateResponse { key, .. }

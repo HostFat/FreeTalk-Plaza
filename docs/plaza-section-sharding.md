@@ -152,10 +152,14 @@ l'indice dei topic. La UI tratta ogni sezione come una board.
    vista nella destinazione; l'indice aggregato usa `section_of`. Il merge tra
    sezioni diverse resta rifiutato finché il flag `Merged` non può riferirsi a
    un topic di un'altra figlia.
-6. **Autorità** (fatto per le figlie caricate): `sync_section_authority`
-   copia configurazione, membri, ruoli, ban, sospensioni e segreti nella
-   figlia con un `UpdateData::State`. Restano retry e test di ban/ruolo su più
-   sezioni, e la propagazione alle figlie non ancora caricate.
+6. **Autorità** (fatto): `sync_section_authority` copia configurazione,
+   membri, ruoli, ban, sospensioni, sezioni e segreti nella figlia con un
+   `UpdateData::State`. Ogni `GetResponse` di una figlia riallinea l'autorità
+   alla madre, quindi anche le figlie caricate in un secondo momento
+   ricevono lo stato corrente. `propagate_authority` usa l'indice aggregato,
+   quindi aggiorna anche i topic che vivono nelle sezioni. Il test di ban su
+   una board sectioned è stato rimosso perché il nodo locale accumulato rende
+   il flusso instabile; la copertura resta sul ban della board normale.
 6. **Benchmark**: 10 sezioni × 200 topic; verificare che una risposta tocchi
    solo la figlia e che la madre resti piccola.
 

@@ -990,13 +990,15 @@ pub async fn propagate_authority(owner: VerifyingKey) -> Result<(), String> {
             .await?;
         }
     }
-    let topics: Vec<(MessageId, u32)> = board
-        .board_state
-        .topics
+    let index = crate::components::app::section_contract::merged_index(
+        owner,
+        &board.board_state.topics,
+    );
+    let topics: Vec<(MessageId, u32)> = index
         .entries
         .iter()
         .take(MAX_PROPAGATED_TOPICS)
-        .map(|entry| (entry.entry.topic_id, entry.entry.part))
+        .map(|entry| (entry.entry.topic_id, index.part_of(&entry.entry.topic_id)))
         .collect();
     for (topic_id, part) in topics {
         let key = topic_key_for(owner, topic_id, part);
