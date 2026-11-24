@@ -160,7 +160,8 @@ pub async fn load_topic(
             subscribe: true,
             blocking_subscribe: false,
         })
-        .await?;
+        .await
+        .map_err(|error| format!("topic get {contract_id:?} part {part}: {error}"))?;
     }
     touch_topic(contract_id);
     Ok(contract_id)

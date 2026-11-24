@@ -290,6 +290,10 @@ test.fixme("a member joins a topic created after a role", async ({ page }) => {
     app.getByRole("heading", { name: "Role first topic" }),
   ).toBeVisible({ timeout: 60_000 });
   const topicId = await waitForTopicRoute(page);
+  await page.reload();
+  await expect(
+    app.getByRole("heading", { name: "Role first topic" }),
+  ).toBeVisible({ timeout: 30_000 });
 
   await page.goto(`${withSections(BASE)}#/board/${boardKey}/admin/links`);
   await app.getByRole("button", { name: "Invite links" }).click();

@@ -137,7 +137,7 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     use_effect(move || {
         let _ = BOARDS.read().map.len();
         let owner = board_data.owner_vk;
-        let part_now = BOARDS
+        let index = BOARDS
             .read()
             .map
             .get(&owner)
@@ -146,9 +146,9 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                     owner,
                     &board.board_state.topics,
                 )
-                .part_of(&topic_id_value)
             })
-            .unwrap_or(part);
+            .unwrap_or_default();
+        let part_now = index.part_of(&topic_id_value);
         if *loaded_part.read() == Some(part_now) {
             return;
         }
