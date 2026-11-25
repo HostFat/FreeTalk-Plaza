@@ -184,9 +184,9 @@ stato limitato alla sezione (la page è 0 per il manifest e per la prima fetta
 di topic, maggiore di 0 per le pagine successive):
 
 - membri, ruoli, ban, admin e ownership sono una copia della board madre;
-- `sections` contiene solo la sezione della figlia;
-- `topics` contiene solo le entry, l'attività, i flag e i report di quella
-  sezione;
+- `sections` contiene solo la sezione della figlia e i suoi antenati;
+- `topics` contiene solo le entry, l'attività e i flag di quella sezione; i
+  report vivono nel contratto moderazione (i legacy restano nell'indice);
 - il topic contract resta invariato: un topic appartiene a una figlia.
 
 La board madre conserva l'elenco delle sezioni e l'autorità; non conserva
