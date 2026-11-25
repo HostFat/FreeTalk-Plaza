@@ -48,9 +48,12 @@ vengono rimesse in coda al reload.
 
 I topic usano una radice Merkle dell'autorita': ogni topic conserva la radice,
 le definizioni dei ruoli e una prova per partecipanti e moderatori, invece di
-copiare bans e sospensioni. La radice e' firmata dall'owner e legata alla
-board; la board la conserva in `authority_root`. Un cambio guidato da un
-membro o la cleanup azzera la radice fino alla firma successiva dell'owner, e
+copiare bans e sospensioni. La radice è firmata dall'owner e legata alla
+board; la board la conserva in `authority_root`. La radice copre anche il
+record del nickname: con una radice valida la board salta le firme di membri,
+ruoli, ban e nickname, e un delta di nickname verifica solo il record che
+porta. Un cambio guidato da un membro o la cleanup azzera la radice fino alla
+firma successiva dell'owner, e
 i topic tornano temporaneamente alle liste complete. Le figlie continuano a
 ricevere token e ruoli dei membri che referenziano, altrimenti la verifica
 dell'invito fallisce. L'activity recente e' uscita dall'indice: vive in

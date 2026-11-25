@@ -13,21 +13,20 @@ pub struct MemberInfoV1 {
     pub member_info: Vec<AuthorizedMemberInfo>,
 }
 
-impl ComposableState for MemberInfoV1 {
-    type ParentState = ChatBoardStateV1;
-    type Summary = BTreeMap<MemberId, u32>;
-    type Delta = Vec<AuthorizedMemberInfo>;
-    type Parameters = ChatBoardParametersV1;
-
-    fn verify(
+impl MemberInfoV1 {
+    /// Verify only the supplied records. A delta carries the records it
+    /// changes; verifying the whole list on every nickname change costs one
+    /// signature per member.
+    pub fn verify_records(
         &self,
-        parent_state: &Self::ParentState,
-        parameters: &Self::Parameters,
+        parent_state: &ChatBoardStateV1,
+        parameters: &ChatBoardParametersV1,
+        records: &[AuthorizedMemberInfo],
     ) -> Result<(), String> {
         let members_by_id = parent_state.members.members_by_member_id();
         let owner_id = parameters.owner_id();
 
-        for member_info in &self.member_info {
+        for member_info in records {
             let member_id = member_info.member_info.member_id;
 
             if member_id == owner_id {
@@ -44,6 +43,21 @@ impl ComposableState for MemberInfoV1 {
             }
         }
         Ok(())
+    }
+}
+
+impl ComposableState for MemberInfoV1 {
+    type ParentState = ChatBoardStateV1;
+    type Summary = BTreeMap<MemberId, u32>;
+    type Delta = Vec<AuthorizedMemberInfo>;
+    type Parameters = ChatBoardParametersV1;
+
+    fn verify(
+        &self,
+        parent_state: &Self::ParentState,
+        parameters: &Self::Parameters,
+    ) -> Result<(), String> {
+        self.verify_records(parent_state, parameters, &self.member_info)
     }
 
     fn summarize(

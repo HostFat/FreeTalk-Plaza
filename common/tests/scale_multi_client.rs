@@ -7,6 +7,7 @@
 //! `cargo test -p plaza-core --test scale_multi_client --release -- --ignored --nocapture`
 
 use ed25519_dalek::SigningKey;
+use freenet_scaffold::ComposableState;
 use freenet_stdlib::prelude::ContractInstanceId;
 use plaza_core::board_state::activity::{
     ActivityDeltaV1, ActivityEntryV1, ActivityStateV1, MAX_ACTIVITY_ENTRIES,
@@ -16,6 +17,7 @@ use plaza_core::board_state::authority::{
 };
 use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
+use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
 use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::privacy::SealedBytes;
 use plaza_core::board_state::report_feed::{
@@ -30,7 +32,7 @@ use plaza_core::board_state::topics::{
     TopicReportResolutionV1, TopicReportV1,
 };
 use plaza_core::board_state::{
-    BoardModeV1, ChatBoardParametersV1, ChatBoardStateV1,
+    BoardModeV1, ChatBoardParametersV1, ChatBoardStateV1, ChatBoardStateV1Delta,
 };
 use plaza_core::util::sign_struct;
 use std::hint::black_box;
@@ -565,7 +567,19 @@ fn sign_owner_root(state: &mut ChatBoardStateV1) {
 
 fn membership_scenario(members: usize, sections: usize) {
     let mut board = parent(sections, members);
+    let without_nicknames = serialized_len(&board);
+    for index in 0..members {
+        let key = member_key(index);
+        let id = MemberId::from(&key.verifying_key());
+        board.member_info.member_info.push(
+            AuthorizedMemberInfo::new_with_member_key(
+                MemberInfo::new_public(id, 1, format!("Member {index}")),
+                &key,
+            ),
+        );
+    }
     let size = serialized_len(&board) as f64 / 1024.0;
+    let nickname_kib = (serialized_len(&board) - without_nicknames) as f64 / 1024.0;
     let full_verify = verify_time(&board, None);
 
     let start = Instant::now();
@@ -575,9 +589,33 @@ fn membership_scenario(members: usize, sections: usize) {
 
     sign_owner_root(&mut board);
     let fast_verify = verify_time(&board, None);
+
+    // A nickname change carries one record; only that record is verified.
+    let key = member_key(0);
+    let id = MemberId::from(&key.verifying_key());
+    let updated = AuthorizedMemberInfo::new_with_member_key(
+        MemberInfo::new_public(id, 2, "Renamed".to_string()),
+        &key,
+    );
+    let nickname_delta = ChatBoardStateV1Delta {
+        member_info: Some(vec![updated]),
+        ..Default::default()
+    };
+    let mut changed = board.clone();
+    changed
+        .apply_delta(&board, &params(), &Some(nickname_delta.clone()))
+        .expect("the nickname delta applies");
+    let start = Instant::now();
+    changed
+        .verify_delta(&nickname_delta, &params())
+        .expect("the nickname delta verifies");
+    let nickname_delta_ms = start.elapsed().as_secs_f64() * 1000.0;
+
     println!(
         "members={members:>6} sections={sections:>3} board={size:>8.1} KiB \
-         full {full_verify:>8.1} ms tree {tree_ms:>7.1} ms fast {fast_verify:>7.1} ms"
+         (nicknames {nickname_kib:>6.1} KiB) full {full_verify:>8.1} ms \
+         tree {tree_ms:>7.1} ms fast {fast_verify:>7.1} ms \
+         nickname delta {nickname_delta_ms:>6.1} ms"
     );
 }
 

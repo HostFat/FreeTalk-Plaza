@@ -2,11 +2,11 @@
 
 Versione: 1 (implementata).
 Stato: fasi 0–4 completate; move e merge tra sezioni pubblicati nella build
-locale v729. Le nuove board topic usano lo shard per sezione come default, le
+locale v730. Le nuove board topic usano lo shard per sezione come default, le
 sezioni dividono l'indice in pagine firmate dall'owner e i topic usano una
 radice Merkle dell'autorita' firmata dall'owner, con prove per membro.
 L'activity recente vive in un contratto separato per board. Contratto board
-alla revisione 31.
+alla revisione 32.
 Nessuna migrazione delle vecchie board.
 
 ## Stato dell'implementazione
@@ -182,9 +182,14 @@ TopicAuthorityV1 {
   del membro, non in liste globali.
 - `AuthorityRootV1 { version, board, epoch, content_hash, digest }` è la
   radice Merkle degli stati dei membri. `MemberStatusV1` raggruppa il record
-  del membro, le definizioni dei suoi ruoli, le assegnazioni, i ban, le revoca
-  e le sospensioni. Il topic conserva la radice e una prova per ogni
-  partecipante/moderatore che referenzia.
+  del membro, le definizioni dei suoi ruoli, le assegnazioni, i ban, le revoca,
+  le sospensioni e il record del nickname. Il topic conserva la radice e una
+  prova per ogni partecipante/moderatore che referenzia.
+- Con una radice valida la board non verifica di nuovo le firme dei membri,
+  dei ruoli, dei ban o dei nickname coperti dalla radice. Un delta di
+  nickname verifica solo i record che porta: con 10.000 membri il percorso
+  caldo scende da 20 s a 6 ms, mentre la verifica completa della radice resta
+  il costo di un nuovo subscriber senza root.
 - `AuthorizedAuthorityRootV1` firma la radice con la chiave dell'owner e la
   lega alla board (`root.board`). La board la conserva in
   `ChatBoardStateV1.authority_root` (`AuthorityRootStateV1`); il contratto
@@ -640,7 +645,7 @@ Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
 - La figlia non copia tutta l'autorità: conserva configurazione, admin,
   ownership, sezioni e solo i membri/ruoli/ban che il suo indice referenzia.
   La sincronizzazione dell'autorità viaggia come delta; un cambio di admin o
-  ownership usa ancora lo stato completo. Contratto board alla revisione 31.
+  ownership usa ancora lo stato completo. Contratto board alla revisione 32.
 - L'attività della figlia viene accorpata per 10 s. Lo stato locale resta
   `dirty` fino all'`UpdateResponse` del nodo; un `Get` che porta ancora lo
   stato precedente fa merge invece di scartare l'entry o l'attività locale.
@@ -688,7 +693,7 @@ delle pagine, ricarica e trova solo la pagina 0, carica le pagine con "Load
 older topics", poi crea la pagina 2 con la dimensione firmata anche se il
 client ricaricato ha il default 200. Con lo shard come default la suite passa
 16/16 in 5 minuti. La suite statica Playwright (Chromium) ha 29 test passati e
-3 saltati. Il contratto della board e' alla revisione 31; l'indice a pagine e'
+3 saltati. Il contratto della board e' alla revisione 32; l'indice a pagine e'
 coperto dal test dedicato.
 
 Il reset di test scrive un marker nel delegate (`skip_legacy_migration`)

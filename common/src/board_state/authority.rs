@@ -8,6 +8,7 @@
 
 use crate::board_state::ban::{AuthorizedBanRevocation, AuthorizedUserBan};
 use crate::board_state::member::{AuthorizedMember, MemberId};
+use crate::board_state::member_info::AuthorizedMemberInfo;
 use crate::board_state::member_moderation::AuthorizedSuspension;
 use crate::board_state::rate_limit::system_time_from_ms;
 use crate::board_state::roles::{AuthorizedRole, AuthorizedRoleAssignment};
@@ -37,6 +38,11 @@ pub struct MemberStatusV1 {
     pub revocations: Vec<AuthorizedBanRevocation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suspensions: Vec<AuthorizedSuspension>,
+    /// The member's current nickname record. Covered by the root so a board
+    /// with thousands of nicknames does not verify each signature again when
+    /// the owner-signed root already attests it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_info: Option<AuthorizedMemberInfo>,
 }
 
 impl MemberStatusV1 {
@@ -296,6 +302,13 @@ impl AuthorityTreeV1 {
                 .filter(|suspension| suspension.suspension.target == member_id)
                 .cloned()
                 .collect();
+            let member_info = state
+                .member_info
+                .member_info
+                .iter()
+                .filter(|info| info.member_info.member_id == member_id)
+                .max_by_key(|info| info.member_info.version)
+                .cloned();
             statuses.push(MemberStatusV1 {
                 member: member.clone(),
                 roles,
@@ -303,6 +316,7 @@ impl AuthorityTreeV1 {
                 bans,
                 revocations,
                 suspensions,
+                member_info,
             });
         }
         Self::new(statuses)
@@ -432,6 +446,7 @@ mod tests {
             bans: Vec::new(),
             revocations: Vec::new(),
             suspensions: Vec::new(),
+            member_info: None,
         }
     }
 

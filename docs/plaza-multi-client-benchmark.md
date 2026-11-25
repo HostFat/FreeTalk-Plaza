@@ -56,16 +56,22 @@ Moderazione, 500 report e 500 risoluzioni:
 
 Le scritture di report sulla board o sulla pagina della sezione sono zero.
 
-Membri della board (10 sezioni, nessun topic):
+Membri della board con nickname (10 sezioni, nessun topic):
 
-| Membri | Board | Verify |
-|---:|---:|---:|
-| 1.000 | 341 KiB | 2,1 s |
-| 5.000 | 1.681 KiB | 10,1 s |
-| 10.000 | 3.356 KiB | 20,4 s |
+| Membri | Board | Nickname | Verify piena | Verify root | Delta nickname |
+|---:|---:|---:|---:|---:|---:|
+| 1.000 | 618 KiB | 277 KiB | 4,3 s | 39 ms | 4,6 ms |
+| 5.000 | 3.076 KiB | 1.395 KiB | 21,3 s | 162 ms | 5,1 ms |
+| 10.000 | 6.148 KiB | 2.792 KiB | 45,8 s | 540 ms | 6,2 ms |
 
-Con 100 sezioni e 10.000 membri la board resta 3.396 KiB e la verifica 19,8 s:
-il costo dipende dai membri, non dalle sezioni.
+Senza nickname la board da 10.000 membri è 3,4 MiB: i nickname sono circa il
+45% dello stato. La radice firmata ora copre anche il record del nickname, e
+un cambio di nickname verifica solo il record del delta: il percorso caldo
+passa da 20 s a 6 ms. Lo stato resta il muro: spostare i nickname in un
+contratto profili è il passo successivo per la dimensione.
+
+Con 100 sezioni e 10.000 membri il costo dipende dai membri, non dalle
+sezioni.
 
 Prima del pruning le figlie erano 639/674 KiB, lo storage 12,5/65,9 MiB,
 il fan-out dell'activity 31,2/32,9 MiB e la sincronizzazione dell'autorita'

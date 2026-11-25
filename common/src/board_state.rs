@@ -307,7 +307,7 @@ impl ChatBoardStateV1 {
         self.admin.verify(self, parameters)?;
         self.ownership.verify(self, parameters)?;
         self.invites.verify(self, parameters)?;
-        self.member_info.verify(self, parameters)?;
+        self.verify_uncovered_member_info(parameters)?;
         self.category_secrets.verify(self, parameters)?;
         self.secrets.verify(self, parameters)?;
         self.recent_messages.verify(self, parameters)?;
@@ -327,6 +327,34 @@ impl ChatBoardStateV1 {
         self.topics.verify(self, parameters)?;
         self.topic_pages.verify(self, parameters)?;
         Ok(())
+    }
+
+    /// The authority root covers the nickname of every member and ban target.
+    /// Verify only the records outside that set (the owner and stale entries);
+    /// the root has already attested the rest.
+    fn verify_uncovered_member_info(
+        &self,
+        parameters: &ChatBoardParametersV1,
+    ) -> Result<(), String> {
+        let mut covered: std::collections::HashSet<MemberId> =
+            self.members.members.iter().map(|m| m.member.id()).collect();
+        for ban in &self.bans.0 {
+            if let Some(target) = &ban.ban.target_member {
+                covered.insert(target.member.id());
+            }
+        }
+        let uncovered: Vec<_> = self
+            .member_info
+            .member_info
+            .iter()
+            .filter(|info| {
+                let id = info.member_info.member_id;
+                id == parameters.owner_id() || !covered.contains(&id)
+            })
+            .cloned()
+            .collect();
+        self.member_info
+            .verify_records(self, parameters, &uncovered)
     }
 
     fn verify_sectioned_layout(
@@ -411,9 +439,12 @@ impl ChatBoardStateV1 {
                 self.members.verify(self, parameters)?;
             }
             self.invites.verify(self, parameters)?;
-            self.member_info.verify(self, parameters)?;
-        } else if delta.member_info.is_some() {
-            self.member_info.verify(self, parameters)?;
+        }
+        if let Some(records) = delta.member_info.as_ref() {
+            // Verify the records the delta carries, not every nickname on
+            // the board.
+            self.member_info
+                .verify_records(self, parameters, records)?;
         }
 
         if delta.sections.is_some() {
