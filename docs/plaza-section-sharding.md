@@ -101,7 +101,9 @@ la propria fetta di topic. Un aggiornamento tocca una pagina, non tutte.
   il numero di pagine); le pagine accettano ancora flag e report, quindi non
   sono immutabili; l'aggiunta di una pagina resta una singola scrittura sul
   manifest. Se l'aggiornamento del manifest fallisce, la pagina resta orfana:
-  non viene caricata e l'owner può crearne un'altra.
+  non viene caricata e l'owner può crearne un'altra. Il badge dei non letti
+  nel top bar conta le pagine caricate: si allinea quando l'utente apre la
+  sezione o carica le pagine.
 
 Benchmark con 2.000 topic, 1.000 membri e pagine da 200: l'intera sezione è
 3.278 KiB e verifica in 14,9 s; una pagina è 363 KiB e 1,7 s. Un nuovo topic è
