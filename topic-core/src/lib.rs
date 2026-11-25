@@ -2300,6 +2300,7 @@ fn merge_ownership(left: &OwnershipV1, right: &OwnershipV1) -> OwnershipV1 {
     OwnershipV1 {
         transfers: transfers.into_values().collect(),
         deactivations: deactivations.into_values().collect(),
+        succession_votes: Vec::new(),
     }
 }
 

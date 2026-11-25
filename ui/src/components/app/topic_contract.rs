@@ -906,7 +906,15 @@ fn authority_from_board(
     } else {
         (None, Some(board.board_state.configuration.clone()))
     };
-    let tree = plaza_topic_core::AuthorityTreeV1::from_board(&board.board_state);
+    let mut merged_board_state = board.board_state.clone();
+    let mut merged_members = std::mem::take(&mut merged_board_state.members);
+    crate::components::app::member_contract::apply_to_members(
+        board.owner_vk,
+        &merged_board_state,
+        &mut merged_members,
+    );
+    merged_board_state.members = merged_members;
+    let tree = plaza_topic_core::AuthorityTreeV1::from_board(&merged_board_state);
     let content_hash = tree.content_hash();
     let digest = tree.root(0).digest;
     let signed_root = board
@@ -1844,40 +1852,63 @@ fn participant_for(
     board: &BoardData,
     member_id: MemberId,
 ) -> Option<AuthorizedParticipantV1> {
+    let shard_entry =
+        crate::components::app::member_contract::find_member_entry(board.owner_vk, member_id);
+    let self_entry = board
+        .self_authorized_member
+        .as_ref()
+        .filter(|member| member.member.id() == member_id);
     let member = board
         .board_state
         .members
         .members
         .iter()
-        .find(|member| member.member.id() == member_id)?
-        .clone();
+        .find(|member| member.member.id() == member_id)
+        .cloned()
+        .or_else(|| shard_entry.as_ref().map(|entry| entry.member.clone()))
+        .or_else(|| self_entry.cloned())?;
     let owner_id = MemberId::from(&board.owner_vk);
     let current_owner = board.current_owner_id();
-    let mut chain: Vec<AuthorizedMember> = Vec::new();
-    let mut current = member.clone();
-    let mut seen = std::collections::HashSet::new();
-    for _ in 0..64 {
-        let inviter = current.member.invited_by;
-        if inviter == owner_id || inviter == current_owner {
-            break;
+    let mut chain: Vec<AuthorizedMember> = if let Some(entry) = &shard_entry {
+        entry.invite_chain.clone()
+    } else if self_entry.is_some() && !board.invite_chain.is_empty() {
+        board.invite_chain.clone()
+    } else {
+        Vec::new()
+    };
+    if chain.is_empty() {
+        let mut current = member.clone();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let inviter = current.member.invited_by;
+            if inviter == owner_id || inviter == current_owner {
+                break;
+            }
+            // A token join is self-signed and carries its proof, not a member
+            // ancestor chain.
+            if current.member.join_proof.is_some() || inviter == current.member.id() {
+                break;
+            }
+            if !seen.insert(inviter) {
+                return None;
+            }
+            let parent = board
+                .board_state
+                .members
+                .members
+                .iter()
+                .find(|candidate| candidate.member.id() == inviter)
+                .cloned()
+                .or_else(|| {
+                    crate::components::app::member_contract::find_member_entry(
+                        board.owner_vk,
+                        inviter,
+                    )
+                    .map(|entry| entry.member)
+                })?;
+            chain.push(parent.clone());
+            current = parent;
         }
-        // A token join is self-signed and carries its proof, not a member
-        // ancestor chain.
-        if current.member.join_proof.is_some() || inviter == current.member.id() {
-            break;
-        }
-        if !seen.insert(inviter) {
-            return None;
-        }
-        let parent = board
-            .board_state
-            .members
-            .members
-            .iter()
-            .find(|candidate| candidate.member.id() == inviter)?
-            .clone();
-        chain.push(parent.clone());
-        current = parent;
     }
     let join_proof = member.member.join_proof.clone();
     let token = join_proof.as_ref().and_then(|proof| {

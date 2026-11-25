@@ -395,6 +395,16 @@ impl BoardData {
                 &self.board_state.topics,
             );
         }
+        // Sharded members live in deterministic bucket contracts; overlay the
+        // verified entries on the parent board before resolving activity,
+        // moderation and profiles.
+        let mut sharded_members = std::mem::take(&mut self.board_state.members);
+        crate::components::app::member_contract::apply_to_members(
+            self.owner_vk,
+            &self.board_state,
+            &mut sharded_members,
+        );
+        self.board_state.members = sharded_members;
         let members: std::collections::HashSet<_> = self
             .board_state
             .members
@@ -4163,6 +4173,7 @@ mod tests {
                     ownership: Some(OwnershipDelta {
                         transfers: vec![transfer],
                         deactivations: Vec::new(),
+                        ..Default::default()
                     }),
                     ..Default::default()
                 }),
@@ -4311,6 +4322,7 @@ mod tests {
                     ownership: Some(OwnershipDelta {
                         transfers: vec![transfer],
                         deactivations,
+                        ..Default::default()
                     }),
                     ..Default::default()
                 }),

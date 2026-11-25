@@ -18,6 +18,10 @@ use plaza_core::board_state::authority::{
 use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
 use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
+use plaza_core::board_state::member_shards::{
+    member_shard_bucket, MemberShardDeltaV1, MemberShardEntryV1, MemberShardParametersV1,
+    MemberShardStateV1, MEMBER_SHARD_COUNT,
+};
 use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::privacy::SealedBytes;
 use plaza_core::board_state::profiles::{
@@ -635,6 +639,63 @@ fn membership_scenario(members: usize, sections: usize) {
     let profile_delta_kib = serialized_len_value(&profile_delta) as f64 / 1024.0;
     let board_without_nicknames = size - nickname_kib;
 
+    // Sharded member directory: distribute all `members` across
+    // `MEMBER_SHARD_COUNT` deterministic buckets and measure one bucket.
+    let owner_sk = owner();
+    let owner_vk = owner_sk.verifying_key();
+    let mut shards: Vec<MemberShardStateV1> = (0..MEMBER_SHARD_COUNT)
+        .map(|_| MemberShardStateV1::default())
+        .collect();
+    for member in &board.members.members {
+        let bucket = member_shard_bucket(&member.member.id()) as usize;
+        shards[bucket].entries.push(MemberShardEntryV1 {
+            member: member.clone(),
+            invite_chain: Vec::new(),
+            invite_token: None,
+        });
+    }
+    let shard0_params = MemberShardParametersV1 {
+        owner: owner_vk,
+        bucket: 0,
+    };
+    let shard0_kib = serialized_len_value(&shards[0]) as f64 / 1024.0;
+    let max_shard_kib = shards
+        .iter()
+        .map(|s| serialized_len_value(s) as f64 / 1024.0)
+        .fold(0.0_f64, f64::max);
+    let start = Instant::now();
+    shards[0].verify(&shard0_params).expect("shard 0 verifies");
+    let shard0_verify_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let extra_sk = member_key(members + 100_000);
+    let extra_member = AuthorizedMember::new(
+        Member {
+            owner_member_id: MemberId::from(&owner_vk),
+            invited_by: MemberId::from(&owner_vk),
+            member_vk: extra_sk.verifying_key(),
+            join_proof: None,
+        },
+        &owner_sk,
+    );
+    let extra_bucket = member_shard_bucket(&extra_member.member.id());
+    let join_delta = MemberShardDeltaV1 {
+        entries: vec![MemberShardEntryV1 {
+            member: extra_member,
+            invite_chain: Vec::new(),
+            invite_token: None,
+        }],
+    };
+    let join_delta_kib = serialized_len_value(&join_delta) as f64 / 1024.0;
+    let mut target_shard = shards[extra_bucket as usize].clone();
+    let target_params = MemberShardParametersV1 {
+        owner: owner_vk,
+        bucket: extra_bucket,
+    };
+    let start = Instant::now();
+    target_shard
+        .apply_delta(&target_params, &join_delta)
+        .expect("join delta applies");
+    let join_delta_ms = start.elapsed().as_secs_f64() * 1000.0;
+
     println!(
         "members={members:>6} sections={sections:>3} board={size:>8.1} KiB \
          (nicknames {nickname_kib:>6.1} KiB, board without {board_without_nicknames:>8.1} KiB) \
@@ -643,6 +704,10 @@ fn membership_scenario(members: usize, sections: usize) {
     );
     println!(
         "         profile feed {profile_kib:>7.1} KiB; new nickname delta {profile_delta_kib:>5.1} KiB; board nickname writes: 0"
+    );
+    println!(
+        "         member shards ({MEMBER_SHARD_COUNT} buckets): bucket0 {shard0_kib:>6.1} KiB ({} members, verify {shard0_verify_ms:>6.1} ms), max bucket {max_shard_kib:>6.1} KiB; join delta {join_delta_kib:>4.2} KiB ({join_delta_ms:>4.2} ms)",
+        shards[0].entries.len()
     );
 }
 

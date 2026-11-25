@@ -4,6 +4,7 @@ pub mod dm_delegate;
 pub mod activity_contract;
 pub mod moderation_contract;
 pub mod profile_contract;
+pub mod member_contract;
 pub mod section_contract;
 pub mod topic_contract;
 pub mod document_title;
@@ -448,12 +449,27 @@ pub fn App() -> Element {
         let Some(owner) = current.owner_key else {
             return;
         };
+        let self_member_id = BOARDS
+            .read()
+            .map
+            .get(&owner)
+            .and_then(|board| {
+                // Only non-owner members live in member shard buckets.
+                let self_vk = board.self_sk.verifying_key();
+                (self_vk != board.current_owner_key())
+                    .then(|| plaza_core::board_state::member::MemberId::from(&self_vk))
+            });
         crate::util::safe_spawn_local(async move {
             let _ = crate::components::app::activity_contract::load_activity(owner)
                 .await;
             let _ = crate::components::app::moderation_contract::load_moderation(owner)
                 .await;
             let _ = crate::components::app::profile_contract::load_profile(owner).await;
+            if let Some(member_id) = self_member_id {
+                let bucket = plaza_core::board_state::member_shards::member_shard_bucket(&member_id);
+                let _ = crate::components::app::member_contract::load_member_shard(owner, bucket)
+                    .await;
+            }
         });
         let sections = {
             let boards = BOARDS.read();

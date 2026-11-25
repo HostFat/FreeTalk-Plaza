@@ -108,6 +108,31 @@ la propria fetta di topic. Un aggiornamento tocca una pagina, non tutte.
   nel top bar conta le pagine caricate: si allinea quando l'utente apre la
   sezione o carica le pagine.
 
+## Membri shardati e successione per quorum admin (rev 34, v735)
+
+- **Directory membri (`plaza-member-contract`)**: i membri vivono in 32 bucket
+  deterministici `MemberShardParametersV1 { owner, bucket }` con
+  `bucket = blake3(member_id)[0..2] % 32` e cap `2.000` record/bucket. Ogni
+  entry porta `invite_chain` o `invite_token` ed è auto-verificabile dal
+  contratto shard, con `summarize_state`/`get_state_delta` incrementali. Al
+  bootstrap il client interroga solo il proprio bucket (`GET`-only, mai `PUT`
+  su bucket vuoti); le viste `Members`, `AddAdminModal` e `OwnershipView`
+  caricano gli altri bucket on-demand (`GET`-only). `BoardData::with_merged_topics`
+  sovrappone i membri verificati (filtrando bannati e token revocati), e le
+  azioni che richiedono un membro sulla board madre (promozione ad admin,
+  assegnazione ruolo, trasferimento ownership) materializzano quel singolo
+  membro nel delta.
+- **Successione di ownership (`OwnershipV1`)**: `SuccessionVoteV1` e
+  `AuthorizedOwnerTransfer.succession_approvals` permettono a una maggioranza
+  stretta degli admin attivi (almeno 2 admin, `floor(N/2) + 1`) di eleggere un
+  nuovo owner da `Manage -> Ownership` se l'owner diventa irraggiungibile,
+  sbloccando configurazione, admin, pagine di sezione, upgrade e `authority_root`
+  senza indebolire l'invariante della radice solo-owner.
+- Re-key: `CONTRACT_REVISION = 34`; `plaza_contract.wasm`,
+  `plaza_section_contract.wasm`, `plaza_topic_contract.wasm` ri-keyati e nuovo
+  `plaza_member_contract.wasm` (delegate invariato). Board e topic esistenti
+  vanno ricreati.
+
 Benchmark con 2.000 topic, 1.000 membri e pagine da 200: l'intera sezione è
 3.278 KiB e verifica in 14,9 s; una pagina è 363 KiB e 1,7 s. Un nuovo topic è
 un delta da 0,7 KiB (0,03 MiB di fan-out con 50 subscriber); un nuovo

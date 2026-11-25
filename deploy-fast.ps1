@@ -24,6 +24,10 @@ param(
     [switch]$SkipContractBuild,
     # Use the size-optimized release profile (slower) instead of release-fast.
     [switch]$Production,
+    # Use the fastest wasm-dev profile (opt-level 1, no LTO) for rapid local UI iteration.
+    [switch]$DevBuild,
+    # Do not touch ui/build.rs (skips forcing a UI relink when sources are unchanged).
+    [switch]$SkipBuildStamp,
     # Do nothing when no source is newer than the last built bundle.
     [switch]$SkipIfUnchanged,
     # Replace the bundled blob contract even when its bytes changed. The blob
@@ -177,8 +181,11 @@ if (-not $SkipCss) {
 
 New-Item -ItemType Directory -Force $TargetDir | Out-Null
 $env:CARGO_TARGET_DIR = $TargetDir
+if (-not $env:RUSTC_WRAPPER -and (Get-Command 'sccache' -ErrorAction SilentlyContinue)) {
+    $env:RUSTC_WRAPPER = 'sccache'
+}
 
-$buildProfile = if ($Production) { "release" } else { "release-fast" }
+$buildProfile = if ($Production) { "release" } elseif ($DevBuild) { "wasm-dev" } else { "release-fast" }
 
 # Rebuild the bundled contract/delegate only when their sources or the shared
 # common crate changed. The UI embeds these wasm files, so they must match the
@@ -246,15 +253,22 @@ $buildTimer = [System.Diagnostics.Stopwatch]::StartNew()
 # when only the version or a commit changed and no source file has a newer
 # timestamp. Without this, dx reuses the previous wasm and About shows stale
 # build details.
-(Get-Item (Join-Path $repoRoot 'ui\build.rs')).LastWriteTime = Get-Date
+if (-not $SkipBuildStamp) {
+    (Get-Item (Join-Path $repoRoot 'ui\build.rs')).LastWriteTime = Get-Date
+}
 # DWARF debug info is on by default in dx and roughly doubles the wasm. The
-# published bundle does not need it.
+# published bundle does not need it. dx sets itself as RUSTC_WORKSPACE_WRAPPER;
+# sccache rejects wrapping dx-fast-deploy.exe as a compiler, so clear it here.
+$savedRustcWrapper = $env:RUSTC_WRAPPER
+Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
 if ($Production) {
     & $dx build --package plaza-ui --base-path "/v1/contract/web/$contractId/" --release --debug-symbols false
 } else {
     & $dx build --package plaza-ui --base-path "/v1/contract/web/$contractId/" --profile $buildProfile --debug-symbols false
 }
-if ($LASTEXITCODE -ne 0) { throw "dx build failed." }
+$dxExit = $LASTEXITCODE
+if ($savedRustcWrapper) { $env:RUSTC_WRAPPER = $savedRustcWrapper }
+if ($dxExit -ne 0) { throw "dx build failed." }
 $buildTimer.Stop()
 Write-Host ("Build finished in {0:n1}s" -f $buildTimer.Elapsed.TotalSeconds)
 
@@ -290,10 +304,27 @@ if ($currentJs) {
 }
 
 # Build the tar.xz exactly like deploy-tool: entries relative to public, no ./.
+# For local dev deploys use fast multi-threaded xz (level 1, all cores);
+# production keeps the default size-focused compression.
 $items = Get-ChildItem $publicDir.FullName -Force | Select-Object -ExpandProperty Name
 if (-not $items) { throw "The public directory is empty." }
 if (Test-Path $archive) { Remove-Item $archive -Force }
-& tar -cJf $archive -C $publicDir.FullName @items
+if ($Production) {
+    & tar -cJf $archive -C $publicDir.FullName @items
+} else {
+    $tarVersion = (& tar --version 2>$null) -join ' '
+    if ($tarVersion -match 'bsdtar') {
+        & tar -cJf $archive --options "xz:compression-level=1,xz:threads=0" -C $publicDir.FullName @items
+    } else {
+        $prevXzOpt = $env:XZ_OPT
+        $env:XZ_OPT = '-1 -T0'
+        try {
+            & tar -cJf $archive -C $publicDir.FullName @items
+        } finally {
+            $env:XZ_OPT = $prevXzOpt
+        }
+    }
+}
 if ($LASTEXITCODE -ne 0) { throw "tar failed to create $archive." }
 
 Write-Host "Signing web container..."

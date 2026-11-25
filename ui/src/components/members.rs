@@ -173,6 +173,15 @@ pub fn MembersView() -> Element {
     let mut invite_modal_active = use_signal(|| false);
     let mut export_modal_active = use_signal(|| false);
 
+    // Load all member shard buckets lazily when the Members list is open.
+    use_effect(move || {
+        if let Some(owner) = CURRENT_BOARD.read().owner_key {
+            crate::util::safe_spawn_local(async move {
+                crate::components::app::member_contract::load_all_member_shards(owner).await;
+            });
+        }
+    });
+
     let members = use_memo(move || {
         let board_owner = CURRENT_BOARD.read().owner_key?;
 

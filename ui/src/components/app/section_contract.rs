@@ -712,13 +712,30 @@ fn with_section_records(
         .iter()
         .map(|member| member.member.id())
         .collect();
-    let added: Vec<AuthorizedMember> = parent
-        .members
+    let mut merged_members = parent.members.clone();
+    crate::components::app::member_contract::apply_to_members(owner, parent, &mut merged_members);
+    let mut added: Vec<AuthorizedMember> = merged_members
         .members
         .iter()
         .filter(|member| ids.contains(&member.member.id()) && !known.contains(&member.member.id()))
         .cloned()
         .collect();
+    // Include any missing invite-chain ancestors carried by shard entries.
+    let mut added_ids: HashSet<MemberId> =
+        added.iter().map(|member| member.member.id()).collect();
+    for id in &ids {
+        if known.contains(id) {
+            continue;
+        }
+        if let Some(entry) = crate::components::app::member_contract::find_member_entry(owner, *id) {
+            for ancestor in entry.invite_chain {
+                let anc_id = ancestor.member.id();
+                if !known.contains(&anc_id) && added_ids.insert(anc_id) {
+                    added.push(ancestor);
+                }
+            }
+        }
+    }
     if !added.is_empty() {
         delta.members = Some(MembersDelta::new(added));
     }

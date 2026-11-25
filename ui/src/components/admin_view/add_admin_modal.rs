@@ -10,6 +10,14 @@ use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 
 #[component]
 pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
+    use_effect(move || {
+        if let Some(owner) = CURRENT_BOARD.read().owner_key {
+            crate::util::safe_spawn_local(async move {
+                crate::components::app::member_contract::load_all_member_shards(owner).await;
+            });
+        }
+    });
+
     let current_board_data: Memo<Option<BoardData>> = use_memo(move || {
         CURRENT_BOARD
             .read()
@@ -102,8 +110,20 @@ pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
         // profile key on a board with a separate owner, and its signature
         // would not verify against the owner key.
         let authorized_admin = AuthorizedAdmin::new(admin, &owner_sk);
+        let materialized = crate::components::app::member_contract::records_for_parent_board(
+            current_board,
+            &board_state_clone,
+            member_id,
+        );
         let delta = ChatBoardStateV1Delta {
             admin: Some(AdminsDelta::new(vec![authorized_admin])),
+            members: if materialized.is_empty() {
+                None
+            } else {
+                Some(plaza_core::board_state::member::MembersDelta::new(
+                    materialized,
+                ))
+            },
             ..Default::default()
         };
 

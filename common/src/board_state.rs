@@ -15,6 +15,7 @@ pub mod mail_addresses;
 pub mod member;
 pub mod member_info;
 pub mod member_moderation;
+pub mod member_shards;
 pub mod message;
 pub mod message_keys;
 pub mod moderation;

@@ -37,28 +37,37 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
     };
 
     // A signed membership proof lets the ban be verified after the target has
-    // been removed from the members list.
-    let members = &board_state_clone.members.members;
+    // been removed from the members list. Look in both the parent board and
+    // loaded member shards so shard-only members can still be banned.
+    let merged_board = board_data.clone().with_merged_topics();
+    let members = &merged_board.board_state.members.members;
+    let shard_entry =
+        crate::components::app::member_contract::find_member_entry(current_board, member_to_ban);
     let target_member = members
         .iter()
         .find(|member| member.member.id() == member_to_ban)
-        .cloned();
-    let mut invite_chain = Vec::new();
-    if let Some(target) = &target_member {
-        let owner_id = MemberId::from(&current_board);
-        let target_id = target.member.id();
-        let mut current = target.member.invited_by;
-        for _ in 0..64 {
-            // A token-joined member is self-invited: stop instead of walking
-            // the target back to itself and building a 64-entry chain.
-            if current == owner_id || current == target_id {
-                break;
+        .cloned()
+        .or_else(|| shard_entry.as_ref().map(|entry| entry.member.clone()));
+    let mut invite_chain = shard_entry
+        .map(|entry| entry.invite_chain)
+        .unwrap_or_default();
+    if invite_chain.is_empty() {
+        if let Some(target) = &target_member {
+            let owner_id = MemberId::from(&current_board);
+            let target_id = target.member.id();
+            let mut current = target.member.invited_by;
+            for _ in 0..64 {
+                // A token-joined member is self-invited: stop instead of walking
+                // the target back to itself and building a 64-entry chain.
+                if current == owner_id || current == target_id {
+                    break;
+                }
+                let Some(parent) = members.iter().find(|member| member.member.id() == current) else {
+                    break;
+                };
+                invite_chain.push(parent.clone());
+                current = parent.member.invited_by;
             }
-            let Some(parent) = members.iter().find(|member| member.member.id() == current) else {
-                break;
-            };
-            invite_chain.push(parent.clone());
-            current = parent.member.invited_by;
         }
     }
 

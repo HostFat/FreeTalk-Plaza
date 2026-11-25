@@ -5427,6 +5427,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "plaza-member-contract"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "freenet-stdlib 0.12.1",
+ "plaza-core",
+]
+
+[[package]]
 name = "plaza-moderation-contract"
 version = "0.1.0"
 dependencies = [

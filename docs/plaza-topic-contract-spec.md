@@ -2,11 +2,14 @@
 
 Versione: 1 (implementata).
 Stato: fasi 0–4 completate; move e merge tra sezioni pubblicati nella build
-locale v732. Le nuove board topic usano lo shard per sezione come default, le
-sezioni dividono l'indice in pagine firmate dall'owner e i topic usano una
-radice Merkle dell'autorita' firmata dall'owner, con prove per membro.
+locale v735. Le nuove board topic usano lo shard per sezione come default, le
+sezioni dividono l'indice in pagine firmate dall'owner, i topic usano una
+radice Merkle dell'autorita' firmata dall'owner con prove per membro, i membri
+sono shardati in 32 bucket deterministici (`plaza-member-contract`) e
+`OwnershipV1` supporta la successione d'emergenza per quorum admin (>= 2 admin
+attivi, maggioranza stretta).
 L'activity recente vive in un contratto separato per board. Contratto board
-alla revisione 33.
+alla revisione 34.
 Nessuna migrazione delle vecchie board.
 
 ## Stato dell'implementazione
@@ -18,9 +21,9 @@ Nessuna migrazione delle vecchie board.
   attività, flag, report e risoluzioni.
 - Client `ui/src/components/app/topic_contract.rs`; UI
   `topic_index_view.rs`, `topic_view.rs`, ricerca, notifiche e code in Manage.
-- Test: 46 in `topic-core`, 302 in `plaza-core`, 16 scenari real-node dei
-  topic (shard della sezione, ruolo-prima-del-topic, draft e parti precedenti
-  inclusi) e 116 test statici Playwright.
+- Test: 46 in `topic-core`, 311 in `plaza-core`, 111 in `plaza-ui`, 16 scenari
+  real-node dei topic (shard della sezione, ruolo-prima-del-topic, draft e
+  parti precedenti inclusi) e 29 test statici Playwright Chromium (3 saltati).
 
 Funzioni disponibili: topic creati dall'owner e dai membri, topic privati,
 modifica di topic e risposte, flag owner (pin/close/announce/hide/approve),

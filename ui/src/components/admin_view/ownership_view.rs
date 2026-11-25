@@ -4,8 +4,9 @@ use plaza_core::board_state::admin::{
 };
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId, MembersDelta};
 use plaza_core::board_state::ownership::{
-    AuthorizedKeyDeactivation, AuthorizedOwnerTransfer, KeyDeactivationV1, OutgoingOwnerAction,
-    OwnerTransferV1, OwnershipDelta,
+    required_succession_quorum, AuthorizedKeyDeactivation, AuthorizedOwnerTransfer,
+    AuthorizedSuccessionVoteV1, KeyDeactivationV1, OutgoingOwnerAction, OwnerTransferV1,
+    OwnershipDelta, SuccessionVoteV1,
 };
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 use plaza_core::util::sign_struct;
@@ -53,6 +54,11 @@ fn start_transfer(
             busy.set(false);
             return;
         };
+        let shard_records = crate::components::app::member_contract::records_for_parent_board(
+            ctx.current_board,
+            &ctx.board_state,
+            target,
+        );
         let Some(target_key) = ctx
             .board_state
             .members
@@ -60,6 +66,12 @@ fn start_transfer(
             .iter()
             .find(|member| member.member.id() == target)
             .map(|member| member.member.member_vk)
+            .or_else(|| {
+                shard_records
+                    .iter()
+                    .find(|member| member.member.id() == target)
+                    .map(|member| member.member.member_vk)
+            })
         else {
             error.set(Some("The chosen member is not on this board".to_string()));
             busy.set(false);
@@ -78,17 +90,27 @@ fn start_transfer(
             .admins
             .iter()
             .any(|admin| admin.admin.id() == target);
-        if !target_is_admin {
-            let admin = Admin {
-                member_id: target,
-                generation: ctx.board_state.admin.next_generation(&target),
-                signed_at,
-            };
-            let delta = ChatBoardStateV1Delta {
-                admin: Some(AdminsDelta::new(vec![AuthorizedAdmin::new(
+        if !target_is_admin || !shard_records.is_empty() {
+            let admin_delta = if target_is_admin {
+                None
+            } else {
+                let admin = Admin {
+                    member_id: target,
+                    generation: ctx.board_state.admin.next_generation(&target),
+                    signed_at,
+                };
+                Some(AdminsDelta::new(vec![AuthorizedAdmin::new(
                     admin,
                     &ctx.owner_sk,
-                )])),
+                )]))
+            };
+            let delta = ChatBoardStateV1Delta {
+                admin: admin_delta,
+                members: if shard_records.is_empty() {
+                    None
+                } else {
+                    Some(MembersDelta::new(shard_records))
+                },
                 ..Default::default()
             };
             if let Err(e) = apply_state_delta(&ctx, delta) {
@@ -154,6 +176,7 @@ fn start_transfer(
                 &ctx.owner_sk,
             )],
             deactivations,
+            ..Default::default()
         });
 
         // The outgoing identity rejoins as a member (and optionally an admin).
@@ -282,11 +305,170 @@ fn start_transfer(
     });
 }
 
+/// Cast an admin vote for emergency succession. When this vote reaches the
+/// required strict-majority quorum (`>= 2` active admins), emit the succession
+/// transfer in the same delta so the successor becomes owner immediately.
+#[allow(clippy::too_many_arguments)]
+fn cast_succession_vote(
+    target: MemberId,
+    owner_id: MemberId,
+    parameters: ChatBoardParametersV1,
+    confirmed: bool,
+    mut error: Signal<Option<String>>,
+    mut confirmed_signal: Signal<bool>,
+    mut busy: Signal<bool>,
+    mut revision: Signal<u32>,
+) {
+    if *busy.peek() {
+        return;
+    }
+    if !confirmed {
+        error.set(Some(
+            "Tick the confirmation before casting a succession vote".to_string(),
+        ));
+        return;
+    }
+    busy.set(true);
+    error.set(None);
+    wasm_bindgen_futures::spawn_local(async move {
+        let Some(ctx) = ActionContext::from_current_board() else {
+            error.set(Some("The board context is not available".to_string()));
+            busy.set(false);
+            return;
+        };
+        let active_admins = ctx
+            .board_state
+            .ownership
+            .current_active_admins(&ctx.board_state, &parameters);
+        let Some(quorum) = required_succession_quorum(active_admins.len()) else {
+            error.set(Some(
+                "Emergency succession requires at least 2 active admins".to_string(),
+            ));
+            busy.set(false);
+            return;
+        };
+        let voter_sk = ctx.self_sk.clone();
+        let voter_vk = voter_sk.verifying_key();
+        let voter_id = MemberId::from(&voter_vk);
+        if !active_admins.contains(&voter_id) {
+            error.set(Some("Only active admins can vote for succession".to_string()));
+            busy.set(false);
+            return;
+        }
+        let Some(target_key) = ctx
+            .board_state
+            .members
+            .members
+            .iter()
+            .find(|member| member.member.id() == target)
+            .map(|member| member.member.member_vk)
+            .or_else(|| {
+                (target == parameters.owner_id()).then_some(parameters.owner)
+            })
+            .or_else(|| ctx.board_state.ownership.owner_key_of(&target))
+        else {
+            error.set(Some("The chosen admin key is not available on this board".to_string()));
+            busy.set(false);
+            return;
+        };
+
+        let generation = ctx.board_state.ownership.transfers.len() as u64 + 1;
+        let now = get_current_system_time();
+        let my_vote = AuthorizedSuccessionVoteV1::new(
+            SuccessionVoteV1 {
+                from: owner_id,
+                to: target,
+                to_key: target_key,
+                generation,
+                voter: voter_id,
+                voter_key: voter_vk,
+                signed_at: now,
+            },
+            &voter_sk,
+        );
+
+        let mut approvals: Vec<AuthorizedSuccessionVoteV1> = ctx
+            .board_state
+            .ownership
+            .succession_votes
+            .iter()
+            .filter(|entry| {
+                entry.vote.generation == generation
+                    && entry.vote.from == owner_id
+                    && entry.vote.to == target
+                    && entry.vote.voter != voter_id
+            })
+            .cloned()
+            .collect();
+        approvals.push(my_vote.clone());
+
+        let finalized = approvals.len() >= quorum;
+        let transfers = if finalized {
+            vec![AuthorizedOwnerTransfer::new_by_succession(
+                OwnerTransferV1 {
+                    from: owner_id,
+                    to: target,
+                    to_key: target_key,
+                    generation,
+                    transferred_at: now + Duration::from_millis(2),
+                    outgoing: OutgoingOwnerAction::Member,
+                },
+                approvals,
+                &voter_sk,
+            )]
+        } else {
+            Vec::new()
+        };
+
+        let delta = ChatBoardStateV1Delta {
+            ownership: Some(OwnershipDelta {
+                transfers,
+                deactivations: Vec::new(),
+                succession_votes: vec![my_vote],
+            }),
+            ..Default::default()
+        };
+        match apply_state_delta(&ctx, delta) {
+            Ok(()) => {
+                error.set(None);
+                confirmed_signal.set(false);
+                revision.set(revision() + 1);
+                if finalized {
+                    crate::components::app::toasts::show(
+                        "Quorum reached: ownership transferred to the successor. Syncing…",
+                    );
+                } else {
+                    crate::components::app::toasts::show(
+                        "Succession vote recorded. Waiting for remaining admin quorum…",
+                    );
+                }
+                let _ = crate::components::app::chat_delegate::save_boards_and_wait().await;
+            }
+            Err(e) => {
+                crate::components::app::toasts::show_error(format!(
+                    "Succession vote failed: {e}"
+                ));
+                error.set(Some(format!("Succession vote failed: {e}")));
+            }
+        }
+        busy.set(false);
+    });
+}
+
 #[component]
 pub fn OwnershipView() -> Element {
+    use_effect(move || {
+        if let Some(owner) = crate::components::app::CURRENT_BOARD.read().owner_key {
+            crate::util::safe_spawn_local(async move {
+                crate::components::app::member_contract::load_all_member_shards(owner).await;
+            });
+        }
+    });
+
     let error = use_signal(|| None::<String>);
     let mut outcome = use_signal(|| OutgoingOwnerAction::KeepAdmin);
     let mut confirmed = use_signal(|| false);
+    let mut succession_confirmed = use_signal(|| false);
     let busy = use_signal(|| false);
 
     // Re-read the board when a transfer lands: the component is not otherwise
@@ -306,12 +488,25 @@ pub fn OwnershipView() -> Element {
     let owner_id = ctx.board_state.ownership.current_owner(&parameters);
     let is_owner =
         ctx.owner_sk.verifying_key() == ctx.board_state.ownership.current_owner_key(&parameters);
+    let self_id = MemberId::from(&ctx.self_sk.verifying_key());
+    let active_admins = ctx
+        .board_state
+        .ownership
+        .current_active_admins(&ctx.board_state, &parameters);
+    let is_active_admin = !is_owner && active_admins.contains(&self_id);
+    let succession_quorum = required_succession_quorum(active_admins.len());
+    let pending_votes = ctx.board_state.ownership.succession_votes.clone();
+
+    let mut merged_members = ctx.board_state.members.clone();
+    crate::components::app::member_contract::apply_to_members(
+        ctx.current_board,
+        &ctx.board_state,
+        &mut merged_members,
+    );
 
     // Members that can receive the board: a valid key, not the current owner,
     // not deactivated. An admin target skips the promotion step.
-    let candidates: Vec<(MemberId, String, bool)> = ctx
-        .board_state
-        .members
+    let candidates: Vec<(MemberId, String, bool)> = merged_members
         .members
         .iter()
         .filter(|member| {
@@ -466,6 +661,85 @@ pub fn OwnershipView() -> Element {
                 }
             }
 
+            if is_active_admin || !pending_votes.is_empty() {
+                div { class: "bg-surface rounded-lg p-4 space-y-3",
+                    h3 { class: "text-text font-medium", "Emergency succession (admin quorum)" }
+                    p { class: "text-text-muted text-sm",
+                        "If the current owner becomes permanently unreachable, a strict majority of active admins (at least 2) can elect one of the active admins as the new owner."
+                    }
+                    if let Some(quorum) = succession_quorum {
+                        p { class: "text-text-muted text-xs",
+                            "Active admins: {active_admins.len()} — Votes required for quorum: {quorum}"
+                        }
+                    } else {
+                        p { class: "text-amber-300 text-xs",
+                            "At least 2 active admins are required to enable emergency succession (currently {active_admins.len()})."
+                        }
+                    }
+                    if !pending_votes.is_empty() {
+                        div { class: "space-y-1 text-xs text-text-muted",
+                            p { class: "text-text font-medium", "Pending succession votes:" }
+                            for vote in pending_votes.iter() {
+                                p {
+                                    "{name_of(vote.vote.voter)} voted for {name_of(vote.vote.to)}"
+                                }
+                            }
+                        }
+                    }
+                    if is_active_admin {
+                        if let Some(quorum) = succession_quorum {
+                            label { class: "flex items-center gap-2 text-sm text-text",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: *succession_confirmed.read(),
+                                    onchange: move |event| succession_confirmed.set(event.checked()),
+                                }
+                                "I confirm the current owner is unreachable and I vote to transfer ownership by admin quorum."
+                            }
+                            div { class: "flex flex-wrap gap-2",
+                                for admin_id in active_admins.iter() {
+                                    {
+                                        let target_admin = *admin_id;
+                                        let target_name = name_of(target_admin);
+                                        let existing_for_target = pending_votes
+                                            .iter()
+                                            .filter(|entry| {
+                                                entry.vote.to == target_admin
+                                                    && entry.vote.voter != self_id
+                                            })
+                                            .count();
+                                        let will_finalize = existing_for_target + 1 >= quorum;
+                                        let click_parameters = parameters.clone();
+                                        rsx! {
+                                            button {
+                                                r#type: "button",
+                                                class: "px-3 py-1.5 bg-background border border-border rounded-lg text-sm text-text hover:bg-surface-hover disabled:opacity-50",
+                                                disabled: *busy.read(),
+                                                onclick: move |_| cast_succession_vote(
+                                                    target_admin,
+                                                    owner_id,
+                                                    click_parameters.clone(),
+                                                    *succession_confirmed.peek(),
+                                                    error,
+                                                    succession_confirmed,
+                                                    busy,
+                                                    revision,
+                                                ),
+                                                if will_finalize {
+                                                    "Vote & finalize for {target_name} ({existing_for_target + 1}/{quorum})"
+                                                } else {
+                                                    "Vote for {target_name} ({existing_for_target}/{quorum})"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             div { class: "bg-surface rounded-lg p-4",
                 h3 { class: "text-text font-medium mb-2", "History" }
                 if history.is_empty() {
@@ -483,6 +757,14 @@ pub fn OwnershipView() -> Element {
                                     OutgoingOwnerAction::Member => "became a member",
                                     OutgoingOwnerAction::Deactivate => "deactivated",
                                 };
+                                let method = if entry.is_succession() {
+                                    format!(
+                                        " - via admin quorum ({} admins)",
+                                        entry.succession_approvals.len()
+                                    )
+                                } else {
+                                    String::new()
+                                };
                                 let digest = change.digest();
                                 let signature: String = entry
                                     .signature
@@ -497,7 +779,7 @@ pub fn OwnershipView() -> Element {
                                             "{name_of(change.from)} -> {name_of(change.to)}"
                                         }
                                         p { class: "text-text-muted text-xs",
-                                            "generation {change.generation} - {when} - outgoing owner {outgoing}"
+                                            "generation {change.generation} - {when} - outgoing owner {outgoing}{method}"
                                         }
                                         p { class: "text-text-muted text-xs font-mono",
                                             "digest {digest:016x} - signature {signature}..."

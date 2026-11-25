@@ -321,6 +321,34 @@ pub async fn handle_get_response(
                 ) {
                     board_data.invite_chain = chain;
                 }
+                // Publish the member record into its deterministic shard
+                // bucket so sectioned boards do not rewrite the parent board
+                // on every join.
+                let invite_token = authorized_member
+                    .member
+                    .join_proof
+                    .as_ref()
+                    .and_then(|proof| {
+                        board_data
+                            .board_state
+                            .invites
+                            .tokens
+                            .iter()
+                            .find(|token| token.token.id == proof.token_id)
+                            .cloned()
+                    });
+                let shard_entry = plaza_core::board_state::member_shards::MemberShardEntryV1 {
+                    member: authorized_member.clone(),
+                    invite_chain: board_data.invite_chain.clone(),
+                    invite_token,
+                };
+                crate::util::safe_spawn_local(async move {
+                    let _ = crate::components::app::member_contract::record_member(
+                        owner_vk,
+                        shard_entry,
+                    )
+                    .await;
+                });
 
                 // Rebuild actions_state from action messages (edit, delete,
                 // reaction). actions_state is #[serde(skip)], and private or

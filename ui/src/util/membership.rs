@@ -135,6 +135,29 @@ pub fn restore_self_membership() -> bool {
             .await;
         });
     }
+    if let Some(authorized_member) = board.self_authorized_member.clone() {
+        let invite_token = authorized_member
+            .member
+            .join_proof
+            .as_ref()
+            .and_then(|proof| {
+                board
+                    .board_state
+                    .invites
+                    .tokens
+                    .iter()
+                    .find(|token| token.token.id == proof.token_id)
+                    .cloned()
+            });
+        let entry = plaza_core::board_state::member_shards::MemberShardEntryV1 {
+            member: authorized_member,
+            invite_chain: board.invite_chain.clone(),
+            invite_token,
+        };
+        crate::util::safe_spawn_local(async move {
+            let _ = crate::components::app::member_contract::record_member(board_key, entry).await;
+        });
+    }
     match result {
         Ok(()) => {
             info!("membership restore published the stored member record");

@@ -24,7 +24,7 @@ fn main() {
         Some("hash") => cmd_hash(args.get(1)),
         Some("add") => cmd_add(args.get(1), args.get(2)),
         Some("check") => cmd_check(&args[1..]),
-        Some("sync") => cmd_sync(),
+        Some("sync") => cmd_sync(&args[1..]),
         _ => usage(),
     };
     if let Err(e) = code {
@@ -35,7 +35,7 @@ fn main() {
 
 fn usage() -> Result<(), String> {
     eprintln!(
-        "usage:\n  wasm-tool hash <file>\n  wasm-tool add <version> <description>\n  wasm-tool check [--ci <base> <head>]\n  wasm-tool sync"
+        "usage:\n  wasm-tool hash <file>\n  wasm-tool add <version> <description>\n  wasm-tool check [--ci <base> <head>]\n  wasm-tool sync [--changed] [--only <package>...]"
     );
     Err("no subcommand".into())
 }
@@ -105,35 +105,225 @@ fn cmd_add(version: Option<&String>, description: Option<&String>) -> Result<(),
     Ok(())
 }
 
-fn cmd_sync() -> Result<(), String> {
+struct WasmTarget {
+    package: &'static str,
+    wasm_file: &'static str,
+    destinations: &'static [&'static str],
+    watch_paths: &'static [&'static str],
+}
+
+const WASM_TARGETS: &[WasmTarget] = &[
+    WasmTarget {
+        package: "plaza-contract",
+        wasm_file: "plaza_contract.wasm",
+        destinations: &[
+            "ui/public/contracts/plaza_contract.wasm",
+            "cli/contracts/plaza_contract.wasm",
+        ],
+        watch_paths: &["plaza-contract", "common"],
+    },
+    WasmTarget {
+        package: "plaza-delegate",
+        wasm_file: "plaza_delegate.wasm",
+        destinations: &["ui/public/contracts/plaza_delegate.wasm"],
+        watch_paths: &["plaza-delegate", "common/src/chat_delegate.rs"],
+    },
+    WasmTarget {
+        package: "plaza-dm-delegate",
+        wasm_file: "plaza_dm_delegate.wasm",
+        destinations: &["ui/public/contracts/plaza_dm_delegate.wasm"],
+        watch_paths: &["dm-delegate", "dm-core"],
+    },
+    WasmTarget {
+        package: "plaza-dm-contract",
+        wasm_file: "plaza_dm_contract.wasm",
+        destinations: &["ui/public/contracts/plaza_dm_contract.wasm"],
+        watch_paths: &["dm-contract", "dm-core"],
+    },
+    WasmTarget {
+        package: "plaza-topic-contract",
+        wasm_file: "plaza_topic_contract.wasm",
+        destinations: &["ui/public/contracts/plaza_topic_contract.wasm"],
+        watch_paths: &["topic-contract", "topic-core", "common"],
+    },
+    WasmTarget {
+        package: "plaza-section-contract",
+        wasm_file: "plaza_section_contract.wasm",
+        destinations: &["ui/public/contracts/plaza_section_contract.wasm"],
+        watch_paths: &["section-contract", "common"],
+    },
+    WasmTarget {
+        package: "plaza-activity-contract",
+        wasm_file: "plaza_activity_contract.wasm",
+        destinations: &["ui/public/contracts/plaza_activity_contract.wasm"],
+        watch_paths: &["activity-contract", "common"],
+    },
+    WasmTarget {
+        package: "plaza-moderation-contract",
+        wasm_file: "plaza_moderation_contract.wasm",
+        destinations: &["ui/public/contracts/plaza_moderation_contract.wasm"],
+        watch_paths: &["moderation-contract", "common"],
+    },
+    WasmTarget {
+        package: "plaza-profile-contract",
+        wasm_file: "plaza_profile_contract.wasm",
+        destinations: &["ui/public/contracts/plaza_profile_contract.wasm"],
+        watch_paths: &["profile-contract", "common"],
+    },
+    WasmTarget {
+        package: "plaza-member-contract",
+        wasm_file: "plaza_member_contract.wasm",
+        destinations: &["ui/public/contracts/plaza_member_contract.wasm"],
+        watch_paths: &["member-contract", "common"],
+    },
+];
+
+fn newest_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    let meta = fs::metadata(path).ok()?;
+    if meta.is_file() {
+        return meta.modified().ok();
+    }
+    if !meta.is_dir() {
+        return None;
+    }
+    let mut newest: Option<std::time::SystemTime> = None;
+    let Ok(entries) = fs::read_dir(path) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+            if name == "target" {
+                continue;
+            }
+        }
+        let mtime = newest_mtime(&p);
+        if let Some(t) = mtime {
+            if newest.map_or(true, |cur| t > cur) {
+                newest = Some(t);
+            }
+        }
+    }
+    newest
+}
+
+fn target_needs_rebuild(root: &Path, target: &WasmTarget) -> bool {
+    let mut oldest_dst: Option<std::time::SystemTime> = None;
+    for dst in target.destinations {
+        let path = root.join(dst);
+        let Ok(meta) = fs::metadata(&path) else {
+            return true;
+        };
+        let Ok(mtime) = meta.modified() else {
+            return true;
+        };
+        if oldest_dst.map_or(true, |cur| mtime < cur) {
+            oldest_dst = Some(mtime);
+        }
+    }
+    let Some(oldest_dst) = oldest_dst else {
+        return true;
+    };
+    for extra in ["Cargo.toml", "Cargo.lock"] {
+        if let Some(t) = newest_mtime(&root.join(extra)) {
+            if t > oldest_dst {
+                return true;
+            }
+        }
+    }
+    for rel in target.watch_paths {
+        if let Some(t) = newest_mtime(&root.join(rel)) {
+            if t > oldest_dst {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn matches_only_filter(target: &WasmTarget, filter: &str) -> bool {
+    let normalized = filter.trim().to_ascii_lowercase();
+    let pkg = target.package.to_ascii_lowercase();
+    let short = pkg.strip_prefix("plaza-").unwrap_or(&pkg);
+    normalized == pkg || normalized == short
+}
+
+fn cmd_sync(args: &[String]) -> Result<(), String> {
     let root = repo_root();
+    let mut changed_only = false;
+    let mut only_filters: Vec<String> = Vec::new();
+    let mut idx = 0;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--changed" => {
+                changed_only = true;
+                idx += 1;
+            }
+            "--only" => {
+                idx += 1;
+                while idx < args.len() && !args[idx].starts_with("--") {
+                    for part in args[idx].split(',') {
+                        if !part.trim().is_empty() {
+                            only_filters.push(part.trim().to_string());
+                        }
+                    }
+                    idx += 1;
+                }
+            }
+            other => {
+                return Err(format!("unknown sync option: {other}"));
+            }
+        }
+    }
+
+    let mut selected: Vec<&WasmTarget> = if only_filters.is_empty() {
+        WASM_TARGETS.iter().collect()
+    } else {
+        for filter in &only_filters {
+            if !WASM_TARGETS.iter().any(|t| matches_only_filter(t, filter)) {
+                let valid: Vec<&str> = WASM_TARGETS.iter().map(|t| t.package).collect();
+                return Err(format!(
+                    "unknown package '{filter}' for --only. Valid packages: {}",
+                    valid.join(", ")
+                ));
+            }
+        }
+        WASM_TARGETS
+            .iter()
+            .filter(|t| only_filters.iter().any(|f| matches_only_filter(t, f)))
+            .collect()
+    };
+
+    if changed_only {
+        selected.retain(|target| {
+            let dirty = target_needs_rebuild(&root, target);
+            if !dirty {
+                println!("up to date: {} (skipped)", target.package);
+            }
+            dirty
+        });
+    }
+
+    if selected.is_empty() {
+        println!("All selected contract/delegate WASMs are up to date.");
+        return Ok(());
+    }
+
+    let mut cargo_args: Vec<&str> = vec![
+        "build",
+        "--locked",
+        "--profile",
+        "release",
+        "--target",
+        "wasm32-unknown-unknown",
+    ];
+    for target in &selected {
+        cargo_args.push("-p");
+        cargo_args.push(target.package);
+    }
+
     let status = Command::new("cargo")
-        .args([
-            "build",
-            "--locked",
-            "--profile",
-            "release",
-            "--target",
-            "wasm32-unknown-unknown",
-            "-p",
-            "plaza-contract",
-            "-p",
-            "plaza-delegate",
-            "-p",
-            "plaza-dm-delegate",
-            "-p",
-            "plaza-dm-contract",
-            "-p",
-            "plaza-topic-contract",
-            "-p",
-            "plaza-section-contract",
-            "-p",
-            "plaza-activity-contract",
-            "-p",
-            "plaza-moderation-contract",
-            "-p",
-            "plaza-profile-contract",
-        ])
+        .args(&cargo_args)
         .current_dir(&root)
         .status()
         .map_err(|e| format!("cannot run cargo: {e}"))?;
@@ -142,48 +332,18 @@ fn cmd_sync() -> Result<(), String> {
     }
 
     let out = root.join("target/wasm32-unknown-unknown/release");
-    let copies = [
-        ("plaza_contract.wasm", "ui/public/contracts/plaza_contract.wasm"),
-        ("plaza_delegate.wasm", "ui/public/contracts/plaza_delegate.wasm"),
-        (
-            "plaza_dm_delegate.wasm",
-            "ui/public/contracts/plaza_dm_delegate.wasm",
-        ),
-        (
-            "plaza_dm_contract.wasm",
-            "ui/public/contracts/plaza_dm_contract.wasm",
-        ),
-        (
-            "plaza_topic_contract.wasm",
-            "ui/public/contracts/plaza_topic_contract.wasm",
-        ),
-        (
-            "plaza_section_contract.wasm",
-            "ui/public/contracts/plaza_section_contract.wasm",
-        ),
-        (
-            "plaza_activity_contract.wasm",
-            "ui/public/contracts/plaza_activity_contract.wasm",
-        ),
-        (
-            "plaza_moderation_contract.wasm",
-            "ui/public/contracts/plaza_moderation_contract.wasm",
-        ),
-        (
-            "plaza_profile_contract.wasm",
-            "ui/public/contracts/plaza_profile_contract.wasm",
-        ),
-        ("plaza_contract.wasm", "cli/contracts/plaza_contract.wasm"),
-    ];
-    for (src, dst) in copies {
-        let src = out.join(src);
-        let dst = root.join(dst);
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    for target in &selected {
+        let src = out.join(target.wasm_file);
+        for dst in target.destinations {
+            let dst = root.join(dst);
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+            }
+            fs::copy(&src, &dst)
+                .map_err(|e| format!("cannot copy {} to {}: {e}", src.display(), dst.display()))?;
+            println!("copied {} -> {}", src.display(), dst.display());
         }
-        fs::copy(&src, &dst)
-            .map_err(|e| format!("cannot copy {} to {}: {e}", src.display(), dst.display()))?;
-        println!("copied {} -> {}", src.display(), dst.display());
     }
     println!("\nVerify with: cargo make check-migration");
     Ok(())

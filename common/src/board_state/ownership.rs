@@ -21,6 +21,18 @@ use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
 pub const MAX_OWNER_TRANSFERS: usize = 256;
+pub const MAX_SUCCESSION_VOTES: usize = 256;
+
+/// Minimum admin votes required for an emergency succession transfer.
+/// Requires at least 2 active admins and a strict majority (`N / 2 + 1`), so a
+/// single compromised admin can never seize a board.
+pub fn required_succession_quorum(active_admin_count: usize) -> Option<usize> {
+    if active_admin_count < 2 {
+        None
+    } else {
+        Some((active_admin_count / 2) + 1)
+    }
+}
 
 /// One step of the ownership chain.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -58,10 +70,64 @@ impl OwnerTransferV1 {
     }
 }
 
+/// One admin's signed vote to promote an active admin as the next owner when
+/// the current owner is unreachable.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct SuccessionVoteV1 {
+    /// Current owner being replaced.
+    pub from: MemberId,
+    /// Admin proposed as the new owner.
+    pub to: MemberId,
+    /// Successor verifying key, so the vote is self-contained.
+    pub to_key: VerifyingKey,
+    /// Target transfer generation (`transfers.len() + 1`).
+    pub generation: u64,
+    /// Active admin casting this vote.
+    pub voter: MemberId,
+    /// Voter verifying key (verified against the board member record).
+    pub voter_key: VerifyingKey,
+    pub signed_at: SystemTime,
+}
+
+impl SuccessionVoteV1 {
+    pub fn digest(&self) -> u64 {
+        let mut bytes = Vec::new();
+        let _ = ciborium::ser::into_writer(self, &mut bytes);
+        freenet_scaffold::util::fast_hash(&bytes).0 as u64
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct AuthorizedSuccessionVoteV1 {
+    pub vote: SuccessionVoteV1,
+    pub signature: Signature,
+}
+
+impl AuthorizedSuccessionVoteV1 {
+    pub fn new(vote: SuccessionVoteV1, voter_sk: &SigningKey) -> Self {
+        Self {
+            signature: sign_struct(&vote, voter_sk),
+            vote,
+        }
+    }
+
+    pub fn verify_signature(&self) -> Result<(), String> {
+        if MemberId::from(&self.vote.voter_key) != self.vote.voter {
+            return Err("Succession vote key does not match voter id".to_string());
+        }
+        verify_struct(&self.vote, &self.signature, &self.vote.voter_key)
+            .map_err(|e| format!("Invalid succession vote signature: {e}"))
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct AuthorizedOwnerTransfer {
     pub transfer: OwnerTransferV1,
     pub signature: Signature,
+    /// Present only for emergency admin-quorum successions; empty for normal
+    /// owner-signed transfers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub succession_approvals: Vec<AuthorizedSuccessionVoteV1>,
 }
 
 impl AuthorizedOwnerTransfer {
@@ -69,7 +135,28 @@ impl AuthorizedOwnerTransfer {
         Self {
             signature: sign_struct(&transfer, owner_sk),
             transfer,
+            succession_approvals: Vec::new(),
         }
+    }
+
+    /// Build a succession transfer backed by a quorum of admin votes. Signed
+    /// by one of the voting admins (typically the admin whose vote completes
+    /// the quorum).
+    pub fn new_by_succession(
+        transfer: OwnerTransferV1,
+        mut approvals: Vec<AuthorizedSuccessionVoteV1>,
+        finalizer_sk: &SigningKey,
+    ) -> Self {
+        approvals.sort_by_key(|entry| (entry.vote.voter.0 .0, entry.vote.digest()));
+        Self {
+            signature: sign_struct(&transfer, finalizer_sk),
+            transfer,
+            succession_approvals: approvals,
+        }
+    }
+
+    pub fn is_succession(&self) -> bool {
+        !self.succession_approvals.is_empty()
     }
 
     pub fn verify_signature(&self, owner_key: &VerifyingKey) -> Result<(), String> {
@@ -117,11 +204,16 @@ impl AuthorizedKeyDeactivation {
 pub struct OwnershipV1 {
     pub transfers: Vec<AuthorizedOwnerTransfer>,
     pub deactivations: Vec<AuthorizedKeyDeactivation>,
+    /// Active admin votes for the next emergency succession generation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub succession_votes: Vec<AuthorizedSuccessionVoteV1>,
 }
 
 impl OwnershipV1 {
     pub fn is_empty(&self) -> bool {
-        self.transfers.is_empty() && self.deactivations.is_empty()
+        self.transfers.is_empty()
+            && self.deactivations.is_empty()
+            && self.succession_votes.is_empty()
     }
 
     /// Owner id at the end of the chain.
@@ -207,8 +299,136 @@ impl OwnershipV1 {
         self.deactivation_of(member).is_some()
     }
 
+    /// Resolve the verifying key of `member` using the founding key, known
+    /// historical owner keys, and the board's current member list.
+    fn resolve_key(
+        state: &ChatBoardStateV1,
+        parameters: &ChatBoardParametersV1,
+        known_owner_keys: &std::collections::HashMap<MemberId, VerifyingKey>,
+        member_id: &MemberId,
+    ) -> Option<VerifyingKey> {
+        if *member_id == parameters.owner_id() {
+            return Some(parameters.owner);
+        }
+        if let Some(key) = known_owner_keys.get(member_id) {
+            return Some(*key);
+        }
+        state
+            .members
+            .members
+            .iter()
+            .find(|member| member.member.id() == *member_id)
+            .map(|member| member.member.member_vk)
+    }
+
+    /// Active admins at `at` (excluding `current_owner` and deactivated keys).
+    pub fn active_admins_at(
+        &self,
+        state: &ChatBoardStateV1,
+        parameters: &ChatBoardParametersV1,
+        current_owner: MemberId,
+        at: SystemTime,
+    ) -> std::collections::HashSet<MemberId> {
+        let at_ms = system_time_ms(at);
+        let mut active = std::collections::HashSet::new();
+
+        for admin in &state.admin.admins {
+            let id = admin.admin.id();
+            if id == current_owner || self.is_deactivated_at(&id, at) {
+                continue;
+            }
+            if system_time_ms(admin.admin.signed_at) > at_ms {
+                continue;
+            }
+            let revoked_by_then = state.admin.revoked.iter().any(|rev| {
+                rev.id() == id && system_time_ms(rev.revocation.signed_at) <= at_ms
+            });
+            if !revoked_by_then {
+                active.insert(id);
+            }
+        }
+        // An admin revoked strictly after `at` was still active at `at`.
+        for rev in &state.admin.revoked {
+            let id = rev.id();
+            if id == current_owner || self.is_deactivated_at(&id, at) {
+                continue;
+            }
+            if system_time_ms(rev.revocation.signed_at) > at_ms {
+                active.insert(id);
+            }
+        }
+        let _ = parameters;
+        active
+    }
+
+    /// Active admins right now (excluding the current owner and deactivated
+    /// keys). Used by the UI and by pending succession vote verification.
+    pub fn current_active_admins(
+        &self,
+        state: &ChatBoardStateV1,
+        parameters: &ChatBoardParametersV1,
+    ) -> Vec<MemberId> {
+        let owner = self.current_owner(parameters);
+        let mut admins: Vec<MemberId> = state
+            .admin
+            .admins
+            .iter()
+            .map(|admin| admin.admin.id())
+            .filter(|id| *id != owner && !self.is_deactivated_now(id))
+            .collect();
+        admins.sort_by_key(|id| id.0 .0);
+        admins.dedup();
+        admins
+    }
+
+    /// Verify one pending succession vote against the current board state.
+    pub fn verify_pending_vote(
+        &self,
+        vote: &AuthorizedSuccessionVoteV1,
+        state: &ChatBoardStateV1,
+        parameters: &ChatBoardParametersV1,
+    ) -> Result<(), String> {
+        vote.verify_signature()?;
+        let current_owner = self.current_owner(parameters);
+        let next_generation = self.transfers.len() as u64 + 1;
+        if vote.vote.generation != next_generation {
+            return Err("Succession vote is for a stale or future generation".to_string());
+        }
+        if vote.vote.from != current_owner {
+            return Err("Succession vote does not target the current owner".to_string());
+        }
+        if vote.vote.to == current_owner || vote.vote.voter == current_owner {
+            return Err("Current owner cannot vote or be targeted in succession".to_string());
+        }
+        let active_admins = self.current_active_admins(state, parameters);
+        if !active_admins.contains(&vote.vote.voter) {
+            return Err("Succession voter is not an active admin".to_string());
+        }
+        if !active_admins.contains(&vote.vote.to) {
+            return Err("Succession target is not an active admin".to_string());
+        }
+        let mut known_owner_keys = std::collections::HashMap::new();
+        for entry in &self.transfers {
+            known_owner_keys.insert(entry.transfer.to, entry.transfer.to_key);
+        }
+        let expected_voter_key =
+            Self::resolve_key(state, parameters, &known_owner_keys, &vote.vote.voter)
+                .ok_or_else(|| "Succession voter key not found".to_string())?;
+        if expected_voter_key != vote.vote.voter_key {
+            return Err("Succession voter key does not match the member".to_string());
+        }
+        let expected_to_key =
+            Self::resolve_key(state, parameters, &known_owner_keys, &vote.vote.to)
+                .ok_or_else(|| "Succession target key not found".to_string())?;
+        if expected_to_key != vote.vote.to_key {
+            return Err("Succession target key does not match the member".to_string());
+        }
+        Ok(())
+    }
+
     /// Verify the whole chain: generations start at one, each step is signed
-    /// by the owner of the previous step, the successor was an admin with a
+    /// by the owner of the previous step (or backed by a quorum of active
+    /// admins for emergency succession), the successor was an admin with a
     /// known key, and times never go backwards.
     pub fn verify(
         &self,
@@ -219,6 +439,8 @@ impl OwnershipV1 {
         let mut from_key = parameters.owner;
         let mut generation = 1u64;
         let mut last_time = 0i64;
+        let mut known_owner_keys = std::collections::HashMap::new();
+        known_owner_keys.insert(from, from_key);
 
         for entry in &self.transfers {
             let transfer = &entry.transfer;
@@ -232,9 +454,74 @@ impl OwnershipV1 {
             if at < last_time {
                 return Err("Owner transfer time goes backwards".to_string());
             }
-            entry.verify_signature(&from_key)?;
             if transfer.to == transfer.from {
                 return Err("An owner cannot transfer the board to itself".to_string());
+            }
+
+            if entry.succession_approvals.is_empty() {
+                entry.verify_signature(&from_key)?;
+            } else {
+                if entry.succession_approvals.len() > MAX_SUCCESSION_VOTES {
+                    return Err("Too many succession approvals on transfer".to_string());
+                }
+                let active_admins =
+                    self.active_admins_at(state, parameters, from, transfer.transferred_at);
+                let quorum = required_succession_quorum(active_admins.len()).ok_or_else(|| {
+                    "Emergency succession requires at least two active admins".to_string()
+                })?;
+                let mut voters = std::collections::HashSet::new();
+                let mut valid_keys = Vec::new();
+                for approval in &entry.succession_approvals {
+                    approval.verify_signature()?;
+                    let vote = &approval.vote;
+                    if vote.from != transfer.from
+                        || vote.to != transfer.to
+                        || vote.to_key != transfer.to_key
+                        || vote.generation != transfer.generation
+                    {
+                        return Err(
+                            "Succession approval does not match the transfer target".to_string()
+                        );
+                    }
+                    if system_time_ms(vote.signed_at) > at {
+                        return Err(
+                            "Succession approval is dated after the transfer".to_string()
+                        );
+                    }
+                    if !voters.insert(vote.voter) {
+                        return Err("Duplicate voter in succession approvals".to_string());
+                    }
+                    if !active_admins.contains(&vote.voter) {
+                        return Err(
+                            "Succession voter was not an active admin at the transfer".to_string()
+                        );
+                    }
+                    let expected_key =
+                        Self::resolve_key(state, parameters, &known_owner_keys, &vote.voter)
+                            .ok_or_else(|| "Succession voter key is unknown".to_string())?;
+                    if expected_key != vote.voter_key {
+                        return Err(
+                            "Succession voter key does not match the member".to_string()
+                        );
+                    }
+                    valid_keys.push(vote.voter_key);
+                }
+                if voters.len() < quorum {
+                    return Err(format!(
+                        "Succession transfer lacks admin quorum: {} < {}",
+                        voters.len(),
+                        quorum
+                    ));
+                }
+                if !valid_keys
+                    .iter()
+                    .any(|key| entry.verify_signature(key).is_ok())
+                {
+                    return Err(
+                        "Succession transfer must be signed by one of the approving admins"
+                            .to_string(),
+                    );
+                }
             }
 
             // The successor must be a member whose key is the one named, and
@@ -242,18 +529,8 @@ impl OwnershipV1 {
             // as a member even after cleanup drops its record: once it owns the
             // board again the owner is implicit, and a return transfer names
             // exactly it.
-            let member_key = match state
-                .members
-                .members
-                .iter()
-                .find(|member| member.member.id() == transfer.to)
-            {
-                Some(member) => member.member.member_vk,
-                None if transfer.to == parameters.owner_id() => parameters.owner,
-                None => {
-                    return Err("Owner transfer target is not a member".to_string());
-                }
-            };
+            let member_key = Self::resolve_key(state, parameters, &known_owner_keys, &transfer.to)
+                .ok_or_else(|| "Owner transfer target is not a member".to_string())?;
             if member_key != transfer.to_key {
                 return Err("Owner transfer target key does not match the member".to_string());
             }
@@ -294,6 +571,7 @@ impl OwnershipV1 {
 
             from = transfer.to;
             from_key = transfer.to_key;
+            known_owner_keys.insert(from, from_key);
             generation += 1;
             last_time = at;
         }
@@ -305,18 +583,8 @@ impl OwnershipV1 {
             if entry.deactivation.member == from {
                 return Err("The current owner cannot deactivate its key".to_string());
             }
-            let expected = if entry.deactivation.member == parameters.owner_id() {
-                Some(parameters.owner)
-            } else {
-                self.owner_key_of(&entry.deactivation.member).or_else(|| {
-                    state
-                        .members
-                        .members
-                        .iter()
-                        .find(|member| member.member.id() == entry.deactivation.member)
-                        .map(|member| member.member.member_vk)
-                })
-            };
+            let expected =
+                Self::resolve_key(state, parameters, &known_owner_keys, &entry.deactivation.member);
             match expected {
                 Some(key) if key == entry.deactivation.key => {}
                 Some(_) => return Err("Deactivation key does not match the member".to_string()),
@@ -324,13 +592,29 @@ impl OwnershipV1 {
             }
         }
 
+        // Pending succession votes target the next generation and must be
+        // signed by distinct active admins.
+        if self.succession_votes.len() > MAX_SUCCESSION_VOTES {
+            return Err("Too many pending succession votes".to_string());
+        }
+        let mut seen_voters = std::collections::HashSet::new();
+        for vote in &self.succession_votes {
+            if !seen_voters.insert(vote.vote.voter) {
+                return Err("Duplicate pending succession vote for the same admin".to_string());
+            }
+            self.verify_pending_vote(vote, state, parameters)?;
+        }
+
         Ok(())
     }
 
     /// Keep one transfer per generation (lowest digest wins, so concurrent
-    /// transfers converge), drop the tail that no longer verifies, and keep
-    /// the latest deactivation per member.
+    /// transfers converge), drop the tail that no longer verifies, keep the
+    /// latest deactivation per member, and keep only valid current-generation
+    /// succession votes (latest per voter).
     pub fn cleanup(&mut self, state: &ChatBoardStateV1, parameters: &ChatBoardParametersV1) {
+        let pending_votes = std::mem::take(&mut self.succession_votes);
+
         self.transfers
             .sort_by_key(|entry| (entry.transfer.generation, entry.transfer.digest()));
         self.transfers
@@ -361,6 +645,27 @@ impl OwnershipV1 {
             }
         }
         self.deactivations = kept;
+
+        let next_generation = self.transfers.len() as u64 + 1;
+        let mut votes: Vec<AuthorizedSuccessionVoteV1> = pending_votes
+            .into_iter()
+            .filter(|vote| {
+                vote.vote.generation == next_generation
+                    && self.verify_pending_vote(vote, state, parameters).is_ok()
+            })
+            .collect();
+        votes.sort_by(|a, b| {
+            a.vote
+                .voter
+                .0
+                 .0
+                .cmp(&b.vote.voter.0 .0)
+                .then(system_time_ms(b.vote.signed_at).cmp(&system_time_ms(a.vote.signed_at)))
+                .then(a.vote.digest().cmp(&b.vote.digest()))
+        });
+        votes.dedup_by_key(|entry| entry.vote.voter);
+        votes.truncate(MAX_SUCCESSION_VOTES);
+        self.succession_votes = votes;
     }
 }
 
@@ -368,12 +673,16 @@ impl OwnershipV1 {
 pub struct OwnershipSummary {
     pub transfers: Vec<u64>,
     pub deactivations: Vec<(MemberId, u64)>,
+    #[serde(default)]
+    pub succession_votes: Vec<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
 pub struct OwnershipDelta {
     pub transfers: Vec<AuthorizedOwnerTransfer>,
     pub deactivations: Vec<AuthorizedKeyDeactivation>,
+    #[serde(default)]
+    pub succession_votes: Vec<AuthorizedSuccessionVoteV1>,
 }
 
 impl OwnershipV1 {
@@ -395,6 +704,13 @@ impl OwnershipV1 {
                     freenet_scaffold::util::fast_hash(&bytes).0 as u64,
                 )
             })
+            .collect()
+    }
+
+    fn succession_vote_digests(&self) -> Vec<u64> {
+        self.succession_votes
+            .iter()
+            .map(|entry| entry.vote.digest())
             .collect()
     }
 }
@@ -421,6 +737,7 @@ impl ComposableState for OwnershipV1 {
         OwnershipSummary {
             transfers: self.transfer_digests(),
             deactivations: self.deactivation_digests(),
+            succession_votes: self.succession_vote_digests(),
         }
     }
 
@@ -453,12 +770,23 @@ impl ComposableState for OwnershipV1 {
             })
             .cloned()
             .collect();
-        if transfers.is_empty() && deactivations.is_empty() {
+        let succession_votes: Vec<_> = self
+            .succession_votes
+            .iter()
+            .filter(|entry| {
+                !old_state_summary
+                    .succession_votes
+                    .contains(&entry.vote.digest())
+            })
+            .cloned()
+            .collect();
+        if transfers.is_empty() && deactivations.is_empty() && succession_votes.is_empty() {
             None
         } else {
             Some(OwnershipDelta {
                 transfers,
                 deactivations,
+                succession_votes,
             })
         }
     }
@@ -477,6 +805,9 @@ impl ComposableState for OwnershipV1 {
         trial
             .deactivations
             .extend(delta.deactivations.iter().cloned());
+        trial
+            .succession_votes
+            .extend(delta.succession_votes.iter().cloned());
         trial.cleanup(parent_state, parameters);
         // A delta may extend the chain, never shorten an accepted one. When a
         // record elsewhere in the update invalidates an earlier transfer (a
@@ -648,6 +979,7 @@ mod tests {
                     &fixture.owner_sk,
                 )],
                 deactivations: Vec::new(),
+                succession_votes: Vec::new(),
             },
         );
 
@@ -708,6 +1040,7 @@ mod tests {
                         &fixture.owner_sk,
                     )],
                     deactivations: Vec::new(),
+                succession_votes: Vec::new(),
                 }),
             )
             .unwrap();
@@ -732,6 +1065,7 @@ mod tests {
                 &Some(OwnershipDelta {
                     transfers: Vec::new(),
                     deactivations: Vec::new(),
+                succession_votes: Vec::new(),
                 }),
             )
             .unwrap();
@@ -779,6 +1113,7 @@ mod tests {
                             &fixture.owner_sk,
                         )],
                         deactivations: Vec::new(),
+                succession_votes: Vec::new(),
                     }),
                     admin: Some(AdminsDelta::new(vec![outgoing_admin])),
                     members: Some(MembersDelta::new(vec![AuthorizedMember::new(
@@ -854,6 +1189,7 @@ mod tests {
                             &fixture.owner_sk,
                         )],
                         deactivations: Vec::new(),
+                succession_votes: Vec::new(),
                     }),
                     members: Some(MembersDelta::new(vec![AuthorizedMember::new(
                         Member {
@@ -903,6 +1239,7 @@ mod tests {
                             OutgoingOwnerAction::Member,
                         )],
                         deactivations: Vec::new(),
+                succession_votes: Vec::new(),
                     }),
                     admin: Some(AdminsDelta::revocation(vec![
                         AuthorizedAdminRevocation::with_signature(
@@ -970,6 +1307,7 @@ mod tests {
                             &fixture.admin_sk,
                         )],
                         deactivations: Vec::new(),
+                succession_votes: Vec::new(),
                     }),
                     ..Default::default()
                 }),
@@ -1006,6 +1344,7 @@ mod tests {
                     &fixture.owner_sk,
                 )],
                 deactivations: Vec::new(),
+                succession_votes: Vec::new(),
             },
         );
 
@@ -1042,6 +1381,7 @@ mod tests {
                             },
                             &fixture.admin_sk,
                         )],
+                        succession_votes: Vec::new(),
                     }),
                     admin: Some(AdminsDelta::revocation(vec![
                         AuthorizedAdminRevocation::with_signature(
@@ -1096,6 +1436,7 @@ mod tests {
                     &fixture.owner_sk,
                 )],
                 deactivations: Vec::new(),
+                succession_votes: Vec::new(),
             },
         );
 
@@ -1115,6 +1456,7 @@ mod tests {
                     &fixture.admin_sk,
                 )],
                 deactivations: Vec::new(),
+                succession_votes: Vec::new(),
             },
         );
 
@@ -1198,6 +1540,7 @@ mod tests {
                     ),
                 ],
                 deactivations: Vec::new(),
+                succession_votes: Vec::new(),
             },
         );
 
@@ -1251,6 +1594,7 @@ mod tests {
                     &fixture.owner_sk,
                 )],
                 deactivations: Vec::new(),
+                succession_votes: Vec::new(),
             },
         );
 
@@ -1282,6 +1626,7 @@ mod tests {
                             &fixture.owner_sk,
                         )],
                         deactivations: Vec::new(),
+                succession_votes: Vec::new(),
                     }),
                     ..Default::default()
                 }),
@@ -1318,6 +1663,7 @@ mod tests {
                     },
                     &fixture.owner_sk,
                 )],
+                succession_votes: Vec::new(),
             },
         );
 
@@ -1341,6 +1687,303 @@ mod tests {
             .state
             .verify(&fixture.state.clone(), &fixture.parameters)
             .is_ok());
+    }
+
+    fn add_admin(fixture: &mut Fixture, seed: u8) -> (SigningKey, MemberId) {
+        let sk = SigningKey::from_bytes(&[seed; 32]);
+        let id = MemberId::from(&sk.verifying_key());
+        fixture.state.members.members.push(AuthorizedMember::new(
+            Member {
+                owner_member_id: fixture.owner_id,
+                invited_by: fixture.owner_id,
+                member_vk: sk.verifying_key(),
+                join_proof: None,
+            },
+            &fixture.owner_sk,
+        ));
+        fixture
+            .state
+            .recent_messages
+            .messages
+            .push(AuthorizedMessageV1::new(
+                MessageV1 {
+                    images: Vec::new(),
+                    board_owner: fixture.owner_id,
+                    author: id,
+                    time: SystemTime::UNIX_EPOCH,
+                    content: BoardMessageBody::public("t".to_string(), "b".to_string()),
+                    reply_to: None,
+                    topic_id: None,
+                    topic_public_key: None,
+                    topic_proof: None,
+                    section_id: None,
+                    section_auto_moderated: None,
+                    auto_moderated: false,
+                },
+                &sk,
+            ));
+        fixture.state.admin.admins.push(AuthorizedAdmin::new(
+            Admin {
+                member_id: id,
+                generation: 1,
+                signed_at: SystemTime::UNIX_EPOCH,
+            },
+            &fixture.owner_sk,
+        ));
+        (sk, id)
+    }
+
+    fn succession_vote(
+        from: MemberId,
+        to: MemberId,
+        to_key: VerifyingKey,
+        generation: u64,
+        voter_sk: &SigningKey,
+        signed_at: SystemTime,
+    ) -> AuthorizedSuccessionVoteV1 {
+        AuthorizedSuccessionVoteV1::new(
+            SuccessionVoteV1 {
+                from,
+                to,
+                to_key,
+                generation,
+                voter: MemberId::from(&voter_sk.verifying_key()),
+                voter_key: voter_sk.verifying_key(),
+                signed_at,
+            },
+            voter_sk,
+        )
+    }
+
+    #[test]
+    fn admin_quorum_succession_promotes_new_owner_and_clears_votes() {
+        let mut fixture = fixture();
+        let (admin2_sk, admin2_id) = add_admin(&mut fixture, 3);
+        let (_admin3_sk, _admin3_id) = add_admin(&mut fixture, 4);
+        assert_eq!(required_succession_quorum(3), Some(2));
+
+        let vote1 = succession_vote(
+            fixture.owner_id,
+            admin2_id,
+            admin2_sk.verifying_key(),
+            1,
+            &fixture.admin_sk,
+            fixture.now,
+        );
+        // First admin records a pending vote on the board.
+        apply(
+            &mut fixture.state,
+            &fixture.parameters,
+            OwnershipDelta {
+                transfers: Vec::new(),
+                deactivations: Vec::new(),
+                succession_votes: vec![vote1.clone()],
+            },
+        );
+        assert_eq!(fixture.state.ownership.succession_votes.len(), 1);
+        assert_eq!(
+            fixture.state.ownership.current_owner(&fixture.parameters),
+            fixture.owner_id
+        );
+
+        // Second admin casts the quorum vote and finalizes the succession
+        // transfer without any signature from the unreachable owner.
+        let vote2 = succession_vote(
+            fixture.owner_id,
+            admin2_id,
+            admin2_sk.verifying_key(),
+            1,
+            &admin2_sk,
+            fixture.now + std::time::Duration::from_millis(1),
+        );
+        let transferred_at = fixture.now + std::time::Duration::from_millis(2);
+        let succession = AuthorizedOwnerTransfer::new_by_succession(
+            OwnerTransferV1 {
+                from: fixture.owner_id,
+                to: admin2_id,
+                to_key: admin2_sk.verifying_key(),
+                generation: 1,
+                transferred_at,
+                outgoing: OutgoingOwnerAction::Member,
+            },
+            vec![vote1, vote2.clone()],
+            &admin2_sk,
+        );
+        apply(
+            &mut fixture.state,
+            &fixture.parameters,
+            OwnershipDelta {
+                transfers: vec![succession],
+                deactivations: Vec::new(),
+                succession_votes: vec![vote2],
+            },
+        );
+
+        assert_eq!(
+            fixture.state.ownership.current_owner(&fixture.parameters),
+            admin2_id
+        );
+        assert!(
+            fixture.state.ownership.succession_votes.is_empty(),
+            "pending votes are cleared once the generation completes"
+        );
+        fixture
+            .state
+            .verify(&fixture.state.clone(), &fixture.parameters)
+            .expect("state verifies after quorum succession");
+
+        // The new owner can update owner-only configuration immediately.
+        let mut next_config = fixture.state.configuration.configuration.clone();
+        next_config.configuration_version += 1;
+        next_config.updated_at = transferred_at + std::time::Duration::from_secs(10);
+        let parent = fixture.state.clone();
+        fixture
+            .state
+            .apply_delta(
+                &parent,
+                &fixture.parameters,
+                &Some(ChatBoardStateV1Delta {
+                    configuration: Some(AuthorizedConfigurationV1::new(next_config, &admin2_sk)),
+                    ..Default::default()
+                }),
+            )
+            .expect("the successor can update board configuration");
+    }
+
+    #[test]
+    fn single_admin_cannot_seize_ownership_via_succession() {
+        let mut fixture = fixture();
+        // Only 1 active admin: quorum is None.
+        assert_eq!(required_succession_quorum(1), None);
+        let vote1 = succession_vote(
+            fixture.owner_id,
+            fixture.admin_id,
+            fixture.admin_sk.verifying_key(),
+            1,
+            &fixture.admin_sk,
+            fixture.now,
+        );
+        let bogus = AuthorizedOwnerTransfer::new_by_succession(
+            OwnerTransferV1 {
+                from: fixture.owner_id,
+                to: fixture.admin_id,
+                to_key: fixture.admin_sk.verifying_key(),
+                generation: 1,
+                transferred_at: fixture.now + std::time::Duration::from_millis(2),
+                outgoing: OutgoingOwnerAction::Member,
+            },
+            vec![vote1],
+            &fixture.admin_sk,
+        );
+        apply(
+            &mut fixture.state,
+            &fixture.parameters,
+            OwnershipDelta {
+                transfers: vec![bogus],
+                deactivations: Vec::new(),
+                succession_votes: Vec::new(),
+            },
+        );
+        assert_eq!(
+            fixture.state.ownership.current_owner(&fixture.parameters),
+            fixture.owner_id,
+            "a single admin must not succeed without quorum"
+        );
+    }
+
+    #[test]
+    fn insufficient_quorum_and_duplicate_votes_are_rejected() {
+        let mut fixture = fixture();
+        let (admin2_sk, admin2_id) = add_admin(&mut fixture, 3);
+        let (_admin3_sk, _admin3_id) = add_admin(&mut fixture, 4);
+        let (_admin4_sk, _admin4_id) = add_admin(&mut fixture, 5);
+        // 4 admins require 3 votes.
+        assert_eq!(required_succession_quorum(4), Some(3));
+
+        let vote1 = succession_vote(
+            fixture.owner_id,
+            admin2_id,
+            admin2_sk.verifying_key(),
+            1,
+            &fixture.admin_sk,
+            fixture.now,
+        );
+        let vote2 = succession_vote(
+            fixture.owner_id,
+            admin2_id,
+            admin2_sk.verifying_key(),
+            1,
+            &admin2_sk,
+            fixture.now,
+        );
+        // 2 votes out of 4 admins (even with a duplicate) must be rejected.
+        let dup_transfer = AuthorizedOwnerTransfer::new_by_succession(
+            OwnerTransferV1 {
+                from: fixture.owner_id,
+                to: admin2_id,
+                to_key: admin2_sk.verifying_key(),
+                generation: 1,
+                transferred_at: fixture.now + std::time::Duration::from_millis(2),
+                outgoing: OutgoingOwnerAction::Member,
+            },
+            vec![vote1.clone(), vote2, vote1],
+            &admin2_sk,
+        );
+        let mut trial = fixture.state.ownership.clone();
+        trial.transfers.push(dup_transfer);
+        assert!(trial.verify(&fixture.state, &fixture.parameters).is_err());
+    }
+
+    #[test]
+    fn revoked_admin_vote_is_dropped_by_cleanup() {
+        let mut fixture = fixture();
+        let (admin2_sk, admin2_id) = add_admin(&mut fixture, 3);
+        let vote1 = succession_vote(
+            fixture.owner_id,
+            admin2_id,
+            admin2_sk.verifying_key(),
+            1,
+            &fixture.admin_sk,
+            fixture.now,
+        );
+        apply(
+            &mut fixture.state,
+            &fixture.parameters,
+            OwnershipDelta {
+                transfers: Vec::new(),
+                deactivations: Vec::new(),
+                succession_votes: vec![vote1],
+            },
+        );
+        assert_eq!(fixture.state.ownership.succession_votes.len(), 1);
+
+        // Owner returns and revokes admin1: their pending vote disappears.
+        let rev = AdminRevocation {
+            member_id: fixture.admin_id,
+            generation: fixture.state.admin.next_generation(&fixture.admin_id),
+            signed_at: fixture.now + std::time::Duration::from_secs(5),
+        };
+        let parent = fixture.state.clone();
+        fixture
+            .state
+            .apply_delta(
+                &parent,
+                &fixture.parameters,
+                &Some(ChatBoardStateV1Delta {
+                    admin: Some(AdminsDelta::revocation(vec![
+                        AuthorizedAdminRevocation::with_signature(
+                            rev.clone(),
+                            sign_struct(&rev, &fixture.owner_sk),
+                        ),
+                    ])),
+                    ..Default::default()
+                }),
+            )
+            .expect("revocation applies");
+        assert!(
+            fixture.state.ownership.succession_votes.is_empty(),
+            "revoked admin vote must be dropped"
+        );
     }
 }
 

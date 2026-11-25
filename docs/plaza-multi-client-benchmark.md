@@ -71,8 +71,22 @@ passa da 20 s a 6 ms.
 
 I profili sono ora in un contratto separato: con 10.000 record il feed è
 3.163 KiB e un nuovo nickname è un delta da 0,3 KiB, con zero scritture sulla
-board. Il totale scaricato da un nuovo client resta simile (board 3.356 KiB +
-profili 3.163 KiB); paginare i profili è il passo successivo per il bootstrap.
+board. Paginare i profili (e introdurre summary/delta incrementali in
+`profile-contract`) è il prossimo passo per il bootstrap dei nomi.
+
+I membri sono ora shardati in 32 bucket deterministici (`plaza-member-contract`,
+`bucket = blake3(member_id)[0..2] % 32`):
+
+| Membri | Board (senza nick) | Bucket 0 | Max bucket | Verify bucket 0 | Join delta |
+|---:|---:|---:|---:|---:|---:|
+| 1.000 | 340,7 KiB | 11,3 KiB (33 m.) | 14,8 KiB | 81,1 ms | 0,35 KiB (2,5 ms) |
+| 5.000 | 1.680,9 KiB | 60,0 KiB (175 m.) | 60,0 KiB | 381,8 ms | 0,36 KiB (2,6 ms) |
+| 10.000 | 3.356,1 KiB | 111,4 KiB (325 m.) | 118,0 KiB | 740,0 ms | 0,35 KiB (2,9–3,4 ms) |
+
+A 10.000 membri (con 10 o 100 sezioni) ciascun bucket è ~30× più piccolo della
+lista monolitica, il bootstrap scarica solo il proprio bucket (`GET`-only) e
+ogni join è un delta da `0,35 KiB` verificato in ~3 ms senza scrivere sulla
+board madre né richiedere l'owner online.
 
 Con 100 sezioni e 10.000 membri il costo dipende dai membri, non dalle
 sezioni.
@@ -137,8 +151,11 @@ la board e le figlie non ricevono più l'activity.
    passano da 20 s a 88 ms.
 4. Profili fuori dalla board (fatto): nickname nel contratto profili, delta
    da 0,3 KiB, zero scritture sulla board.
-5. Paginare membri e profili; la board conserva ancora la lista dei membri
-   (3,3 MiB a 10.000) e il feed profili è 3,2 MiB.
+5. Membri shardati in 32 bucket deterministici (fatto): `plaza-member-contract`,
+   111,4 KiB/bucket (max 118,0 KiB) a 10.000 membri (~30× meno della board
+   monolitica), join delta 0,35 KiB (~3 ms), zero dipendenza dall'owner online.
+6. Paginare i profili (3,2 MiB a 10.000 nickname) e introdurre summary/delta
+   incrementali in `profile-contract`.
 5. Compattare le pagine e l'autorita' duplicata; oggi ogni pagina copia
    l'autorita' potata.
 6. Topic a pagine append-only; una risposta scrive una pagina.

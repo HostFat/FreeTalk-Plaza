@@ -539,11 +539,27 @@ pub fn set_role_member(role_id: RoleId, member_id: MemberId, grant: bool) -> Res
                 .with_optional_authority(manager_authority_proof(&data.board_state, &signer)),
             None => AuthorizedRoleAssignment::new(assignment, &signing_key),
         };
+        let materialized = if grant {
+            crate::components::app::member_contract::records_for_parent_board(
+                board_key,
+                &data.board_state,
+                member_id,
+            )
+        } else {
+            Vec::new()
+        };
         let delta = ChatBoardStateV1Delta {
             roles: Some(RolesDelta {
                 roles: vec![],
                 assignments: vec![authorized],
             }),
+            members: if materialized.is_empty() {
+                None
+            } else {
+                Some(plaza_core::board_state::member::MembersDelta::new(
+                    materialized,
+                ))
+            },
             ..Default::default()
         };
         apply_and_sync(board_key, &data.board_state.clone(), delta)

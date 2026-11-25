@@ -45,7 +45,14 @@ fn current_board() -> Option<BoardData> {
         .read()
         .owner_key
         .as_ref()
-        .and_then(|key| BOARDS.read().map.get(key).cloned())
+        .and_then(|key| {
+            BOARDS
+                .read()
+                .map
+                .get(key)
+                .cloned()
+                .map(|board| board.with_merged_topics())
+        })
 }
 
 /// Small "?" that works with a tap, not only with a mouse hover.
