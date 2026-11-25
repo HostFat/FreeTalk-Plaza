@@ -170,6 +170,26 @@ della pagina non dipende più dal numero di sezioni sorelle.
 Board revision 31; board, section e topic ri-keyati; board e topic esistenti
 vanno ricreati.
 
+## Profili fuori dalla board
+
+I nickname occupavano circa il 45% dello stato di una board con 10.000 membri
+e ogni cambio riscriveva la board. Ora vivono in `plaza-profile-contract`, un
+contratto per board con massimo 10.000 record. Ogni record porta `MemberInfo`,
+la chiave del membro e la firma; il contratto verifica le entry del delta e la
+board non le vede più. Il client sovrappone i profili dei membri correnti alla
+board per la visualizzazione.
+
+- Il join scrive il record del membro con il primo messaggio; il nickname va
+  al contratto profili. Il nickname dell'owner resta nel record iniziale.
+- La board con 10.000 membri senza nickname è 3.356 KiB; il feed profili è
+  3.163 KiB. Un nuovo nickname è un delta da 0,3 KiB e le scritture di
+  nickname sulla board sono zero.
+- Il feed viene caricato all'apertura della board; paginarlo è il passo
+  successivo per ridurre il bootstrap.
+
+Board revision 33; board, section e topic ri-keyati, più il contratto profili;
+board e topic esistenti vanno ricreati.
+
 ## Problema
 
 La board `TopicIndex` tiene in un unico contratto sezioni, membri, autorità e

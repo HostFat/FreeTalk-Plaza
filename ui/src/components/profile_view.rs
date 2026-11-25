@@ -15,7 +15,7 @@ pub fn ProfileView(member_key: String) -> Element {
     let board = use_memo(move || {
         let current = CURRENT_BOARD.read().owner_key?;
         let boards = BOARDS.read();
-        let board = boards.map.get(&current)?.clone();
+        let board = boards.map.get(&current)?.clone().with_merged_topics();
         let self_id = MemberId::from(&board.self_sk.verifying_key());
         let messages = get_all_messages(
             &board.board_state,
@@ -101,7 +101,11 @@ pub fn ProfileView(member_key: String) -> Element {
 
     let (warnings, suspension, can_view_warnings) = {
         let boards = BOARDS.read();
-        match boards.map.get(&owner_vk) {
+        match boards
+            .map
+            .get(&owner_vk)
+            .map(|board| board.clone().with_merged_topics())
+        {
             Some(board) => {
                 let self_id = MemberId::from(&board.self_sk.verifying_key());
                 let owner_id = MemberId::from(&board.owner_vk);

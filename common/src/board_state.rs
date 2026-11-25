@@ -22,6 +22,7 @@ pub mod ownership;
 pub mod pages;
 pub mod pq_secrets;
 pub mod privacy;
+pub mod profiles;
 pub mod rate_limit;
 pub mod report_feed;
 pub mod reports;

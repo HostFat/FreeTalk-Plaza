@@ -177,7 +177,11 @@ pub fn MembersView() -> Element {
         let board_owner = CURRENT_BOARD.read().owner_key?;
 
         let boards_read = BOARDS.read();
-        let board_data = boards_read.map.get(&board_owner)?;
+        let board_data = boards_read
+            .map
+            .get(&board_owner)?
+            .clone()
+            .with_merged_topics();
         let board_state = board_data.board_state.clone();
         let self_member_id: MemberId = board_data.self_sk.verifying_key().into();
         let owner_id: MemberId = board_state.ownership.current_owner(
@@ -280,7 +284,11 @@ pub fn MembersView() -> Element {
     let retired_identities = use_memo(move || {
         let board_owner = CURRENT_BOARD.read().owner_key?;
         let boards_read = BOARDS.read();
-        let board_data = boards_read.map.get(&board_owner)?;
+        let board_data = boards_read
+            .map
+            .get(&board_owner)?
+            .clone()
+            .with_merged_topics();
         let board_state = &board_data.board_state;
         let member_ids: HashSet<MemberId> = board_state
             .members

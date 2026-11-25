@@ -3,6 +3,7 @@ pub mod dm_contract;
 pub mod dm_delegate;
 pub mod activity_contract;
 pub mod moderation_contract;
+pub mod profile_contract;
 pub mod section_contract;
 pub mod topic_contract;
 pub mod document_title;
@@ -452,6 +453,7 @@ pub fn App() -> Element {
                 .await;
             let _ = crate::components::app::moderation_contract::load_moderation(owner)
                 .await;
+            let _ = crate::components::app::profile_contract::load_profile(owner).await;
         });
         let sections = {
             let boards = BOARDS.read();

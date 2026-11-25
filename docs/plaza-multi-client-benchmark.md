@@ -64,11 +64,15 @@ Membri della board con nickname (10 sezioni, nessun topic):
 | 5.000 | 3.076 KiB | 1.395 KiB | 21,3 s | 162 ms | 5,1 ms |
 | 10.000 | 6.148 KiB | 2.792 KiB | 45,8 s | 540 ms | 6,2 ms |
 
-Senza nickname la board da 10.000 membri è 3,4 MiB: i nickname sono circa il
+Senza nickname la board da 10.000 membri è 3.356 KiB: i nickname sono circa il
 45% dello stato. La radice firmata ora copre anche il record del nickname, e
 un cambio di nickname verifica solo il record del delta: il percorso caldo
-passa da 20 s a 6 ms. Lo stato resta il muro: spostare i nickname in un
-contratto profili è il passo successivo per la dimensione.
+passa da 20 s a 6 ms.
+
+I profili sono ora in un contratto separato: con 10.000 record il feed è
+3.163 KiB e un nuovo nickname è un delta da 0,3 KiB, con zero scritture sulla
+board. Il totale scaricato da un nuovo client resta simile (board 3.356 KiB +
+profili 3.163 KiB); paginare i profili è il passo successivo per il bootstrap.
 
 Con 100 sezioni e 10.000 membri il costo dipende dai membri, non dalle
 sezioni.
@@ -112,11 +116,12 @@ la board e le figlie non ricevono più l'activity.
    temporaneamente le liste complete. La passata carica ogni topic, quindi il
    costo CPU del client cresce con il numero di topic: aggiornamenti
    incrementali della sola radice sono il passo successivo.
-7. **I membri sono il prossimo limite.** La board tiene tutti i membri: a
-   10.000 membri pesa 3,3 MiB. Con una radice firmata valida la verifica
-   scende da 20 s a 88 ms (tree 53 ms); senza radice, o per una modifica
-   guidata da un admin, resta la verifica completa. Paginare i membri toglie
-   anche la crescita dello stato.
+7. **I membri restano il limite.** La board tiene tutti i membri: a 10.000
+   membri pesa 3,3 MiB senza nickname. Con una radice firmata valida la
+   verifica scende da 20 s a 88 ms (tree 53 ms); senza radice, o per una
+   modifica guidata da un admin, resta la verifica completa. I nickname sono
+   fuori (feed separato da 3,2 MiB); paginare membri e profili toglie la
+   crescita dello stato e del bootstrap.
 8. **La moderazione e' fuori dall'indice.** Un report e' un delta da 0,3 KiB
    al contratto moderazione; il feed completo (500 report + 500 risoluzioni)
    e' 362,8 KiB per un nuovo subscriber.
@@ -130,8 +135,10 @@ la board e le figlie non ricevono più l'activity.
    risoluzioni verificati dal client.
 3. Radice firmata come percorso veloce di verifica (fatto): 10.000 membri
    passano da 20 s a 88 ms.
-4. Paginare i membri e conservare nella board solo radice e versione; lo
-   stato cresce ancora con il numero di membri.
+4. Profili fuori dalla board (fatto): nickname nel contratto profili, delta
+   da 0,3 KiB, zero scritture sulla board.
+5. Paginare membri e profili; la board conserva ancora la lista dei membri
+   (3,3 MiB a 10.000) e il feed profili è 3,2 MiB.
 5. Compattare le pagine e l'autorita' duplicata; oggi ogni pagina copia
    l'autorita' potata.
 6. Topic a pagine append-only; una risposta scrive una pagina.

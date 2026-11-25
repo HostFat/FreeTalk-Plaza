@@ -20,6 +20,9 @@ use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
 use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
 use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::privacy::SealedBytes;
+use plaza_core::board_state::profiles::{
+    ProfileDeltaV1, ProfileEntryV1, ProfileStateV1,
+};
 use plaza_core::board_state::report_feed::{
     ReportFeedDeltaV1, ReportFeedStateV1, MAX_REPORT_FEED,
 };
@@ -565,6 +568,19 @@ fn sign_owner_root(state: &mut ChatBoardStateV1) {
     )));
 }
 
+fn profile_feed(members: usize) -> ProfileStateV1 {
+    let mut state = ProfileStateV1::default();
+    for index in 0..members {
+        let key = member_key(index);
+        let id = MemberId::from(&key.verifying_key());
+        state.entries.push(ProfileEntryV1::new(
+            MemberInfo::new_public(id, 1, format!("Member {index}")),
+            &key,
+        ));
+    }
+    state
+}
+
 fn membership_scenario(members: usize, sections: usize) {
     let mut board = parent(sections, members);
     let without_nicknames = serialized_len(&board);
@@ -611,11 +627,22 @@ fn membership_scenario(members: usize, sections: usize) {
         .expect("the nickname delta verifies");
     let nickname_delta_ms = start.elapsed().as_secs_f64() * 1000.0;
 
+    let profiles = profile_feed(members);
+    let profile_kib = serialized_len_value(&profiles) as f64 / 1024.0;
+    let profile_delta = ProfileDeltaV1 {
+        entries: vec![profiles.entries[0].clone()],
+    };
+    let profile_delta_kib = serialized_len_value(&profile_delta) as f64 / 1024.0;
+    let board_without_nicknames = size - nickname_kib;
+
     println!(
         "members={members:>6} sections={sections:>3} board={size:>8.1} KiB \
-         (nicknames {nickname_kib:>6.1} KiB) full {full_verify:>8.1} ms \
-         tree {tree_ms:>7.1} ms fast {fast_verify:>7.1} ms \
-         nickname delta {nickname_delta_ms:>6.1} ms"
+         (nicknames {nickname_kib:>6.1} KiB, board without {board_without_nicknames:>8.1} KiB) \
+         full {full_verify:>8.1} ms tree {tree_ms:>7.1} ms \
+         fast {fast_verify:>7.1} ms nickname delta {nickname_delta_ms:>6.1} ms"
+    );
+    println!(
+        "         profile feed {profile_kib:>7.1} KiB; new nickname delta {profile_delta_kib:>5.1} KiB; board nickname writes: 0"
     );
 }
 

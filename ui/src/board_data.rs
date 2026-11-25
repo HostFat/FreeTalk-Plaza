@@ -416,6 +416,15 @@ impl BoardData {
             &mut topics,
         );
         self.board_state.topics = topics;
+        // Nicknames live in their own contract; overlay the verified entries
+        // on the legacy list for display.
+        let mut member_info = std::mem::take(&mut self.board_state.member_info);
+        crate::components::app::profile_contract::apply_to_member_info(
+            self.owner_vk,
+            &self.board_state,
+            &mut member_info,
+        );
+        self.board_state.member_info = member_info;
         self
     }
 
@@ -4010,7 +4019,7 @@ mod tests {
 
         // The contract pruned the profile because it had no recent messages.
         board.board_state.members.members.clear();
-        let (members, member_info) = crate::util::messaging::self_membership_delta(&board)
+        let (members, profile_info) = crate::util::messaging::self_membership_delta(&board)
             .expect("the stored record is republished");
 
         let before = board.board_state.clone();
@@ -4021,7 +4030,7 @@ mod tests {
                 &ChatBoardParametersV1 { owner: key },
                 &Some(plaza_core::board_state::ChatBoardStateV1Delta {
                     members: Some(members),
-                    member_info: Some(member_info),
+                    member_info: Some(vec![profile_info]),
                     ..Default::default()
                 }),
             )

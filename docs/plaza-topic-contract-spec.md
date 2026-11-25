@@ -2,11 +2,11 @@
 
 Versione: 1 (implementata).
 Stato: fasi 0–4 completate; move e merge tra sezioni pubblicati nella build
-locale v730. Le nuove board topic usano lo shard per sezione come default, le
+locale v732. Le nuove board topic usano lo shard per sezione come default, le
 sezioni dividono l'indice in pagine firmate dall'owner e i topic usano una
 radice Merkle dell'autorita' firmata dall'owner, con prove per membro.
 L'activity recente vive in un contratto separato per board. Contratto board
-alla revisione 32.
+alla revisione 33.
 Nessuna migrazione delle vecchie board.
 
 ## Stato dell'implementazione
@@ -18,7 +18,7 @@ Nessuna migrazione delle vecchie board.
   attività, flag, report e risoluzioni.
 - Client `ui/src/components/app/topic_contract.rs`; UI
   `topic_index_view.rs`, `topic_view.rs`, ricerca, notifiche e code in Manage.
-- Test: 46 in `topic-core`, 299 in `plaza-core`, 16 scenari real-node dei
+- Test: 46 in `topic-core`, 302 in `plaza-core`, 16 scenari real-node dei
   topic (shard della sezione, ruolo-prima-del-topic, draft e parti precedenti
   inclusi) e 116 test statici Playwright.
 
@@ -590,6 +590,12 @@ Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
   firma del reporter e il potere di moderazione prima di mostrare un'entry.
   L'indice non cambia quando si segnala; i report legacy restano come
   fallback. Le approvazioni restano nel contratto del topic.
+- I nickname vivono in `plaza-profile-contract` (massimo 10.000 record, 4 KiB
+  per nickname). Ogni record porta la chiave del membro e la firma: il
+  contratto verifica solo le entry del delta, il client sovrappone alla board
+  i profili dei membri correnti. La board non riceve più il nickname; il join
+  scrive il record del membro con il primo messaggio e il profilo nel
+  contratto. Il nickname dell'owner resta nel record iniziale della board.
 
 ## 10. Client e UI
 
@@ -645,7 +651,7 @@ Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
 - La figlia non copia tutta l'autorità: conserva configurazione, admin,
   ownership, sezioni e solo i membri/ruoli/ban che il suo indice referenzia.
   La sincronizzazione dell'autorità viaggia come delta; un cambio di admin o
-  ownership usa ancora lo stato completo. Contratto board alla revisione 32.
+  ownership usa ancora lo stato completo. Contratto board alla revisione 33.
 - L'attività della figlia viene accorpata per 10 s. Lo stato locale resta
   `dirty` fino all'`UpdateResponse` del nodo; un `Get` che porta ancora lo
   stato precedente fa merge invece di scartare l'entry o l'attività locale.
@@ -679,7 +685,7 @@ hide/restore/purge, poll e reaction, contenuto sigillato illeggibile al
 contratto, limiti di dimensione e numero, CBOR round-trip, firme manomesse e
 continuation.
 
-`plaza-core` ha 299 test, inclusi indice, sezioni, flag, report, risoluzioni,
+`plaza-core` ha 302 test, inclusi indice, sezioni, flag, report, risoluzioni,
 limiti di frequenza, percorso rapido dell'indice e lista firmata delle pagine.
 
 La suite real-node `ui/tests/real-node/topics.spec.ts` ha 16 scenari: topic e
@@ -693,7 +699,7 @@ delle pagine, ricarica e trova solo la pagina 0, carica le pagine con "Load
 older topics", poi crea la pagina 2 con la dimensione firmata anche se il
 client ricaricato ha il default 200. Con lo shard come default la suite passa
 16/16 in 5 minuti. La suite statica Playwright (Chromium) ha 29 test passati e
-3 saltati. Il contratto della board e' alla revisione 32; l'indice a pagine e'
+3 saltati. Il contratto della board e' alla revisione 33; l'indice a pagine e'
 coperto dal test dedicato.
 
 Il reset di test scrive un marker nel delegate (`skip_legacy_migration`)

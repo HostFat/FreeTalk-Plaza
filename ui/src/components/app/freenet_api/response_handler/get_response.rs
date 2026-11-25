@@ -302,7 +302,18 @@ pub async fn handle_get_response(
                 // is published atomically with the first message to avoid
                 // post_apply_cleanup pruning a member with no messages.
                 board_data.self_authorized_member = Some(authorized_member.clone());
-                board_data.self_member_info = Some(authorized_member_info);
+                board_data.self_member_info = Some(authorized_member_info.clone());
+                // The nickname goes to the profile contract; the board only
+                // receives the member record with the first message.
+                let signer_key = self_sk.verifying_key();
+                crate::util::safe_spawn_local(async move {
+                    let _ = crate::components::app::profile_contract::record_member_info(
+                        owner_vk,
+                        authorized_member_info,
+                        signer_key,
+                    )
+                    .await;
+                });
                 // Capture invite chain from current state
                 if let Ok(chain) = board_data.board_state.members.get_invite_chain(
                     &authorized_member,

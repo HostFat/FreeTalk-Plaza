@@ -343,7 +343,7 @@ pub(crate) fn self_membership_delta(
     board_data: &crate::board_data::BoardData,
 ) -> Option<(
     plaza_core::board_state::member::MembersDelta,
-    Vec<plaza_core::board_state::member_info::AuthorizedMemberInfo>,
+    plaza_core::board_state::member_info::AuthorizedMemberInfo,
 )> {
     let self_vk = board_data.self_sk.verifying_key();
     let is_in_members = self_vk == board_data.current_owner_key()
@@ -402,7 +402,7 @@ pub(crate) fn self_membership_delta(
 
     Some((
         plaza_core::board_state::member::MembersDelta::new(members_to_add),
-        vec![authorized_info],
+        authorized_info,
     ))
 }
 
@@ -469,14 +469,31 @@ pub(crate) async fn publish_message(
     // a ban was lifted). A fresh join is restored before this delta, because
     // the contract verifies the message against a parent that must already
     // contain the author.
-    let (members_delta, member_info_delta) = BOARDS
+    let (members_delta, profile_info) = BOARDS
         .read()
         .map
         .get(&current_board)
         .and_then(|board_data| {
-            self_membership_delta(board_data).map(|(members, info)| (Some(members), Some(info)))
+            self_membership_delta(board_data).map(|(members, info)| {
+                (
+                    Some(members),
+                    Some((info, board_data.self_sk.verifying_key())),
+                )
+            })
         })
         .unwrap_or((None, None));
+    // The nickname lives in the profile contract; the board delta carries
+    // only the member record.
+    if let Some((info, signer_key)) = profile_info {
+        crate::util::safe_spawn_local(async move {
+            let _ = crate::components::app::profile_contract::record_member_info(
+                current_board,
+                info,
+                signer_key,
+            )
+            .await;
+        });
+    }
 
     let route = AuthorizedMessageRoute::new(
         MessageRoute {
@@ -493,7 +510,6 @@ pub(crate) async fn publish_message(
     let delta = ChatBoardStateV1Delta {
         recent_messages: Some(vec![auth_message.clone()]),
         members: members_delta,
-        member_info: member_info_delta,
         moderation: Some(ModerationDelta {
             illegal_purges: Vec::new(),
             thread_moves: Vec::new(),

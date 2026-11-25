@@ -101,6 +101,15 @@ impl ResponseHandler {
                     .await?;
                     return Ok(flags);
                 }
+                if crate::components::app::profile_contract::is_profile_contract_response(
+                    &contract_response,
+                ) {
+                    crate::components::app::profile_contract::handle_contract_response(
+                        contract_response,
+                    )
+                    .await?;
+                    return Ok(flags);
+                }
                 if crate::components::app::section_contract::is_section_contract_response(
                     &contract_response,
                 ) {

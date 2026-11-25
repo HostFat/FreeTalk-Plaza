@@ -80,31 +80,36 @@ pub fn restore_self_membership() -> bool {
     }
 
     let former_owner = board.board_state.ownership.was_owner(&self_id);
-    let delta = if let Some((members, member_info)) =
+    let (delta, profile_info) = if let Some((members, member_info)) =
         crate::util::messaging::self_membership_delta(&board)
     {
-        ChatBoardStateV1Delta {
-            members: Some(members),
-            member_info: Some(member_info),
-            ..Default::default()
-        }
+        (
+            ChatBoardStateV1Delta {
+                members: Some(members),
+                ..Default::default()
+            },
+            Some(member_info),
+        )
     } else if former_owner {
         // The former owner signs its own record: the new owner cannot sign on
         // its behalf, and the contract accepts it because this key used to own
         // the board.
         info!("membership restore: publishing the former owner's own record");
-        ChatBoardStateV1Delta {
-            members: Some(MembersDelta::new(vec![AuthorizedMember::new(
-                Member {
-                    owner_member_id: MemberId::from(&board.owner_vk),
-                    invited_by: self_id,
-                    member_vk: board.self_sk.verifying_key(),
-                    join_proof: None,
-                },
-                &board.self_sk,
-            )])),
-            ..Default::default()
-        }
+        (
+            ChatBoardStateV1Delta {
+                members: Some(MembersDelta::new(vec![AuthorizedMember::new(
+                    Member {
+                        owner_member_id: MemberId::from(&board.owner_vk),
+                        invited_by: self_id,
+                        member_vk: board.self_sk.verifying_key(),
+                        join_proof: None,
+                    },
+                    &board.self_sk,
+                )])),
+                ..Default::default()
+            },
+            None,
+        )
     } else {
         warn!("membership restore skipped: no stored membership to publish");
         return false;
@@ -119,6 +124,17 @@ pub fn restore_self_membership() -> bool {
     } else {
         apply_state_delta(&ctx, delta)
     };
+    if let Some(info) = profile_info {
+        let signer_key = board.self_sk.verifying_key();
+        crate::util::safe_spawn_local(async move {
+            let _ = crate::components::app::profile_contract::record_member_info(
+                board_key,
+                info,
+                signer_key,
+            )
+            .await;
+        });
+    }
     match result {
         Ok(()) => {
             info!("membership restore published the stored member record");

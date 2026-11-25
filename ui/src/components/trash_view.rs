@@ -18,7 +18,14 @@ pub fn TrashView() -> Element {
             .read()
             .owner_key
             .as_ref()
-            .and_then(|key| BOARDS.read().map.get(key).cloned())
+            .and_then(|key| {
+                BOARDS
+                    .read()
+                    .map
+                    .get(key)
+                    .cloned()
+                    .map(|board| board.with_merged_topics())
+            })
     });
 
     let Some(data) = board_data.read().clone() else {

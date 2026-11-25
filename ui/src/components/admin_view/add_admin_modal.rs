@@ -15,7 +15,14 @@ pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
             .read()
             .owner_key
             .as_ref()
-            .and_then(|key| BOARDS.read().map.get(key).cloned())
+            .and_then(|key| {
+                BOARDS
+                    .read()
+                    .map
+                    .get(key)
+                    .cloned()
+                    .map(|board| board.with_merged_topics())
+            })
     });
 
     let mut selected_member = use_signal(|| None::<MemberId>);

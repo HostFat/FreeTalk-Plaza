@@ -1335,7 +1335,11 @@ pub fn Conversation(
         let current_board = CURRENT_BOARD.read();
         if let Some(key) = current_board.owner_key {
             let boards = BOARDS.read();
-            boards.map.get(&key).cloned()
+            boards
+                .map
+                .get(&key)
+                .cloned()
+                .map(|board| board.with_merged_topics())
         } else {
             None
         }
@@ -1361,7 +1365,13 @@ pub fn Conversation(
             let current_board = CURRENT_BOARD.read();
             if let Some(key) = current_board.owner_key {
                 let boards = BOARDS.read();
-                if let Some(board_data) = boards.map.get(&key) {
+                if let Some(board_data) = boards
+                    .map
+                    .get(&key)
+                    .cloned()
+                    .map(|board| board.with_merged_topics())
+                    .as_ref()
+                {
                     let self_member_id = MemberId::from(&board_data.self_sk.verifying_key());
                     let config = &board_data.board_state.configuration.configuration;
                     let max_title_size = config.max_title_size;

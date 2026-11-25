@@ -23,7 +23,14 @@ pub fn AuditView() -> Element {
         CURRENT_BOARD
             .read()
             .owner_key
-            .and_then(|key| BOARDS.read().map.get(&key).cloned())
+            .and_then(|key| {
+                BOARDS
+                    .read()
+                    .map
+                    .get(&key)
+                    .cloned()
+                    .map(|board| board.with_merged_topics())
+            })
     });
     let Some(board) = board.read().clone() else {
         return rsx! {};
