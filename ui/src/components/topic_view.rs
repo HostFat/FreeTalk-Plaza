@@ -59,7 +59,7 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     let mut loaded_part = use_signal(|| None::<u32>);
     let mut marked_read = use_signal(|| 0i64);
     let mut draft_loaded = use_signal(|| false);
-    let mut earlier_part = use_signal(|| None::<u32>);
+    let mut earlier_parts = use_signal(Vec::<u32>::new);
     let mut editing_topic = use_signal(|| false);
     let mut edit_title = use_signal(String::new);
     let mut edit_body = use_signal(String::new);
@@ -151,30 +151,39 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
         }
         loaded_part.set(Some(part_now));
         spawn(async move {
-            for attempt in 0..3 {
-                match topic_contract::load_topic(owner, topic_id_value, part_now).await {
-                    Ok(_) => {
-                        if let Err(message) = topic_contract::sync_topic_authority(
-                            owner,
-                            topic_id_value,
-                            part_now,
-                        )
-                        .await
-                        {
-                            error.set(Some(message));
+            // Always load part 0 (topic head: title, body, section, flags).
+            // When part_now > 0, also load the active append-only post page.
+            let parts_to_load: Vec<u32> = if part_now == 0 {
+                vec![0]
+            } else {
+                vec![0, part_now]
+            };
+            for target_part in parts_to_load {
+                for attempt in 0..3 {
+                    match topic_contract::load_topic(owner, topic_id_value, target_part).await {
+                        Ok(_) => {
+                            if let Err(message) = topic_contract::sync_topic_authority(
+                                owner,
+                                topic_id_value,
+                                target_part,
+                            )
+                            .await
+                            {
+                                error.set(Some(message));
+                            }
+                            break;
                         }
-                        return;
-                    }
-                    Err(message) => {
-                        dioxus::logger::tracing::warn!(
-                            "load_topic failed for part {part_now} (attempt {}): {message}",
-                            attempt + 1
-                        );
-                        if attempt + 1 == 3 {
-                            error.set(Some(message));
-                            return;
+                        Err(message) => {
+                            dioxus::logger::tracing::warn!(
+                                "load_topic failed for part {target_part} (attempt {}): {message}",
+                                attempt + 1
+                            );
+                            if attempt + 1 == 3 {
+                                error.set(Some(message));
+                                return;
+                            }
+                            crate::util::sleep(std::time::Duration::from_secs(1)).await;
                         }
-                        crate::util::sleep(std::time::Duration::from_secs(1)).await;
                     }
                 }
             }
@@ -182,20 +191,37 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     });
 
     // Lazily load only the member and profile shard buckets for authors and
-    // participants present in this topic.
+    // participants present in this topic head, active page, and loaded earlier
+    // parts.
     use_effect(move || {
-        let Some(topic_state) = topic_contract::topic_state(owner, topic_id_value, part) else {
-            return;
-        };
         let mut ids: Vec<plaza_core::board_state::member::MemberId> = Vec::new();
-        if let Some(header) = &topic_state.header {
-            ids.push(header.header.author);
+        if let Some(head) = topic_contract::topic_head(owner, topic_id_value) {
+            if let Some(header) = &head.header {
+                ids.push(header.header.author);
+            }
+            for post in head.posts.values() {
+                ids.push(post.post.author);
+            }
+            for participant in &head.participants {
+                ids.push(participant.record.member_id);
+            }
         }
-        for post in topic_state.posts.values() {
-            ids.push(post.post.author);
+        if part > 0 {
+            if let Some(active) = topic_contract::topic_state(owner, topic_id_value, part) {
+                for post in active.posts().values() {
+                    ids.push(post.post.author);
+                }
+                for participant in active.participants() {
+                    ids.push(participant.record.member_id);
+                }
+            }
         }
-        for participant in &topic_state.participants {
-            ids.push(participant.record.member_id);
+        for earlier in earlier_parts.read().iter().copied() {
+            if let Some(prev) = topic_contract::topic_state(owner, topic_id_value, earlier) {
+                for post in prev.posts().values() {
+                    ids.push(post.post.author);
+                }
+            }
         }
         if ids.is_empty() {
             return;
@@ -210,23 +236,39 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
         });
     });
 
-    let state = topic_contract::topic_state(owner, topic_id_value, part);
-    let Some(state) = state else {
+    let head = topic_contract::topic_head(owner, topic_id_value);
+    let Some(head) = head else {
         return rsx! {
             div { class: "max-w-3xl mx-auto px-4 py-8 text-text-muted", "Loading topic…" }
         };
     };
-    let Some(header) = state.header.as_ref() else {
+    let Some(header) = head.header.as_ref() else {
         return rsx! {
             div { class: "max-w-3xl mx-auto px-4 py-8 text-text-muted", "Loading topic…" }
         };
+    };
+    let head_part_state = topic_contract::TopicPartState::Head(head.clone());
+    let state = if part == 0 {
+        head_part_state.clone()
+    } else {
+        let Some(page_state) = topic_contract::topic_state(owner, topic_id_value, part) else {
+            return rsx! {
+                div { class: "max-w-3xl mx-auto px-4 py-8 text-text-muted", "Loading topic…" }
+            };
+        };
+        if !page_state.is_loaded() {
+            return rsx! {
+                div { class: "max-w-3xl mx-auto px-4 py-8 text-text-muted", "Loading topic…" }
+            };
+        }
+        page_state
     };
 
     let self_id = plaza_core::board_state::member::MemberId::from(
         &board_data.self_sk.verifying_key(),
     );
     let (header_title, header_body) =
-        topic_contract::effective_topic_content(&board_data, &state)
+        topic_contract::effective_topic_content(&board_data, &head)
             .unwrap_or((header.header.title.clone(), header.header.body.clone()));
     let title = topic_contract::read_text(&board_data, &header_title)
         .unwrap_or_else(|| "Untitled".to_string());
@@ -236,36 +278,39 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     let author = board_data
         .display_nickname(header.header.author)
         .unwrap_or_else(|| short_id(header.header.author));
-    let closed = state.is_closed();
-    let deleted = state.is_deleted(header.header.id());
-    let pinned = state.is_pinned();
-    let announced = state.is_announced();
-    let hidden = state.is_hidden();
+    let closed = head.is_closed();
+    let deleted = head.is_deleted(header.header.id());
+    let pinned = head.is_pinned();
+    let announced = head.is_announced();
+    let hidden = head.is_hidden();
     let is_owner = board_data.is_current_owner();
     let now_ms = plaza_core::board_state::rate_limit::system_time_ms(
         crate::util::get_current_system_time(),
     );
-    let banned = state.is_banned_member(self_id, now_ms);
-    let suspended = state.is_suspended_member(self_id, now_ms);
-    let effective_section = state.effective_section();
+    let banned = head.is_banned_member(self_id, now_ms)
+        || state.is_banned_member(self_id, now_ms);
+    let suspended = head.is_suspended_member(self_id, now_ms)
+        || state.is_suspended_member(self_id, now_ms);
+    let effective_section = head.effective_section();
     let effective_section_id = effective_section.as_ref().map(|section| section.section);
     let scope_chain = effective_section
         .as_ref()
         .map(|section| section.chain.clone())
         .unwrap_or_default();
     let can_moderate = is_owner || board_data.can_moderate(&scope_chain);
-    let merged_into = state.merged_into();
+    let merged_into = head.merged_into();
     let topic_for_flags = topic_id_value;
     let owner_for_flags = board_data.owner_vk;
 
-    let mut posts: Vec<_> = state.posts.values().cloned().collect();
+    let mut posts: Vec<_> = state.posts().values().cloned().collect();
     posts.sort_by_key(|post| (post.post.created_at, *post.id().as_bytes()));
     let visible_posts: Vec<_> = posts
         .into_iter()
         .filter(|post| !state.is_deleted(post.id()))
         .filter(|post| !state.is_split(post.id()))
         .filter(|post| {
-            state.post_is_visible(post)
+            let head_trusted = head.is_trusted(post.post.author);
+            state.post_is_visible(post, head_trusted)
                 || post.post.author == self_id
                 || is_owner
         })
@@ -384,20 +429,37 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                     p { class: "mt-2 text-[11px] text-text-muted",
                         "Part {part + 1}. Earlier posts are in the previous parts."
                     }
-                    button {
-                        r#type: "button",
-                        class: "mt-1 text-xs text-accent hover:underline",
-                        onclick: move |_| {
-                            let owner = board_data.owner_vk;
-                            let previous = part.saturating_sub(1);
-                            spawn(async move {
-                                match topic_contract::load_topic(owner, topic_id_value, previous).await {
-                                    Ok(_) => earlier_part.set(Some(previous)),
-                                    Err(message) => error.set(Some(message)),
+                    {
+                        let next_earlier = (0..part)
+                            .rev()
+                            .find(|candidate| !earlier_parts.read().contains(candidate));
+                        if let Some(previous) = next_earlier {
+                            rsx! {
+                                button {
+                                    r#type: "button",
+                                    class: "mt-1 text-xs text-accent hover:underline",
+                                    onclick: move |_| {
+                                        let owner = board_data.owner_vk;
+                                        spawn(async move {
+                                            match topic_contract::load_topic(owner, topic_id_value, previous).await {
+                                                Ok(_) => {
+                                                    earlier_parts.with_mut(|parts| {
+                                                        if !parts.contains(&previous) {
+                                                            parts.push(previous);
+                                                            parts.sort_unstable();
+                                                        }
+                                                    });
+                                                }
+                                                Err(message) => error.set(Some(message)),
+                                            }
+                                        });
+                                    },
+                                    "Load earlier posts"
                                 }
-                            });
-                        },
-                        "Load earlier posts"
+                            }
+                        } else {
+                            rsx! {}
+                        }
                     }
                 }
                 if !body.trim().is_empty() {
@@ -469,9 +531,9 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                 }
                 {reaction_bar(
                     &board_data,
-                    &state,
+                    &head_part_state,
                     topic_id_value,
-                    part,
+                    0,
                     header.header.id(),
                     board_data.owner_vk,
                     self_id,
@@ -597,18 +659,27 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                 }
             }
 
-            if let Some(previous) = *earlier_part.read() {
+            for previous in earlier_parts.read().iter().copied().filter(|&p| p < part) {
                 if let Some(previous_state) =
                     topic_contract::topic_state(owner, topic_id_value, previous)
                 {
-                    div { class: "bg-surface border border-border rounded-xl p-4",
-                        h3 { class: "text-sm font-semibold text-text",
-                            "Part {previous + 1}"
+                    div {
+                        key: "earlier-part-{previous}",
+                        class: "bg-surface border border-border rounded-xl p-4",
+                        div { class: "flex items-center gap-2",
+                            h3 { class: "text-sm font-semibold text-text",
+                                "Part {previous + 1}"
+                            }
+                            if previous_state.is_sealed() {
+                                span { class: "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-panel border border-border text-text-muted",
+                                    "Sealed"
+                                }
+                            }
                         }
                         div { class: "mt-2 flex flex-col gap-2",
                             {
                                 let mut previous_posts: Vec<_> = previous_state
-                                    .posts
+                                    .posts()
                                     .values()
                                     .filter(|post| {
                                         !previous_state.is_deleted(post.id())
@@ -616,22 +687,28 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                                     })
                                     .cloned()
                                     .collect();
-                                previous_posts.sort_by_key(|post| post.post.created_at);
+                                previous_posts.sort_by_key(|post| (post.post.created_at, *post.id().as_bytes()));
                                 rsx! {
                                     for post in previous_posts {
                                         {
                                             let author = board_data
                                                 .display_nickname(post.post.author)
                                                 .unwrap_or_else(|| short_id(post.post.author));
-                                            let text = topic_contract::read_post_content(
+                                            let sealed_content = topic_contract::effective_post_content(
                                                 &board_data,
-                                                &post.post.content,
-                                            )
-                                            .and_then(|content| match content {
-                                                TopicPostContentV1::Text(text) => Some(text),
-                                                _ => None,
-                                            })
-                                            .unwrap_or_else(|| "[poll]".to_string());
+                                                &previous_state,
+                                                post.id(),
+                                            );
+                                            let text = sealed_content
+                                                .as_ref()
+                                                .and_then(|sealed| {
+                                                    topic_contract::read_post_content(&board_data, sealed)
+                                                })
+                                                .and_then(|content| match content {
+                                                    TopicPostContentV1::Text(text) => Some(text),
+                                                    _ => None,
+                                                })
+                                                .unwrap_or_else(|| "[poll]".to_string());
                                             rsx! {
                                                 div { class: "bg-panel border border-border rounded-lg px-3 py-2",
                                                     div { class: "flex items-center gap-2",
@@ -680,9 +757,10 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                             let has_poll = poll.is_some();
                             let can_delete = post_value.author == self_id || is_owner;
                             let can_edit = post_value.author == self_id || is_owner;
-                            let pending = !state.post_is_visible(&post);
+                            let pending = !state.post_is_visible(&post, head.is_trusted(post_value.author));
                             let author_banned =
-                                state.is_banned_member(post_value.author, now_ms);
+                                head.is_banned_member(post_value.author, now_ms)
+                                    || state.is_banned_member(post_value.author, now_ms);
                             let owner = board_for_reply.owner_vk;
                             let mut editing_post = editing_post;
                             let mut edit_reply = edit_reply;
@@ -1115,14 +1193,14 @@ fn format_time(ms: i64) -> String {
 
 fn reaction_bar(
     board: &crate::board_data::BoardData,
-    state: &plaza_topic_core::TopicStateV1,
+    state: &topic_contract::TopicPartState,
     topic_id: MessageId,
     part: u32,
     target: MessageId,
     owner: ed25519_dalek::VerifyingKey,
     self_id: plaza_core::board_state::member::MemberId,
 ) -> Element {
-    if !state.authority.policy().reactions_enabled {
+    if !state.authority().policy().reactions_enabled {
         return rsx! {};
     }
     let reactions = topic_contract::reactions_for(board, state, target);
@@ -1171,7 +1249,7 @@ fn reaction_bar(
 
 fn poll_block(
     board: &crate::board_data::BoardData,
-    state: &plaza_topic_core::TopicStateV1,
+    state: &topic_contract::TopicPartState,
     topic_id: MessageId,
     part: u32,
     poll_id: MessageId,

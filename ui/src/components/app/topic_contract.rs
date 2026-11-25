@@ -42,24 +42,200 @@ use plaza_core::board_state::topics::{
 };
 use plaza_core::board_state::{BoardModeV1, ChatBoardParametersV1, ChatBoardStateV1Delta};
 use plaza_topic_core::{
-    decode_state, encode, AuthorizedParticipantV1, AuthorizedSectionSnapshotV1,
-    AuthorizedTopicApprovalV1, AuthorizedTopicHeaderV1, AuthorizedTopicPolicyV1,
-    AuthorizedTrustV1, ParticipantCertificateV1, ParticipantRecordV1,
-    SectionSnapshotV1, TopicActionKind, TopicApprovalV1, TopicDeltaV1,
-    TopicEditV1, TopicHeaderV1, TopicParamsV1, TopicPolicyV1, TopicPostContentV1,
-    TopicStateV1, TrustV1, PostEditV1,
+    decode_page_state, decode_state, encode, AuthorizedParticipantV1, AuthorizedSectionSnapshotV1,
+    AuthorizedTopicApprovalV1, AuthorizedTopicHeaderV1, AuthorizedTopicPageHeaderV1,
+    AuthorizedTopicPageSealV1, AuthorizedTopicPolicyV1, AuthorizedTopicPostV1, AuthorizedTrustV1,
+    ParticipantCertificateV1, ParticipantRecordV1, PostEditV1, SectionSnapshotV1,
+    TopicActionKind, TopicApprovalV1, TopicAuthorityV1, TopicDeltaV1, TopicEditV1,
+    TopicHeaderV1, TopicPageDeltaV1, TopicPageHeaderV1, TopicPageStateV1, TopicParamsV1,
+    TopicPolicyV1, TopicPostContentV1, TopicStateV1, TrustV1, DEFAULT_TOPIC_PAGE_SIZE,
+    MAX_TOPIC_PAGE_BYTES,
 };
 use rand::rngs::OsRng;
-use sha2::{Digest, Sha256};
 use rand::RngCore;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+
+/// Cached state of one topic contract (`part == 0` head or `part > 0` compact
+/// append-only post page).
+#[derive(Clone, Debug)]
+pub enum TopicPartState {
+    Head(TopicStateV1),
+    Page(TopicPageStateV1),
+}
+
+impl TopicPartState {
+    pub fn empty_for_part(part: u32) -> Self {
+        if part == 0 {
+            Self::Head(TopicStateV1::default())
+        } else {
+            Self::Page(TopicPageStateV1::default())
+        }
+    }
+
+    pub fn as_head(&self) -> Option<&TopicStateV1> {
+        match self {
+            Self::Head(state) => Some(state),
+            Self::Page(_) => None,
+        }
+    }
+
+    pub fn as_page(&self) -> Option<&TopicPageStateV1> {
+        match self {
+            Self::Page(page) => Some(page),
+            Self::Head(_) => None,
+        }
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        match self {
+            Self::Head(state) => state.header.is_some(),
+            Self::Page(page) => page.header.is_some(),
+        }
+    }
+
+    pub fn is_sealed(&self) -> bool {
+        match self {
+            Self::Head(state) => state.is_posts_sealed(),
+            Self::Page(page) => page.is_sealed(),
+        }
+    }
+
+    pub fn is_closed_part(&self) -> bool {
+        match self {
+            Self::Head(state) => state.is_closed_part(),
+            Self::Page(page) => page.is_closed_part(),
+        }
+    }
+
+    pub fn posts(&self) -> &BTreeMap<MessageId, AuthorizedTopicPostV1> {
+        match self {
+            Self::Head(state) => &state.posts,
+            Self::Page(page) => &page.posts,
+        }
+    }
+
+    pub fn participants(&self) -> &[AuthorizedParticipantV1] {
+        match self {
+            Self::Head(state) => &state.participants,
+            Self::Page(page) => &page.participants,
+        }
+    }
+
+    pub fn approvals(&self) -> &[AuthorizedTopicApprovalV1] {
+        match self {
+            Self::Head(state) => &state.approvals,
+            Self::Page(page) => &page.approvals,
+        }
+    }
+
+    pub fn trust(&self) -> &[AuthorizedTrustV1] {
+        match self {
+            Self::Head(state) => &state.trust,
+            Self::Page(page) => &page.trust,
+        }
+    }
+
+    pub fn authority(&self) -> &TopicAuthorityV1 {
+        match self {
+            Self::Head(state) => &state.authority,
+            Self::Page(page) => &page.authority,
+        }
+    }
+
+    pub fn all_actions(&self) -> Vec<&plaza_topic_core::AuthorizedTopicActionV1> {
+        match self {
+            Self::Head(state) => state.actions.iter().collect(),
+            Self::Page(page) => page.all_actions().collect(),
+        }
+    }
+
+    pub fn latest_action(
+        &self,
+        target: MessageId,
+        kind: TopicActionKind,
+    ) -> Option<&plaza_topic_core::AuthorizedTopicActionV1> {
+        match self {
+            Self::Head(state) => state.latest_action(target, kind),
+            Self::Page(page) => page.latest_action(target, kind),
+        }
+    }
+
+    pub fn is_deleted(&self, target: MessageId) -> bool {
+        match self {
+            Self::Head(state) => state.is_deleted(target),
+            Self::Page(page) => page.is_deleted(target),
+        }
+    }
+
+    pub fn is_split(&self, post_id: MessageId) -> bool {
+        match self {
+            Self::Head(state) => state.is_split(post_id),
+            Self::Page(page) => page.is_split(post_id),
+        }
+    }
+
+    pub fn is_trusted(&self, member: MemberId) -> bool {
+        match self {
+            Self::Head(state) => state.is_trusted(member),
+            Self::Page(page) => page.is_trusted(member),
+        }
+    }
+
+    pub fn is_banned_member(&self, member: MemberId, at_ms: i64) -> bool {
+        match self {
+            Self::Head(state) => state.is_banned_member(member, at_ms),
+            Self::Page(page) => page.is_banned_member(member, at_ms),
+        }
+    }
+
+    pub fn is_suspended_member(&self, member: MemberId, at_ms: i64) -> bool {
+        match self {
+            Self::Head(state) => state.is_suspended_member(member, at_ms),
+            Self::Page(page) => page.is_suspended_member(member, at_ms),
+        }
+    }
+
+    pub fn post_is_visible(&self, post: &AuthorizedTopicPostV1, head_trusted: bool) -> bool {
+        match self {
+            Self::Head(state) => head_trusted && !state.is_deleted(post.id()) || state.post_is_visible(post),
+            Self::Page(page) => page.post_is_visible(post, head_trusted),
+        }
+    }
+
+    pub fn section_chain(&self) -> Vec<MessageId> {
+        match self {
+            Self::Head(state) => state
+                .effective_section()
+                .map(|section| section.chain)
+                .unwrap_or_default(),
+            Self::Page(page) => page
+                .header
+                .as_ref()
+                .map(|h| h.header.section_chain.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn section_id(&self) -> Option<MessageId> {
+        match self {
+            Self::Head(state) => state
+                .effective_section()
+                .map(|section| section.section)
+                .or_else(|| state.header.as_ref().and_then(|h| h.header.section)),
+            Self::Page(page) => page
+                .header
+                .as_ref()
+                .and_then(|h| h.header.section_chain.last().copied()),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct TopicConversation {
     pub key: ContractKey,
     pub params: TopicParamsV1,
-    pub state: TopicStateV1,
+    pub state: TopicPartState,
     pub synced: bool,
     /// Last time this topic was opened, used to bound the client cache.
     pub last_used: i64,
@@ -68,9 +244,9 @@ pub struct TopicConversation {
 pub static TOPIC_CACHE: GlobalSignal<HashMap<ContractInstanceId, TopicConversation>> =
     Global::new(HashMap::new);
 
-/// Keep the state of recently opened topics. The node subscription is not
-/// cancelled here; the client only drops the cached state.
-const MAX_CACHED_TOPICS: usize = 24;
+/// Keep the state of recently opened topics and their pages. The node
+/// subscription is not cancelled here; the client only drops the cached state.
+const MAX_CACHED_TOPICS: usize = 48;
 
 fn touch_topic(contract_id: ContractInstanceId) {
     let now = system_time_ms(get_current_system_time());
@@ -121,7 +297,11 @@ pub fn is_topic_contract_response(response: &ContractResponse) -> bool {
     }
 }
 
-pub fn topic_state(owner: VerifyingKey, topic_id: MessageId, part: u32) -> Option<TopicStateV1> {
+pub fn topic_state(
+    owner: VerifyingKey,
+    topic_id: MessageId,
+    part: u32,
+) -> Option<TopicPartState> {
     let key = topic_key_for(owner, topic_id, part);
     TOPIC_CACHE
         .read()
@@ -129,8 +309,16 @@ pub fn topic_state(owner: VerifyingKey, topic_id: MessageId, part: u32) -> Optio
         .map(|conversation| conversation.state.clone())
 }
 
-/// Ensure a topic is in the cache and fetch its state. Safe to call on every
-/// render; a loaded state is not fetched again.
+/// Convenience accessor for the topic head (`part == 0`).
+pub fn topic_head(owner: VerifyingKey, topic_id: MessageId) -> Option<TopicStateV1> {
+    topic_state(owner, topic_id, 0).and_then(|state| match state {
+        TopicPartState::Head(head) => Some(head),
+        TopicPartState::Page(_) => None,
+    })
+}
+
+/// Ensure a topic part is in the cache and fetch its state. Safe to call on
+/// every render; a loaded state is not fetched again.
 pub async fn load_topic(
     owner: VerifyingKey,
     topic_id: MessageId,
@@ -141,14 +329,14 @@ pub async fn load_topic(
     let already_loaded = TOPIC_CACHE
         .read()
         .get(&contract_id)
-        .map(|conversation| conversation.state.header.is_some())
+        .map(|conversation| conversation.state.is_loaded())
         .unwrap_or(false);
     if !already_loaded {
         TOPIC_CACHE.with_mut(|topics| {
             topics.entry(contract_id).or_insert_with(|| TopicConversation {
                 key,
                 params: TopicParamsV1::new(owner, *topic_id.as_bytes(), part),
-                state: TopicStateV1::default(),
+                state: TopicPartState::empty_for_part(part),
                 synced: false,
                 last_used: system_time_ms(get_current_system_time()),
             });
@@ -177,12 +365,14 @@ pub async fn fetch_topic(contract_id: ContractInstanceId) -> Result<(), String> 
     .await
 }
 
-
-
-
-/// Start the next part of a long topic. The new contract reuses the header,
-/// authority, participants, actions and trust, drops the old posts and records
-/// the hash of the closed part. The board index moves to the new part.
+/// Start the next append-only post page (`part + 1`) of a long topic.
+///
+/// The new contract uses compact `TopicPageStateV1` (small signed
+/// `TopicPageHeaderV1`, minimal authority/participants for the creator only,
+/// no duplicated 64 KiB body or historical participants). The previous page is
+/// closed to new posts and, when the current identity is the board owner,
+/// sealed with `AuthorizedTopicPageSealV1` so future verifications run in O(1)
+/// and old extra pages strip all duplicated authority records.
 pub async fn continue_topic(
     owner: VerifyingKey,
     topic_id: MessageId,
@@ -190,38 +380,139 @@ pub async fn continue_topic(
 ) -> Result<u32, String> {
     let board = board_for(owner)?;
     let conversation = conversation_for(owner, topic_id, part)?;
-    let header = conversation
-        .state
-        .header
-        .clone()
-        .ok_or("the topic is still loading")?;
-    if conversation.state.generation.closed_at.is_some() {
+    if !conversation.state.is_loaded() {
+        return Err("the topic is still loading".to_string());
+    }
+    if conversation.state.is_closed_part() {
         return Err("the topic part is already closed".to_string());
     }
     let next_part = part + 1;
     if next_part > plaza_topic_core::MAX_PARTS {
         return Err("the topic reached the maximum number of parts".to_string());
     }
-    let mut next_state = conversation.state.clone();
-    next_state.posts.clear();
-    next_state.approvals.clear();
-    let header_id = header.header.id();
-    next_state.header = Some(header);
-    next_state
-        .actions
-        .retain(|entry| entry.action.target == header_id);
-    next_state.generation = plaza_topic_core::TopicGenerationV1 {
+    let now = system_time_ms(get_current_system_time());
+    let is_owner = board.is_current_owner();
+    let signer_sk = if is_owner {
+        board.owner_key().clone()
+    } else {
+        board.self_sk.clone()
+    };
+    let creator = MemberId::from(&signer_sk.verifying_key());
+
+    let (
+        header_hash,
+        previous_hash,
+        topic_author,
+        auto_moderated,
+        section_chain,
+        allowed_roles,
+        images_allowed,
+        prev_previous_hash,
+    ) = match &conversation.state {
+        TopicPartState::Head(head) => {
+            let header = head
+                .header
+                .as_ref()
+                .ok_or("the topic is still loading")?;
+            let section = head.effective_section();
+            let chain = section
+                .as_ref()
+                .map(|s| s.chain.clone())
+                .unwrap_or_else(|| header.header.section_chain.clone());
+            let allowed_roles = section
+                .as_ref()
+                .map(|s| s.allowed_roles.clone())
+                .unwrap_or_default();
+            let images_allowed = section
+                .as_ref()
+                .map(|s| s.images_allowed)
+                .unwrap_or(true);
+            (
+                header.hash(),
+                head.state_hash()?,
+                header.header.author,
+                header.header.auto_moderated,
+                chain,
+                allowed_roles,
+                images_allowed,
+                head.generation.previous_hash,
+            )
+        }
+        TopicPartState::Page(page) => {
+            let page_header = page
+                .header
+                .as_ref()
+                .ok_or("the topic page is still loading")?;
+            // If the head (`part == 0`) is loaded, refresh section rules in case
+            // the topic was moved to another section since the previous page opened.
+            let (chain, allowed_roles, images_allowed) = topic_head(owner, topic_id)
+                .and_then(|head| head.effective_section())
+                .map(|section| (section.chain, section.allowed_roles, section.images_allowed))
+                .unwrap_or_else(|| {
+                    (
+                        page_header.header.section_chain.clone(),
+                        page_header.header.allowed_roles.clone(),
+                        page_header.header.images_allowed,
+                    )
+                });
+            (
+                page_header.header.header_hash,
+                page.state_hash()?,
+                page_header.header.topic_author,
+                page_header.header.auto_moderated,
+                chain,
+                allowed_roles,
+                images_allowed,
+                page.generation.previous_hash,
+            )
+        }
+    };
+
+    let page_header = TopicPageHeaderV1 {
+        topic_id: *topic_id.as_bytes(),
         part: next_part,
-        closed_at: None,
-        next_part: None,
-        previous_hash: Some(
-            Sha256::digest(encode(&conversation.state)?).into(),
-        ),
+        header_hash,
+        previous_hash,
+        topic_author,
+        auto_moderated,
+        section_chain: section_chain.clone(),
+        allowed_roles,
+        images_allowed,
+        max_posts: DEFAULT_TOPIC_PAGE_SIZE as u32,
+        creator,
+        created_at: now,
+    };
+    let mut participants = Vec::new();
+    let mut member_ids = HashSet::new();
+    if creator != board.current_owner_id() && creator != MemberId::from(&owner) {
+        let cert = participant_for(&board, creator)
+            .ok_or("the active identity is not a member of this board")?;
+        participants.push(cert);
+        member_ids.insert(creator);
+    }
+    let authority = authority_from_board(&board, is_owner, &member_ids)?;
+    let next_page = TopicPageStateV1 {
+        version: plaza_topic_core::PROTOCOL_VERSION,
+        header: Some(AuthorizedTopicPageHeaderV1::new(page_header, &signer_sk)),
+        authority,
+        participants,
+        trust: Vec::new(),
+        posts: BTreeMap::new(),
+        actions: Vec::new(),
+        approvals: Vec::new(),
+        generation: plaza_topic_core::TopicGenerationV1 {
+            part: next_part,
+            closed_at: None,
+            next_part: None,
+            previous_hash: Some(previous_hash),
+        },
+        seal: None,
+        post_seal_actions: Vec::new(),
     };
     let next_params = TopicParamsV1::new(owner, *topic_id.as_bytes(), next_part);
-    next_state
+    next_page
         .verify(&next_params)
-        .map_err(|error| format!("the new topic part does not verify: {error}"))?;
+        .map_err(|error| format!("the new topic page does not verify: {error}"))?;
     let key = topic_key_for(owner, topic_id, next_part);
     let contract_id = *key.id();
     TOPIC_CACHE.with_mut(|topics| {
@@ -230,9 +521,9 @@ pub async fn continue_topic(
             TopicConversation {
                 key,
                 params: next_params.clone(),
-                state: next_state.clone(),
+                state: TopicPartState::Page(next_page.clone()),
                 synced: false,
-                last_used: system_time_ms(get_current_system_time()),
+                last_used: now,
             },
         );
     });
@@ -243,28 +534,57 @@ pub async fn continue_topic(
     )));
     send_contract_request(ContractRequest::Put {
         contract,
-        state: WrappedState::new(to_cbor_vec(&next_state)),
+        state: WrappedState::new(to_cbor_vec(&next_page)),
         related_contracts: Default::default(),
         subscribe: true,
         blocking_subscribe: false,
     })
     .await?;
 
-    let now = system_time_ms(get_current_system_time());
     let closed = plaza_topic_core::TopicGenerationV1 {
         part,
         closed_at: Some(now),
         next_part: Some(next_part),
-        previous_hash: conversation.state.generation.previous_hash,
+        previous_hash: prev_previous_hash,
     };
-    publish_topic_delta(
-        *conversation.key.id(),
-        TopicDeltaV1 {
-            generation: Some(closed),
-            ..Default::default()
-        },
-    )
-    .await?;
+    match &conversation.state {
+        TopicPartState::Head(head) => {
+            let posts_seal = if is_owner {
+                head.build_posts_seal(&conversation.params, now)
+                    .ok()
+                    .map(|seal| AuthorizedTopicPageSealV1::new(seal, board.owner_key(), None))
+            } else {
+                None
+            };
+            publish_topic_delta(
+                *conversation.key.id(),
+                TopicDeltaV1 {
+                    generation: Some(closed),
+                    posts_seal,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
+        TopicPartState::Page(page) => {
+            let seal = if is_owner {
+                page.build_seal(&conversation.params, now)
+                    .ok()
+                    .map(|seal| AuthorizedTopicPageSealV1::new(seal, board.owner_key(), None))
+            } else {
+                None
+            };
+            publish_topic_page_delta(
+                *conversation.key.id(),
+                TopicPageDeltaV1 {
+                    generation: Some(closed),
+                    seal,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
+    }
 
     let index = crate::components::app::section_contract::merged_index(
         owner,
@@ -274,7 +594,6 @@ pub async fn continue_topic(
         .flag(&topic_id, TopicFlagKind::Part)
         .map(|flag| flag.generation)
         .unwrap_or(0);
-    let chain = conversation.state.effective_section().map(|section| section.chain).unwrap_or_default();
     let flag = TopicFlagV1 {
         topic_id,
         kind: TopicFlagKind::Part,
@@ -284,15 +603,15 @@ pub async fn continue_topic(
         section_chain: Vec::new(),
         destination_sections: Vec::new(),
         part: Some(next_part),
-        scope_chain: chain,
+        scope_chain: section_chain,
         generation: current_generation + 1,
         created_at: now,
     };
     let authorized_flag = AuthorizedTopicFlagV1 {
-        signature: plaza_core::util::sign_struct(&flag, &board.self_sk),
+        signature: plaza_core::util::sign_struct(&flag, &signer_sk),
         flag,
-        signer: Some(MemberId::from(&board.self_sk.verifying_key())),
-        signer_key: Some(board.self_sk.verifying_key()),
+        signer: Some(creator),
+        signer_key: Some(signer_sk.verifying_key()),
         authority: None,
     };
     let board_delta = ChatBoardStateV1Delta {
@@ -330,20 +649,23 @@ fn section_snapshot_from_board(
 }
 
 /// Move a topic to another section. The owner signs a Move action carrying the
-/// new section snapshot and a board `Section` flag for the index.
+/// new section snapshot on `part == 0` and a board `Section` flag for the index.
 pub async fn move_topic(
     owner: VerifyingKey,
     topic_id: MessageId,
-    part: u32,
+    _part: u32,
     section_id: MessageId,
 ) -> Result<(), String> {
     let board = board_for(owner)?;
     if !board.is_current_owner() {
         return Err("only the board owner can move a topic for now".to_string());
     }
-    let conversation = conversation_for(owner, topic_id, part)?;
-    let header = conversation
+    let conversation = conversation_for(owner, topic_id, 0)?;
+    let head = conversation
         .state
+        .as_head()
+        .ok_or("topic head is not loaded")?;
+    let header = head
         .header
         .as_ref()
         .ok_or("the topic is still loading")?;
@@ -352,8 +674,7 @@ pub async fn move_topic(
     let now = system_time_ms(get_current_system_time());
     let owner_key = board.owner_key();
     let signer = MemberId::from(&owner_key.verifying_key());
-    let generation = conversation
-        .state
+    let generation = head
         .latest_action(header.header.id(), TopicActionKind::Move)
         .map(|entry| entry.action.generation + 1)
         .unwrap_or(1);
@@ -424,11 +745,12 @@ pub async fn move_topic(
 }
 
 /// Merge a topic into another one as a link. Replies stay in the source
-/// contract; the index marks the source as merged.
+/// contract; the Merge action is recorded on `part == 0` and the index marks
+/// the source as merged.
 pub async fn merge_topic(
     owner: VerifyingKey,
     topic_id: MessageId,
-    part: u32,
+    _part: u32,
     destination: MessageId,
 ) -> Result<(), String> {
     let board = board_for(owner)?;
@@ -463,17 +785,19 @@ pub async fn merge_topic(
     } else {
         (None, Vec::new())
     };
-    let conversation = conversation_for(owner, topic_id, part)?;
-    let header = conversation
+    let conversation = conversation_for(owner, topic_id, 0)?;
+    let head = conversation
         .state
+        .as_head()
+        .ok_or("topic head is not loaded")?;
+    let header = head
         .header
         .as_ref()
         .ok_or("the topic is still loading")?;
     let now = system_time_ms(get_current_system_time());
     let owner_key = board.owner_key();
     let signer = MemberId::from(&owner_key.verifying_key());
-    let generation = conversation
-        .state
+    let generation = head
         .latest_action(header.header.id(), TopicActionKind::Merge)
         .map(|entry| entry.action.generation + 1)
         .unwrap_or(1);
@@ -559,7 +883,7 @@ pub async fn split_reply(
     let conversation = conversation_for(owner, topic_id, part)?;
     let post = conversation
         .state
-        .posts
+        .posts()
         .get(&reply_id)
         .ok_or("the reply is not in this topic")?;
     let body = match read_post_content(&board, &post.post.content) {
@@ -592,14 +916,7 @@ pub async fn split_reply(
         signer_key: Some(owner_key.verifying_key()),
         authority: None,
     };
-    publish_topic_delta(
-        *conversation.key.id(),
-        TopicDeltaV1 {
-            actions: vec![authorized],
-            ..Default::default()
-        },
-    )
-    .await?;
+    publish_part_action(&conversation, authorized).await?;
     Ok(new_topic)
 }
 
@@ -1064,31 +1381,44 @@ pub async fn sync_topic_authority(
 ) -> Result<bool, String> {
     let board = board_for(owner)?;
     let conversation = conversation_for(owner, topic_id, part)?;
-    if conversation.state.header.is_none() {
+    if !conversation.state.is_loaded() {
         return Ok(false);
     }
-    let mut member_ids = HashSet::new();
-    if let Some(header) = &conversation.state.header {
-        member_ids.insert(header.header.author);
+    // Sealed extra pages have stripped authority and never need authority syncs.
+    if let TopicPartState::Page(page) = &conversation.state {
+        if page.is_sealed() {
+            return Ok(false);
+        }
     }
-    for participant in &conversation.state.participants {
+    let mut member_ids = HashSet::new();
+    match &conversation.state {
+        TopicPartState::Head(head) => {
+            if let Some(header) = &head.header {
+                member_ids.insert(header.header.author);
+            }
+        }
+        TopicPartState::Page(page) => {
+            if let Some(header) = &page.header {
+                member_ids.insert(header.header.creator);
+            }
+        }
+    }
+    for participant in conversation.state.participants() {
         member_ids.insert(participant.record.member_id);
     }
-    for action in &conversation.state.actions {
+    for action in conversation.state.all_actions() {
         member_ids.insert(action.action.signer);
     }
-    for approval in &conversation.state.approvals {
+    for approval in conversation.state.approvals() {
         member_ids.insert(approval.approval.signed_by);
     }
-    for trust in &conversation.state.trust {
+    for trust in conversation.state.trust() {
         member_ids.insert(trust.trust.signed_by);
     }
     let generated =
         authority_from_board(&board, board.is_current_owner(), &member_ids)?;
-    let same_root = match (
-        &conversation.state.authority.root,
-        &generated.root,
-    ) {
+    let current_authority = conversation.state.authority();
+    let same_root = match (&current_authority.root, &generated.root) {
         (Some(current), Some(next)) => {
             current.root.content_hash == next.root.content_hash
                 && current.root.digest == next.root.digest
@@ -1096,26 +1426,66 @@ pub async fn sync_topic_authority(
         (None, None) => true,
         _ => false,
     };
-    let same_proofs =
-        conversation.state.authority.member_proofs == generated.member_proofs;
+    let same_proofs = current_authority.member_proofs == generated.member_proofs;
     if same_root && same_proofs {
         return Ok(false);
     }
-    publish_topic_delta(
-        *conversation.key.id(),
-        TopicDeltaV1 {
-            authority: Some(generated),
-            ..Default::default()
-        },
-    )
-    .await?;
+    match &conversation.state {
+        TopicPartState::Head(_) => {
+            publish_topic_delta(
+                *conversation.key.id(),
+                TopicDeltaV1 {
+                    authority: Some(generated),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
+        TopicPartState::Page(_) => {
+            publish_topic_page_delta(
+                *conversation.key.id(),
+                TopicPageDeltaV1 {
+                    authority: Some(generated),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
+    }
     Ok(true)
 }
 
+async fn ensure_topic_part_loaded_for_sync(
+    owner: VerifyingKey,
+    topic_id: MessageId,
+    part: u32,
+) {
+    let key = topic_key_for(owner, topic_id, part);
+    let loaded = TOPIC_CACHE
+        .read()
+        .get(key.id())
+        .map(|conversation| conversation.state.is_loaded())
+        .unwrap_or(false);
+    if !loaded {
+        let _ = load_topic(owner, topic_id, part).await;
+        for _ in 0..30 {
+            let ready = TOPIC_CACHE
+                .read()
+                .get(key.id())
+                .map(|conversation| conversation.state.is_loaded())
+                .unwrap_or(false);
+            if ready {
+                break;
+            }
+            crate::util::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+}
+
 /// Push bans, suspensions, roles, admins, ownership and the policy to every
-/// topic in the board index. Each topic gets the authority root and the proofs
-/// for its own participants/moderators, so the payload does not grow with the
-/// board. The pass is not capped at a fixed number of topics.
+/// topic in the board index. Each topic head (`part == 0`) and open active
+/// page (`part > 0`) receives the authority root and the proofs for its own
+/// participants/moderators; sealed historical pages are never touched.
 pub async fn propagate_authority(owner: VerifyingKey) -> Result<(), String> {
     let board = board_for(owner)?;
     if !board.board_state.mode.is_topic_index() {
@@ -1146,32 +1516,24 @@ pub async fn propagate_authority(owner: VerifyingKey) -> Result<(), String> {
         .map(|entry| (entry.entry.topic_id, index.part_of(&entry.entry.topic_id)))
         .collect();
     for (position, (topic_id, part)) in topics.into_iter().enumerate() {
-        let key = topic_key_for(owner, topic_id, part);
-        let loaded = TOPIC_CACHE
-            .read()
-            .get(key.id())
-            .map(|conversation| conversation.state.header.is_some())
-            .unwrap_or(false);
-        if !loaded {
-            let _ = load_topic(owner, topic_id, part).await;
-            for _ in 0..30 {
-                let ready = TOPIC_CACHE
-                    .read()
-                    .get(key.id())
-                    .map(|conversation| conversation.state.header.is_some())
-                    .unwrap_or(false);
-                if ready {
-                    break;
-                }
-                crate::util::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
-        if let Err(error) = sync_topic_authority(owner, topic_id, part).await {
+        ensure_topic_part_loaded_for_sync(owner, topic_id, 0).await;
+        if let Err(error) = sync_topic_authority(owner, topic_id, 0).await {
             dioxus::logger::tracing::warn!(
-                "authority propagation failed for topic {}: {}",
+                "authority propagation failed for topic {} head: {}",
                 topic_id,
                 error
             );
+        }
+        if part > 0 {
+            ensure_topic_part_loaded_for_sync(owner, topic_id, part).await;
+            if let Err(error) = sync_topic_authority(owner, topic_id, part).await {
+                dioxus::logger::tracing::warn!(
+                    "authority propagation failed for topic {} part {}: {}",
+                    topic_id,
+                    part,
+                    error
+                );
+            }
         }
         if position % 50 == 49 {
             crate::util::sleep(std::time::Duration::from_millis(10)).await;
@@ -1222,7 +1584,7 @@ pub async fn create_topic(
             TopicConversation {
                 key: prepared.key,
                 params: prepared.params.clone(),
-                state: prepared.state.clone(),
+                state: TopicPartState::Head(prepared.state.clone()),
                 synced: false,
                 last_used: system_time_ms(get_current_system_time()),
             },
@@ -1300,10 +1662,22 @@ async fn ensure_part_for_new_post(
     part: u32,
 ) -> Result<u32, String> {
     let conversation = conversation_for(owner, topic_id, part)?;
-    let full = conversation.state.posts.len() >= plaza_topic_core::MAX_POSTS
-        || encode(&conversation.state)
-            .map(|bytes| bytes.len() >= plaza_topic_core::MAX_TOPIC_STATE_BYTES * 7 / 8)
-            .unwrap_or(false);
+    let full = match &conversation.state {
+        TopicPartState::Head(head) => {
+            head.is_closed_part()
+                || head.posts.len() >= DEFAULT_TOPIC_PAGE_SIZE
+                || encode(head)
+                    .map(|bytes| bytes.len() >= plaza_topic_core::MAX_TOPIC_STATE_BYTES * 7 / 8)
+                    .unwrap_or(false)
+        }
+        TopicPartState::Page(page) => {
+            page.is_closed_part()
+                || page.is_full()
+                || encode(page)
+                    .map(|bytes| bytes.len() >= MAX_TOPIC_PAGE_BYTES * 7 / 8)
+                    .unwrap_or(false)
+        }
+    };
     if full {
         continue_topic(owner, topic_id, part).await
     } else {
@@ -1374,7 +1748,10 @@ async fn publish_prepared_reply(
     prepared: PreparedReply,
 ) -> Result<(), String> {
     let contract_id = prepared.contract_id;
-    publish_topic_delta(contract_id, prepared.topic_delta).await?;
+    match prepared.delta {
+        PreparedReplyDelta::Head(delta) => publish_topic_delta(contract_id, delta).await?,
+        PreparedReplyDelta::Page(delta) => publish_topic_page_delta(contract_id, delta).await?,
+    }
     if let Some(activity) = prepared.activity {
         if let Err(error) = crate::components::app::activity_contract::record_activity(
             owner,
@@ -1422,20 +1799,15 @@ pub async fn delete_post(
         signer_key: Some(board.self_sk.verifying_key()),
         authority: None,
     };
-    let delta = TopicDeltaV1 {
-        actions: vec![authorized],
-        ..Default::default()
-    };
-    publish_topic_delta(conversation.key.id().clone(), delta).await
+    publish_part_action(&conversation, authorized).await
 }
 
-/// Set one moderation flag on a topic. The owner signs both the topic action
-/// and the board index flag; member moderators get their authority proof in a
-/// later slice.
+/// Set one moderation flag on a topic. Topic-level flags always live on
+/// `part == 0` (the topic head) and in the board/section manifest.
 pub async fn set_flag(
     owner: VerifyingKey,
     topic_id: MessageId,
-    part: u32,
+    _part: u32,
     kind: TopicFlagKind,
     value: bool,
 ) -> Result<(), String> {
@@ -1443,9 +1815,12 @@ pub async fn set_flag(
     if !board.is_current_owner() {
         return Err("only the board owner can change this flag for now".to_string());
     }
-    let conversation = conversation_for(owner, topic_id, part)?;
-    let header = conversation
+    let conversation = conversation_for(owner, topic_id, 0)?;
+    let head = conversation
         .state
+        .as_head()
+        .ok_or("topic head is not loaded")?;
+    let header = head
         .header
         .as_ref()
         .ok_or("the topic is still loading")?;
@@ -1472,8 +1847,7 @@ pub async fn set_flag(
     let now = system_time_ms(get_current_system_time());
     let owner_key = board.owner_key();
     let signer = MemberId::from(&owner_key.verifying_key());
-    let generation = conversation
-        .state
+    let generation = head
         .latest_action(target, action_kind)
         .map(|entry| entry.action.generation + 1)
         .unwrap_or(1);
@@ -1497,8 +1871,7 @@ pub async fn set_flag(
     };
     publish_topic_delta(*conversation.key.id(), delta).await?;
 
-    let chain = conversation
-        .state
+    let chain = head
         .section
         .as_ref()
         .map(|section| section.snapshot.chain.clone())
@@ -1736,11 +2109,16 @@ async fn prepare_topic(
     })
 }
 
+enum PreparedReplyDelta {
+    Head(TopicDeltaV1),
+    Page(TopicPageDeltaV1),
+}
+
 struct PreparedReply {
     contract_id: ContractInstanceId,
     topic_id: MessageId,
     part: u32,
-    topic_delta: TopicDeltaV1,
+    delta: PreparedReplyDelta,
     activity: Option<AuthorizedTopicActivityV1>,
 }
 
@@ -1752,7 +2130,7 @@ fn prepare_reply(
 ) -> Result<PreparedReply, String> {
     let board = board_for(owner)?;
     let conversation = conversation_for(owner, topic_id, part)?;
-    if conversation.state.header.is_none() {
+    if !conversation.state.is_loaded() {
         return Err("the topic is still loading".to_string());
     }
     match &content {
@@ -1783,11 +2161,11 @@ fn prepare_reply(
     let mut participants = Vec::new();
     if !conversation
         .state
-        .participants
+        .participants()
         .iter()
         .any(|entry| entry.record.member_id == author)
     {
-        if author == board.current_owner_id() {
+        if author == board.current_owner_id() || author == MemberId::from(&owner) {
             // The owner is implicit and never appears in the participant list.
         } else if let Some(participant) = participant_for(&board, author) {
             participants.push(participant);
@@ -1795,15 +2173,42 @@ fn prepare_reply(
             return Err("the active identity is not a member of this board".to_string());
         }
     }
-    let topic_delta = TopicDeltaV1 {
-        posts: vec![authorized],
-        participants,
-        ..Default::default()
+    let delta = match &conversation.state {
+        TopicPartState::Head(_) => PreparedReplyDelta::Head(TopicDeltaV1 {
+            posts: vec![authorized],
+            participants,
+            ..Default::default()
+        }),
+        TopicPartState::Page(page) => {
+            // If the page uses an authority root and the replying author does
+            // not yet have a proof on this page, attach an updated proof set
+            // so section ACL / ban checks have the author's status.
+            let authority = if !participants.is_empty() && page.authority.root.is_some() {
+                let mut member_ids: HashSet<MemberId> = page
+                    .participants
+                    .iter()
+                    .map(|p| p.record.member_id)
+                    .collect();
+                member_ids.insert(author);
+                authority_from_board(&board, board.is_current_owner(), &member_ids).ok()
+            } else {
+                None
+            };
+            PreparedReplyDelta::Page(TopicPageDeltaV1 {
+                posts: vec![authorized],
+                participants,
+                authority,
+                ..Default::default()
+            })
+        }
     };
 
     // Activity hint for the board list. If the board update fails the reply is
     // still valid; the next successful one refreshes the count.
     let contract_id = *conversation.key.id();
+    let head_trusted = topic_head(owner, topic_id)
+        .map(|head| head.is_trusted(author))
+        .unwrap_or(false);
     let activity_index = board.clone().with_merged_topics().board_state.topics;
     let activity = activity_index.entry(&topic_id).map(|_| {
         let current = activity_index
@@ -1822,8 +2227,9 @@ fn prepare_reply(
                     .as_ref()
                     .map(|activity| activity.pending_approvals)
                     .unwrap_or(0);
-                let policy = conversation.state.authority.policy();
+                let policy = conversation.state.authority().policy();
                 if policy.approval_required
+                    && !head_trusted
                     && !conversation.state.is_trusted(author)
                 {
                     current_pending + 1
@@ -1848,7 +2254,7 @@ fn prepare_reply(
         contract_id,
         topic_id,
         part,
-        topic_delta,
+        delta,
         activity,
     })
 }
@@ -2012,19 +2418,10 @@ fn section_for_topic(owner: VerifyingKey, topic_id: MessageId) -> Option<(Messag
         .read()
         .values()
         .find(|conversation| {
-            conversation
-                .state
-                .header
-                .as_ref()
-                .is_some_and(|header| header.header.id() == topic_id)
+            conversation.params.topic_id == *topic_id.as_bytes()
+                && conversation.state.is_loaded()
         })
-        .and_then(|conversation| {
-            conversation
-                .state
-                .section
-                .as_ref()
-                .map(|section| (section.snapshot.section, 0))
-        })
+        .and_then(|conversation| conversation.state.section_id().map(|section| (section, 0)))
 }
 
 /// Extra index pages load on demand, so the page that holds a topic may not
@@ -2041,19 +2438,10 @@ async fn locate_section_page(
         .read()
         .values()
         .find(|conversation| {
-            conversation
-                .state
-                .header
-                .as_ref()
-                .is_some_and(|header| header.header.id() == topic_id)
+            conversation.params.topic_id == *topic_id.as_bytes()
+                && conversation.state.is_loaded()
         })
-        .and_then(|conversation| {
-            conversation
-                .state
-                .section
-                .as_ref()
-                .map(|section| section.snapshot.section)
-        });
+        .and_then(|conversation| conversation.state.section_id());
     if let Some(section) = section {
         let _ = crate::components::app::section_contract::load_all_section_pages(owner, section)
             .await;
@@ -2111,29 +2499,12 @@ fn apply_board_delta(owner: VerifyingKey, delta: ChatBoardStateV1Delta) -> Resul
     Ok(())
 }
 
-async fn publish_topic_delta(
+async fn send_topic_delta_bytes(
     contract_id: ContractInstanceId,
-    delta: TopicDeltaV1,
+    key: ContractKey,
+    next_state: TopicPartState,
+    bytes: Vec<u8>,
 ) -> Result<(), String> {
-    let (key, params, next_state, bytes) = {
-        let topics = TOPIC_CACHE.read();
-        let conversation = topics
-            .get(&contract_id)
-            .ok_or_else(|| "the topic is not loaded".to_string())?;
-        let mut next_state = conversation.state.clone();
-        next_state
-            .apply_delta(&conversation.params, &delta)
-            .map_err(|error| format!("apply topic delta: {error}"))?;
-        let bytes = encode(&delta).map_err(|error| format!("encode topic delta: {error}"))?;
-        (
-            conversation.key,
-            conversation.params.clone(),
-            next_state,
-            bytes,
-        )
-    };
-    let _ = params;
-
     TOPIC_CACHE.with_mut(|topics| {
         if let Some(conversation) = topics.get_mut(&contract_id) {
             conversation.state = next_state;
@@ -2165,6 +2536,84 @@ async fn publish_topic_delta(
             );
             // The delta is already applied locally; the outbox will retry it.
             Ok(())
+        }
+    }
+}
+
+async fn publish_topic_delta(
+    contract_id: ContractInstanceId,
+    delta: TopicDeltaV1,
+) -> Result<(), String> {
+    let (key, next_state, bytes) = {
+        let topics = TOPIC_CACHE.read();
+        let conversation = topics
+            .get(&contract_id)
+            .ok_or_else(|| "the topic is not loaded".to_string())?;
+        let mut next_head = conversation
+            .state
+            .as_head()
+            .ok_or_else(|| "expected topic head state for part 0 delta".to_string())?
+            .clone();
+        next_head
+            .apply_delta(&conversation.params, &delta)
+            .map_err(|error| format!("apply topic delta: {error}"))?;
+        let bytes = encode(&delta).map_err(|error| format!("encode topic delta: {error}"))?;
+        (conversation.key, TopicPartState::Head(next_head), bytes)
+    };
+    send_topic_delta_bytes(contract_id, key, next_state, bytes).await
+}
+
+async fn publish_topic_page_delta(
+    contract_id: ContractInstanceId,
+    delta: TopicPageDeltaV1,
+) -> Result<(), String> {
+    let (key, next_state, bytes) = {
+        let topics = TOPIC_CACHE.read();
+        let conversation = topics
+            .get(&contract_id)
+            .ok_or_else(|| "the topic page is not loaded".to_string())?;
+        let mut next_page = conversation
+            .state
+            .as_page()
+            .ok_or_else(|| "expected compact topic page state for part > 0 delta".to_string())?
+            .clone();
+        next_page
+            .apply_delta(&conversation.params, &delta)
+            .map_err(|error| format!("apply topic page delta: {error}"))?;
+        let bytes = encode(&delta).map_err(|error| format!("encode topic page delta: {error}"))?;
+        (conversation.key, TopicPartState::Page(next_page), bytes)
+    };
+    send_topic_delta_bytes(contract_id, key, next_state, bytes).await
+}
+
+async fn publish_part_action(
+    conversation: &TopicConversation,
+    action: plaza_topic_core::AuthorizedTopicActionV1,
+) -> Result<(), String> {
+    match &conversation.state {
+        TopicPartState::Head(_) => {
+            publish_topic_delta(
+                *conversation.key.id(),
+                TopicDeltaV1 {
+                    actions: vec![action],
+                    ..Default::default()
+                },
+            )
+            .await
+        }
+        TopicPartState::Page(page) => {
+            let delta = if page.is_sealed() {
+                TopicPageDeltaV1 {
+                    post_seal_actions: vec![action],
+                    ..Default::default()
+                }
+            } else {
+                TopicPageDeltaV1 {
+                    actions: vec![action],
+                    ..Default::default()
+                }
+            };
+            publish_topic_page_delta(*conversation.key.id(), delta).await
         }
     }
 }
@@ -2259,14 +2708,25 @@ fn mark_synced(key: &ContractKey) {
 pub async fn handle_contract_response(response: ContractResponse) -> Result<(), String> {
     match response {
         ContractResponse::GetResponse { key, state, .. } => {
-            if !is_known_topic(key.id()) {
-                return Ok(());
-            }
-            let state = decode_state(state.as_ref())
-                .map_err(|error| format!("decode topic state: {error}"))?;
+            let part = {
+                let topics = TOPIC_CACHE.read();
+                match topics.get(key.id()) {
+                    Some(conversation) => conversation.params.part,
+                    None => return Ok(()),
+                }
+            };
+            let decoded = if part == 0 {
+                let head = decode_state(state.as_ref())
+                    .map_err(|error| format!("decode topic state: {error}"))?;
+                TopicPartState::Head(head)
+            } else {
+                let page = decode_page_state(state.as_ref())
+                    .map_err(|error| format!("decode topic page state: {error}"))?;
+                TopicPartState::Page(page)
+            };
             TOPIC_CACHE.with_mut(|topics| {
                 if let Some(conversation) = topics.get_mut(key.id()) {
-                    conversation.state = state;
+                    conversation.state = decoded;
                     conversation.synced = true;
                     conversation.last_used = system_time_ms(get_current_system_time());
                 }
@@ -2323,11 +2783,11 @@ pub fn read_post_content(
 /// Latest reaction per member and emoji for one post or the topic header.
 pub fn reactions_for(
     board: &BoardData,
-    state: &TopicStateV1,
+    state: &TopicPartState,
     target: MessageId,
 ) -> BTreeMap<String, Vec<MemberId>> {
     let mut latest: BTreeMap<(MemberId, String), (u64, bool)> = BTreeMap::new();
-    for entry in state.actions.iter().filter(|entry| {
+    for entry in state.all_actions().into_iter().filter(|entry| {
         entry.action.target == target
             && matches!(
                 entry.action.kind,
@@ -2370,7 +2830,8 @@ pub async fn toggle_reaction(
     add: bool,
 ) -> Result<(), String> {
     let board = board_for(owner)?;
-    let conversation = conversation_for(owner, topic_id, part)?;
+    let target_part = if target == topic_id { 0 } else { part };
+    let conversation = conversation_for(owner, topic_id, target_part)?;
     if emoji.is_empty() || emoji.len() > 32 {
         return Err("the reaction is not valid".to_string());
     }
@@ -2378,8 +2839,8 @@ pub async fn toggle_reaction(
     let now = system_time_ms(get_current_system_time());
     let generation = conversation
         .state
-        .actions
-        .iter()
+        .all_actions()
+        .into_iter()
         .filter(|entry| {
             entry.action.target == target
                 && entry.action.signer == signer
@@ -2409,23 +2870,52 @@ pub async fn toggle_reaction(
         signer_key: Some(board.self_sk.verifying_key()),
         authority: None,
     };
-    publish_topic_delta(
-        *conversation.key.id(),
-        TopicDeltaV1 {
-            actions: vec![authorized],
-            ..Default::default()
-        },
-    )
-    .await
+    let mut participants = Vec::new();
+    if signer != board.current_owner_id()
+        && signer != MemberId::from(&owner)
+        && !conversation
+            .state
+            .participants()
+            .iter()
+            .any(|p| p.record.member_id == signer)
+    {
+        if let Some(cert) = participant_for(&board, signer) {
+            participants.push(cert);
+        }
+    }
+    match &conversation.state {
+        TopicPartState::Head(_) => {
+            publish_topic_delta(
+                *conversation.key.id(),
+                TopicDeltaV1 {
+                    participants,
+                    actions: vec![authorized],
+                    ..Default::default()
+                },
+            )
+            .await
+        }
+        TopicPartState::Page(_) => {
+            publish_topic_page_delta(
+                *conversation.key.id(),
+                TopicPageDeltaV1 {
+                    participants,
+                    actions: vec![authorized],
+                    ..Default::default()
+                },
+            )
+            .await
+        }
+    }
 }
 
 /// Counts per option, using the latest vote per member.
 pub fn poll_votes(
     board: &BoardData,
-    state: &TopicStateV1,
+    state: &TopicPartState,
     poll_id: MessageId,
 ) -> Vec<Vec<MemberId>> {
-    let Some(post) = state.posts.get(&poll_id) else {
+    let Some(post) = state.posts().get(&poll_id) else {
         return Vec::new();
     };
     let Some(TopicPostContentV1::Poll(poll)) =
@@ -2434,7 +2924,7 @@ pub fn poll_votes(
         return Vec::new();
     };
     let mut latest: BTreeMap<MemberId, (u64, PollVoteV1)> = BTreeMap::new();
-    for entry in state.actions.iter().filter(|entry| {
+    for entry in state.all_actions().into_iter().filter(|entry| {
         entry.action.target == poll_id && entry.action.kind == TopicActionKind::Vote
     }) {
         let Some(bytes) = open_action_payload(board, &entry.action.payload) else {
@@ -2480,7 +2970,7 @@ pub async fn vote(
     let conversation = conversation_for(owner, topic_id, part)?;
     let post = conversation
         .state
-        .posts
+        .posts()
         .get(&poll_id)
         .ok_or("the poll is not in this topic")?;
     let Some(TopicPostContentV1::Poll(poll)) =
@@ -2495,8 +2985,8 @@ pub async fn vote(
     let signer = MemberId::from(&board.self_sk.verifying_key());
     let generation = conversation
         .state
-        .actions
-        .iter()
+        .all_actions()
+        .into_iter()
         .filter(|entry| {
             entry.action.target == poll_id
                 && entry.action.kind == TopicActionKind::Vote
@@ -2527,14 +3017,43 @@ pub async fn vote(
         signer_key: Some(board.self_sk.verifying_key()),
         authority: None,
     };
-    publish_topic_delta(
-        *conversation.key.id(),
-        TopicDeltaV1 {
-            actions: vec![authorized],
-            ..Default::default()
-        },
-    )
-    .await
+    let mut participants = Vec::new();
+    if signer != board.current_owner_id()
+        && signer != MemberId::from(&owner)
+        && !conversation
+            .state
+            .participants()
+            .iter()
+            .any(|p| p.record.member_id == signer)
+    {
+        if let Some(cert) = participant_for(&board, signer) {
+            participants.push(cert);
+        }
+    }
+    match &conversation.state {
+        TopicPartState::Head(_) => {
+            publish_topic_delta(
+                *conversation.key.id(),
+                TopicDeltaV1 {
+                    participants,
+                    actions: vec![authorized],
+                    ..Default::default()
+                },
+            )
+            .await
+        }
+        TopicPartState::Page(_) => {
+            publish_topic_page_delta(
+                *conversation.key.id(),
+                TopicPageDeltaV1 {
+                    participants,
+                    actions: vec![authorized],
+                    ..Default::default()
+                },
+            )
+            .await
+        }
+    }
 }
 
 fn open_action_payload(board: &BoardData, payload: &SealedBytes) -> Option<Vec<u8>> {
@@ -2590,10 +3109,10 @@ pub fn effective_topic_content(
 
 pub fn effective_post_content(
     board: &BoardData,
-    state: &TopicStateV1,
+    state: &TopicPartState,
     post_id: MessageId,
 ) -> Option<SealedBytes> {
-    let post = state.posts.get(&post_id)?;
+    let post = state.posts().get(&post_id)?;
     let Some(action) = state.latest_action(post_id, TopicActionKind::Edit) else {
         return Some(post.post.content.clone());
     };
@@ -2606,20 +3125,22 @@ pub fn effective_post_content(
     }
 }
 
-/// Edit the topic title and body. Only the topic author updates the board
-/// index entry; a moderator edit changes the topic contract but leaves the
-/// author-signed list metadata alone.
+/// Edit the topic title and body. Topic-level edits always target `part == 0`
+/// (the topic head). Only the topic author updates the board index entry.
 pub async fn edit_topic(
     owner: VerifyingKey,
     topic_id: MessageId,
-    part: u32,
+    _part: u32,
     title: String,
     body: String,
 ) -> Result<(), String> {
     let board = board_for(owner)?;
-    let conversation = conversation_for(owner, topic_id, part)?;
-    let header = conversation
+    let conversation = conversation_for(owner, topic_id, 0)?;
+    let head = conversation
         .state
+        .as_head()
+        .ok_or("topic head is not loaded")?;
+    let header = head
         .header
         .as_ref()
         .ok_or("the topic is still loading")?;
@@ -2636,8 +3157,7 @@ pub async fn edit_topic(
         body: seal_text(&board, &body)?,
     };
     let payload = seal_action_payload(&board, &encode(&edit)?)?;
-    let generation = conversation
-        .state
+    let generation = head
         .latest_action(header.header.id(), TopicActionKind::Edit)
         .map(|entry| entry.action.generation + 1)
         .unwrap_or(1);
@@ -2699,7 +3219,7 @@ pub async fn edit_post(
     let conversation = conversation_for(owner, topic_id, part)?;
     let post = conversation
         .state
-        .posts
+        .posts()
         .get(&post_id)
         .ok_or("the reply is not in this topic")?;
     let self_id = MemberId::from(&board.self_sk.verifying_key());
@@ -2735,14 +3255,7 @@ pub async fn edit_post(
         signer_key: Some(signer_sk.verifying_key()),
         authority: None,
     };
-    publish_topic_delta(
-        *conversation.key.id(),
-        TopicDeltaV1 {
-            actions: vec![authorized],
-            ..Default::default()
-        },
-    )
-    .await
+    publish_part_action(&conversation, authorized).await
 }
 
 
@@ -2782,8 +3295,9 @@ fn delete_authority(
     })
 }
 
-/// Approve or reject one pending reply. The owner signs the approval and, when
-/// approving, also trusts the author so later replies are visible immediately.
+/// Approve or reject one pending reply. The owner/moderator signs the approval
+/// and, when approving, also trusts the author so later replies are visible
+/// immediately.
 pub async fn approve_post(
     owner: VerifyingKey,
     topic_id: MessageId,
@@ -2793,16 +3307,11 @@ pub async fn approve_post(
 ) -> Result<(), String> {
     let board = board_for(owner)?;
     let conversation = conversation_for(owner, topic_id, part)?;
-    let header = conversation
-        .state
-        .header
-        .as_ref()
-        .ok_or("the topic is still loading")?;
-    let chain = conversation
-        .state
-        .effective_section()
-        .map(|section| section.chain)
-        .unwrap_or_default();
+    if !conversation.state.is_loaded() {
+        return Err("the topic is still loading".to_string());
+    }
+    let chain = conversation.state.section_chain();
+    let scope = conversation.state.section_id();
     let self_id = MemberId::from(&board.self_sk.verifying_key());
     let owner_id = board.current_owner_id();
     let (signer_sk, signer, authority) = if self_id != owner_id
@@ -2820,13 +3329,13 @@ pub async fn approve_post(
     };
     let post = conversation
         .state
-        .posts
+        .posts()
         .get(&post_id)
         .ok_or("the reply is not in this topic")?;
     let now = system_time_ms(get_current_system_time());
     let generation = conversation
         .state
-        .approvals
+        .approvals()
         .iter()
         .filter(|entry| entry.approval.target == post_id)
         .map(|entry| entry.approval.generation + 1)
@@ -2836,7 +3345,7 @@ pub async fn approve_post(
         target: post_id,
         approved,
         generation,
-        scope: header.header.section,
+        scope,
         signed_by: signer,
         created_at: now,
     };
@@ -2846,15 +3355,11 @@ pub async fn approve_post(
         signer_key: Some(signer_sk.verifying_key()),
         authority: authority.clone().map(Box::new),
     };
-    let mut delta = TopicDeltaV1 {
-        approvals: vec![authorized],
-        ..Default::default()
-    };
-    if approved {
+    let trust_record = if approved {
         let author = post.post.author;
         let trust_generation = conversation
             .state
-            .trust
+            .trust()
             .iter()
             .filter(|entry| entry.trust.member_id == author)
             .map(|entry| entry.trust.generation + 1)
@@ -2867,14 +3372,39 @@ pub async fn approve_post(
             signed_by: signer,
             created_at: now,
         };
-        delta.trust.push(AuthorizedTrustV1 {
+        Some(AuthorizedTrustV1 {
             signature: plaza_core::util::sign_struct(&trust, &signer_sk),
             trust,
             signer_key: Some(signer_sk.verifying_key()),
             authority: authority.clone().map(Box::new),
-        });
+        })
+    } else {
+        None
+    };
+    match &conversation.state {
+        TopicPartState::Head(_) => {
+            publish_topic_delta(
+                *conversation.key.id(),
+                TopicDeltaV1 {
+                    approvals: vec![authorized],
+                    trust: trust_record.into_iter().collect(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
+        TopicPartState::Page(_) => {
+            publish_topic_page_delta(
+                *conversation.key.id(),
+                TopicPageDeltaV1 {
+                    approvals: vec![authorized],
+                    trust: trust_record.into_iter().collect(),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
     }
-    publish_topic_delta(*conversation.key.id(), delta).await?;
 
     let index = board.clone().with_merged_topics().board_state.topics;
     if let Some(current) = index
