@@ -21,6 +21,15 @@ cargo test -p plaza-core --release --test topic_index scale_board_benchmark -- -
 | 100 | 37 KiB | 0.3 ms | 236 ms | 231 ms | 12.7 ms |
 | 200 | 73 KiB | 0.5 ms | 455 ms | 472 ms | 13.1 ms |
 
+Aggiornamento 2026-11-25 (pagine append-only per i topic, `scale_topic_pages_benchmark`, 200 post / 50 autori / body 4 KiB):
+
+| Layout | Dimensione | `verify` | Note |
+|---|---|---|---|
+| Monolitico 200 post (`TopicStateV1`, 50 autori) | 133,3 KiB | 665,9 ms | Broadcast per risposta: 133,3 KiB |
+| Pagina compatta aperta 50 post (`TopicPageStateV1`, 12 autori) | 31,6 KiB | 174,8 ms | Summary 4,9 KiB; 1-reply delta 0,45 KiB in 12,7 ms (4,2× meno broadcast) |
+| Pagina compatta sigillata 50 post (`AuthorizedTopicPageSealV1`) | 24,3 KiB | 13,1 ms | 0 partecipanti/autorità duplicati (~51× più veloce di 200 post monolitici) |
+| Totale 200 post su 4 pagine (3 sigillate + 1 aperta) | 104,4 KiB | — | -21,7% storage totale vs 133,3 KiB monolitico |
+
 ### Board (1.000 membri)
 
 | Topic | Flag | Report | Stato | Serializzazione | `verify` | `apply_delta` (1 activity) | `apply_topics_delta` |

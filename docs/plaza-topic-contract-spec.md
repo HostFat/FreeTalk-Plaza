@@ -396,7 +396,7 @@ AuthorizedTopicApprovalV1 {
   (stessa regola della board attuale, limitata al topic e alla sezione).
 - Il client mostra i post in attesa solo all'autore e ai moderatori.
 
-### 3.8 Generazione
+### 3.8 Generazione e pagine append-only (`part > 0`)
 
 ```rust
 TopicGenerationV1 {
@@ -407,15 +407,36 @@ TopicGenerationV1 {
 }
 ```
 
-- Quando il topic raggiunge `MAX_POSTS` o 7/8 di `MAX_TOPIC_STATE_BYTES`, il
-  client crea la parte `part + 1` con gli stessi header/partecipanti/autorità,
-  un record `previous_hash` e `next_part` nella parte precedente. La
-  continuation manuale usa lo stesso percorso. `previous_hash` è obbligatorio
-  per `part > 0` e vietato per `part == 0`.
-- L'indice della board aggiorna `part`; il client legge dalla parte corrente e
-  carica le precedenti su richiesta.
-- La coerenza tra le parti è verificata dal client; i contratti non si
-  vedono.
+- `part == 0` è la testa del topic (`TopicStateV1`): conserva `header` (titolo
+  e corpo fino a 64 KiB), `section`, l'autorità canonica, le azioni a livello
+  di topic (`Edit` header, `Pin`, `Close`, `Announce`, `Hide`, `Move`, `Merge`,
+  reaction sull'header), la prima pagina di post (`DEFAULT_TOPIC_PAGE_SIZE = 50`
+  prima della continuation automatica, cap rigido 200) e un `posts_seal`
+  opzionale (`AuthorizedTopicPageSealV1`) che congela i post di `part == 0`
+  saltando la ri-verifica delle firme dei post.
+- Quando una pagina raggiunge `DEFAULT_TOPIC_PAGE_SIZE` (50 post) o 7/8 del
+  budget di byte (oppure su continuation manuale), qualsiasi membro della board
+  può aprire la pagina successiva `part + 1` in formato compatto append-only
+  `TopicPageStateV1` (`MAX_TOPIC_PAGE_BYTES = 256 KiB`):
+  - porta un piccolo `AuthorizedTopicPageHeaderV1` (~220 byte con `header_hash`,
+    `previous_hash`, `topic_author`, `section_chain`, `allowed_roles`,
+    `images_allowed`, `max_posts`) invece di duplicare corpo da 64 KiB,
+    snapshot della sezione e partecipanti storici delle pagine precedenti;
+  - accetta solo post e azioni sui post della pagina (le azioni di topic
+    vanno sempre su `part == 0`), quindi una risposta scrive una sola pagina;
+  - quando l'owner (o un admin) chiude la pagina, la sigilla con
+    `AuthorizedTopicPageSealV1` (`content_digest` BLAKE3 su `(header, posts,
+    actions, approvals)`): `compact_for_seal()` rimuove `participants`,
+    `trust` e i campi pesanti di `authority` (lasciando solo `ownership` e
+    `admins`), riducendo la verifica a 1 firma + 1 digest (~13 ms per 50 post)
+    e bloccando nuovi post; eventuali edit/delete dell'autore o moderazione
+    owner/admin post-sigillo viaggiano in `post_seal_actions`.
+- `plaza-topic-contract` (revisione 2) instrada `part == 0` su `TopicStateV1`
+  e `part > 0` su `TopicPageStateV1` in `validate_state`, `update_state`,
+  `summarize_state` e `get_state_delta`.
+- L'indice della board aggiorna `part`; `TopicView` carica `part == 0` (testa)
+  e `part` attiva, e carica le pagine precedenti su richiesta (`Load earlier
+  posts`) in ordine cronologico.
 
 ## 4. Limiti
 
@@ -640,9 +661,9 @@ Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
   1 secondo e inviate alla rete al massimo una volta ogni 10 secondi per
   board. Le altre modifiche (topic, flag, report, permessi) sincronizzano
   subito.
-- `TOPIC_CACHE` tiene al massimo 24 topic, eliminando i più vecchi già
-  sincronizzati. La sottoscrizione sul nodo resta attiva: la stdlib attuale
-  non espone ancora un `Unsubscribe` nel client API.
+- `TOPIC_CACHE` tiene al massimo 48 contratti topic/pagine, eliminando i più
+  vecchi già sincronizzati. La sottoscrizione sul nodo resta attiva: la stdlib
+  attuale non espone ancora un `Unsubscribe` nel client API.
 - Se l'invio di un delta topic fallisce, il delta resta in una coda locale e
   viene ritentato ogni 20 secondi, fino a 5 volte. Lo stato locale è già
   applicato, quindi il post resta visibile; il retry è idempotente.

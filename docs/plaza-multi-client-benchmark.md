@@ -196,9 +196,20 @@ la board e le figlie non ricevono più l'activity.
    pagine 1,51 MiB vs 3,55 MiB) e permettendo comunque gli edit autore tramite
    `entry_edits`. Fixata anche la potatura su pagina 0 nei sync `admin`/
    `ownership`.
-8. Topic a pagine append-only; una risposta scrive una pagina.
-9. Compattare le sezioni nelle figlie (`O(sezioni^2)`) e le definizioni dei
-   ruoli.
+8. Topic a pagine append-only; una risposta scrive una pagina (fatto, topic
+   rev 2): `part == 0` resta la testa del topic (`TopicStateV1`: header,
+   sezione, autorità, azioni a livello di topic, prima fetta da 50 post con
+   `posts_seal` opzionale); le pagine `part > 0` usano `TopicPageStateV1`
+   compatto (piccolo `AuthorizedTopicPageHeaderV1`, solo i partecipanti della
+   pagina, cap 256 KiB, `DEFAULT_TOPIC_PAGE_SIZE = 50`, summary/delta
+   incrementali) e, quando vengono chiuse dall'owner/admin, vengono sigillate
+   con `AuthorizedTopicPageSealV1` azzerando partecipanti e autorità duplicata
+   (24,3 KiB sigillata, verifica 13,1 ms vs 133,3 KiB / 665,9 ms monolitica da
+   200 post; broadcast per risposta 31,6 KiB vs 133,3 KiB, 4,2× più piccolo;
+   4 pagine totali 104,4 KiB vs 133,3 KiB; edit/delete post-sigillo tramite
+   `post_seal_actions`).
+9. Compattare le definizioni dei ruoli nei topic (le sezioni nelle figlie sono
+   già potate con `SectionsV1::chain_only`).
 10. Aggiornamenti incrementali della sola radice per i topic, senza caricare
     ogni topic nella passata di propagazione.
 11. Subscription lazy con budget/TTL e `Unsubscribe` quando la stdlib lo
