@@ -195,25 +195,39 @@ della pagina non dipende più dal numero di sezioni sorelle.
 Board revision 31; board, section e topic ri-keyati; board e topic esistenti
 vanno ricreati.
 
-## Profili fuori dalla board
+## Profili fuori dalla board (shardati in 32 bucket) e feed incrementali
 
 I nickname occupavano circa il 45% dello stato di una board con 10.000 membri
-e ogni cambio riscriveva la board. Ora vivono in `plaza-profile-contract`, un
-contratto per board con massimo 10.000 record. Ogni record porta `MemberInfo`,
-la chiave del membro e la firma; il contratto verifica le entry del delta e la
-board non le vede più. Il client sovrappone i profili dei membri correnti alla
-board per la visualizzazione.
+e ogni cambio riscriveva la board. Ora vivono in `plaza-profile-contract`,
+shardato in **32 bucket deterministici** `ProfileShardParametersV1 { owner, bucket }`
+con `bucket = blake3(member_id)[0..2] % 32` (allineato a `plaza-member-contract`)
+e massimo `2.000` record per bucket (`4 KiB` per nickname). Ogni record porta
+`MemberInfo`, la chiave del membro e la firma; il contratto verifica il bucket
+e le sole entry del delta, e la board non le vede più.
 
-- Il join scrive il record del membro con il primo messaggio; il nickname va
-  al contratto profili. Il nickname dell'owner resta nel record iniziale.
-- La board con 10.000 membri senza nickname è 3.356 KiB; il feed profili è
-  3.163 KiB. Un nuovo nickname è un delta da 0,3 KiB e le scritture di
-  nickname sulla board sono zero.
-- Il feed viene caricato all'apertura della board; paginarlo è il passo
-  successivo per ridurre il bootstrap.
+- Il join scrive il record del membro nello shard membri e il nickname nello
+  shard profili corrispondente (creandolo on demand se assente). Il nickname
+  dell'owner resta nel record iniziale.
+- Caricamento pigro: all'apertura della board il client carica solo lo shard
+  profili del viewer (`GET`-only, mai `PUT` su bucket vuoti); `TopicIndexView`,
+  `TopicView`, `ProfileView` e `Conversation` caricano solo i bucket degli
+  autori visibili, mentre le viste directory/ricerca/moderazione/notifiche
+  caricano gli altri bucket on demand.
+- Delta incrementali nei feed per-board: `profile-contract`, `activity-contract`
+  e `moderation-contract` implementano `summarize_state` (`ProfileSummaryV1`,
+  `ActivitySummaryV1`, `ReportFeedSummaryV1`) e `get_state_delta` incrementali,
+  evitando la ritrasmissione dell'intero stato al sync tra peer e la ri-verifica
+  O(N) dell'intero stato in `update_state`.
+- Benchmark (10.000 membri): il feed monolitico era 3.163 KiB; uno shard
+  profili pesa 102,8 KiB (max 108,8 KiB, ~30× meno), con summary da 20,3 KiB e
+  delta di rename/sync da 0,32 KiB (~2,4 ms). In `activity-contract` il delta
+  di 1 entry è 0,42 KiB (summary 8,6 KiB vs stato 83,2 KiB); in
+  `moderation-contract` il delta è 0,34–0,42 KiB (summary 100,5 KiB vs stato
+  362,8 KiB).
 
-Board revision 33; board, section e topic ri-keyati, più il contratto profili;
-board e topic esistenti vanno ricreati.
+Board revision 34 invariata per board/section/topic/member/delegate; aggiornati
+solo `plaza_profile_contract.wasm`, `plaza_activity_contract.wasm` e
+`plaza_moderation_contract.wasm` (revisione interna 2).
 
 ## Problema
 

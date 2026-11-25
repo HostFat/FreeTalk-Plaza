@@ -25,7 +25,8 @@ use plaza_core::board_state::member_shards::{
 use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::privacy::SealedBytes;
 use plaza_core::board_state::profiles::{
-    ProfileDeltaV1, ProfileEntryV1, ProfileStateV1,
+    profile_shard_bucket, ProfileDeltaV1, ProfileEntryV1, ProfileShardParametersV1,
+    ProfileStateV1, PROFILE_SHARD_COUNT,
 };
 use plaza_core::board_state::report_feed::{
     ReportFeedDeltaV1, ReportFeedStateV1, MAX_REPORT_FEED,
@@ -416,7 +417,14 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
     let parent_kib = parent_size as f64 / 1024.0;
     let activity = activity_contract(members);
     let activity_kib = serialized_len_value(&activity) as f64 / 1024.0;
-    let activity_mib = activity_kib / 1024.0;
+    let activity_summary_kib = serialized_len_value(&activity.summarize()) as f64 / 1024.0;
+    let mut activity_minus_one = activity.clone();
+    activity_minus_one.entries.pop();
+    let activity_inc_delta = activity
+        .delta(&activity_minus_one.summarize())
+        .expect("activity incremental delta");
+    let activity_inc_delta_kib = serialized_len_value(&activity_inc_delta) as f64 / 1024.0;
+    let activity_inc_mib = activity_inc_delta_kib / 1024.0;
 
     println!("\n=== scenario ===");
     println!(
@@ -446,9 +454,11 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
         delta_ms, layout_ms
     );
     println!(
-        "activity contract: {:>7.1} KiB; fan-out {:.2} MiB per update ({MAX_ACTIVITY_ENTRIES} entries x {subscribers} subscribers)",
+        "activity contract: {:>7.1} KiB (summary {:.1} KiB); incremental 1-entry delta {:.2} KiB, fan-out {:.3} MiB ({MAX_ACTIVITY_ENTRIES} entries, {subscribers} subscribers)",
         activity_kib,
-        activity_mib * subscribers as f64
+        activity_summary_kib,
+        activity_inc_delta_kib,
+        activity_inc_mib * subscribers as f64
     );
     println!(
         "storage:  {:>7.1} MiB across {sections} pruned children (O(sections + referenced members))",
@@ -462,15 +472,24 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
     let new_topic_kib = serialized_len_value(&new_topic) as f64 / 1024.0;
     let moderation = moderation_feed();
     let moderation_kib = serialized_len_value(&moderation) as f64 / 1024.0;
+    let moderation_summary_kib = serialized_len_value(&moderation.summarize()) as f64 / 1024.0;
+    let mut moderation_minus_one = moderation.clone();
+    moderation_minus_one.resolutions.pop();
+    let moderation_inc_delta = moderation
+        .delta(&moderation_minus_one.summarize())
+        .expect("moderation incremental delta");
+    let moderation_inc_delta_kib = serialized_len_value(&moderation_inc_delta) as f64 / 1024.0;
     let moderation_delta = ReportFeedDeltaV1 {
         reports: vec![moderation.reports[0].clone()],
         resolutions: Vec::new(),
     };
     let moderation_delta_kib = serialized_len_value(&moderation_delta) as f64 / 1024.0;
     println!(
-        "moderation feed: {:>7.1} KiB (500 reports + 500 resolutions); new report delta {:.1} KiB, fan-out {:.2} MiB ({subscribers} subscribers)",
+        "moderation feed: {:>7.1} KiB (summary {:.1} KiB, 500 reports + 500 resolutions); new report delta {:.2} KiB, sync delta {:.2} KiB, fan-out {:.3} MiB ({subscribers} subscribers)",
         moderation_kib,
+        moderation_summary_kib,
         moderation_delta_kib,
+        moderation_inc_delta_kib,
         moderation_delta_kib / 1024.0 * subscribers as f64
     );
     println!(
@@ -639,10 +658,60 @@ fn membership_scenario(members: usize, sections: usize) {
     let profile_delta_kib = serialized_len_value(&profile_delta) as f64 / 1024.0;
     let board_without_nicknames = size - nickname_kib;
 
-    // Sharded member directory: distribute all `members` across
-    // `MEMBER_SHARD_COUNT` deterministic buckets and measure one bucket.
+    // Sharded profile directory: distribute all `members` across
+    // `PROFILE_SHARD_COUNT` deterministic buckets and measure one bucket.
     let owner_sk = owner();
     let owner_vk = owner_sk.verifying_key();
+    let mut profile_shards: Vec<ProfileStateV1> = (0..PROFILE_SHARD_COUNT)
+        .map(|_| ProfileStateV1::default())
+        .collect();
+    for entry in &profiles.entries {
+        let bucket = profile_shard_bucket(&entry.member_id()) as usize;
+        profile_shards[bucket].entries.push(entry.clone());
+    }
+    let profile_shard0_params = ProfileShardParametersV1 {
+        owner: owner_vk,
+        bucket: 0,
+    };
+    let profile_shard0_kib = serialized_len_value(&profile_shards[0]) as f64 / 1024.0;
+    let profile_shard0_summary_kib =
+        serialized_len_value(&profile_shards[0].summarize()) as f64 / 1024.0;
+    let max_profile_shard_kib = profile_shards
+        .iter()
+        .map(|s| serialized_len_value(s) as f64 / 1024.0)
+        .fold(0.0_f64, f64::max);
+    let start = Instant::now();
+    profile_shards[0]
+        .verify(&profile_shard0_params)
+        .expect("profile shard 0 verifies");
+    let profile_shard0_verify_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let rename_sk = member_key(0);
+    let rename_id = MemberId::from(&rename_sk.verifying_key());
+    let rename_bucket = profile_shard_bucket(&rename_id);
+    let rename_params = ProfileShardParametersV1 {
+        owner: owner_vk,
+        bucket: rename_bucket,
+    };
+    let rename_delta = ProfileDeltaV1 {
+        entries: vec![ProfileEntryV1::new(
+            MemberInfo::new_public(rename_id, 2, "Renamed".to_string()),
+            &rename_sk,
+        )],
+    };
+    let mut target_profile_shard = profile_shards[rename_bucket as usize].clone();
+    let before_summary = target_profile_shard.summarize();
+    let start = Instant::now();
+    target_profile_shard
+        .apply_delta(&rename_params, &rename_delta)
+        .expect("profile rename delta applies");
+    let profile_delta_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let profile_sync_delta = target_profile_shard
+        .delta(&before_summary)
+        .expect("incremental profile sync delta");
+    let profile_sync_delta_kib = serialized_len_value(&profile_sync_delta) as f64 / 1024.0;
+
+    // Sharded member directory: distribute all `members` across
+    // `MEMBER_SHARD_COUNT` deterministic buckets and measure one bucket.
     let mut shards: Vec<MemberShardStateV1> = (0..MEMBER_SHARD_COUNT)
         .map(|_| MemberShardStateV1::default())
         .collect();
@@ -703,7 +772,8 @@ fn membership_scenario(members: usize, sections: usize) {
          fast {fast_verify:>7.1} ms nickname delta {nickname_delta_ms:>6.1} ms"
     );
     println!(
-        "         profile feed {profile_kib:>7.1} KiB; new nickname delta {profile_delta_kib:>5.1} KiB; board nickname writes: 0"
+        "         profile shards ({PROFILE_SHARD_COUNT} buckets vs {profile_kib:.1} KiB monolithic): bucket0 {profile_shard0_kib:>6.1} KiB ({} profiles, summary {profile_shard0_summary_kib:>4.1} KiB, verify {profile_shard0_verify_ms:>6.1} ms), max bucket {max_profile_shard_kib:>6.1} KiB; rename delta {profile_delta_kib:>4.2} KiB ({profile_delta_ms:>4.2} ms), sync delta {profile_sync_delta_kib:>4.2} KiB; board nickname writes: 0",
+        profile_shards[0].entries.len()
     );
     println!(
         "         member shards ({MEMBER_SHARD_COUNT} buckets): bucket0 {shard0_kib:>6.1} KiB ({} members, verify {shard0_verify_ms:>6.1} ms), max bucket {max_shard_kib:>6.1} KiB; join delta {join_delta_kib:>4.2} KiB ({join_delta_ms:>4.2} ms)",

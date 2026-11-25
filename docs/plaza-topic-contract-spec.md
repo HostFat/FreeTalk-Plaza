@@ -555,8 +555,10 @@ Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
 - L'attività recente vive in `plaza-activity-contract`, un contratto per board
   (`{ owner }`). Lo stato `ActivityStateV1` tiene al massimo 200 entry; ogni
   entry ha `topic_id`, `part` e l'`AuthorizedTopicActivityV1` firmato. Il
-  client invia un `ActivityDeltaV1` a ogni risposta e il contratto fa upsert,
-  ordina per `last_activity` e taglia la finestra. La board e le figlie non
+  client invia un `ActivityDeltaV1` a ogni risposta e il contratto fa upsert
+  verificando solo i record del delta, ordina per `last_activity` e taglia la
+  finestra. `summarize_state` (`ActivitySummaryV1`) e `get_state_delta`
+  restituiscono solo le entry mancanti o più recenti. La board e le figlie non
   ricevono più l'activity.
 - `with_merged_topics` sovrappone le entry del contratto all'indice: per i
   topic nella finestra il conteggio, i pending e l'ordine sono aggiornati; i
@@ -589,16 +591,21 @@ Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
   sezioni sorelle.
 - Report e risoluzioni vivono in `plaza-moderation-contract`, un contratto per
   board con `ReportFeedStateV1` (500 report e 500 risoluzioni). Il contratto
-  verifica struttura, cap e firma delle risoluzioni; il client verifica la
-  firma del reporter e il potere di moderazione prima di mostrare un'entry.
-  L'indice non cambia quando si segnala; i report legacy restano come
-  fallback. Le approvazioni restano nel contratto del topic.
-- I nickname vivono in `plaza-profile-contract` (massimo 10.000 record, 4 KiB
-  per nickname). Ogni record porta la chiave del membro e la firma: il
-  contratto verifica solo le entry del delta, il client sovrappone alla board
-  i profili dei membri correnti. La board non riceve più il nickname; il join
-  scrive il record del membro con il primo messaggio e il profilo nel
-  contratto. Il nickname dell'owner resta nel record iniziale della board.
+  verifica struttura, cap e firma delle risoluzioni sui soli record in ingresso
+  ed espone `summarize_state` (`ReportFeedSummaryV1`) e `get_state_delta`
+  incrementali; il client verifica la firma del reporter e il potere di
+  moderazione prima di mostrare un'entry. L'indice non cambia quando si
+  segnala; i report legacy restano come fallback. Le approvazioni restano nel
+  contratto del topic.
+- I nickname vivono in `plaza-profile-contract`, shardato in 32 bucket
+  deterministici `ProfileShardParametersV1 { owner, bucket }` con `bucket =
+  blake3(member_id)[0..2] % 32` (massimo 2.000 record/bucket, 4 KiB per
+  nickname) e `summarize_state` (`ProfileSummaryV1`) / `get_state_delta`
+  incrementali. Ogni record porta la chiave del membro e la firma: il
+  contratto verifica bucket e sole entry del delta, il client carica in modo
+  pigro gli shard del viewer e degli autori visibili e sovrappone alla board i
+  profili dei membri correnti. La board non riceve più il nickname; il
+  nickname dell'owner resta nel record iniziale della board.
 
 ## 10. Client e UI
 

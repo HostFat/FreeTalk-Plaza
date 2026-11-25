@@ -28,10 +28,10 @@ copia l'autorita' della madre e aggiunge l'indice della propria sezione.
 | 20 | 345 KiB | 639 KiB | 3,46 s | 363 KiB | 1,71 s | 2,1 ms |
 | 100 | 380 KiB | 674 KiB | 3,61 s | 363 KiB | 1,67 s | 2,0 ms |
 
-| Sezioni | Storage figlie (pruned) | Activity contract | Fan-out activity (50 sub) | Authority sync |
-|---:|---:|---:|---:|---:|
-| 20 | 7,1 MiB | 83,2 KiB (200 entry) | 4,06 MiB per update | 7,1 MiB |
-| 100 | 35,4 MiB | 83,2 KiB (200 entry) | 4,06 MiB per update | 35,4 MiB |
+| Sezioni | Storage figlie (pruned) | Activity contract | Summary / 1-entry delta | Fan-out activity (50 sub) | Authority sync |
+|---:|---:|---:|---:|---:|---:|
+| 20 | 7,1 MiB | 83,2 KiB (200 entry) | 8,6 KiB / 0,42 KiB | 0,021 MiB (delta) / 4,06 MiB (full) | 7,1 MiB |
+| 100 | 35,4 MiB | 83,2 KiB (200 entry) | 8,6 KiB / 0,42 KiB | 0,021 MiB (delta) / 4,06 MiB (full) | 35,4 MiB |
 
 Le figlie ora tengono solo la propria catena di sezioni: la dimensione pruned è
 la stessa con 20 e con 100 sezioni sorelle (363 KiB), e lo storage cresce con
@@ -52,9 +52,13 @@ Moderazione, 500 report e 500 risoluzioni:
 | Unità | Dimensione | Fan-out (50 sub) |
 |---|---:|---:|
 | Feed completo (bootstrap) | 362,8 KiB | — |
-| Un nuovo report | 0,3 KiB | 0,02 MiB |
+| `ReportFeedSummaryV1` (sync peer) | 100,5 KiB | — |
+| Un nuovo report (delta) | 0,34 KiB | 0,017 MiB |
+| Una risoluzione (delta) | 0,42 KiB | 0,021 MiB |
 
-Le scritture di report sulla board o sulla pagina della sezione sono zero.
+Le scritture di report sulla board o sulla pagina della sezione sono zero, e la
+sincronizzazione peer-to-peer usa summary/delta incrementali invece di
+ritrasmettere l'intero feed.
 
 Membri della board con nickname (10 sezioni, nessun topic):
 
@@ -69,10 +73,20 @@ Senza nickname la board da 10.000 membri è 3.356 KiB: i nickname sono circa il
 un cambio di nickname verifica solo il record del delta: il percorso caldo
 passa da 20 s a 6 ms.
 
-I profili sono ora in un contratto separato: con 10.000 record il feed è
-3.163 KiB e un nuovo nickname è un delta da 0,3 KiB, con zero scritture sulla
-board. Paginare i profili (e introdurre summary/delta incrementali in
-`profile-contract`) è il prossimo passo per il bootstrap dei nomi.
+I profili sono ora shardati in 32 bucket deterministici (`plaza-profile-contract`,
+`bucket = blake3(member_id)[0..2] % 32`, stesso bucket di `plaza-member-contract`)
+con `ProfileSummaryV1` e `get_state_delta` incrementale:
+
+| Membri | Profili monolitico | Bucket 0 | Max bucket | Summary b0 | Verify b0 | Rename/sync delta |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1.000 | 314,3 KiB | 10,3 KiB (33 p.) | 13,5 KiB | 2,1 KiB | 67,3 ms | 0,32 KiB (2,0 ms) |
+| 5.000 | 1.580,8 KiB | 55,3 KiB (175 p.) | 55,3 KiB | 10,9 KiB | 399,3 ms | 0,32 KiB (2,6 ms) |
+| 10.000 | 3.163,0 KiB | 102,8 KiB (325 p.) | 108,8 KiB | 20,3 KiB | 714,5 ms | 0,32 KiB (2,4–2,5 ms) |
+
+A 10.000 membri ciascun bucket profili è ~30× più piccolo del feed monolitico;
+al bootstrap il client scarica solo il proprio bucket (`GET`-only) e i bucket
+degli autori visibili vengono caricati pigro per vista, mentre il sync tra peer
+invia solo i record nuovi/aggiornati (0,32 KiB per un rename).
 
 I membri sono ora shardati in 32 bucket deterministici (`plaza-member-contract`,
 `bucket = blake3(member_id)[0..2] % 32`):
@@ -99,10 +113,12 @@ la board e le figlie non ricevono più l'activity.
 
 ## Cosa dicono i numeri
 
-1. **L'activity e' fuori dalla figlia.** Una risposta scrive il topic e un
-   piccolo contratto activity per board (83,2 KiB con 200 entry, 4,06 MiB di
-   fan-out con 50 subscriber). La board non riceve piu' l'activity. Il fast
-   path del contratto section resta per gli altri delta.
+1. **L'activity e' fuori dalla figlia e sincronizza per delta.** Una risposta
+   scrive il topic e il contratto activity per board (83,2 KiB con 200 entry;
+   `ActivitySummaryV1` 8,6 KiB; sync delta di 1 entry 0,42 KiB, cioè 0,021 MiB
+   di fan-out con 50 subscriber invece di 4,06 MiB di stato pieno). La board
+   non riceve piu' l'activity. Il fast path del contratto section resta per
+   gli altri delta.
 2. **La verifica completa resta il costo di ingresso.** Un nuovo subscriber,
    un `UpdateData::State` o un merge versionato pagano 1,7 s per figlia con
    1.000 membri e 200 topic, dopo il pruning e la catena di sezioni.
@@ -154,17 +170,22 @@ la board e le figlie non ricevono più l'activity.
 5. Membri shardati in 32 bucket deterministici (fatto): `plaza-member-contract`,
    111,4 KiB/bucket (max 118,0 KiB) a 10.000 membri (~30× meno della board
    monolitica), join delta 0,35 KiB (~3 ms), zero dipendenza dall'owner online.
-6. Paginare i profili (3,2 MiB a 10.000 nickname) e introdurre summary/delta
-   incrementali in `profile-contract`.
-5. Compattare le pagine e l'autorita' duplicata; oggi ogni pagina copia
+6. Profili shardati in 32 bucket deterministici e delta incrementali nei feed
+   per-board (fatto): `plaza-profile-contract` shardato con `bucket =
+   blake3(member_id)[0..2] % 32` (102,8 KiB/bucket, max 108,8 KiB a 10.000
+   profili, ~30× meno del feed monolitico; caricamento pigro per autore/vista)
+   e `summarize_state`/`get_state_delta` incrementali in `profile-contract`,
+   `activity-contract` (delta 0,42 KiB vs 83,2 KiB) e `moderation-contract`
+   (delta 0,34–0,42 KiB vs 362,8 KiB).
+7. Compattare le pagine e l'autorita' duplicata; oggi ogni pagina copia
    l'autorita' potata.
-6. Topic a pagine append-only; una risposta scrive una pagina.
-7. Compattare le sezioni nelle figlie (`O(sezioni^2)`) e le definizioni dei
+8. Topic a pagine append-only; una risposta scrive una pagina.
+9. Compattare le sezioni nelle figlie (`O(sezioni^2)`) e le definizioni dei
    ruoli.
-8. Aggiornamenti incrementali della sola radice per i topic, senza caricare
-   ogni topic nella passata di propagazione.
-9. Subscription lazy con budget/TTL e `Unsubscribe` quando la stdlib lo
-   espone.
+10. Aggiornamenti incrementali della sola radice per i topic, senza caricare
+    ogni topic nella passata di propagazione.
+11. Subscription lazy con budget/TTL e `Unsubscribe` quando la stdlib lo
+    espone.
 
 ## Limiti del benchmark
 
