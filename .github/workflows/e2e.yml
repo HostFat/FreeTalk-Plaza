@@ -63,7 +63,9 @@ jobs:
         restore-keys: e2e-${{ runner.os }}-
 
     - name: Download contract bundle
+      id: download-contracts
       if: github.event_name == 'workflow_run'
+      continue-on-error: true
       uses: actions/download-artifact@v4
       with:
         name: contracts
@@ -72,7 +74,9 @@ jobs:
         github-token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Download target WASMs
+      id: download-target
       if: github.event_name == 'workflow_run'
+      continue-on-error: true
       uses: actions/download-artifact@v4
       with:
         name: wasm-target
@@ -81,7 +85,9 @@ jobs:
         github-token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Download stylesheet
+      id: download-styles
       if: github.event_name == 'workflow_run'
+      continue-on-error: true
       uses: actions/download-artifact@v4
       with:
         name: styles
@@ -89,9 +95,14 @@ jobs:
         run-id: ${{ github.event.workflow_run.id }}
         github-token: ${{ secrets.GITHUB_TOKEN }}
 
-    # A manual run has no upstream artifacts to download.
-    - name: Build contracts and stylesheet (manual run)
-      if: github.event_name == 'workflow_dispatch'
+    # A manual run has no upstream artifacts. The same fallback covers a Rust
+    # run from before this workflow started uploading them.
+    - name: Build contracts and stylesheet when the artifacts are missing
+      if: >-
+        github.event_name == 'workflow_dispatch'
+        || steps.download-contracts.outcome != 'success'
+        || steps.download-target.outcome != 'success'
+        || steps.download-styles.outcome != 'success'
       run: |
         nix develop --command cargo run --quiet --manifest-path tools/wasm-tool/Cargo.toml -- sync
         npm --prefix ui ci
