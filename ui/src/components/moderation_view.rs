@@ -42,6 +42,18 @@ pub fn ModerationView() -> Element {
                 .map(|board| board.with_merged_topics())
         })
     });
+    // The queue aggregates every section page, so load them all on entry.
+    use_effect(move || {
+        let Some(owner) = CURRENT_BOARD.read().owner_key else {
+            return;
+        };
+        spawn(async move {
+            let _ = crate::components::app::section_contract::load_all_section_pages_for_board(
+                owner,
+            )
+            .await;
+        });
+    });
 
     let Some(board) = board.read().clone() else {
         return rsx! {};

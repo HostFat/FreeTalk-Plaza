@@ -62,6 +62,8 @@ pub enum Route {
     EnableSectionsPage { page_size: u32 },
     #[route("/test-reset")]
     TestReset,
+    #[route("/test-clear-section-pages")]
+    TestClearSectionPages,
     #[route("/dm/join/:contract_id/:token/:key_version/:key_b58")]
     DmJoin {
         contract_id: String,
@@ -715,6 +717,34 @@ fn TestReset() -> Element {
                 },
                 "Reset local data"
             }
+        }
+    }
+}
+
+/// Test-only: drop the cached extra section pages so the next reload loads
+/// them from the node on demand.
+#[component]
+fn TestClearSectionPages() -> Element {
+    let mut done = use_signal(|| false);
+    use_effect(move || {
+        if *done.read() {
+            return;
+        }
+        done.set(true);
+        spawn(async move {
+            crate::components::app::section_contract::clear_extra_pages().await;
+            #[cfg(target_arch = "wasm32")]
+            if let Some(root) = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.document_element())
+            {
+                let _ = root.set_attribute("data-section-pages-cleared", "1");
+            }
+        });
+    });
+    rsx! {
+        div { class: "min-h-screen flex items-center justify-center p-6 text-text-muted",
+            "Cleared cached section pages."
         }
     }
 }

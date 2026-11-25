@@ -44,6 +44,9 @@ fn verify_section_layout(
             return Err("the topic page list belongs to another section".to_string());
         }
     }
+    if state.topics.entries.len() > plaza_core::board_state::pages::MAX_TOPICS_PER_PAGE {
+        return Err("a section page has too many topics".to_string());
+    }
     for entry in &state.topics.entries {
         if entry.entry.section != Some(section) {
             return Err("a section board cannot index topics of another section".to_string());

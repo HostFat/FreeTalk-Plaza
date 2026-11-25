@@ -305,6 +305,19 @@ fn TopicNotificationsView() -> Element {
             .cloned()
             .map(|board| board.with_merged_topics())
     });
+    // Notifications cover the whole index, including pages the board list has
+    // not loaded yet.
+    use_effect(move || {
+        let Some(owner) = CURRENT_BOARD.read().owner_key else {
+            return;
+        };
+        spawn(async move {
+            let _ = crate::components::app::section_contract::load_all_section_pages_for_board(
+                owner,
+            )
+            .await;
+        });
+    });
     let Some(board_data) = board.read().clone() else {
         return rsx! {};
     };

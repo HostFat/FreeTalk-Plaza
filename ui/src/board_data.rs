@@ -3663,11 +3663,23 @@ impl Boards {
                 .get(&owner_vk)
                 .map(|board| board.board_state.clone())
             {
+                let topic_pages = self.map.get(&owner_vk).map(|board| {
+                    plaza_core::board_state::pages::AuthorizedTopicPageListV1::new(
+                        section.section.id,
+                        Vec::new(),
+                        crate::components::app::section_contract::current_topic_page_size(),
+                        board.owner_key(),
+                        plaza_core::board_state::rate_limit::system_time_ms(
+                            get_current_system_time(),
+                        ),
+                    )
+                });
                 crate::util::safe_spawn_local(async move {
                     if let Err(error) = crate::components::app::section_contract::create_section_board(
                         owner_vk,
                         &section,
                         &state,
+                        topic_pages,
                     )
                     .await
                     {

@@ -2,11 +2,11 @@
 
 Versione: 1 (implementata).
 Stato: fasi 0–4 completate; move e merge tra sezioni pubblicati nella build
-locale v719. Le nuove board topic usano lo shard per sezione come default, le
+locale v724. Le nuove board topic usano lo shard per sezione come default, le
 sezioni dividono l'indice in pagine firmate dall'owner e i topic usano una
 radice Merkle dell'autorita' firmata dall'owner, con prove per membro.
 L'activity recente vive in un contratto separato per board. Contratto board
-alla revisione 28.
+alla revisione 29.
 Nessuna migrazione delle vecchie board.
 
 ## Stato dell'implementazione
@@ -18,7 +18,7 @@ Nessuna migrazione delle vecchie board.
   attività, flag, report e risoluzioni.
 - Client `ui/src/components/app/topic_contract.rs`; UI
   `topic_index_view.rs`, `topic_view.rs`, ricerca, notifiche e code in Manage.
-- Test: 46 in `topic-core`, 292 in `plaza-core`, 16 scenari real-node dei
+- Test: 46 in `topic-core`, 294 in `plaza-core`, 16 scenari real-node dei
   topic (shard della sezione, ruolo-prima-del-topic, draft e parti precedenti
   inclusi) e 116 test statici Playwright.
 
@@ -41,7 +41,7 @@ la ricerca copre i metadati dell'indice, non il testo completo; la radice è
 firmata dall'owner, ma un cambio guidato da un membro azzera la radice fino
 alla firma successiva dell'owner, e i topic tornano alle liste complete. La
 radice è firmata solo dall'owner (gli admin non possono firmarla). La suite
-real-node è isolata da un marker nel delegate e passa 15/15 in sequenza.
+real-node è isolata da un marker nel delegate e passa 16/16 in sequenza.
 
 ## 1. Scopo
 
@@ -565,13 +565,16 @@ Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
   entry di altre sezioni.
 - L'indice di una sezione è diviso in pagine. La pagina 0 (manifest) tiene
   autorità, sezione e `topic_pages`: un `AuthorizedTopicPageListV1` firmato
-  dall'owner con l'elenco ordinato delle pagine extra (massimo 1.000, nessuna
-  pagina 0). Ogni pagina extra è un contratto con `{ owner, section, page }`.
-  La pagina 0 è anche la prima fetta di topic; `TOPIC_PAGE_SIZE` (default
-  200) decide quando crearne una nuova. Solo l'owner crea pagine; il manifest
-  verifica firma, ordinamento e sezione, e rifiuta una lista su una pagina
-  diversa da 0. Il client unisce tutte le pagine in `merged_index` e scrive
-  flag/report sulla pagina che contiene il topic.
+  dall'owner con la dimensione di pagina (`page_size`, default 200, massimo
+  500) e l'elenco ordinato delle pagine extra (massimo 1.000, nessuna pagina
+  0). Ogni pagina extra è un contratto con `{ owner, section, page }`. La
+  pagina 0 è anche la prima fetta di topic; `active_page` usa la dimensione
+  firmata e, quando tutte le pagine sono piene, l'owner ne crea una nuova.
+  Solo l'owner crea pagine; il manifest verifica firma, dimensione,
+  ordinamento e sezione, e rifiuta una lista su una pagina diversa da 0. Il
+  contratto di sezione impone `MAX_TOPICS_PER_PAGE = 500` su ogni pagina. Il
+  client unisce solo le pagine caricate in `merged_index` e scrive flag/report
+  sulla pagina che contiene il topic.
 
 ## 10. Client e UI
 
@@ -610,19 +613,20 @@ Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
   attività, flag e report vengono scritti sulla figlia; la UI unisce gli
   indici delle figlie. Ricerca, notifiche e coda moderazione leggono lo stesso
   indice aggregato. Le board `TopicIndex` esistenti restano leggibili.
-- `section_contract.rs` carica il manifest, poi ogni pagina elencata, e
-  mantiene `SECTION_BOARDS` per pagina (chiave `{ owner, section, page }`).
-  `active_page` sceglie la prima pagina sotto `TOPIC_PAGE_SIZE`; se sono tutte
-  piene, `create_section_page` crea la successiva e aggiorna `topic_pages` con
-  un delta firmato. Persistenza, GET, notifiche e `sync_section_authority`
-  lavorano per pagina; una pagina non ancora arrivata viene saltata e si
-  allinea alla propria risposta. `merged_index` unisce tutte le pagine per
-  lista, ricerca, notifiche e moderazione; `section_for_topic` instrada
-  flag/report alla pagina che contiene l'entry.
+- `section_contract.rs` carica il manifest all'apertura e le pagine extra solo
+  on demand (`Load older topics`, 4 GET per clic); mantiene `SECTION_BOARDS`
+  per pagina (chiave `{ owner, section, page }`) e `load_section_page` evita
+  GET duplicati mentre uno è in volo. `active_page` usa `page_size` firmato;
+  se le pagine sono piene, `create_section_page` crea la successiva e aggiorna
+  `topic_pages` con un delta firmato. Ricerca, notifiche e moderazione
+  chiamano `load_all_section_pages_for_board`; `locate_section_page` carica le
+  pagine della sezione di un topic prima di scrivere flag/report.
+  `merged_index` unisce le pagine caricate. La persistenza conserva sempre i
+  manifest e al massimo 24 pagine extra / 4 MiB, ordinate per `last_used`.
 - La figlia non copia tutta l'autorità: conserva configurazione, admin,
   ownership, sezioni e solo i membri/ruoli/ban che il suo indice referenzia.
   La sincronizzazione dell'autorità viaggia come delta; un cambio di admin o
-  ownership usa ancora lo stato completo. Contratto board alla revisione 28.
+  ownership usa ancora lo stato completo. Contratto board alla revisione 29.
 - L'attività della figlia viene accorpata per 10 s. Lo stato locale resta
   `dirty` fino all'`UpdateResponse` del nodo; un `Get` che porta ancora lo
   stato precedente fa merge invece di scartare l'entry o l'attività locale.
@@ -656,7 +660,7 @@ hide/restore/purge, poll e reaction, contenuto sigillato illeggibile al
 contratto, limiti di dimensione e numero, CBOR round-trip, firme manomesse e
 continuation.
 
-`plaza-core` ha 292 test, inclusi indice, sezioni, flag, report, risoluzioni,
+`plaza-core` ha 294 test, inclusi indice, sezioni, flag, report, risoluzioni,
 limiti di frequenza, percorso rapido dell'indice e lista firmata delle pagine.
 
 La suite real-node `ui/tests/real-node/topics.spec.ts` ha 16 scenari: topic e
@@ -665,10 +669,13 @@ un membro, board e sezioni con membri, ruolo creato prima del topic,
 approvazione, propagazione del ban, reaction e poll, move/merge/split,
 continuation con caricamento delle parti precedenti, report con risoluzione,
 report in una sezione, ricerca sull'indice e una sezione che passa a una
-seconda pagina. Con lo shard come default la suite passa 16/16 in 5 minuti. La
-suite statica Playwright (Chromium) ha 29 test passati e 3 saltati. Il
-contratto della board e' alla revisione 28; l'indice a pagine e' coperto dal
-test dedicato.
+seconda pagina. Quest'ultimo verifica la dimensione firmata, svuota la cache
+delle pagine, ricarica e trova solo la pagina 0, carica le pagine con "Load
+older topics", poi crea la pagina 2 con la dimensione firmata anche se il
+client ricaricato ha il default 200. Con lo shard come default la suite passa
+16/16 in 5 minuti. La suite statica Playwright (Chromium) ha 29 test passati e
+3 saltati. Il contratto della board e' alla revisione 29; l'indice a pagine e'
+coperto dal test dedicato.
 
 Il reset di test scrive un marker nel delegate (`skip_legacy_migration`)
 perché la shell sandboxata non espone `localStorage`: senza il marker i

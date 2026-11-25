@@ -70,38 +70,57 @@ dall'owner (`TopicPageListV1` in `ChatBoardStateV1.topic_pages`); ogni pagina
 extra è un contratto con parametri `{ owner, section, page }` che contiene solo
 la propria fetta di topic. Un aggiornamento tocca una pagina, non tutte.
 
-- `TOPIC_PAGE_SIZE` (default 200) è la soglia client: `active_page` sceglie la
-  prima pagina con meno entry della soglia e, se sono tutte piene, l'owner
-  crea la pagina successiva (`create_section_page`). La creazione fa un PUT
-  della pagina e poi aggiorna il manifest con un delta firmato; il manifest
-  accetta il delta solo se la lista è firmata dall'owner corrente, ordinata,
-  senza duplicati, senza pagina 0 e sotto `MAX_TOPIC_PAGES = 1000`.
+- `TopicPageListDataV1` firma anche `page_size`: default 200, accettato tra 1
+  e `MAX_TOPIC_PAGE_SIZE = 500`. La sezione nasce con la lista (vuota) e la
+  dimensione scelta dal client, quindi tutti i client concordano su dove
+  finisce una pagina. `active_page` usa la dimensione firmata; il default
+  locale vale solo per le sezioni create da quel client.
+- `active_page` sceglie la prima pagina con meno entry della soglia e, se sono
+  tutte piene, l'owner crea la pagina successiva (`create_section_page`). La
+  creazione fa un PUT della pagina e poi aggiorna il manifest con un delta
+  firmato; il manifest accetta il delta solo se la lista è firmata dall'owner
+  corrente, ordinata, senza duplicati, senza pagina 0 e sotto
+  `MAX_TOPIC_PAGES = 1000`. Il contratto di sezione impone
+  `MAX_TOPICS_PER_PAGE = 500` su ogni pagina, manifest compreso.
 - La pagina 0 resta anche la prima pagina di topic, quindi una sezione appena
   creata non aggiunge contratti.
-- Il client carica il manifest, poi ogni pagina elencata, e `merged_index`
-  unisce le entry di tutte le pagine. Flag e report di un topic vengono
-  scritti nella pagina che contiene l'entry (`section_for_topic`).
-- Persistenza, GET, notifiche e sincronizzazione dell'autorità sono per
-  pagina; una pagina non ancora arrivata non blocca il manifest né le altre
-  pagine.
+- Caricamento pigro: all'apertura il client carica il manifest (pagina 0) di
+  ogni sezione; le pagine extra arrivano on demand con il pulsante "Load older
+  topics" (4 GET per clic). `merged_index` unisce solo le pagine caricate.
+  Ricerca, notifiche e moderazione chiamano `load_all_section_pages_for_board`
+  perché leggono l'indice intero; se un topic vive in una pagina non caricata,
+  `locate_section_page` carica le pagine della sua sezione prima di scrivere
+  flag o report. `load_section_page` evita GET duplicati mentre uno è in volo.
+- Persistenza: il delegate conserva sempre i manifest, più al massimo 24
+  pagine extra e 4 MiB, ordinate per `last_used`; le pagine sfrattate vengono
+  ricaricate dal nodo. Il route `/test-clear-section-pages` svuota la cache
+  per il test.
 - Solo l'owner crea pagine: un membro che trova tutte le pagine piene riceve
   un errore finché l'owner non ne aggiunge una.
 - Limiti attuali: ogni pagina duplica l'autorità potata (lo storage cresce con
   il numero di pagine); le pagine accettano ancora flag e report, quindi non
-  sono immutabili; la soglia è un valore del client e il contratto non impone
-  un massimo di entry per pagina; l'aggiunta di una pagina resta una singola
-  scrittura sul manifest. Se l'aggiornamento del manifest fallisce, la pagina
-  resta orfana: non viene caricata e l'owner può crearne un'altra.
+  sono immutabili; l'aggiunta di una pagina resta una singola scrittura sul
+  manifest. Se l'aggiornamento del manifest fallisce, la pagina resta orfana:
+  non viene caricata e l'owner può crearne un'altra.
+
+Benchmark con 2.000 topic, 1.000 membri e pagine da 200: l'intera sezione è
+3.278 KiB e verifica in 14,9 s; una pagina è 363 KiB e 1,7 s. Un nuovo topic è
+un delta da 0,7 KiB (0,03 MiB di fan-out con 50 subscriber); un nuovo
+subscriber scarica 363 KiB invece di 3,3 MiB. La board con 10.000 membri è
+3,3 MiB e verifica in circa 20 s: è il prossimo collo di bottiglia.
 
 Il test real-node "a full section index spills into a second page" usa
 `#/enable-sections/3` (o `?pageSize=3` quando l'app è servita direttamente,
-senza la shell), crea cinque topic, verifica
-`option[data-pages="2"]`, ricarica la board e trova tutti i topic; poi crea un
-altro topic nella pagina 1, che ha ancora spazio. La shell non inoltra la
-query esterna all'iframe, quindi il test naviga dentro l'app con l'hash per
-mantenere la soglia.
+senza la shell), crea cinque topic, verifica `data-pages="2"` e
+`data-page-size="3"`, svuota la cache delle pagine con
+`#/test-clear-section-pages` e ricarica: trova solo i topic della pagina 0 e
+il pulsante "Load older topics"; dopo il clic trova anche quelli della pagina
+1. Poi crea altri due topic: il client ricaricato ha default 200 ma usa la
+dimensione firmata 3, quindi riempie la pagina 1 e crea la pagina 2
+(`data-pages="3"`). La shell non inoltra la query esterna all'iframe, quindi
+il test naviga dentro l'app con l'hash per mantenere la soglia.
 
-Board revision 28; board, section, topic e activity ri-keyati; board e topic
+Board revision 29; board, section, topic e activity ri-keyati; board e topic
 esistenti vanno ricreati.
 
 ## Problema

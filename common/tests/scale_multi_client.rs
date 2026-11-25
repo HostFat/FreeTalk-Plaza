@@ -228,10 +228,21 @@ fn report(_section: MessageId, index: usize, members: usize) -> AuthorizedTopicR
 
 /// One section child: the parent authority plus the topics of one section.
 fn child(parent: ChatBoardStateV1, section_index: usize, topics: usize, members: usize) -> ChatBoardStateV1 {
+    child_range(parent, section_index, 0, topics, members)
+}
+
+/// One section page: the parent authority plus a range of topic entries.
+fn child_range(
+    parent: ChatBoardStateV1,
+    section_index: usize,
+    start: usize,
+    topics: usize,
+    members: usize,
+) -> ChatBoardStateV1 {
     let section_id = MessageId::from_bytes(section_seed(section_index));
     let mut state = parent;
     state.topics = TopicIndexV1::default();
-    for index in 0..topics {
+    for index in start..start + topics {
         state.topics.entries.push(entry(section_id, index, members));
         state
             .topics
@@ -370,12 +381,23 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
         "storage:  {:>7.1} MiB across {sections} pruned children (O(sections x referenced members + sections^2))",
         pruned_mib * sections as f64
     );
+    // The client sends a delta with the new entry, not the full index state.
+    let new_topic = TopicIndexDelta {
+        entries: vec![entry(section_id, topics, members)],
+        ..Default::default()
+    };
+    let new_topic_kib = serialized_len_value(&new_topic) as f64 / 1024.0;
     println!(
         "board activity writes: 0 (a reply writes the topic and the activity contract)"
     );
     println!(
-        "new topic:       {:.2} MiB per subscriber fan-out (pruned state)",
-        pruned_mib * subscribers as f64
+        "new topic delta: {:>6.1} KiB; fan-out {:.2} MiB ({subscribers} subscribers)",
+        new_topic_kib,
+        new_topic_kib / 1024.0 * subscribers as f64
+    );
+    println!(
+        "new subscriber bootstrap: {:.1} KiB (pruned index state)",
+        pruned_size as f64 / 1024.0
     );
     println!(
         "authority sync:  {:.2} MiB to all children (pruned state x {sections})",
@@ -388,6 +410,80 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
     );
 }
 
+/// Compare one whole section index with one page of it. The page is the unit
+/// a client loads for a new subscriber and the write target of a new topic.
+fn page_scenario(members: usize, topics: usize, page_size: usize, subscribers: usize) {
+    let parent = parent(1, members);
+    let section_id = MessageId::from_bytes(section_seed(0));
+    let mut whole = child(parent.clone(), 0, topics, members);
+    let whole_needed: std::collections::HashSet<MemberId> = whole
+        .topics
+        .entries
+        .iter()
+        .map(|entry| entry.entry.author)
+        .collect();
+    whole
+        .members
+        .members
+        .retain(|member| whole_needed.contains(&member.member.id()));
+    let whole_kib = serialized_len(&whole) as f64 / 1024.0;
+    let whole_verify = verify_time(&whole, Some(section_id));
+
+    let page_start = topics.saturating_sub(page_size);
+    let page_count = topics.div_ceil(page_size).max(1);
+    let mut page = child_range(parent, 0, page_start, topics - page_start, members);
+    // The client prunes child authority to the members its index references.
+    let page_needed: std::collections::HashSet<MemberId> = page
+        .topics
+        .entries
+        .iter()
+        .map(|entry| entry.entry.author)
+        .collect();
+    page
+        .members
+        .members
+        .retain(|member| page_needed.contains(&member.member.id()));
+    let page_kib = serialized_len(&page) as f64 / 1024.0;
+    let page_verify = verify_time(&page, Some(section_id));
+
+    let delta = TopicIndexDelta {
+        entries: vec![entry(section_id, topics, members)],
+        ..Default::default()
+    };
+    let delta_kib = serialized_len_value(&delta) as f64 / 1024.0;
+
+    println!("\n=== pages ===");
+    println!(
+        "members={members} topics/section={topics} page_size={page_size} pages={page_count} subscribers={subscribers}"
+    );
+    println!(
+        "section:  {:>7.1} KiB   verify {:>8.1} ms   (all topics)",
+        whole_kib, whole_verify
+    );
+    println!(
+        "page:     {:>7.1} KiB   verify {:>8.1} ms   (topics {page_start}..{topics})",
+        page_kib, page_verify
+    );
+    println!(
+        "new topic delta: {:>6.1} KiB; fan-out {:.2} MiB ({subscribers} subscribers)",
+        delta_kib,
+        delta_kib / 1024.0 * subscribers as f64
+    );
+    println!(
+        "new subscriber bootstrap: page {:.1} KiB instead of section {:.1} KiB",
+        page_kib, whole_kib
+    );
+}
+
+fn membership_scenario(members: usize, sections: usize) {
+    let board = parent(sections, members);
+    let size = serialized_len(&board) as f64 / 1024.0;
+    let verify = verify_time(&board, None);
+    println!(
+        "members={members:>6} sections={sections:>3} board={size:>8.1} KiB verify {verify:>8.1} ms"
+    );
+}
+
 #[test]
 #[ignore = "scale benchmark; run in release"]
 fn scale_multi_client_benchmark() {
@@ -397,4 +493,15 @@ fn scale_multi_client_benchmark() {
     ] {
         run(sections, members, topics, subscribers);
     }
+    page_scenario(1_000, 2_000, 200, 50);
+}
+
+#[test]
+#[ignore = "scale benchmark; run in release"]
+fn membership_scale_benchmark() {
+    println!("\n=== membership ===");
+    for members in [1_000, 5_000, 10_000] {
+        membership_scenario(members, 10);
+    }
+    membership_scenario(10_000, 100);
 }

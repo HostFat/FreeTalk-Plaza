@@ -813,10 +813,21 @@ pub async fn create_section(
     };
     let authorized = AuthorizedSectionV1::new(section, board.owner_key(), None);
     if child_key.is_some() {
+        let owner_sk = board.owner_key();
+        let page_size = crate::components::app::section_contract::current_topic_page_size();
+        let topic_pages =
+            plaza_core::board_state::pages::AuthorizedTopicPageListV1::new(
+                id,
+                Vec::new(),
+                page_size,
+                owner_sk,
+                system_time_ms(now),
+            );
         crate::components::app::section_contract::create_section_board(
             owner,
             &authorized,
             &board.board_state,
+            Some(topic_pages),
         )
         .await?;
     }
@@ -1986,6 +1997,41 @@ fn section_for_topic(owner: VerifyingKey, topic_id: MessageId) -> Option<(Messag
         })
 }
 
+/// Extra index pages load on demand, so the page that holds a topic may not
+/// be in memory yet. The topic state knows its section; load that section's
+/// pages and retry.
+async fn locate_section_page(
+    owner: VerifyingKey,
+    topic_id: MessageId,
+) -> Result<(MessageId, u32), String> {
+    if let Some(found) = section_for_topic(owner, topic_id) {
+        return Ok(found);
+    }
+    let section = TOPIC_CACHE
+        .read()
+        .values()
+        .find(|conversation| {
+            conversation
+                .state
+                .header
+                .as_ref()
+                .is_some_and(|header| header.header.id() == topic_id)
+        })
+        .and_then(|conversation| {
+            conversation
+                .state
+                .section
+                .as_ref()
+                .map(|section| section.snapshot.section)
+        });
+    if let Some(section) = section {
+        let _ = crate::components::app::section_contract::load_all_section_pages(owner, section)
+            .await;
+    }
+    section_for_topic(owner, topic_id)
+        .ok_or_else(|| "the topic section is not loaded".to_string())
+}
+
 async fn apply_topic_board_delta(
     owner: VerifyingKey,
     topic_id: MessageId,
@@ -1995,8 +2041,7 @@ async fn apply_topic_board_delta(
     if board.board_state.mode != BoardModeV1::SectionedTopicIndex {
         return apply_board_delta(owner, delta);
     }
-    let (section, page) =
-        section_for_topic(owner, topic_id).ok_or("the topic section is not loaded")?;
+    let (section, page) = locate_section_page(owner, topic_id).await?;
     crate::components::app::section_contract::apply_section_delta(owner, section, page, delta)
         .await
 }

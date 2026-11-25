@@ -1141,11 +1141,17 @@ test("a full section index spills into a second page", async ({ page }) => {
   const option = app.locator("option", { hasText: "Paged section" }).first();
   await expect(option).toHaveCount(1, { timeout: 60_000 });
   await expect(option).toHaveAttribute("data-pages", "1", { timeout: 60_000 });
+  // The section signs its page size from the first state.
+  await expect(option).toHaveAttribute("data-page-size", pageSize.toString(), {
+    timeout: 60_000,
+  });
 
   // The shell only mirrors the app hash outward, so navigate inside the app to
   // keep the page-size setting and the loaded section pages alive.
   const gotoBoard = async () => {
-    await frame.evaluate((hash) => {
+    // Resolve the frame each time: a reload replaces the iframe.
+    const current = await appFrame(page);
+    await current.evaluate((hash) => {
       location.hash = hash;
     }, `#/board/${boardKey}`);
   };
@@ -1180,28 +1186,70 @@ test("a full section index spills into a second page", async ({ page }) => {
     await expect(app.getByText(title, { exact: true })).toBeVisible({ timeout: 90_000 });
   }
 
-  // The half-full second page still has room.
-  await app
-    .getByRole("combobox")
-    .first()
-    .selectOption({ label: "Paged section" });
-  await app.getByPlaceholder("Title").fill("Paged topic last");
-  await app
-    .getByPlaceholder("Write the first message…")
-    .fill("Body of the last paged topic");
-  await app.getByRole("button", { name: "Create topic" }).click();
-  await expect(
-    app.getByRole("heading", { name: "Paged topic last" }),
-  ).toBeVisible({ timeout: 60_000 });
-  titles.push("Paged topic last");
+  // Drop the cached page states so the reload uses the network path.
+  const clearing = await appFrame(page);
+  await clearing.evaluate(() => {
+    location.hash = "#/test-clear-section-pages";
+  });
+  await expect
+    .poll(
+      () =>
+        clearing.evaluate(
+          () => document.documentElement.dataset.sectionPagesCleared,
+        ),
+      { timeout: 30_000 },
+    )
+    .toBe("1");
 
-  // A reload rebuilds the index from the manifest and every listed page.
+  // A reload loads only page 0; older pages wait for "Load older topics".
   await page.goto(`${url}#/board/${boardKey}`);
   await page.reload();
   await expect(option).toHaveAttribute("data-pages", "2", { timeout: 60_000 });
-  for (const title of titles) {
-    await expect(app.getByText(title, { exact: true })).toBeVisible({ timeout: 90_000 });
+  await expect(option).toHaveAttribute("data-page-size", pageSize.toString(), {
+    timeout: 60_000,
+  });
+  for (const title of titles.slice(0, pageSize)) {
+    await expect(app.getByText(title, { exact: true })).toBeVisible({
+      timeout: 90_000,
+    });
   }
+  await expect(
+    app.getByText(titles[pageSize], { exact: true }),
+  ).toHaveCount(0);
+  const loadOlder = app.getByRole("button", { name: "Load older topics" });
+  await expect(loadOlder).toBeVisible({ timeout: 60_000 });
+  await loadOlder.click();
+  for (const title of titles.slice(pageSize)) {
+    await expect(app.getByText(title, { exact: true })).toBeVisible({
+      timeout: 90_000,
+    });
+  }
+
+  // The reloaded client defaults to 200, but the manifest signs 3: the next
+  // two topics fill page 1 and then create page 2.
+  const createPaged = async (title: string) => {
+    await gotoBoard();
+    await expect(app.getByPlaceholder("Title")).toBeVisible({ timeout: 60_000 });
+    await app
+      .getByRole("combobox")
+      .first()
+      .selectOption({ label: "Paged section" });
+    await app.getByPlaceholder("Title").fill(title);
+    await app
+      .getByPlaceholder("Write the first message…")
+      .fill(`Body of ${title}`);
+    await app.getByRole("button", { name: "Create topic" }).click();
+    await expect(app.getByRole("heading", { name: title })).toBeVisible({
+      timeout: 60_000,
+    });
+  };
+  await createPaged("Paged topic six");
+  await createPaged("Paged topic seven");
+  await gotoBoard();
+  await expect(option).toHaveAttribute("data-pages", "3", { timeout: 60_000 });
+  await expect(
+    app.getByText("Paged topic seven", { exact: true }),
+  ).toBeVisible({ timeout: 90_000 });
 });
 
 test("the index search finds a topic by title and preview", async ({ page }) => {

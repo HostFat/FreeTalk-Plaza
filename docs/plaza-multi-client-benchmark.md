@@ -33,6 +33,27 @@ copia l'autorita' della madre e aggiunge l'indice della propria sezione.
 | 20 | 7,3 MiB | 83,2 KiB (200 entry) | 4,06 MiB per update | 7,3 MiB |
 | 100 | 39,7 MiB | 83,2 KiB (200 entry) | 4,06 MiB per update | 39,7 MiB |
 
+Indice a pagine, 1.000 membri, 2.000 topic, pagine da 200:
+
+| Unità | Dimensione | Verify | Bootstrap nuovo subscriber |
+|---|---:|---:|---:|
+| Sezione intera | 3.278 KiB | 14,9 s | 3,3 MiB |
+| Una pagina | 363 KiB | 1,7 s | 363 KiB |
+
+Un nuovo topic è un delta da 0,7 KiB: con 50 subscriber il fan-out è
+0,03 MiB. Il manifest cambia solo quando nasce una pagina.
+
+Membri della board (10 sezioni, nessun topic):
+
+| Membri | Board | Verify |
+|---:|---:|---:|
+| 1.000 | 341 KiB | 2,1 s |
+| 5.000 | 1.681 KiB | 10,1 s |
+| 10.000 | 3.356 KiB | 20,4 s |
+
+Con 100 sezioni e 10.000 membri la board resta 3.396 KiB e la verifica 19,8 s:
+il costo dipende dai membri, non dalle sezioni.
+
 Prima del pruning le figlie erano 639/674 KiB, lo storage 12,5/65,9 MiB,
 il fan-out dell'activity 31,2/32,9 MiB e la sincronizzazione dell'autorita'
 12,5/65,9 MiB. Ora una risposta scrive il topic e il contratto activity; la
@@ -48,20 +69,20 @@ board e le figlie non ricevono piu' l'activity.
    un `UpdateData::State` o un merge versionato pagano 3,5 s per figlia con
    1.000 membri e 200 topic. E' il costo da ridurre con autorita' compatta e
    indice a pagine.
-3. **Il broadcast resta per i nuovi topic.** Un nuovo topic scrive lo stato
-   completo della figlia (371-406 KiB) e lo trasmette ai subscriber. Con 50
-   subscriber sono circa 18-20 MiB per topic nuovo. L'activity non contribuisce
-   piu' a questo traffico.
+3. **Un nuovo topic trasmette un delta piccolo.** Il client invia un
+   `TopicIndexDelta` da 0,7 KiB; con 50 subscriber il fan-out e' 0,03 MiB.
+   Lo stato completo (371-406 KiB) serve a un nuovo subscriber o a un
+   resync, non a ogni topic. L'activity non contribuisce a questo traffico.
 4. **Il pruning taglia circa il 40% della figlia.** La figlia conserva solo i
    membri che il suo indice referenzia: 371-406 KiB invece di 639-674 KiB,
    con una verifica piena di 1,75-1,90 s invece di 3,5 s. La radice firmata
    elimina le copie nei topic; restano le sezioni copiate in ogni figlia
    (`O(sezioni^2)`) e le definizioni dei ruoli.
-5. **Le pagine limitano la scrittura dell'indice.** Con `TOPIC_PAGE_SIZE=200`
-   una nuova entry riscrive solo la pagina attiva: il fan-out e' quello della
-   pagina invece che della sezione intera, e il manifest cambia solo quando
-   nasce una pagina. Le pagine duplicano l'autorita' potata, quindi lo storage
-   cresce con il numero di pagine e la verifica iniziale resta per pagina.
+5. **Le pagine limitano scrittura e bootstrap.** Con `page_size=200` una nuova
+   entry tocca solo la pagina attiva; il bootstrap di un nuovo subscriber
+   passa da 3,3 MiB (sezione da 2.000 topic) a 363 KiB (una pagina), con la
+   verifica da 14,9 s a 1,7 s. Le pagine duplicano l'autorita' potata, quindi
+   lo storage cresce con il numero di pagine.
 6. **La propagazione dell'autorita' e' il caso peggiore.** Un cambio di
    ruolo o un ban sincronizza tutte le figlie (39,7 MiB nello scenario da 100
    sezioni dopo il pruning) e poi aggiorna ogni topic. Il limite di 100 topic
@@ -72,18 +93,26 @@ board e le figlie non ricevono piu' l'activity.
    temporaneamente le liste complete. La passata carica ogni topic, quindi il
    costo CPU del client cresce con il numero di topic: aggiornamenti
    incrementali della sola radice sono il passo successivo.
+7. **I membri sono il prossimo limite.** La board tiene tutti i membri: a
+   10.000 membri pesa 3,3 MiB e la verifica piena supera i 20 s, mentre le
+   sezioni restano 3,3 MiB. Un contratto membri con radice firmata toglie
+   questa crescita dal percorso caldo.
 
 ## Prossimi passi
 
-1. Indice a pagine con manifest (fatto): aggiornamenti limitati alla pagina.
-2. Compattare le pagine e l'autorita' duplicata; oggi ogni pagina copia
+1. Indice a pagine con manifest (fatto): aggiornamenti limitati alla pagina,
+   `page_size` firmato con cap 500, caricamento pigro e budget dello storage
+   locale.
+2. Contratto membri con radice firmata; la board conserva solo radice e
+   versione.
+3. Compattare le pagine e l'autorita' duplicata; oggi ogni pagina copia
    l'autorita' potata.
-3. Topic a pagine append-only; una risposta scrive una pagina.
-4. Compattare le sezioni nelle figlie (`O(sezioni^2)`) e le definizioni dei
+4. Topic a pagine append-only; una risposta scrive una pagina.
+5. Compattare le sezioni nelle figlie (`O(sezioni^2)`) e le definizioni dei
    ruoli.
-5. Aggiornamenti incrementali della sola radice per i topic, senza caricare
+6. Aggiornamenti incrementali della sola radice per i topic, senza caricare
    ogni topic nella passata di propagazione.
-6. Subscription lazy con budget/TTL e `Unsubscribe` quando la stdlib lo
+7. Subscription lazy con budget/TTL e `Unsubscribe` quando la stdlib lo
    espone.
 
 ## Limiti del benchmark

@@ -261,6 +261,19 @@ fn TopicSearchView() -> Element {
             .cloned()
             .map(|board| board.with_merged_topics())
     });
+    // Search scans the whole index, so every page of every section is needed
+    // here even though the board list loads pages on demand.
+    use_effect(move || {
+        let Some(owner) = CURRENT_BOARD.read().owner_key else {
+            return;
+        };
+        spawn(async move {
+            let _ = crate::components::app::section_contract::load_all_section_pages_for_board(
+                owner,
+            )
+            .await;
+        });
+    });
     let Some(board_data) = board.read().clone() else {
         return rsx! {};
     };

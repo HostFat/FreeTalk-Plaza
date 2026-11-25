@@ -13,7 +13,9 @@ use plaza_core::board_state::ban::{AuthorizedBanRevocation, AuthorizedUserBan};
 use plaza_core::board_state::invites::{AuthorizedInviteToken, InviteTokensDelta};
 use plaza_core::board_state::member::{AuthorizedMember, MemberId, MembersDelta};
 use plaza_core::board_state::member_moderation::{AuthorizedSuspension, SuspensionsDelta};
-use plaza_core::board_state::pages::AuthorizedTopicPageListV1;
+use plaza_core::board_state::pages::{
+    AuthorizedTopicPageListV1, DEFAULT_TOPIC_PAGE_SIZE, MAX_TOPIC_PAGE_SIZE,
+};
 use plaza_core::board_state::roles::{AuthorizedRole, AuthorizedRoleAssignment, RolesDelta};
 use plaza_core::board_state::sections::{
     AuthorizedSectionV1, SectionId, SectionParametersV1, SectionsDelta,
@@ -39,11 +41,26 @@ struct PersistedSectionBoard {
     section: SectionId,
     #[serde(default)]
     page: u32,
+    #[serde(default)]
+    last_used: i64,
     state: ChatBoardStateV1,
 }
 
 /// Number of topics in a page before the owner is asked to create the next.
-pub static TOPIC_PAGE_SIZE: GlobalSignal<usize> = Global::new(|| 200);
+/// This is the client default for new sections; an existing section uses the
+/// page size signed in its manifest.
+pub static TOPIC_PAGE_SIZE: GlobalSignal<usize> =
+    Global::new(|| DEFAULT_TOPIC_PAGE_SIZE as usize);
+
+/// The client default, clamped to the bound the contract accepts.
+pub(crate) fn current_topic_page_size() -> u32 {
+    let size = *TOPIC_PAGE_SIZE.read() as u32;
+    size.clamp(1, MAX_TOPIC_PAGE_SIZE)
+}
+
+fn now_ms() -> i64 {
+    plaza_core::board_state::rate_limit::system_time_ms(crate::util::get_current_system_time())
+}
 
 static SECTION_SAVE_SCHEDULED: AtomicBool = AtomicBool::new(false);
 static SECTION_LOAD_STARTED: AtomicBool = AtomicBool::new(false);
@@ -64,20 +81,63 @@ fn schedule_section_save() {
     });
 }
 
+/// Extra pages kept in the delegate blob, newest first. Page 0 (the manifest)
+/// is always kept so the board list and page lists survive a reload. Evicted
+/// pages are fetched again when the user opens them.
+const MAX_PERSISTED_SECTION_PAGES: usize = 24;
+const MAX_PERSISTED_SECTION_BYTES: usize = 4 * 1024 * 1024;
+
+fn cbor_len<T: serde::Serialize>(value: &T) -> usize {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes)
+        .map(|_| bytes.len())
+        .unwrap_or(0)
+}
+
 async fn save_section_boards_now() -> Result<(), String> {
-    let entries: Vec<PersistedSectionBoard> = SECTION_BOARDS
-        .read()
-        .values()
-        // A placeholder inserted by `load_section_board` has a default state;
-        // saving it would restore an invalid child on the next load.
-        .filter(|board| board.state.mode == BoardModeV1::SectionedTopicIndex)
-        .map(|board| PersistedSectionBoard {
-            owner: board.params.owner,
-            section: board.params.section,
-            page: board.params.page,
-            state: board.state.clone(),
-        })
-        .collect();
+    let (mut manifests, mut pages) = {
+        let boards = SECTION_BOARDS.read();
+        let mut manifests = Vec::new();
+        let mut pages = Vec::new();
+        for board in boards.values() {
+            // A placeholder inserted by `load_section_board` has a default
+            // state; saving it would restore an invalid child on the next load.
+            if board.state.mode != BoardModeV1::SectionedTopicIndex {
+                continue;
+            }
+            let entry = PersistedSectionBoard {
+                owner: board.params.owner,
+                section: board.params.section,
+                page: board.params.page,
+                last_used: board.last_used,
+                state: board.state.clone(),
+            };
+            if board.params.page == 0 {
+                manifests.push(entry);
+            } else {
+                pages.push(entry);
+            }
+        }
+        (manifests, pages)
+    };
+    pages.sort_by(|left, right| right.last_used.cmp(&left.last_used));
+    let mut entries = manifests;
+    let mut bytes: usize = entries.iter().map(|entry| cbor_len(&entry.state)).sum();
+    let mut kept_pages = 0;
+    for entry in pages {
+        if kept_pages >= MAX_PERSISTED_SECTION_PAGES
+            || bytes >= MAX_PERSISTED_SECTION_BYTES
+        {
+            break;
+        }
+        let size = cbor_len(&entry.state);
+        if bytes + size > MAX_PERSISTED_SECTION_BYTES {
+            continue;
+        }
+        bytes += size;
+        kept_pages += 1;
+        entries.push(entry);
+    }
     if entries.is_empty() {
         return Ok(());
     }
@@ -138,17 +198,23 @@ pub async fn load_persisted_section_boards() {
             // the persisted state would lose to an empty default.
             boards.insert(
                 contract_id,
-                SectionBoard {
-                    params: SectionParametersV1 {
-                        owner: entry.owner,
-                        section: entry.section,
-                        page: entry.page,
-                    },
-                    state: entry.state,
-                    synced: false,
-                    ready: false,
-                    syncing: false,
-                    dirty: has_local_activity,
+                {
+                    let last_used = if entry.last_used > 0 {
+                        entry.last_used
+                    } else {
+                        now_ms()
+                    };
+                    let mut board = SectionBoard::new(
+                        SectionParametersV1 {
+                            owner: entry.owner,
+                            section: entry.section,
+                            page: entry.page,
+                        },
+                        entry.state,
+                        has_local_activity,
+                    );
+                    board.last_used = last_used;
+                    board
                 },
             );
         }
@@ -171,6 +237,26 @@ pub struct SectionBoard {
     pub syncing: bool,
     /// Local activity has not been confirmed by the network yet.
     pub dirty: bool,
+    /// Last time this page was read or written, for the persistence budget.
+    pub last_used: i64,
+    /// Last GET sent for this page; avoids duplicate fetches while it is in
+    /// flight.
+    pub last_fetch: i64,
+}
+
+impl SectionBoard {
+    fn new(params: SectionParametersV1, state: ChatBoardStateV1, dirty: bool) -> Self {
+        Self {
+            params,
+            state,
+            synced: false,
+            ready: false,
+            syncing: false,
+            dirty,
+            last_used: now_ms(),
+            last_fetch: 0,
+        }
+    }
 }
 
 pub static SECTION_BOARDS: GlobalSignal<HashMap<ContractInstanceId, SectionBoard>> =
@@ -324,6 +410,13 @@ pub fn pages_for(owner: VerifyingKey, section: SectionId) -> Vec<u32> {
     section_state(owner, section)
         .map(|state| state.topic_pages.pages())
         .unwrap_or_else(|| vec![0])
+}
+
+/// Page size signed in the section manifest, when it has a page list.
+pub fn page_size_for(owner: VerifyingKey, section: SectionId) -> Option<u32> {
+    section_state(owner, section)
+        .and_then(|state| state.topic_pages.page_size())
+        .filter(|size| *size > 0 && *size <= MAX_TOPIC_PAGE_SIZE)
 }
 
 /// Merge the parent index (used by non-sharded boards) with every loaded
@@ -831,6 +924,7 @@ async fn sync_section_page_authority(
                 if let Some(board) = boards.get_mut(&contract_id) {
                     board.syncing = false;
                     board.ready = true;
+                    board.last_used = now_ms();
                 }
             });
             return Ok(());
@@ -858,6 +952,7 @@ async fn sync_section_page_authority(
             board.synced = true;
             board.ready = false;
             board.dirty = true;
+            board.last_used = now_ms();
         }
     });
     schedule_section_save();
@@ -928,6 +1023,7 @@ pub async fn apply_section_delta(
             board.state = state;
             board.synced = false;
             board.dirty = true;
+            board.last_used = now_ms();
         }
     });
     schedule_section_save();
@@ -971,6 +1067,7 @@ pub async fn create_section_board(
     owner: VerifyingKey,
     section: &AuthorizedSectionV1,
     parent: &ChatBoardStateV1,
+    topic_pages: Option<AuthorizedTopicPageListV1>,
 ) -> Result<ContractKey, String> {
     let section_id = section.section.id;
     let key = section_key(owner, section_id);
@@ -997,7 +1094,9 @@ pub async fn create_section_board(
     // The child carries only the pruned authority records; the parent's root
     // commits to the full board and would not match this state.
     child.authority_root = Default::default();
-    child.topic_pages = Default::default();
+    // The manifest signs the page size from the first section state, so every
+    // client agrees where page 0 ends.
+    child.topic_pages = plaza_core::board_state::pages::TopicPageListV1(topic_pages);
     child.recent_messages = Default::default();
     child.trash = Default::default();
     child.message_keys = Default::default();
@@ -1051,14 +1150,7 @@ pub async fn create_section_board(
     SECTION_BOARDS.with_mut(|boards| {
         boards.insert(
             child_id,
-            SectionBoard {
-                params: params.clone(),
-                state: child.clone(),
-                synced: false,
-                ready: false,
-                syncing: false,
-                dirty: true,
-            },
+            SectionBoard::new(params.clone(), child.clone(), true),
         );
     });
     schedule_section_save();
@@ -1151,14 +1243,7 @@ pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Res
     SECTION_BOARDS.with_mut(|boards| {
         boards.insert(
             contract_id,
-            SectionBoard {
-                params: params.clone(),
-                state: child.clone(),
-                synced: false,
-                ready: false,
-                syncing: false,
-                dirty: true,
-            },
+            SectionBoard::new(params.clone(), child.clone(), true),
         );
     });
     schedule_section_save();
@@ -1187,11 +1272,13 @@ pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Res
     let mut pages = pages_for(owner, section);
     pages.retain(|existing| *existing > 0);
     pages.push(page);
+    let page_size = page_size_for(owner, section).unwrap_or_else(current_topic_page_size);
     let list = AuthorizedTopicPageListV1::new(
         section,
         pages,
+        page_size,
         &owner_sk,
-        plaza_core::board_state::rate_limit::system_time_ms(crate::util::get_current_system_time()),
+        now_ms(),
     );
     SECTION_BOARDS.with_mut(|boards| {
         if let Some(board) = boards.get_mut(&page0_id) {
@@ -1256,7 +1343,7 @@ pub async fn ensure_section_page_loaded(
 pub async fn active_page(owner: VerifyingKey, section: SectionId) -> Result<u32, String> {
     ensure_section_loaded(owner, section).await?;
     load_section_pages(owner, section).await?;
-    let limit = TOPIC_PAGE_SIZE.read().max(1);
+    let limit = page_size_for(owner, section).unwrap_or_else(current_topic_page_size) as usize;
     let pages = pages_for(owner, section);
     for page in pages.iter().copied() {
         ensure_section_page_loaded(owner, section, page).await?;
@@ -1294,23 +1381,33 @@ pub async fn load_section_page(
     if known {
         return Ok(contract_id);
     }
+    // A GET that is still in flight must not be sent again on every render.
+    let pending = SECTION_BOARDS
+        .read()
+        .get(&contract_id)
+        .map(|board| !board.synced && now_ms().saturating_sub(board.last_fetch) < 10_000)
+        .unwrap_or(false);
+    if pending {
+        return Ok(contract_id);
+    }
     SECTION_BOARDS.with_mut(|boards| {
         if !boards.contains_key(&contract_id) {
             boards.insert(
                 contract_id,
-                SectionBoard {
-                    params: SectionParametersV1 {
+                SectionBoard::new(
+                    SectionParametersV1 {
                         owner,
                         section,
                         page,
                     },
-                    state: ChatBoardStateV1::default(),
-                    synced: false,
-                    ready: false,
-                    syncing: false,
-                    dirty: false,
-                },
+                    ChatBoardStateV1::default(),
+                    false,
+                ),
             );
+        }
+        if let Some(board) = boards.get_mut(&contract_id) {
+            board.last_used = now_ms();
+            board.last_fetch = now_ms();
         }
     });
     send_client_request(ClientRequest::ContractOp(ContractRequest::Get {
@@ -1335,9 +1432,23 @@ pub async fn load_section_pages(owner: VerifyingKey, section: SectionId) -> Resu
     Ok(())
 }
 
-/// Wait until a section child state has arrived. A GET is retried because the
-/// child PUT may still be in flight right after the board or section is created.
-async fn ensure_section_pages(owner: VerifyingKey, section: SectionId) -> Result<(), String> {
+/// Drop every extra page from memory and from the delegate blob. Test hook:
+/// lets a reload exercise the on-demand page path instead of the persisted
+/// cache. Page 0 and the boards themselves are kept.
+pub async fn clear_extra_pages() {
+    SECTION_BOARDS.with_mut(|boards| {
+        boards.retain(|_, board| board.params.page == 0);
+    });
+    let _ = save_section_boards_now().await;
+}
+
+/// Load and wait for every page listed by a section manifest. Views that scan
+/// the whole index (search, notifications, moderation) call this explicitly;
+/// the board list loads pages on demand.
+pub async fn load_all_section_pages(
+    owner: VerifyingKey,
+    section: SectionId,
+) -> Result<(), String> {
     load_section_pages(owner, section).await?;
     for page in pages_for(owner, section)
         .into_iter()
@@ -1346,6 +1457,80 @@ async fn ensure_section_pages(owner: VerifyingKey, section: SectionId) -> Result
         ensure_section_page_loaded(owner, section, page).await?;
     }
     Ok(())
+}
+
+/// Section ids of a loaded board that point to a child contract.
+fn board_sections(owner: VerifyingKey) -> Vec<SectionId> {
+    let boards = crate::components::app::BOARDS.read();
+    boards
+        .map
+        .get(&owner)
+        .map(|board| {
+            board
+                .board_state
+                .sections
+                .sections
+                .iter()
+                .filter(|entry| !entry.section.deleted && entry.section.contract.is_some())
+                .map(|entry| entry.section.id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Load and wait for every page of every section of a board.
+pub async fn load_all_section_pages_for_board(owner: VerifyingKey) -> Result<(), String> {
+    for section in board_sections(owner) {
+        let _ = load_all_section_pages(owner, section).await;
+    }
+    Ok(())
+}
+
+/// True when the manifest lists a page that is not loaded yet.
+pub fn has_more_pages(owner: VerifyingKey) -> bool {
+    for section in board_sections(owner) {
+        for page in pages_for(owner, section)
+            .into_iter()
+            .filter(|page| *page > 0)
+        {
+            let loaded = SECTION_BOARDS
+                .read()
+                .get(section_page_key(owner, section, page).id())
+                .map(|board| board.synced)
+                .unwrap_or(false);
+            if !loaded {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Send a GET for up to `limit` pages that are not loaded yet. The states
+/// arrive asynchronously and the list re-renders when they do.
+pub async fn load_next_pages(owner: VerifyingKey, limit: usize) -> Result<usize, String> {
+    let mut started = 0;
+    for section in board_sections(owner) {
+        for page in pages_for(owner, section)
+            .into_iter()
+            .filter(|page| *page > 0)
+        {
+            if started >= limit {
+                return Ok(started);
+            }
+            let loaded = SECTION_BOARDS
+                .read()
+                .get(section_page_key(owner, section, page).id())
+                .map(|board| board.synced)
+                .unwrap_or(false);
+            if loaded {
+                continue;
+            }
+            load_section_page(owner, section, page).await?;
+            started += 1;
+        }
+    }
+    Ok(started)
 }
 
 pub async fn ensure_section_loaded(owner: VerifyingKey, section: SectionId) -> Result<(), String> {
@@ -1358,7 +1543,8 @@ pub async fn ensure_section_loaded(owner: VerifyingKey, section: SectionId) -> R
             .map(|board| board.ready)
             .unwrap_or(false)
         {
-            ensure_section_pages(owner, section).await?;
+            // Page 0 is enough to list the section. Extra pages load on
+            // demand; views that scan every page call `load_all_section_pages`.
             return Ok(());
         }
         let synced = SECTION_BOARDS
@@ -1391,7 +1577,6 @@ pub async fn ensure_section_loaded(owner: VerifyingKey, section: SectionId) -> R
         let Some(parent) = parent else {
             return Err("the parent board is not loaded".to_string());
         };
-        ensure_section_pages(owner, section).await?;
         let _ = sync_section_authority(owner, section, &parent).await;
         for _ in 0..10 {
             crate::util::sleep(std::time::Duration::from_millis(200)).await;
@@ -1476,17 +1661,14 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 if let Some(board) = boards.get_mut(key.id()) {
                     board.state = state;
                     board.synced = true;
+                    board.last_used = now_ms();
+                    board.last_fetch = 0;
                     // Keep a local change marked until our UpdateResponse
                     // confirms it; a stale Get must not clear it.
                     board.dirty = dirty;
                 }
             });
             schedule_section_save();
-            if page == 0 {
-                crate::util::safe_spawn_local(async move {
-                    let _ = load_section_pages(owner, section).await;
-                });
-            }
             if let Some(parent_state) = parent_state {
                 if parent_state.mode == BoardModeV1::SectionedTopicIndex {
                     let section = SECTION_BOARDS
@@ -1495,7 +1677,6 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                         .map(|board| board.params.section);
                     if let Some(section) = section {
                         crate::util::safe_spawn_local(async move {
-                            let _ = load_section_pages(owner, section).await;
                             let _ = sync_section_authority(owner, section, &parent_state).await;
                         });
                     }
@@ -1509,6 +1690,8 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 if let Some(board) = boards.get_mut(key.id()) {
                     board.synced = true;
                     board.dirty = false;
+                    board.last_used = now_ms();
+                    board.last_fetch = 0;
                 }
             });
         }
@@ -1577,19 +1760,14 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 if let Some(board) = boards.get_mut(key.id()) {
                     board.state = state;
                     board.synced = true;
+                    board.last_used = now_ms();
+                    board.last_fetch = 0;
                     // Keep dirty as it was: only the UpdateResponse for our
                     // own request confirms that the local change reached the
                     // node.
                 }
             });
             schedule_section_save();
-            if entry.2 == 0 {
-                let owner = entry.0;
-                let section = entry.1;
-                crate::util::safe_spawn_local(async move {
-                    let _ = load_section_pages(owner, section).await;
-                });
-            }
         }
         _ => {}
     }

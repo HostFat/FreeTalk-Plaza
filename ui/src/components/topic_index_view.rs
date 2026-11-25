@@ -18,6 +18,7 @@ pub fn TopicIndexView(board_id: String) -> Element {
     let mut new_section_name = use_signal(String::new);
     let mut section_busy = use_signal(|| false);
     let mut section_error = use_signal(|| None::<String>);
+    let mut loading_more = use_signal(|| false);
     let navigator = navigator();
 
     let board = use_memo(move || {
@@ -212,6 +213,12 @@ pub fn TopicIndexView(board_id: String) -> Element {
                                         )
                                         .len()
                                         .to_string(),
+                                        "data-page-size": crate::components::app::section_contract::page_size_for(
+                                            board_data.owner_vk,
+                                            id,
+                                        )
+                                        .map(|size| size.to_string())
+                                        .unwrap_or_default(),
                                         "{label}"
                                     }
                                 }
@@ -373,6 +380,32 @@ pub fn TopicIndexView(board_id: String) -> Element {
                         disabled: current_page + 1 >= pages,
                         onclick: move |_| page.set((current_page + 1).min(pages - 1)),
                         "Next"
+                    }
+                }
+            }
+
+            // Extra index pages load on demand; page 0 is enough for the
+            // first topics of every section.
+            if crate::components::app::section_contract::has_more_pages(owner) {
+                div { class: "flex items-center justify-center",
+                    button {
+                        r#type: "button",
+                        class: "px-4 py-2 rounded-lg border border-border text-sm text-text disabled:opacity-50",
+                        disabled: *loading_more.read(),
+                        onclick: move |_| {
+                            if *loading_more.read() {
+                                return;
+                            }
+                            loading_more.set(true);
+                            spawn(async move {
+                                let _ = crate::components::app::section_contract::load_next_pages(
+                                    owner, 4,
+                                )
+                                .await;
+                                loading_more.set(false);
+                            });
+                        },
+                        if *loading_more.read() { "Loading older topics…" } else { "Load older topics" }
                     }
                 }
             }

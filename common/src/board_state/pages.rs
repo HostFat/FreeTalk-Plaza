@@ -16,13 +16,28 @@ use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_TOPIC_PAGES: usize = 1_000;
+/// Default number of topics in a page. New sections sign this value.
+pub const DEFAULT_TOPIC_PAGE_SIZE: u32 = 200;
+/// Largest page size a section may sign. The page contract enforces the same
+/// bound, so a client cannot grow a page past it.
+pub const MAX_TOPIC_PAGE_SIZE: u32 = 500;
+/// Hard cap on the entries of one section page, enforced by the contract.
+pub const MAX_TOPICS_PER_PAGE: usize = MAX_TOPIC_PAGE_SIZE as usize;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct TopicPageListDataV1 {
     pub section: SectionId,
+    /// Number of topics a page holds before the owner creates the next one.
+    /// Signed so every client agrees on where a page ends.
+    #[serde(default = "default_topic_page_size")]
+    pub page_size: u32,
     /// Extra pages; page 0 is the section manifest itself.
     pub pages: Vec<u32>,
     pub updated_at: i64,
+}
+
+fn default_topic_page_size() -> u32 {
+    DEFAULT_TOPIC_PAGE_SIZE
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -38,6 +53,7 @@ impl AuthorizedTopicPageListV1 {
     pub fn new(
         section: SectionId,
         mut pages: Vec<u32>,
+        page_size: u32,
         owner: &SigningKey,
         updated_at: i64,
     ) -> Self {
@@ -46,6 +62,7 @@ impl AuthorizedTopicPageListV1 {
         pages.dedup();
         let data = TopicPageListDataV1 {
             section,
+            page_size: page_size.clamp(1, MAX_TOPIC_PAGE_SIZE),
             pages,
             updated_at,
         };
@@ -63,6 +80,9 @@ impl AuthorizedTopicPageListV1 {
         }
         if self.data.pages.len() > MAX_TOPIC_PAGES {
             return Err("too many topic pages".to_string());
+        }
+        if self.data.page_size == 0 || self.data.page_size > MAX_TOPIC_PAGE_SIZE {
+            return Err("the topic page size is out of range".to_string());
         }
         if self.data.pages.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err("topic pages are not sorted and unique".to_string());
@@ -90,6 +110,11 @@ impl TopicPageListV1 {
 
     pub fn section(&self) -> Option<SectionId> {
         self.0.as_ref().map(|list| list.data.section)
+    }
+
+    /// Signed page size, when the manifest carries a page list.
+    pub fn page_size(&self) -> Option<u32> {
+        self.0.as_ref().map(|list| list.data.page_size)
     }
 
     pub fn is_none(&self) -> bool {
@@ -167,11 +192,45 @@ mod tests {
     fn a_signed_page_list_verifies() {
         let owner = SigningKey::from_bytes(&[1u8; 32]);
         let section = SectionId::from_bytes([7u8; 32]);
-        let list = AuthorizedTopicPageListV1::new(section, vec![2, 1, 2, 0], &owner, 10);
+        let list =
+            AuthorizedTopicPageListV1::new(section, vec![2, 1, 2, 0], 50, &owner, 10);
         let state = TopicPageListV1(Some(list));
         let parent = ChatBoardStateV1::default();
         state.verify(&parent, &params(&owner)).unwrap();
         assert_eq!(state.pages(), vec![0, 1, 2]);
+        assert_eq!(state.page_size(), Some(50));
+    }
+
+    #[test]
+    fn a_page_size_out_of_range_is_rejected() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let section = SectionId::from_bytes([7u8; 32]);
+        let mut state = TopicPageListV1(Some(AuthorizedTopicPageListV1::new(
+            section,
+            vec![1],
+            50,
+            &owner,
+            10,
+        )));
+        if let Some(list) = &mut state.0 {
+            list.data.page_size = 0;
+        }
+        let parent = ChatBoardStateV1::default();
+        assert!(state.verify(&parent, &params(&owner)).is_err());
+
+        if let Some(list) = &mut state.0 {
+            list.data.page_size = MAX_TOPIC_PAGE_SIZE + 1;
+        }
+        assert!(state.verify(&parent, &params(&owner)).is_err());
+    }
+
+    #[test]
+    fn a_new_page_size_is_clamped_to_the_contract_bound() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let section = SectionId::from_bytes([7u8; 32]);
+        let list =
+            AuthorizedTopicPageListV1::new(section, vec![1], u32::MAX, &owner, 10);
+        assert_eq!(list.data.page_size, MAX_TOPIC_PAGE_SIZE);
     }
 
     #[test]
@@ -181,6 +240,7 @@ mod tests {
         let mut state = TopicPageListV1(Some(AuthorizedTopicPageListV1::new(
             section,
             vec![1],
+            50,
             &owner,
             10,
         )));
