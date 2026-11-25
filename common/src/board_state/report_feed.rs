@@ -14,7 +14,7 @@ use crate::board_state::topics::{
 };
 use crate::util::verify_struct;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 /// A busy board still needs a bounded queue. Older reports are dropped when
 /// the cap is reached; the resolutions that point at them go with them.
@@ -35,6 +35,16 @@ pub struct ReportFeedDeltaV1 {
     pub reports: Vec<AuthorizedTopicReportV1>,
     #[serde(default)]
     pub resolutions: Vec<AuthorizedTopicReportResolutionV1>,
+}
+
+/// Compact summary for incremental Freenet state synchronization: maps each
+/// report and resolution key to its current generation.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
+pub struct ReportFeedSummaryV1 {
+    #[serde(default)]
+    pub reports: BTreeMap<TopicReportKey, u64>,
+    #[serde(default)]
+    pub resolutions: BTreeMap<TopicReportKey, u64>,
 }
 
 fn report_key(entry: &AuthorizedTopicReportV1) -> TopicReportKey {
@@ -87,7 +97,10 @@ fn verify_resolution(entry: &AuthorizedTopicReportResolutionV1) -> Result<(), St
 fn upsert_report(list: &mut Vec<AuthorizedTopicReportV1>, entry: &AuthorizedTopicReportV1) {
     let key = report_key(entry);
     if let Some(existing) = list.iter_mut().find(|existing| report_key(existing) == key) {
-        if entry.report.generation > existing.report.generation {
+        if entry.report.generation > existing.report.generation
+            || (entry.report.generation == existing.report.generation
+                && entry.signature.to_bytes() < existing.signature.to_bytes())
+        {
             *existing = entry.clone();
         }
         return;
@@ -104,7 +117,10 @@ fn upsert_resolution(
         .iter_mut()
         .find(|existing| resolution_key(existing) == key)
     {
-        if entry.resolution.generation > existing.resolution.generation {
+        if entry.resolution.generation > existing.resolution.generation
+            || (entry.resolution.generation == existing.resolution.generation
+                && entry.signature.to_bytes() < existing.signature.to_bytes())
+        {
             *existing = entry.clone();
         }
         return;
@@ -141,25 +157,84 @@ impl ReportFeedStateV1 {
     }
 
     /// Upsert reports first, so a delta can carry a report and its resolution
-    /// together.
+    /// together. Enforces caps atomically so a rejected delta leaves `self`
+    /// unchanged and callers do not need to re-verify existing entries.
     pub fn apply_delta(&mut self, delta: &ReportFeedDeltaV1) -> Result<(), String> {
+        let mut next = self.clone();
         for entry in &delta.reports {
             verify_report(entry)?;
-            upsert_report(&mut self.reports, entry);
+            upsert_report(&mut next.reports, entry);
         }
         for entry in &delta.resolutions {
             verify_resolution(entry)?;
-            if !self
+            if !next
                 .reports
                 .iter()
                 .any(|report| report_key(report) == resolution_key(entry))
             {
                 return Err("resolution targets a missing report".to_string());
             }
-            upsert_resolution(&mut self.resolutions, entry);
+            upsert_resolution(&mut next.resolutions, entry);
         }
-        self.normalize();
+        if next.reports.len() > MAX_REPORT_FEED {
+            return Err("too many reports".to_string());
+        }
+        if next.resolutions.len() > MAX_REPORT_FEED_RESOLUTIONS {
+            return Err("too many report resolutions".to_string());
+        }
+        next.normalize();
+        *self = next;
         Ok(())
+    }
+
+    pub fn summarize(&self) -> ReportFeedSummaryV1 {
+        ReportFeedSummaryV1 {
+            reports: self
+                .reports
+                .iter()
+                .map(|entry| (report_key(entry), entry.report.generation))
+                .collect(),
+            resolutions: self
+                .resolutions
+                .iter()
+                .map(|entry| (resolution_key(entry), entry.resolution.generation))
+                .collect(),
+        }
+    }
+
+    pub fn delta(&self, summary: &ReportFeedSummaryV1) -> Option<ReportFeedDeltaV1> {
+        let reports: Vec<AuthorizedTopicReportV1> = self
+            .reports
+            .iter()
+            .filter(|entry| {
+                summary
+                    .reports
+                    .get(&report_key(entry))
+                    .copied()
+                    .is_none_or(|generation| entry.report.generation > generation)
+            })
+            .cloned()
+            .collect();
+        let resolutions: Vec<AuthorizedTopicReportResolutionV1> = self
+            .resolutions
+            .iter()
+            .filter(|entry| {
+                summary
+                    .resolutions
+                    .get(&resolution_key(entry))
+                    .copied()
+                    .is_none_or(|generation| entry.resolution.generation > generation)
+            })
+            .cloned()
+            .collect();
+        if reports.is_empty() && resolutions.is_empty() {
+            None
+        } else {
+            Some(ReportFeedDeltaV1 {
+                reports,
+                resolutions,
+            })
+        }
     }
 
     /// Deterministic order so independent merges produce the same bytes.
@@ -282,7 +357,7 @@ mod tests {
     fn the_caps_are_enforced() {
         let reporter = SigningKey::from_bytes(&[1u8; 32]);
         let mut state = ReportFeedStateV1::default();
-        for index in 0..=MAX_REPORT_FEED {
+        for index in 0..MAX_REPORT_FEED {
             let mut topic = [0u8; 32];
             topic[..8].copy_from_slice(&(index as u64).to_le_bytes());
             state
@@ -292,6 +367,48 @@ mod tests {
                 })
                 .unwrap();
         }
+        let mut overflow = [0u8; 32];
+        overflow[..8].copy_from_slice(&(MAX_REPORT_FEED as u64).to_le_bytes());
+        assert!(state
+            .apply_delta(&ReportFeedDeltaV1 {
+                reports: vec![report(overflow, &reporter, 1)],
+                resolutions: Vec::new(),
+            })
+            .is_err());
+        assert_eq!(state.reports.len(), MAX_REPORT_FEED);
+
+        state.reports.push(report(overflow, &reporter, 1));
         assert!(state.verify().is_err());
+    }
+
+    #[test]
+    fn summarize_and_delta_sync_incrementally() {
+        let reporter = SigningKey::from_bytes(&[1u8; 32]);
+        let resolver = SigningKey::from_bytes(&[2u8; 32]);
+        let mut peer_a = ReportFeedStateV1::default();
+        peer_a
+            .apply_delta(&ReportFeedDeltaV1 {
+                reports: vec![report([1u8; 32], &reporter, 1)],
+                resolutions: Vec::new(),
+            })
+            .unwrap();
+
+        let mut peer_b = peer_a.clone();
+        peer_b
+            .apply_delta(&ReportFeedDeltaV1 {
+                reports: vec![report([2u8; 32], &reporter, 1)],
+                resolutions: vec![resolution([1u8; 32], &reporter, &resolver, 1)],
+            })
+            .unwrap();
+
+        let delta = peer_b
+            .delta(&peer_a.summarize())
+            .expect("delta carries missing report and resolution");
+        assert_eq!(delta.reports.len(), 1);
+        assert_eq!(delta.resolutions.len(), 1);
+
+        peer_a.apply_delta(&delta).unwrap();
+        assert_eq!(peer_a, peer_b);
+        assert!(peer_b.delta(&peer_a.summarize()).is_none());
     }
 }

@@ -11,7 +11,7 @@ use crate::board_state::topics::{AuthorizedTopicActivityV1, TopicActivityV1};
 use crate::board_state::member::MemberId;
 use crate::util::verify_struct;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 pub const MAX_ACTIVITY_ENTRIES: usize = 200;
 pub const MAX_ACTIVITY_COUNT: u32 = 1_000_000;
@@ -36,9 +36,24 @@ pub struct ActivityDeltaV1 {
     pub entries: Vec<ActivityEntryV1>,
 }
 
+/// Compact summary for incremental Freenet state synchronization: maps
+/// `(topic_id, part)` to `(generation, last_activity)`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
+pub struct ActivitySummaryV1 {
+    #[serde(default)]
+    pub entries: BTreeMap<(MessageId, u32), (u64, i64)>,
+}
+
 impl ActivityEntryV1 {
     fn key(&self) -> (MessageId, u32) {
         (self.topic_id, self.part)
+    }
+
+    fn version_tuple(&self) -> (u64, i64) {
+        (
+            self.activity.activity.generation,
+            self.activity.activity.last_activity,
+        )
     }
 
     fn verify(&self) -> Result<(), String> {
@@ -92,18 +107,18 @@ impl ActivityStateV1 {
     pub fn apply_delta(&mut self, delta: &ActivityDeltaV1) -> Result<(), String> {
         for entry in &delta.entries {
             entry.verify()?;
+        }
+        for entry in &delta.entries {
             match self
                 .entries
                 .iter_mut()
                 .find(|existing| existing.key() == entry.key())
             {
                 Some(existing) => {
-                    let take = entry.activity.activity.generation
-                        > existing.activity.activity.generation
-                        || (entry.activity.activity.generation
-                            == existing.activity.activity.generation
-                            && entry.activity.activity.last_activity
-                                > existing.activity.activity.last_activity);
+                    let take = entry.version_tuple() > existing.version_tuple()
+                        || (entry.version_tuple() == existing.version_tuple()
+                            && entry.activity.signature.to_bytes()
+                                < existing.activity.signature.to_bytes());
                     if take {
                         *existing = entry.clone();
                     }
@@ -113,6 +128,36 @@ impl ActivityStateV1 {
         }
         self.normalize();
         Ok(())
+    }
+
+    pub fn summarize(&self) -> ActivitySummaryV1 {
+        ActivitySummaryV1 {
+            entries: self
+                .entries
+                .iter()
+                .map(|entry| (entry.key(), entry.version_tuple()))
+                .collect(),
+        }
+    }
+
+    pub fn delta(&self, summary: &ActivitySummaryV1) -> Option<ActivityDeltaV1> {
+        let missing: Vec<ActivityEntryV1> = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                summary
+                    .entries
+                    .get(&entry.key())
+                    .copied()
+                    .is_none_or(|known| entry.version_tuple() > known)
+            })
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            None
+        } else {
+            Some(ActivityDeltaV1 { entries: missing })
+        }
     }
 
     fn normalize(&mut self) {
@@ -259,5 +304,32 @@ mod tests {
                 entries: vec![entry],
             })
             .is_err());
+    }
+
+    #[test]
+    fn summarize_and_delta_sync_incrementally() {
+        let key = SigningKey::from_bytes(&[1u8; 32]);
+        let mut peer_a = ActivityStateV1::default();
+        peer_a
+            .apply_delta(&ActivityDeltaV1 {
+                entries: vec![activity(&key, 1, 1, 10, 1), activity(&key, 2, 1, 20, 1)],
+            })
+            .unwrap();
+
+        let mut peer_b = peer_a.clone();
+        peer_b
+            .apply_delta(&ActivityDeltaV1 {
+                entries: vec![activity(&key, 2, 2, 30, 2), activity(&key, 3, 1, 40, 1)],
+            })
+            .unwrap();
+
+        let delta = peer_b
+            .delta(&peer_a.summarize())
+            .expect("delta carries only newer/missing entries");
+        assert_eq!(delta.entries.len(), 2);
+
+        peer_a.apply_delta(&delta).unwrap();
+        assert_eq!(peer_a, peer_b);
+        assert!(peer_b.delta(&peer_a.summarize()).is_none());
     }
 }

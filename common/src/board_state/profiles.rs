@@ -1,24 +1,61 @@
-//! Per-board member profiles (nicknames), kept outside the board state.
+//! Sharded per-board member profiles (nicknames), kept outside the board state.
 //!
 //! A board with thousands of nicknames carried several MiB of profile records
-//! and verified every signature on each sync. The profile contract keeps the
-//! records instead; the client overlays the nickname on the board for display.
-//! The contract verifies the member signature, so the client does not repeat
-//! one signature check per render.
+//! and verified every signature on each sync. Profiles now live in deterministic
+//! bucket contracts (`PROFILE_SHARD_COUNT` fixed shards addressed by
+//! `{ owner, bucket }`, matching `member_shards`):
+//! - no owner is needed online to open new pages,
+//! - each rename or join writes a ~0.3 KiB delta to one shard with zero writes
+//!   to the parent board,
+//! - `summarize`/`delta` sync only new or bumped versions instead of full state.
 
 use crate::board_state::member::MemberId;
 use crate::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
 use crate::util::{sign_struct, verify_struct};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// A board with more members than this needs paged profiles; the feed stays
-/// bounded so the contract state cannot grow without limit.
-pub const MAX_PROFILE_ENTRIES: usize = 10_000;
+/// Fixed number of deterministic profile buckets per board.
+/// Matches `MEMBER_SHARD_COUNT` so a member's profile and membership share the
+/// same bucket index; at 10,000 members each shard holds ~312 profiles (~100 KiB).
+pub const PROFILE_SHARD_COUNT: u16 = 32;
+/// Hard cap on entries in one profile shard, enforced by the contract.
+pub const MAX_PROFILES_PER_SHARD: usize = 2_000;
 /// Generous bound for a sealed nickname; the board configuration can be
 /// stricter and the client enforces it.
 pub const MAX_PROFILE_NICKNAME_BYTES: usize = 4_096;
+
+/// Deterministic bucket index for a member id.
+pub fn profile_shard_bucket(member_id: &MemberId) -> u16 {
+    let digest = blake3::hash(member_id.as_bytes());
+    let prefix = u16::from_le_bytes([digest.as_bytes()[0], digest.as_bytes()[1]]);
+    prefix % PROFILE_SHARD_COUNT
+}
+
+/// Contract parameters for one profile shard of a board.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct ProfileShardParametersV1 {
+    pub owner: VerifyingKey,
+    pub bucket: u16,
+}
+
+impl ProfileShardParametersV1 {
+    pub fn owner_id(&self) -> MemberId {
+        MemberId::from(&self.owner)
+    }
+
+    pub fn verify(&self) -> Result<(), String> {
+        if self.bucket >= PROFILE_SHARD_COUNT {
+            return Err(format!(
+                "profile shard bucket {} out of range (max {})",
+                self.bucket,
+                PROFILE_SHARD_COUNT - 1
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// One nickname with the member key that signed it, so the contract can
 /// verify it without the board member list.
@@ -58,7 +95,16 @@ impl ProfileEntryV1 {
         self.info.member_id
     }
 
-    fn verify(&self) -> Result<(), String> {
+    pub fn verify(&self, params: &ProfileShardParametersV1) -> Result<(), String> {
+        params.verify()?;
+        if profile_shard_bucket(&self.info.member_id) != params.bucket {
+            return Err(format!(
+                "profile {:?} belongs to bucket {}, not {}",
+                self.info.member_id,
+                profile_shard_bucket(&self.info.member_id),
+                params.bucket
+            ));
+        }
         if MemberId::from(&self.signer_key) != self.info.member_id {
             return Err("the profile key does not match its member id".to_string());
         }
@@ -82,28 +128,29 @@ pub struct ProfileDeltaV1 {
     pub entries: Vec<ProfileEntryV1>,
 }
 
-fn upsert(entries: &mut Vec<ProfileEntryV1>, entry: &ProfileEntryV1) {
-    let member_id = entry.info.member_id;
-    if let Some(existing) = entries
-        .iter_mut()
-        .find(|existing| existing.info.member_id == member_id)
-    {
-        if entry.info.version > existing.info.version {
-            *existing = entry.clone();
-        }
-        return;
-    }
-    entries.push(entry.clone());
+/// Compact summary for incremental Freenet state synchronization: maps each
+/// member id in this shard to its latest nickname version.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
+pub struct ProfileSummaryV1 {
+    #[serde(default)]
+    pub versions: BTreeMap<MemberId, u32>,
+}
+
+fn should_replace(existing: &ProfileEntryV1, incoming: &ProfileEntryV1) -> bool {
+    incoming.info.version > existing.info.version
+        || (incoming.info.version == existing.info.version
+            && incoming.signature.to_bytes() < existing.signature.to_bytes())
 }
 
 impl ProfileStateV1 {
-    pub fn verify(&self) -> Result<(), String> {
-        if self.entries.len() > MAX_PROFILE_ENTRIES {
-            return Err("too many member profiles".to_string());
+    pub fn verify(&self, params: &ProfileShardParametersV1) -> Result<(), String> {
+        params.verify()?;
+        if self.entries.len() > MAX_PROFILES_PER_SHARD {
+            return Err("too many member profiles in shard".to_string());
         }
         let mut seen = HashSet::new();
         for entry in &self.entries {
-            entry.verify()?;
+            entry.verify(params)?;
             if !seen.insert(entry.info.member_id) {
                 return Err("duplicate member profile".to_string());
             }
@@ -112,14 +159,74 @@ impl ProfileStateV1 {
     }
 
     /// Verify only the entries the delta carries; the rest of the state was
-    /// validated when it was written.
-    pub fn apply_delta(&mut self, delta: &ProfileDeltaV1) -> Result<(), String> {
+    /// validated when it was written. Applies atomically so a rejected delta
+    /// leaves `self` unchanged.
+    pub fn apply_delta(
+        &mut self,
+        params: &ProfileShardParametersV1,
+        delta: &ProfileDeltaV1,
+    ) -> Result<(), String> {
+        params.verify()?;
+        let mut by_member: HashMap<MemberId, ProfileEntryV1> = self
+            .entries
+            .iter()
+            .cloned()
+            .map(|entry| (entry.info.member_id, entry))
+            .collect();
         for entry in &delta.entries {
-            entry.verify()?;
-            upsert(&mut self.entries, entry);
+            entry.verify(params)?;
+            let member_id = entry.info.member_id;
+            match by_member.get_mut(&member_id) {
+                Some(existing) => {
+                    if should_replace(existing, entry) {
+                        *existing = entry.clone();
+                    }
+                }
+                None => {
+                    by_member.insert(member_id, entry.clone());
+                }
+            }
         }
+        if by_member.len() > MAX_PROFILES_PER_SHARD {
+            return Err(format!(
+                "profile shard exceeds cap after delta: {} > {}",
+                by_member.len(),
+                MAX_PROFILES_PER_SHARD
+            ));
+        }
+        self.entries = by_member.into_values().collect();
         self.normalize();
         Ok(())
+    }
+
+    pub fn summarize(&self) -> ProfileSummaryV1 {
+        ProfileSummaryV1 {
+            versions: self
+                .entries
+                .iter()
+                .map(|entry| (entry.info.member_id, entry.info.version))
+                .collect(),
+        }
+    }
+
+    pub fn delta(&self, summary: &ProfileSummaryV1) -> Option<ProfileDeltaV1> {
+        let missing: Vec<ProfileEntryV1> = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                summary
+                    .versions
+                    .get(&entry.info.member_id)
+                    .copied()
+                    .is_none_or(|version| entry.info.version > version)
+            })
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            None
+        } else {
+            Some(ProfileDeltaV1 { entries: missing })
+        }
     }
 
     /// Deterministic order so independent merges produce the same bytes.
@@ -158,74 +265,195 @@ mod tests {
     use super::*;
     use crate::board_state::privacy::SealedBytes;
 
-    fn info(member: u8, version: u32) -> MemberInfo {
-        MemberInfo {
-            member_id: MemberId::from(
-                &ed25519_dalek::SigningKey::from_bytes(&[member; 32]).verifying_key(),
-            ),
-            version,
-            preferred_nickname: SealedBytes::public(format!("Member {member}").into_bytes()),
+    fn owner_vk() -> VerifyingKey {
+        ed25519_dalek::SigningKey::from_bytes(&[99u8; 32]).verifying_key()
+    }
+
+    fn key_for_bucket(target_bucket: u16, start_seed: u64) -> (SigningKey, u64) {
+        let mut seed = start_seed;
+        loop {
+            let mut key_bytes = [0u8; 32];
+            key_bytes[..8].copy_from_slice(&seed.to_le_bytes());
+            let key = SigningKey::from_bytes(&key_bytes);
+            let id = MemberId::from(&key.verifying_key());
+            if profile_shard_bucket(&id) == target_bucket {
+                return (key, seed + 1);
+            }
+            seed += 1;
         }
     }
 
-    fn entry(member: u8, version: u32) -> ProfileEntryV1 {
-        let key = ed25519_dalek::SigningKey::from_bytes(&[member; 32]);
-        ProfileEntryV1::new(info(member, version), &key)
+    fn entry_for_key(key: &SigningKey, version: u32, name: &str) -> ProfileEntryV1 {
+        let info = MemberInfo {
+            member_id: MemberId::from(&key.verifying_key()),
+            version,
+            preferred_nickname: SealedBytes::public(name.as_bytes().to_vec()),
+        };
+        ProfileEntryV1::new(info, key)
+    }
+
+    #[test]
+    fn bucket_is_deterministic_and_matches_member_shards() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let id = MemberId::from(&key.verifying_key());
+        let bucket = profile_shard_bucket(&id);
+        assert!(bucket < PROFILE_SHARD_COUNT);
+        assert_eq!(bucket, profile_shard_bucket(&id));
+        assert_eq!(
+            bucket,
+            crate::board_state::member_shards::member_shard_bucket(&id)
+        );
     }
 
     #[test]
     fn a_newer_version_wins_and_duplicates_are_rejected() {
+        let params = ProfileShardParametersV1 {
+            owner: owner_vk(),
+            bucket: 0,
+        };
+        let (key1, next) = key_for_bucket(0, 1);
+        let (key2, _) = key_for_bucket(0, next);
+        let id1 = MemberId::from(&key1.verifying_key());
+
         let mut state = ProfileStateV1::default();
         state
-            .apply_delta(&ProfileDeltaV1 {
-                entries: vec![entry(1, 1)],
-            })
+            .apply_delta(
+                &params,
+                &ProfileDeltaV1 {
+                    entries: vec![entry_for_key(&key1, 1, "Alice")],
+                },
+            )
             .unwrap();
         state
-            .apply_delta(&ProfileDeltaV1 {
-                entries: vec![entry(1, 2), entry(2, 1)],
-            })
+            .apply_delta(
+                &params,
+                &ProfileDeltaV1 {
+                    entries: vec![
+                        entry_for_key(&key1, 2, "Alice 2"),
+                        entry_for_key(&key2, 1, "Bob"),
+                    ],
+                },
+            )
             .unwrap();
         assert_eq!(state.entries.len(), 2);
         let first = state
             .entries
             .iter()
-            .find(|entry| entry.info.member_id == info(1, 0).member_id)
+            .find(|entry| entry.info.member_id == id1)
             .unwrap();
         assert_eq!(first.info.version, 2);
-        state.verify().unwrap();
+        state.verify(&params).unwrap();
 
-        state.entries.push(entry(1, 3));
-        assert!(state.verify().is_err());
+        state.entries.push(entry_for_key(&key1, 3, "Duplicate"));
+        assert!(state.verify(&params).is_err());
+    }
+
+    #[test]
+    fn wrong_bucket_and_out_of_range_bucket_are_rejected() {
+        let (key0, _) = key_for_bucket(0, 1);
+        let wrong_params = ProfileShardParametersV1 {
+            owner: owner_vk(),
+            bucket: 1,
+        };
+        let mut state = ProfileStateV1::default();
+        assert!(state
+            .apply_delta(
+                &wrong_params,
+                &ProfileDeltaV1 {
+                    entries: vec![entry_for_key(&key0, 1, "Alice")],
+                },
+            )
+            .is_err());
+
+        let oob_params = ProfileShardParametersV1 {
+            owner: owner_vk(),
+            bucket: PROFILE_SHARD_COUNT,
+        };
+        assert!(oob_params.verify().is_err());
+        assert!(state.verify(&oob_params).is_err());
     }
 
     #[test]
     fn a_signature_by_another_member_is_rejected() {
-        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
-        let mut bad = entry(1, 1);
-        bad.signature = sign_struct(&bad.info, &key);
+        let params = ProfileShardParametersV1 {
+            owner: owner_vk(),
+            bucket: 0,
+        };
+        let (key1, _) = key_for_bucket(0, 1);
+        let other = SigningKey::from_bytes(&[9u8; 32]);
+        let mut bad = entry_for_key(&key1, 1, "Alice");
+        bad.signature = sign_struct(&bad.info, &other);
         let mut state = ProfileStateV1::default();
         assert!(state
-            .apply_delta(&ProfileDeltaV1 { entries: vec![bad] })
+            .apply_delta(&params, &ProfileDeltaV1 { entries: vec![bad] })
             .is_err());
     }
 
     #[test]
+    fn summarize_and_delta_sync_incrementally() {
+        let params = ProfileShardParametersV1 {
+            owner: owner_vk(),
+            bucket: 0,
+        };
+        let (key1, next) = key_for_bucket(0, 1);
+        let (key2, _) = key_for_bucket(0, next);
+
+        let mut peer_a = ProfileStateV1::default();
+        peer_a
+            .apply_delta(
+                &params,
+                &ProfileDeltaV1 {
+                    entries: vec![entry_for_key(&key1, 1, "Alice")],
+                },
+            )
+            .unwrap();
+        let mut peer_b = peer_a.clone();
+        peer_b
+            .apply_delta(
+                &params,
+                &ProfileDeltaV1 {
+                    entries: vec![
+                        entry_for_key(&key1, 2, "Alice renamed"),
+                        entry_for_key(&key2, 1, "Bob"),
+                    ],
+                },
+            )
+            .unwrap();
+
+        let summary_a = peer_a.summarize();
+        let delta = peer_b.delta(&summary_a).expect("delta has updates");
+        assert_eq!(delta.entries.len(), 2);
+
+        peer_a.apply_delta(&params, &delta).unwrap();
+        assert_eq!(peer_a, peer_b);
+        assert!(peer_b.delta(&peer_a.summarize()).is_none());
+    }
+
+    #[test]
     fn the_caps_are_enforced() {
+        let params = ProfileShardParametersV1 {
+            owner: owner_vk(),
+            bucket: 0,
+        };
         let mut state = ProfileStateV1::default();
-        for index in 0..=MAX_PROFILE_ENTRIES {
-            let mut key_bytes = [0u8; 32];
-            key_bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
-            let key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
-            let member_info = MemberInfo {
-                member_id: MemberId::from(&key.verifying_key()),
-                version: 1,
-                preferred_nickname: SealedBytes::public(b"Member".to_vec()),
-            };
-            state
-                .entries
-                .push(ProfileEntryV1::new(member_info, &key));
+        let mut seed = 1u64;
+        for _ in 0..MAX_PROFILES_PER_SHARD {
+            let (key, next) = key_for_bucket(0, seed);
+            seed = next;
+            state.entries.push(entry_for_key(&key, 1, "Member"));
         }
-        assert!(state.verify().is_err());
+        let (overflow_key, _) = key_for_bucket(0, seed);
+        assert!(state
+            .apply_delta(
+                &params,
+                &ProfileDeltaV1 {
+                    entries: vec![entry_for_key(&overflow_key, 1, "Overflow")],
+                },
+            )
+            .is_err());
+        assert_eq!(state.entries.len(), MAX_PROFILES_PER_SHARD);
+
+        state.entries.push(entry_for_key(&overflow_key, 1, "Overflow"));
+        assert!(state.verify(&params).is_err());
     }
 }
