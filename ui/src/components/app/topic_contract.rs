@@ -282,6 +282,7 @@ pub async fn continue_topic(
         destination: None,
         section: None,
         section_chain: Vec::new(),
+        destination_sections: Vec::new(),
         part: Some(next_part),
         scope_chain: chain,
         generation: current_generation + 1,
@@ -395,6 +396,11 @@ pub async fn move_topic(
         destination: None,
         section: Some(section_id),
         section_chain: snapshot.chain,
+        destination_sections: board
+            .board_state
+            .sections
+            .chain_only(&section_id)
+            .sections,
         part: None,
         scope_chain: base.entry.section_chain.clone(),
         generation: current_generation + 1,
@@ -501,6 +507,15 @@ pub async fn merge_topic(
         destination: Some(destination),
         section: flag_section,
         section_chain: flag_section_chain,
+        destination_sections: flag_section
+            .map(|section| {
+                board
+                    .board_state
+                    .sections
+                    .chain_only(&section)
+                    .sections
+            })
+            .unwrap_or_default(),
         part: None,
         scope_chain: base.entry.section_chain.clone(),
         generation: current_generation + 1,
@@ -1490,6 +1505,7 @@ pub async fn set_flag(
         destination: None,
         section: None,
         section_chain: Vec::new(),
+        destination_sections: Vec::new(),
         part: None,
         scope_chain: chain,
         generation: current_generation + 1,

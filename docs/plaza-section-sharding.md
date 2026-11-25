@@ -151,6 +151,22 @@ Le scritture di report sulla board sono zero.
 Board revision 30; board, section e topic ri-keyati, più il nuovo contratto
 moderazione; board e topic esistenti vanno ricreati.
 
+## Sezioni compatte nelle pagine
+
+Ogni figlia conservava tutte le sezioni della madre, quindi lo storage cresceva
+con il quadrato delle sezioni. Ora conserva solo la propria sezione e i suoi
+antenati (`SectionsV1::chain_only`). Uno spostamento o un merge verso un'altra
+sezione porta nel flag i record firmati della destinazione
+(`TopicFlagV1.destination_sections`); il child di origine li verifica senza
+conoscere le sezioni sorelle. Il delta di autorità invia solo la catena.
+
+Benchmark: con 20 o 100 sezioni sorelle la figlia pruned resta 363 KiB (prima
+371/406 KiB) e lo storage scende da 7,3/39,7 a 7,1/35,4 MiB. La dimensione
+della pagina non dipende più dal numero di sezioni sorelle.
+
+Board revision 31; board, section e topic ri-keyati; board e topic esistenti
+vanno ricreati.
+
 ## Problema
 
 La board `TopicIndex` tiene in un unico contratto sezioni, membri, autorità e

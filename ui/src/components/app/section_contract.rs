@@ -851,7 +851,7 @@ async fn sync_section_page_authority(
         state.configuration = parent.configuration.clone();
         state.admin = parent.admin.clone();
         state.ownership = parent.ownership.clone();
-        state.sections = parent.sections.clone();
+        state.sections = parent.sections.chain_only(&section);
         state.authority_root = Default::default();
         state.members = parent.members.clone();
         state.roles = parent.roles.clone();
@@ -867,9 +867,10 @@ async fn sync_section_page_authority(
         if parent.configuration != child.configuration {
             delta.configuration = Some(parent.configuration.clone());
         }
-        if parent.sections != child.sections {
+        let wanted_sections = parent.sections.chain_only(&section);
+        if wanted_sections != child.sections {
             delta.sections = Some(SectionsDelta {
-                sections: parent.sections.sections.clone(),
+                sections: wanted_sections.sections,
             });
         }
         let known: HashSet<MemberId> = child
@@ -1085,11 +1086,13 @@ pub async fn create_section_board(
         .any(|entry| entry.section.id == section_id)
     {
         sections.sections.push(section.clone());
+        sections
+            .sections
+            .sort_by_key(|entry| (*entry.section.id.as_bytes(), entry.section.generation));
     }
-    sections
-        .sections
-        .sort_by_key(|entry| (*entry.section.id.as_bytes(), entry.section.generation));
-    child.sections = sections;
+    // A child only needs its own section and its ancestors. Cross-section
+    // moves carry the destination records in the flag.
+    child.sections = sections.chain_only(&section_id);
     child.topics = TopicIndexV1::default();
     // The child carries only the pruned authority records; the parent's root
     // commits to the full board and would not match this state.
@@ -1219,6 +1222,7 @@ pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Res
     child.image_retirements = Default::default();
     child.upgrade = Default::default();
     child.mail_addresses = Default::default();
+    child.sections = child.sections.chain_only(&section);
 
     let board_params = ChatBoardParametersV1 { owner };
     child

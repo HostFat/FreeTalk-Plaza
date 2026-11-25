@@ -213,6 +213,33 @@ impl SectionsV1 {
             .unwrap_or(1)
     }
 
+    /// The section followed by its ancestors, with the signed records that
+    /// prove the chain. A section child keeps only this small set instead of
+    /// every sibling section.
+    pub fn chain_only(&self, id: &SectionId) -> SectionsV1 {
+        let chain = self.chain(id);
+        SectionsV1 {
+            sections: self
+                .sections
+                .iter()
+                .filter(|entry| chain.contains(&entry.section.id))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// Verify one signed section record against a board state. Exposed so a
+    /// move flag can carry a destination section proof without storing every
+    /// section in the source child.
+    pub fn verify_record(
+        &self,
+        state: &ChatBoardStateV1,
+        parameters: &ChatBoardParametersV1,
+        entry: &AuthorizedSectionV1,
+    ) -> Result<(), String> {
+        self.verify_entry(state, parameters, entry)
+    }
+
     fn verify_entry(
         &self,
         state: &ChatBoardStateV1,

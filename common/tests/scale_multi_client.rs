@@ -199,6 +199,7 @@ fn flag(section: MessageId, index: usize) -> AuthorizedTopicFlagV1 {
         destination: None,
         section: None,
         section_chain: Vec::new(),
+        destination_sections: Vec::new(),
         part: None,
         scope_chain: vec![section],
         generation: 1,
@@ -367,8 +368,14 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
     let child_size = serialized_len(&child);
     let child_verify = verify_time(&child, Some(section_id));
 
-    // The client now gives a child only the members its index references.
-    let mut pruned = child.clone();
+    // A child now keeps only its own section chain, and only the members its
+    // index references.
+    let mut compact = child.clone();
+    compact.sections = parent.sections.chain_only(&section_id);
+    let compact_size = serialized_len(&compact);
+    let compact_verify = verify_time(&compact, Some(section_id));
+
+    let mut pruned = compact.clone();
     let needed: std::collections::HashSet<MemberId> = child
         .topics
         .entries
@@ -416,7 +423,12 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
         child_verify
     );
     println!(
-        "pruned:   {:>7.1} KiB   verify {:>8.1} ms   (only members the index references)",
+        "compact:  {:>7.1} KiB   verify {:>8.1} ms   (own section chain, all members)",
+        compact_size as f64 / 1024.0,
+        compact_verify
+    );
+    println!(
+        "pruned:   {:>7.1} KiB   verify {:>8.1} ms   (own chain + only referenced members)",
         pruned_size as f64 / 1024.0,
         pruned_verify
     );
@@ -430,7 +442,7 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
         activity_mib * subscribers as f64
     );
     println!(
-        "storage:  {:>7.1} MiB across {sections} pruned children (O(sections x referenced members + sections^2))",
+        "storage:  {:>7.1} MiB across {sections} pruned children (O(sections + referenced members))",
         pruned_mib * sections as f64
     );
     // The client sends a delta with the new entry, not the full index state.

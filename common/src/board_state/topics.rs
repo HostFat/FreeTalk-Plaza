@@ -13,7 +13,7 @@ use crate::board_state::roles::{
     resolve_signer_key, verify_moderation_authority, AuthorityProof,
     ModerationPower,
 };
-use crate::board_state::sections::{SectionId, SectionsV1};
+use crate::board_state::sections::{AuthorizedSectionV1, SectionId, SectionsV1};
 use crate::board_state::ChatBoardParametersV1;
 use crate::board_state::ChatBoardStateV1;
 use crate::util::{sign_struct, verify_struct};
@@ -143,7 +143,7 @@ pub enum TopicFlagKind {
     Part,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct TopicFlagV1 {
     pub topic_id: TopicId,
     pub kind: TopicFlagKind,
@@ -155,6 +155,11 @@ pub struct TopicFlagV1 {
     pub section: Option<SectionId>,
     #[serde(default)]
     pub section_chain: Vec<SectionId>,
+    /// Signed destination section records for a cross-section move or merge.
+    /// A section child stores only its own chain, so the flag carries the
+    /// destination proof instead of the whole section list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destination_sections: Vec<AuthorizedSectionV1>,
     /// New part for a `Part` flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part: Option<u32>,
@@ -164,7 +169,7 @@ pub struct TopicFlagV1 {
     pub created_at: i64,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct AuthorizedTopicFlagV1 {
     pub flag: TopicFlagV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -499,19 +504,12 @@ impl TopicIndexV1 {
                     }
                 } else {
                     // A cross-section merge points into another child board.
-                    // The owner signs the destination section; the source
-                    // child can only validate that the section exists.
+                    // The flag carries the destination records, so the source
+                    // child does not need to store every sibling section.
                     let section = value.section.ok_or(
                         "a cross-section merge needs the destination section",
                     )?;
-                    if !state.sections.exists(&section) {
-                        return Err("the merge destination section does not exist".to_string());
-                    }
-                    if state.sections.chain(&section) != value.section_chain {
-                        return Err(
-                            "the merge destination section chain does not match".to_string()
-                        );
-                    }
+                    verify_flag_destination(state, parameters, value, section)?;
                 }
             }
         } else if value.kind == TopicFlagKind::Section {
@@ -521,12 +519,7 @@ impl TopicIndexV1 {
             let section = value
                 .section
                 .ok_or("a section move needs a destination section")?;
-            if !state.sections.exists(&section) {
-                return Err("the new section does not exist".to_string());
-            }
-            if state.sections.chain(&section) != value.section_chain {
-                return Err("the new section chain does not match the board".to_string());
-            }
+            verify_flag_destination(state, parameters, value, section)?;
             if value.destination.is_some() {
                 return Err("a section move cannot carry a topic destination".to_string());
             }
@@ -563,6 +556,7 @@ impl TopicIndexV1 {
         } else if value.destination.is_some()
             || value.section.is_some()
             || !value.section_chain.is_empty()
+            || !value.destination_sections.is_empty()
             || value.part.is_some()
         {
             return Err("only a merge, section or part flag carries a destination".to_string());
@@ -1169,6 +1163,39 @@ impl TopicIndexV1 {
     }
 }
 
+/// Validate the destination of a move or cross-section merge. A child board
+/// keeps only its own section chain, so the flag carries the signed
+/// destination records; a full board can fall back to its stored sections.
+fn verify_flag_destination(
+    state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    value: &TopicFlagV1,
+    section: SectionId,
+) -> Result<(), String> {
+    if value.destination_sections.is_empty() {
+        if !state.sections.exists(&section) {
+            return Err("the new section does not exist".to_string());
+        }
+        if state.sections.chain(&section) != value.section_chain {
+            return Err("the new section chain does not match the board".to_string());
+        }
+        return Ok(());
+    }
+    let proof = SectionsV1 {
+        sections: value.destination_sections.clone(),
+    };
+    if !proof.exists(&section) {
+        return Err("the new section proof does not contain the section".to_string());
+    }
+    if proof.chain(&section) != value.section_chain {
+        return Err("the new section chain does not match the proof".to_string());
+    }
+    for entry in &value.destination_sections {
+        state.sections.verify_record(state, parameters, entry)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1264,6 +1291,7 @@ pub(crate) mod tests {
             destination: None,
             section: None,
             section_chain: Vec::new(),
+            destination_sections: Vec::new(),
             part: None,
             scope_chain: Vec::new(),
             generation: 1,
@@ -1471,6 +1499,7 @@ mod section_move_tests {
             destination: None,
             section: Some(section_b),
             section_chain: vec![section_b],
+            destination_sections: Vec::new(),
             part: None,
             scope_chain: vec![section_a],
             generation: 1,
@@ -1488,6 +1517,72 @@ mod section_move_tests {
             index.section_of(&TopicId::from_bytes([7u8; 32])).0,
             Some(section_b)
         );
+    }
+
+    #[test]
+    fn a_move_proof_works_without_the_sibling_sections() {
+        let mut state = board();
+        let section_a = SectionId::from_bytes([1u8; 32]);
+        let section_b = SectionId::from_bytes([2u8; 32]);
+        for (id, name) in [(section_a, "A"), (section_b, "B")] {
+            state.sections.sections.push(AuthorizedSectionV1::new(
+                SectionV1 {
+                    id,
+                    parent: None,
+                    name: name.to_string(),
+                    description: None,
+                    icon: None,
+                    color: "#fff".to_string(),
+                    allowed_roles: Vec::new(),
+                    sealed_name: None,
+                    hidden: false,
+                    is_group: false,
+                    images_allowed: true,
+                    auto_moderated_topics: None,
+                    generation: 1,
+                    deleted: false,
+                    contract: None,
+                    signed_at: SystemTime::UNIX_EPOCH,
+                },
+                &owner(),
+                None,
+            ));
+        }
+        let destination = state.sections.chain_only(&section_b).sections;
+        let mut index = TopicIndexV1::default();
+        index
+            .entries
+            .push(topic(&member(), Some(section_a), vec![section_a]));
+        let flag = TopicFlagV1 {
+            topic_id: TopicId::from_bytes([7u8; 32]),
+            kind: TopicFlagKind::Section,
+            value: true,
+            destination: None,
+            section: Some(section_b),
+            section_chain: vec![section_b],
+            destination_sections: destination,
+            part: None,
+            scope_chain: vec![section_a],
+            generation: 1,
+            created_at: 1,
+        };
+        index.flags.push(AuthorizedTopicFlagV1 {
+            signature: sign_struct(&flag, &owner()),
+            flag,
+            signer: Some(MemberId::from(&owner().verifying_key())),
+            signer_key: Some(owner().verifying_key()),
+            authority: None,
+        });
+
+        let mut child = state.clone();
+        child.sections = state.sections.chain_only(&section_a);
+        assert_eq!(child.sections.sections.len(), 1);
+        index.verify(&child, &params()).unwrap();
+
+        // The destination proof is signed; changing its content rejects it.
+        let mut tampered = index.clone();
+        tampered.flags[0].flag.destination_sections[0].section.name = "C".to_string();
+        assert!(tampered.verify(&child, &params()).is_err());
     }
 }
 
@@ -1508,6 +1603,7 @@ mod continuation_flag_tests {
             destination: None,
             section: None,
             section_chain: Vec::new(),
+            destination_sections: Vec::new(),
             part: Some(2),
             scope_chain: Vec::new(),
             generation: 1,

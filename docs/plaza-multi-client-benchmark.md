@@ -25,13 +25,17 @@ copia l'autorita' della madre e aggiunge l'indice della propria sezione.
 
 | Sezioni | Madre | Figlia piena | Verify piena | Figlia pruned | Verify pruned | Legacy activity delta |
 |---:|---:|---:|---:|---:|---:|---:|
-| 20 | 345 KiB | 639 KiB | 3,50 s | 371 KiB | 1,75 s | 2,1 ms |
-| 100 | 380 KiB | 674 KiB | 3,53 s | 406 KiB | 1,90 s | 2,0 ms |
+| 20 | 345 KiB | 639 KiB | 3,46 s | 363 KiB | 1,71 s | 2,1 ms |
+| 100 | 380 KiB | 674 KiB | 3,61 s | 363 KiB | 1,67 s | 2,0 ms |
 
 | Sezioni | Storage figlie (pruned) | Activity contract | Fan-out activity (50 sub) | Authority sync |
 |---:|---:|---:|---:|---:|
-| 20 | 7,3 MiB | 83,2 KiB (200 entry) | 4,06 MiB per update | 7,3 MiB |
-| 100 | 39,7 MiB | 83,2 KiB (200 entry) | 4,06 MiB per update | 39,7 MiB |
+| 20 | 7,1 MiB | 83,2 KiB (200 entry) | 4,06 MiB per update | 7,1 MiB |
+| 100 | 35,4 MiB | 83,2 KiB (200 entry) | 4,06 MiB per update | 35,4 MiB |
+
+Le figlie ora tengono solo la propria catena di sezioni: la dimensione pruned è
+la stessa con 20 e con 100 sezioni sorelle (363 KiB), e lo storage cresce con
+le figlie, non con il quadrato delle sezioni.
 
 Indice a pagine, 1.000 membri, 2.000 topic, pagine da 200:
 
@@ -65,8 +69,9 @@ il costo dipende dai membri, non dalle sezioni.
 
 Prima del pruning le figlie erano 639/674 KiB, lo storage 12,5/65,9 MiB,
 il fan-out dell'activity 31,2/32,9 MiB e la sincronizzazione dell'autorita'
-12,5/65,9 MiB. Ora una risposta scrive il topic e il contratto activity; la
-board e le figlie non ricevono piu' l'activity.
+12,5/65,9 MiB. Ora una figlia pruned è 363 KiB in entrambi gli scenari e lo
+storage è 7,1/35,4 MiB. Una risposta scrive il topic e il contratto activity;
+la board e le figlie non ricevono più l'activity.
 
 ## Cosa dicono i numeri
 
@@ -75,25 +80,24 @@ board e le figlie non ricevono piu' l'activity.
    fan-out con 50 subscriber). La board non riceve piu' l'activity. Il fast
    path del contratto section resta per gli altri delta.
 2. **La verifica completa resta il costo di ingresso.** Un nuovo subscriber,
-   un `UpdateData::State` o un merge versionato pagano 3,5 s per figlia con
-   1.000 membri e 200 topic. E' il costo da ridurre con autorita' compatta e
-   indice a pagine.
+   un `UpdateData::State` o un merge versionato pagano 1,7 s per figlia con
+   1.000 membri e 200 topic, dopo il pruning e la catena di sezioni.
 3. **Un nuovo topic trasmette un delta piccolo.** Il client invia un
    `TopicIndexDelta` da 0,7 KiB; con 50 subscriber il fan-out e' 0,03 MiB.
    Lo stato completo (371-406 KiB) serve a un nuovo subscriber o a un
    resync, non a ogni topic. L'activity non contribuisce a questo traffico.
-4. **Il pruning taglia circa il 40% della figlia.** La figlia conserva solo i
-   membri che il suo indice referenzia: 371-406 KiB invece di 639-674 KiB,
-   con una verifica piena di 1,75-1,90 s invece di 3,5 s. La radice firmata
-   elimina le copie nei topic; restano le sezioni copiate in ogni figlia
-   (`O(sezioni^2)`) e le definizioni dei ruoli.
+4. **Il pruning e la catena tagliano circa il 45% della figlia.** La figlia
+   conserva solo i membri che il suo indice referenzia e la propria catena di
+   sezioni: 363 KiB invece di 639-674 KiB, con una verifica piena di 1,7 s
+   invece di 3,5 s. La dimensione pruned non dipende dalle sezioni sorelle.
+   Le definizioni dei ruoli restano nel topic.
 5. **Le pagine limitano scrittura e bootstrap.** Con `page_size=200` una nuova
    entry tocca solo la pagina attiva; il bootstrap di un nuovo subscriber
    passa da 3,3 MiB (sezione da 2.000 topic) a 363 KiB (una pagina), con la
-   verifica da 14,9 s a 1,7 s. Le pagine duplicano l'autorita' potata, quindi
+   verifica da 14,9 s a 1,7 s. Le pagine duplicano l'autorità potata, quindi
    lo storage cresce con il numero di pagine.
 6. **La propagazione dell'autorita' e' il caso peggiore.** Un cambio di
-   ruolo o un ban sincronizza tutte le figlie (39,7 MiB nello scenario da 100
+   ruolo o un ban sincronizza tutte le figlie (35,4 MiB nello scenario da 100
    sezioni dopo il pruning) e poi aggiorna ogni topic. Il limite di 100 topic
    e' stato rimosso. Ogni topic riceve una radice Merkle firmata dall'owner e
    le prove dei suoi membri, non la copia globale di ban/sospensioni; le
