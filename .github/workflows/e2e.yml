@@ -1,41 +1,42 @@
 name: E2E
 
+# Run after the Rust workflow so the contract bundle, the target WASMs and the
+# stylesheet can be downloaded instead of rebuilt on a second runner.
 on:
-  push:
-    branches: [ "trunk" ]
-  pull_request:
-    branches: [ "trunk" ]
+  workflow_run:
+    workflows: ["Rust"]
+    types: [completed]
   workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   playwright:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
-    # Nix supplies dx, the pinned Rust toolchain and wasm-bindgen.
+    # Nix supplies dx and the pinned Rust toolchain.
     - uses: cachix/install-nix-action@v31
       with:
         nix_path: nixpkgs=channel:nixos-unstable
 
-    # Playwright itself runs on the runner's Node; only dx comes from Nix.
+    # Playwright itself runs on the runner's Node.
     - uses: actions/setup-node@v4
       with:
         node-version: 22
         cache: npm
-        cache-dependency-path: |
-          ui/package-lock.json
-          ui/tests/package-lock.json
-
-    - name: Build Tailwind CSS
-      run: |
-        npm --prefix ui ci
-        npm --prefix ui run build:css
+        cache-dependency-path: ui/tests/package-lock.json
 
     - name: Cache Playwright browsers
       uses: actions/cache@v4
@@ -50,6 +51,7 @@ jobs:
         npm ci
         npx playwright install --with-deps chromium firefox webkit
 
+    # The example UI is still built here, but it reuses the dependency cache.
     - name: Cache the Dioxus build
       uses: actions/cache@v4
       with:
@@ -60,9 +62,40 @@ jobs:
         key: e2e-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}
         restore-keys: e2e-${{ runner.os }}-
 
-    # chat_delegate.rs includes target/wasm32-unknown-unknown/release/plaza_delegate.wasm.
-    - name: Build contract and delegate WASMs
-      run: nix develop --command cargo run --quiet --manifest-path tools/wasm-tool/Cargo.toml -- sync
+    - name: Download contract bundle
+      if: github.event_name == 'workflow_run'
+      uses: actions/download-artifact@v4
+      with:
+        name: contracts
+        path: ui/public/contracts
+        run-id: ${{ github.event.workflow_run.id }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Download target WASMs
+      if: github.event_name == 'workflow_run'
+      uses: actions/download-artifact@v4
+      with:
+        name: wasm-target
+        path: target/wasm32-unknown-unknown/release
+        run-id: ${{ github.event.workflow_run.id }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Download stylesheet
+      if: github.event_name == 'workflow_run'
+      uses: actions/download-artifact@v4
+      with:
+        name: styles
+        path: ui/assets
+        run-id: ${{ github.event.workflow_run.id }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+
+    # A manual run has no upstream artifacts to download.
+    - name: Build contracts and stylesheet (manual run)
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        nix develop --command cargo run --quiet --manifest-path tools/wasm-tool/Cargo.toml -- sync
+        npm --prefix ui ci
+        npm --prefix ui run build:css
 
     # Run the Node process outside Nix: WebKit crashes when it inherits the
     # Nix dev shell's library paths. Only dx needs the shell.
