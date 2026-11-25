@@ -407,6 +407,15 @@ impl BoardData {
             &members,
             &mut self.board_state.topics,
         );
+        // Reports and resolutions live in their own contract; the moderation
+        // view overlays the verified entries on the merged index.
+        let mut topics = std::mem::take(&mut self.board_state.topics);
+        crate::components::app::moderation_contract::apply_to_index(
+            self.owner_vk,
+            &self.board_state,
+            &mut topics,
+        );
+        self.board_state.topics = topics;
         self
     }
 

@@ -1598,7 +1598,7 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
         ContractResponse::GetResponse { key, state, .. } => {
             let network = ciborium::de::from_reader::<ChatBoardStateV1, _>(state.as_ref())
                 .map_err(|error| format!("decode section state: {error}"))?;
-            let Some((owner, section, page, cached, dirty)) =
+            let Some((owner, section, _page, cached, dirty)) =
                 SECTION_BOARDS.read().get(key.id()).map(|board| {
                     (
                         board.params.owner,

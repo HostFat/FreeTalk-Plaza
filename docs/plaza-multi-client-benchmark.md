@@ -43,6 +43,15 @@ Indice a pagine, 1.000 membri, 2.000 topic, pagine da 200:
 Un nuovo topic è un delta da 0,7 KiB: con 50 subscriber il fan-out è
 0,03 MiB. Il manifest cambia solo quando nasce una pagina.
 
+Moderazione, 500 report e 500 risoluzioni:
+
+| Unità | Dimensione | Fan-out (50 sub) |
+|---|---:|---:|
+| Feed completo (bootstrap) | 362,8 KiB | — |
+| Un nuovo report | 0,3 KiB | 0,02 MiB |
+
+Le scritture di report sulla board o sulla pagina della sezione sono zero.
+
 Membri della board (10 sezioni, nessun topic):
 
 | Membri | Board | Verify |
@@ -94,25 +103,33 @@ board e le figlie non ricevono piu' l'activity.
    costo CPU del client cresce con il numero di topic: aggiornamenti
    incrementali della sola radice sono il passo successivo.
 7. **I membri sono il prossimo limite.** La board tiene tutti i membri: a
-   10.000 membri pesa 3,3 MiB e la verifica piena supera i 20 s, mentre le
-   sezioni restano 3,3 MiB. Un contratto membri con radice firmata toglie
-   questa crescita dal percorso caldo.
+   10.000 membri pesa 3,3 MiB. Con una radice firmata valida la verifica
+   scende da 20 s a 88 ms (tree 53 ms); senza radice, o per una modifica
+   guidata da un admin, resta la verifica completa. Paginare i membri toglie
+   anche la crescita dello stato.
+8. **La moderazione e' fuori dall'indice.** Un report e' un delta da 0,3 KiB
+   al contratto moderazione; il feed completo (500 report + 500 risoluzioni)
+   e' 362,8 KiB per un nuovo subscriber.
 
 ## Prossimi passi
 
 1. Indice a pagine con manifest (fatto): aggiornamenti limitati alla pagina,
    `page_size` firmato con cap 500, caricamento pigro e budget dello storage
    locale.
-2. Contratto membri con radice firmata; la board conserva solo radice e
-   versione.
-3. Compattare le pagine e l'autorita' duplicata; oggi ogni pagina copia
+2. Moderazione fuori dall'indice (fatto): feed per board, report e
+   risoluzioni verificati dal client.
+3. Radice firmata come percorso veloce di verifica (fatto): 10.000 membri
+   passano da 20 s a 88 ms.
+4. Paginare i membri e conservare nella board solo radice e versione; lo
+   stato cresce ancora con il numero di membri.
+5. Compattare le pagine e l'autorita' duplicata; oggi ogni pagina copia
    l'autorita' potata.
-4. Topic a pagine append-only; una risposta scrive una pagina.
-5. Compattare le sezioni nelle figlie (`O(sezioni^2)`) e le definizioni dei
+6. Topic a pagine append-only; una risposta scrive una pagina.
+7. Compattare le sezioni nelle figlie (`O(sezioni^2)`) e le definizioni dei
    ruoli.
-6. Aggiornamenti incrementali della sola radice per i topic, senza caricare
+8. Aggiornamenti incrementali della sola radice per i topic, senza caricare
    ogni topic nella passata di propagazione.
-7. Subscription lazy con budget/TTL e `Unsubscribe` quando la stdlib lo
+9. Subscription lazy con budget/TTL e `Unsubscribe` quando la stdlib lo
    espone.
 
 ## Limiti del benchmark

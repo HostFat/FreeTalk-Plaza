@@ -23,6 +23,7 @@ pub mod pages;
 pub mod pq_secrets;
 pub mod privacy;
 pub mod rate_limit;
+pub mod report_feed;
 pub mod reports;
 pub mod roles;
 pub mod secret;
@@ -278,8 +279,54 @@ impl ChatBoardStateV1 {
         parameters: &ChatBoardParametersV1,
         section: Option<crate::board_state::sections::SectionId>,
     ) -> Result<(), String> {
-        <Self as ComposableState>::verify(self, self, parameters)?;
+        // A matching owner-signed root attests to the member, role, ban and
+        // suspension records. Verifying every record signature again costs
+        // seconds on a board with thousands of members; the root commits to
+        // the same bytes with one signature.
+        if self.authority_root_matches(parameters) {
+            self.verify_without_authority_records(parameters)?;
+        } else {
+            <Self as ComposableState>::verify(self, self, parameters)?;
+        }
         self.verify_sectioned_layout(parameters, section)
+    }
+
+    /// True when an owner-signed root commits to the current authority set.
+    pub fn authority_root_matches(&self, parameters: &ChatBoardParametersV1) -> bool {
+        self.authority_root.0.is_some()
+            && self.authority_root.verify(self, parameters).is_ok()
+    }
+
+    /// Verify every field except the records the authority root covers.
+    /// Callers must have checked `authority_root_matches` first.
+    fn verify_without_authority_records(
+        &self,
+        parameters: &ChatBoardParametersV1,
+    ) -> Result<(), String> {
+        self.configuration.verify(self, parameters)?;
+        self.admin.verify(self, parameters)?;
+        self.ownership.verify(self, parameters)?;
+        self.invites.verify(self, parameters)?;
+        self.member_info.verify(self, parameters)?;
+        self.category_secrets.verify(self, parameters)?;
+        self.secrets.verify(self, parameters)?;
+        self.recent_messages.verify(self, parameters)?;
+        self.trash.verify(self, parameters)?;
+        self.message_keys.verify(self, parameters)?;
+        self.moderation.verify(self, parameters)?;
+        self.reports.verify(self, parameters)?;
+        self.approvals.verify(self, parameters)?;
+        self.pq_secrets.verify(self, parameters)?;
+        self.warnings.verify(self, parameters)?;
+        self.image_retirements.verify(self, parameters)?;
+        self.upgrade.verify(self, parameters)?;
+        self.version.verify(self, parameters)?;
+        self.mail_addresses.verify(self, parameters)?;
+        self.mode.verify(self, parameters)?;
+        self.sections.verify(self, parameters)?;
+        self.topics.verify(self, parameters)?;
+        self.topic_pages.verify(self, parameters)?;
+        Ok(())
     }
 
     fn verify_sectioned_layout(
@@ -347,14 +394,23 @@ impl ChatBoardStateV1 {
             || delta.roles.is_some()
             || delta.invites.is_some()
             || delta.members.is_some()
+            || delta.suspensions.is_some()
             || delta.admin.is_some()
             || delta.ownership.is_some();
+        // The owner re-signs the root before syncing, so an authority change
+        // normally arrives with a matching root and skips the per-record
+        // signature checks. A member-driven change without the new root keeps
+        // the full path.
+        let root_matches =
+            authority_changed && self.authority_root_matches(parameters);
         if authority_changed {
-            self.bans.verify(self, parameters)?;
-            self.ban_revocations.verify(self, parameters)?;
-            self.roles.verify(self, parameters)?;
+            if !root_matches {
+                self.bans.verify(self, parameters)?;
+                self.ban_revocations.verify(self, parameters)?;
+                self.roles.verify(self, parameters)?;
+                self.members.verify(self, parameters)?;
+            }
             self.invites.verify(self, parameters)?;
-            self.members.verify(self, parameters)?;
             self.member_info.verify(self, parameters)?;
         } else if delta.member_info.is_some() {
             self.member_info.verify(self, parameters)?;
@@ -393,7 +449,7 @@ impl ChatBoardStateV1 {
         if delta.warnings.is_some() {
             self.warnings.verify(self, parameters)?;
         }
-        if delta.suspensions.is_some() {
+        if delta.suspensions.is_some() && !root_matches {
             self.suspensions.verify(self, parameters)?;
         }
         if delta.image_retirements.is_some() {
@@ -405,12 +461,13 @@ impl ChatBoardStateV1 {
         if delta.mail_addresses.is_some() {
             self.mail_addresses.verify(self, parameters)?;
         }
-        if delta.authority_root.is_some()
+        if (delta.authority_root.is_some()
             || delta.members.is_some()
             || delta.roles.is_some()
             || delta.bans.is_some()
             || delta.ban_revocations.is_some()
-            || delta.suspensions.is_some()
+            || delta.suspensions.is_some())
+            && !root_matches
         {
             self.authority_root.verify(self, parameters)?;
         }
@@ -1711,5 +1768,49 @@ mod tests {
             new_state, partially_modified_state,
             "State should be partially modified"
         );
+    }
+
+    fn sign_owner_root(state: &mut ChatBoardStateV1, owner: &SigningKey) {
+        let tree = crate::board_state::authority::AuthorityTreeV1::from_board(state);
+        let mut root = tree.root(1_000);
+        root.content_hash = tree.content_hash();
+        state.authority_root = crate::board_state::authority::AuthorityRootStateV1(Some(
+            crate::board_state::authority::AuthorizedAuthorityRootV1::new(root, owner),
+        ));
+    }
+
+    #[test]
+    fn an_owner_root_skips_the_authority_record_signatures() {
+        let (mut state, parameters, owner_key) = create_empty_chat_board_state();
+        let member_key = SigningKey::generate(&mut rand::thread_rng());
+        state.members.members.push(AuthorizedMember::new(
+            Member {
+                owner_member_id: parameters.owner_id(),
+                invited_by: parameters.owner_id(),
+                member_vk: member_key.verifying_key(),
+                join_proof: None,
+            },
+            &owner_key,
+        ));
+        sign_owner_root(&mut state, &owner_key);
+        state
+            .verify_with_section(&parameters, None)
+            .expect("the signed root and the records verify");
+
+        // Change the signed member data. The root no longer commits to it, so
+        // the board falls back to the full verification and rejects it.
+        state.members.members[0].member.member_vk =
+            SigningKey::generate(&mut rand::thread_rng()).verifying_key();
+        assert!(
+            state.verify_with_section(&parameters, None).is_err(),
+            "a stale root must not hide an invalid record"
+        );
+
+        // Re-signing the root attests the new bytes: the owner is the board
+        // authority, so the record signatures are not checked again.
+        sign_owner_root(&mut state, &owner_key);
+        state
+            .verify_with_section(&parameters, None)
+            .expect("the owner root attests the records");
     }
 }

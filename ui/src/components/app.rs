@@ -2,6 +2,7 @@ pub mod chat_delegate;
 pub mod dm_contract;
 pub mod dm_delegate;
 pub mod activity_contract;
+pub mod moderation_contract;
 pub mod section_contract;
 pub mod topic_contract;
 pub mod document_title;
@@ -448,6 +449,8 @@ pub fn App() -> Element {
         };
         crate::util::safe_spawn_local(async move {
             let _ = crate::components::app::activity_contract::load_activity(owner)
+                .await;
+            let _ = crate::components::app::moderation_contract::load_moderation(owner)
                 .await;
         });
         let sections = {

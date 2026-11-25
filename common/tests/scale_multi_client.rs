@@ -11,16 +11,23 @@ use freenet_stdlib::prelude::ContractInstanceId;
 use plaza_core::board_state::activity::{
     ActivityDeltaV1, ActivityEntryV1, ActivityStateV1, MAX_ACTIVITY_ENTRIES,
 };
+use plaza_core::board_state::authority::{
+    AuthorizedAuthorityRootV1, AuthorityRootStateV1, AuthorityTreeV1,
+};
 use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
 use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::privacy::SealedBytes;
+use plaza_core::board_state::report_feed::{
+    ReportFeedDeltaV1, ReportFeedStateV1, MAX_REPORT_FEED,
+};
 use plaza_core::board_state::reports::ReportReason;
 use plaza_core::board_state::sections::{AuthorizedSectionV1, SectionV1};
 use plaza_core::board_state::topics::{
     AuthorizedTopicActivityV1, AuthorizedTopicEntryV1, AuthorizedTopicFlagV1,
-    AuthorizedTopicReportV1, TopicActivityV1, TopicEntryV1, TopicFlagKind, TopicFlagV1,
-    TopicIndexDelta, TopicIndexV1, TopicReportV1,
+    AuthorizedTopicReportResolutionV1, AuthorizedTopicReportV1, TopicActivityV1,
+    TopicEntryV1, TopicFlagKind, TopicFlagV1, TopicIndexDelta, TopicIndexV1,
+    TopicReportResolutionV1, TopicReportV1,
 };
 use plaza_core::board_state::{
     BoardModeV1, ChatBoardParametersV1, ChatBoardStateV1,
@@ -298,6 +305,51 @@ fn activity_contract(members: usize) -> ActivityStateV1 {
     state
 }
 
+fn moderation_feed() -> ReportFeedStateV1 {
+    let owner_key = owner();
+    let owner_id = MemberId::from(&owner_key.verifying_key());
+    let mut reports = Vec::new();
+    let mut resolutions = Vec::new();
+    for index in 0..MAX_REPORT_FEED {
+        let topic_id = MessageId::from_bytes(topic_seed(index));
+        let report = TopicReportV1 {
+            topic_id,
+            post_id: None,
+            reporter: owner_id,
+            reason: ReportReason::Spam,
+            body: SealedBytes::public(b"Spam".to_vec()),
+            created_at: 1_000_000 + index as i64,
+            generation: 1,
+        };
+        reports.push(AuthorizedTopicReportV1 {
+            signature: sign_struct(&report, &owner_key),
+            report,
+        });
+        let resolution = TopicReportResolutionV1 {
+            topic_id,
+            post_id: None,
+            reporter: owner_id,
+            resolved_by: owner_id,
+            created_at: 2_000_000 + index as i64,
+            generation: 1,
+        };
+        resolutions.push(AuthorizedTopicReportResolutionV1 {
+            signature: sign_struct(&resolution, &owner_key),
+            resolution,
+            signer_key: Some(owner_key.verifying_key()),
+            authority: None,
+        });
+    }
+    let mut state = ReportFeedStateV1::default();
+    state
+        .apply_delta(&ReportFeedDeltaV1 {
+            reports,
+            resolutions,
+        })
+        .expect("the moderation feed verifies");
+    state
+}
+
 fn verify_time(state: &ChatBoardStateV1, section: Option<MessageId>) -> f64 {
     let params = params();
     let start = Instant::now();
@@ -387,9 +439,23 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
         ..Default::default()
     };
     let new_topic_kib = serialized_len_value(&new_topic) as f64 / 1024.0;
+    let moderation = moderation_feed();
+    let moderation_kib = serialized_len_value(&moderation) as f64 / 1024.0;
+    let moderation_delta = ReportFeedDeltaV1 {
+        reports: vec![moderation.reports[0].clone()],
+        resolutions: Vec::new(),
+    };
+    let moderation_delta_kib = serialized_len_value(&moderation_delta) as f64 / 1024.0;
+    println!(
+        "moderation feed: {:>7.1} KiB (500 reports + 500 resolutions); new report delta {:.1} KiB, fan-out {:.2} MiB ({subscribers} subscribers)",
+        moderation_kib,
+        moderation_delta_kib,
+        moderation_delta_kib / 1024.0 * subscribers as f64
+    );
     println!(
         "board activity writes: 0 (a reply writes the topic and the activity contract)"
     );
+    println!("board report writes: 0 (a report writes the moderation contract)");
     println!(
         "new topic delta: {:>6.1} KiB; fan-out {:.2} MiB ({subscribers} subscribers)",
         new_topic_kib,
@@ -475,12 +541,31 @@ fn page_scenario(members: usize, topics: usize, page_size: usize, subscribers: u
     );
 }
 
+fn sign_owner_root(state: &mut ChatBoardStateV1) {
+    let tree = AuthorityTreeV1::from_board(state);
+    let mut root = tree.root(1_000);
+    root.content_hash = tree.content_hash();
+    state.authority_root = AuthorityRootStateV1(Some(AuthorizedAuthorityRootV1::new(
+        root,
+        &owner(),
+    )));
+}
+
 fn membership_scenario(members: usize, sections: usize) {
-    let board = parent(sections, members);
+    let mut board = parent(sections, members);
     let size = serialized_len(&board) as f64 / 1024.0;
-    let verify = verify_time(&board, None);
+    let full_verify = verify_time(&board, None);
+
+    let start = Instant::now();
+    let tree = AuthorityTreeV1::from_board(&board);
+    black_box(tree.content_hash());
+    let tree_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    sign_owner_root(&mut board);
+    let fast_verify = verify_time(&board, None);
     println!(
-        "members={members:>6} sections={sections:>3} board={size:>8.1} KiB verify {verify:>8.1} ms"
+        "members={members:>6} sections={sections:>3} board={size:>8.1} KiB \
+         full {full_verify:>8.1} ms tree {tree_ms:>7.1} ms fast {fast_verify:>7.1} ms"
     );
 }
 

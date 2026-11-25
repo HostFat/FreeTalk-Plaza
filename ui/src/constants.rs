@@ -19,6 +19,9 @@ pub const SECTION_CONTRACT_WASM: &[u8] =
 pub const ACTIVITY_CONTRACT_WASM: &[u8] =
     include_bytes!("../public/contracts/plaza_activity_contract.wasm");
 
+pub const MODERATION_CONTRACT_WASM: &[u8] =
+    include_bytes!("../public/contracts/plaza_moderation_contract.wasm");
+
 pub const CHAT_DELEGATE_WASM: &[u8] = include_bytes!("../public/contracts/plaza_delegate.wasm");
 
 // pub const board_CONTRACT_CODE_HASH: CodeHash = CodeHash::from_code(BOARD_CONTRACT_WASM);

@@ -122,8 +122,34 @@ dimensione firmata 3, quindi riempie la pagina 1 e crea la pagina 2
 (`data-pages="3"`). La shell non inoltra la query esterna all'iframe, quindi
 il test naviga dentro l'app con l'hash per mantenere la soglia.
 
-Board revision 29; board, section, topic e activity ri-keyati; board e topic
-esistenti vanno ricreati.
+## Moderazione fuori dall'indice
+
+Segnalare un topic riscriveva la pagina della sezione che lo contiene e la
+trasmetteva a ogni lettore. Report e risoluzioni ora vivono in
+`plaza-moderation-contract`, un contratto per board con stato
+`ReportFeedStateV1` (massimo 500 report e 500 risoluzioni). Il contratto
+verifica struttura, cap e la firma delle risoluzioni, e fa upsert per chiave
+`(topic, post, reporter)` con la generazione più alta.
+
+- `report_post` e `resolve_report` inviano un delta al contratto moderazione;
+  la pagina della sezione non cambia. I report legacy nell'indice restano
+  leggibili come fallback.
+- `BoardData::with_merged_topics` sovrappone il feed all'indice: un report
+  compare solo se la firma del reporter verifica con l'autorità della board;
+  una risoluzione richiede anche il potere di moderazione sulla sezione del
+  topic. La coda moderazione e la vista topic leggono l'indice sovrapposto.
+- Il contratto non conosce l'autorità della board, quindi non può verificare
+  chi ha potere di moderazione: la verifica avviene nel client, che scarta le
+  entry non valide.
+- Le approvazioni restano nel contratto del topic: sono necessarie al topic
+  per validare i post e non passano dall'indice della sezione.
+
+Benchmark con 500 report e 500 risoluzioni: il feed completo è 362,8 KiB; un
+nuovo report è un delta da 0,3 KiB (0,02 MiB di fan-out con 50 subscriber).
+Le scritture di report sulla board sono zero.
+
+Board revision 30; board, section e topic ri-keyati, più il nuovo contratto
+moderazione; board e topic esistenti vanno ricreati.
 
 ## Problema
 

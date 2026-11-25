@@ -584,8 +584,9 @@ pub async fn split_reply(
 }
 
 
-/// Report a topic or one of its posts. Reports live in the board index so the
-/// moderation queue sees them even when the topic contract is not open.
+/// Report a topic or one of its posts. Reports live in the per-board
+/// moderation contract, so the moderation queue sees them without rewriting
+/// the section page.
 pub async fn report_post(
     owner: VerifyingKey,
     topic_id: MessageId,
@@ -594,10 +595,7 @@ pub async fn report_post(
     body: String,
 ) -> Result<(), String> {
     let board = board_for(owner)?;
-    let index = crate::components::app::section_contract::merged_index(
-        owner,
-        &board.board_state.topics,
-    );
+    let index = board.clone().with_merged_topics().board_state.topics;
     if index.entry(&topic_id).is_none() {
         return Err("the topic is not indexed".to_string());
     }
@@ -645,14 +643,7 @@ pub async fn report_post(
         signature: plaza_core::util::sign_struct(&report, &board.self_sk),
         report,
     };
-    let board_delta = ChatBoardStateV1Delta {
-        topics: Some(TopicIndexDelta {
-            reports: vec![authorized],
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    apply_topic_board_delta(owner, topic_id, board_delta).await
+    crate::components::app::moderation_contract::record_report(owner, authorized).await
 }
 
 
@@ -663,10 +654,7 @@ pub async fn resolve_report(
     reporter: MemberId,
 ) -> Result<(), String> {
     let board = board_for(owner)?;
-    let index = crate::components::app::section_contract::merged_index(
-        owner,
-        &board.board_state.topics,
-    );
+    let index = board.clone().with_merged_topics().board_state.topics;
     let report = index
         .reports
         .iter()
@@ -718,14 +706,7 @@ pub async fn resolve_report(
         signer_key: Some(signer_sk.verifying_key()),
         authority: authority.clone().map(Box::new),
     };
-    let board_delta = ChatBoardStateV1Delta {
-        topics: Some(TopicIndexDelta {
-            report_resolutions: vec![authorized],
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    apply_topic_board_delta(owner, topic_id, board_delta).await
+    crate::components::app::moderation_contract::record_resolution(owner, authorized).await
 }
 
 pub fn topic_reports(
