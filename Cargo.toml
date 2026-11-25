@@ -11,6 +11,7 @@ members = [
     "topic-core",
     "topic-contract",
     "section-contract",
+    "activity-contract",
     "ui",
     "cli",
 ]

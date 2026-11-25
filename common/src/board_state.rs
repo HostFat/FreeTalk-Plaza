@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod activity;
 pub mod approvals;
 pub mod authority;
 pub mod ban;

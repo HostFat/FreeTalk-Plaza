@@ -23,39 +23,40 @@ copia l'autorita' della madre e aggiunge l'indice della propria sezione.
 
 ## Risultati
 
-| Sezioni | Madre | Figlia piena | Verify piena | Figlia pruned | Verify pruned | Activity delta |
+| Sezioni | Madre | Figlia piena | Verify piena | Figlia pruned | Verify pruned | Legacy activity delta |
 |---:|---:|---:|---:|---:|---:|---:|
 | 20 | 345 KiB | 639 KiB | 3,50 s | 371 KiB | 1,75 s | 2,1 ms |
 | 100 | 380 KiB | 674 KiB | 3,53 s | 406 KiB | 1,90 s | 2,0 ms |
 
-| Sezioni | Storage figlie (pruned) | Activity fan-out (50 sub) | Authority sync a tutte le figlie |
-|---:|---:|---:|---:|
-| 20 | 7,3 MiB | 18,1 MiB per finestra di 10 s | 7,3 MiB |
-| 100 | 39,7 MiB | 19,8 MiB per finestra di 10 s | 39,7 MiB |
+| Sezioni | Storage figlie (pruned) | Activity contract | Fan-out activity (50 sub) | Authority sync |
+|---:|---:|---:|---:|---:|
+| 20 | 7,3 MiB | 83,2 KiB (200 entry) | 4,06 MiB per update | 7,3 MiB |
+| 100 | 39,7 MiB | 83,2 KiB (200 entry) | 4,06 MiB per update | 39,7 MiB |
 
 Prima del pruning le figlie erano 639/674 KiB, lo storage 12,5/65,9 MiB,
-il fan-out 31,2/32,9 MiB e la sincronizzazione dell'autorita' 12,5/65,9 MiB.
+il fan-out dell'activity 31,2/32,9 MiB e la sincronizzazione dell'autorita'
+12,5/65,9 MiB. Ora una risposta scrive il topic e il contratto activity; la
+board e le figlie non ricevono piu' l'activity.
 
 ## Cosa dicono i numeri
 
-1. **Il fast path della figlia funziona.** Dopo la correzione del contratto
-   section, un aggiornamento di sola activity costa 2 ms + layout scan
-   trascurabile, contro 3,5 s della verifica completa. Il contratto non
-   rifirma piu' tutti i membri e tutti i topic a ogni refresh.
+1. **L'activity e' fuori dalla figlia.** Una risposta scrive il topic e un
+   piccolo contratto activity per board (83,2 KiB con 200 entry, 4,06 MiB di
+   fan-out con 50 subscriber). La board non riceve piu' l'activity. Il fast
+   path del contratto section resta per gli altri delta.
 2. **La verifica completa resta il costo di ingresso.** Un nuovo subscriber,
    un `UpdateData::State` o un merge versionato pagano 3,5 s per figlia con
    1.000 membri e 200 topic. E' il costo da ridurre con autorita' compatta e
    indice a pagine.
-3. **Il broadcast e' il vero collo di bottiglia.** Il nodo restituisce lo
-   stato completo della figlia (639-674 KiB) a ogni subscriber. Con 50
-   subscriber sono 18-20 MiB per finestra di activity (31-33 prima del
-   pruning), anche se il calcolo del contratto costa 2 ms. Togliere
-   l'activity dalla figlia o restituire solo il delta elimina questo traffico.
+3. **Il broadcast resta per i nuovi topic.** Un nuovo topic scrive lo stato
+   completo della figlia (371-406 KiB) e lo trasmette ai subscriber. Con 50
+   subscriber sono circa 18-20 MiB per topic nuovo. L'activity non contribuisce
+   piu' a questo traffico.
 4. **Il pruning taglia circa il 40% della figlia.** La figlia conserva solo i
    membri che il suo indice referenzia: 371-406 KiB invece di 639-674 KiB,
-   con una verifica piena di 1,75-1,90 s invece di 3,5 s. Restano le sezioni
-   copiate in ogni figlia (`O(sezioni^2)`) e le copie nei topic. Un authority
-   root con prove di inclusione eliminera' anche quelle.
+   con una verifica piena di 1,75-1,90 s invece di 3,5 s. La radice firmata
+   elimina le copie nei topic; restano le sezioni copiate in ogni figlia
+   (`O(sezioni^2)`) e le definizioni dei ruoli.
 5. **La propagazione dell'autorita' e' il caso peggiore.** Un cambio di
    ruolo o un ban sincronizza tutte le figlie (39,7 MiB nello scenario da 100
    sezioni dopo il pruning) e poi aggiorna ogni topic. Il limite di 100 topic
@@ -69,13 +70,12 @@ il fan-out 31,2/32,9 MiB e la sincronizzazione dell'autorita' 12,5/65,9 MiB.
 
 ## Prossimi passi
 
-1. Authority root + prove di inclusione al posto delle copie ancora presenti
-   (tutte le sezioni in ogni figlia, roles/bans nei topic). Il pruning delle
-   figlie e' gia' implementato.
-2. Activity fuori dall'indice della figlia (nel topic o in un contratto
-   activity separato).
-3. Indice a pagine con manifest; aggiornamenti limitati alla pagina.
-4. Topic a pagine append-only; una risposta scrive una pagina.
+1. Indice a pagine con manifest; aggiornamenti limitati alla pagina.
+2. Topic a pagine append-only; una risposta scrive una pagina.
+3. Compattare le sezioni nelle figlie (`O(sezioni^2)`) e le definizioni dei
+   ruoli.
+4. Aggiornamenti incrementali della sola radice per i topic, senza caricare
+   ogni topic nella passata di propagazione.
 5. Subscription lazy con budget/TTL e `Unsubscribe` quando la stdlib lo
    espone.
 

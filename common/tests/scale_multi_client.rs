@@ -8,6 +8,9 @@
 
 use ed25519_dalek::SigningKey;
 use freenet_stdlib::prelude::ContractInstanceId;
+use plaza_core::board_state::activity::{
+    ActivityDeltaV1, ActivityEntryV1, ActivityStateV1, MAX_ACTIVITY_ENTRIES,
+};
 use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
 use plaza_core::board_state::message::MessageId;
@@ -42,6 +45,13 @@ fn section_seed(index: usize) -> [u8; 32] {
     let mut seed = [0u8; 32];
     seed[..8].copy_from_slice(&(index as u64).to_le_bytes());
     seed[8] = 0x33;
+    seed
+}
+
+fn topic_seed(index: usize) -> [u8; 32] {
+    let mut seed = [0u8; 32];
+    seed[..8].copy_from_slice(&(index as u64).to_le_bytes());
+    seed[8] = 0x11;
     seed
 }
 
@@ -236,9 +246,45 @@ fn child(parent: ChatBoardStateV1, section_index: usize, topics: usize, members:
 }
 
 fn serialized_len(state: &ChatBoardStateV1) -> usize {
+    serialized_len_value(state)
+}
+
+fn serialized_len_value<T: serde::Serialize>(value: &T) -> usize {
     let mut bytes = Vec::new();
-    ciborium::ser::into_writer(state, &mut bytes).unwrap();
+    ciborium::ser::into_writer(value, &mut bytes).unwrap();
     bytes.len()
+}
+
+fn activity_contract(members: usize) -> ActivityStateV1 {
+    let entries = (0..MAX_ACTIVITY_ENTRIES)
+        .map(|index| {
+            let author = member_key(index % members);
+            let topic_id = MessageId::from_bytes(topic_seed(index));
+            let value = TopicActivityV1 {
+                topic_id,
+                last_activity: 1_000_000 + index as i64,
+                last_post_id: None,
+                reply_count: 1,
+                pending_approvals: 0,
+                generation: 1,
+            };
+            ActivityEntryV1 {
+                topic_id,
+                part: 0,
+                activity: AuthorizedTopicActivityV1 {
+                    signature: sign_struct(&value, &author),
+                    activity: value,
+                    signer: Some(MemberId::from(&author.verifying_key())),
+                    signer_key: Some(author.verifying_key()),
+                },
+            }
+        })
+        .collect();
+    let mut state = ActivityStateV1::default();
+    state
+        .apply_delta(&ActivityDeltaV1 { entries })
+        .expect("the activity state verifies");
+    state
 }
 
 fn verify_time(state: &ChatBoardStateV1, section: Option<MessageId>) -> f64 {
@@ -289,6 +335,9 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
 
     let pruned_mib = pruned_size as f64 / (1024.0 * 1024.0);
     let parent_kib = parent_size as f64 / 1024.0;
+    let activity = activity_contract(members);
+    let activity_kib = serialized_len_value(&activity) as f64 / 1024.0;
+    let activity_mib = activity_kib / 1024.0;
 
     println!("\n=== scenario ===");
     println!(
@@ -309,16 +358,20 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
         pruned_verify
     );
     println!(
-        "activity delta: {:>6.1} ms + {:>5.1} ms layout scan (vs full verify above)",
+        "legacy section activity delta: {:>6.1} ms + {:>5.1} ms layout scan (no longer used)",
         delta_ms, layout_ms
+    );
+    println!(
+        "activity contract: {:>7.1} KiB; fan-out {:.2} MiB per update ({MAX_ACTIVITY_ENTRIES} entries x {subscribers} subscribers)",
+        activity_kib,
+        activity_mib * subscribers as f64
     );
     println!(
         "storage:  {:>7.1} MiB across {sections} pruned children (O(sections x referenced members + sections^2))",
         pruned_mib * sections as f64
     );
     println!(
-        "activity update: {:.2} MiB per coalesced window (pruned state x {subscribers} subscribers)",
-        pruned_mib * subscribers as f64
+        "board activity writes: 0 (a reply writes the topic and the activity contract)"
     );
     println!(
         "new topic:       {:.2} MiB per subscriber fan-out (pruned state)",

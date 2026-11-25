@@ -127,6 +127,8 @@ fn cmd_sync() -> Result<(), String> {
             "plaza-topic-contract",
             "-p",
             "plaza-section-contract",
+            "-p",
+            "plaza-activity-contract",
         ])
         .current_dir(&root)
         .status()
@@ -154,6 +156,10 @@ fn cmd_sync() -> Result<(), String> {
         (
             "plaza_section_contract.wasm",
             "ui/public/contracts/plaza_section_contract.wasm",
+        ),
+        (
+            "plaza_activity_contract.wasm",
+            "ui/public/contracts/plaza_activity_contract.wasm",
         ),
         ("plaza_contract.wasm", "cli/contracts/plaza_contract.wasm"),
     ];

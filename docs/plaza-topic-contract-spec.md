@@ -2,9 +2,10 @@
 
 Versione: 1 (implementata).
 Stato: fasi 0–4 completate; move e merge tra sezioni pubblicati nella build
-locale v713. Le nuove board topic usano lo shard per sezione come default e i
+locale v715. Le nuove board topic usano lo shard per sezione come default e i
 topic usano una radice Merkle dell'autorita' firmata dall'owner, con prove per
-membro. Contratto board alla revisione 27.
+membro. L'activity recente vive in un contratto separato per board. Contratto
+board alla revisione 27.
 Nessuna migrazione delle vecchie board.
 
 ## Stato dell'implementazione
@@ -16,7 +17,7 @@ Nessuna migrazione delle vecchie board.
   attività, flag, report e risoluzioni.
 - Client `ui/src/components/app/topic_contract.rs`; UI
   `topic_index_view.rs`, `topic_view.rs`, ricerca, notifiche e code in Manage.
-- Test: 46 in `topic-core`, 284 in `plaza-core`, 15 scenari real-node dei
+- Test: 46 in `topic-core`, 288 in `plaza-core`, 15 scenari real-node dei
   topic (shard della sezione, ruolo-prima-del-topic, draft e parti precedenti
   inclusi) e 116 test statici Playwright.
 
@@ -532,16 +533,30 @@ Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
   - `entries`: topic_id, part, protocol_version, autore, sezione,
     section_chain, titolo e anteprima (sigillati sulle private), header_hash,
     created_at, generazione;
-  - `activity`: last_activity, last_post_id, reply_count, pending_approvals;
+  - `activity`: campo legacy; i topic nuovi non lo scrivono più;
   - `flags`: pin, close, announce, merge, hide, approve, section, part;
   - `reports` e `report_resolutions`.
 - Le entry e l'activity sono firmate dall'autore; flag e risoluzioni
   richiedono l'autorità di moderazione. La sezione effettiva è quella
   dell'ultimo flag `Section`; la parte quella dell'ultimo flag `Part`.
 - La board non contiene i post: conserva solo indice, sezioni e stato di
-  moderazione. Ogni indice (madre o figlia) è limitato a 2.000 topic, 2.000
-  righe di attività, 16.000 flag e 2.000 report, perché viaggia in pieno con
-  ogni update della sua sezione.
+  moderazione. Ogni indice (madre o figlia) è limitato a 2.000 topic, 16.000
+  flag e 2.000 report, perché viaggia in pieno con ogni update della sua
+  sezione.
+- L'attività recente vive in `plaza-activity-contract`, un contratto per board
+  (`{ owner }`). Lo stato `ActivityStateV1` tiene al massimo 200 entry; ogni
+  entry ha `topic_id`, `part` e l'`AuthorizedTopicActivityV1` firmato. Il
+  client invia un `ActivityDeltaV1` a ogni risposta e il contratto fa upsert,
+  ordina per `last_activity` e taglia la finestra. La board e le figlie non
+  ricevono più l'activity.
+- `with_merged_topics` sovrappone le entry del contratto all'indice: per i
+  topic nella finestra il conteggio, i pending e l'ordine sono aggiornati; i
+  topic più vecchi usano l'activity legacy o `created_at`. `entries_for`
+  scarta le entry il cui signer non è membro; il contratto verifica la firma
+  dell'activity, non l'appartenenza, quindi l'activity resta un hint.
+- Il contratto viene creato con un PUT di stato vuoto all'apertura della
+  board; un `UpdateData::State` è additivo (merge delle entry), quindi il PUT
+  non cancella quelle scritte da altri client.
 - Con `BoardModeV1::SectionedTopicIndex` la board madre tiene solo le sezioni
   e l'autorità; ogni sezione è una board figlia (`plaza-section-contract`)
   con parametri `{ owner, section }`, la propria sezione e l'indice dei suoi
@@ -552,6 +567,9 @@ Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
 
 - `topic_contract.rs` mantiene `TOPIC_CACHE`, crea i contratti, invia PUT/GET/
   UPDATE, applica i delta e propaga l'autorità della board ai topic.
+- `activity_contract.rs` carica il contratto activity all'apertura della
+  board, applica i delta, registra le risposte e aggiorna le approvazioni. Il
+  PUT iniziale è additivo e non richiede un reset del delegate.
 - `TopicIndexView` mostra sezioni, argomenti e attività, i badge di
   approvazioni e report, e crea i topic.
 - `TopicView` carica la parte corrente e le precedenti su richiesta, e
@@ -619,7 +637,7 @@ hide/restore/purge, poll e reaction, contenuto sigillato illeggibile al
 contratto, limiti di dimensione e numero, CBOR round-trip, firme manomesse e
 continuation.
 
-`plaza-core` ha 284 test, inclusi indice, sezioni, flag, report, risoluzioni,
+`plaza-core` ha 288 test, inclusi indice, sezioni, flag, report, risoluzioni,
 limiti di frequenza e percorso rapido dell'indice.
 
 La suite real-node `ui/tests/real-node/topics.spec.ts` ha 15 scenari: topic e

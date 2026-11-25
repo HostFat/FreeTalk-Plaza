@@ -395,6 +395,18 @@ impl BoardData {
                 &self.board_state.topics,
             );
         }
+        let members: std::collections::HashSet<_> = self
+            .board_state
+            .members
+            .members
+            .iter()
+            .map(|member| member.member.id())
+            .collect();
+        crate::components::app::activity_contract::apply_to_index(
+            self.owner_vk,
+            &members,
+            &mut self.board_state.topics,
+        );
         self
     }
 

@@ -85,10 +85,7 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
             // A topic with no activity row yet must not fall back to the wall
             // clock: every render would then look newer than the stored mark,
             // write the board again, and re-render forever.
-            let topics = crate::components::app::section_contract::merged_index(
-                owner,
-                &board.board_state.topics,
-            );
+            let topics = board.clone().with_merged_topics().board_state.topics;
             let at = topics
                 .activity_for(&topic_id_value)
                 .map(|activity| activity.activity.last_activity)

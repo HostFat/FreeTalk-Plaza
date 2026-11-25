@@ -1354,12 +1354,17 @@ async fn publish_prepared_reply(
 ) -> Result<(), String> {
     let contract_id = prepared.contract_id;
     publish_topic_delta(contract_id, prepared.topic_delta).await?;
-    if let Some(board_delta) = prepared.board_delta {
-        if let Err(error) =
-            apply_topic_board_delta(owner, prepared.topic_id, board_delta).await
+    if let Some(activity) = prepared.activity {
+        if let Err(error) = crate::components::app::activity_contract::record_activity(
+            owner,
+            prepared.topic_id,
+            prepared.part,
+            activity,
+        )
+        .await
         {
             dioxus::logger::tracing::warn!(
-                "reply sent but activity not indexed: {}",
+                "reply sent but activity not recorded: {}",
                 error
             );
         }
@@ -1704,8 +1709,9 @@ fn prepare_topic(
 struct PreparedReply {
     contract_id: ContractInstanceId,
     topic_id: MessageId,
+    part: u32,
     topic_delta: TopicDeltaV1,
-    board_delta: Option<ChatBoardStateV1Delta>,
+    activity: Option<AuthorizedTopicActivityV1>,
 }
 
 fn prepare_reply(
@@ -1768,64 +1774,52 @@ fn prepare_reply(
     // Activity hint for the board list. If the board update fails the reply is
     // still valid; the next successful one refreshes the count.
     let contract_id = *conversation.key.id();
-    let activity_index = crate::components::app::section_contract::merged_index(
-        owner,
-        &board.board_state.topics,
-    );
-    let board_delta = activity_index
-        .entry(&topic_id)
-        .map(|entry| {
-            let current = activity_index
-                .activity_for(&topic_id)
-                .map(|activity| activity.activity.clone());
-            let value = TopicActivityV1 {
-                topic_id,
-                last_activity: now,
-                last_post_id: Some(post_id),
-                reply_count: current
+    let activity_index = board.clone().with_merged_topics().board_state.topics;
+    let activity = activity_index.entry(&topic_id).map(|_| {
+        let current = activity_index
+            .activity_for(&topic_id)
+            .map(|activity| activity.activity.clone());
+        let value = TopicActivityV1 {
+            topic_id,
+            last_activity: now,
+            last_post_id: Some(post_id),
+            reply_count: current
+                .as_ref()
+                .map(|activity| activity.reply_count + 1)
+                .unwrap_or(1),
+            pending_approvals: {
+                let current_pending = current
                     .as_ref()
-                    .map(|activity| activity.reply_count + 1)
-                    .unwrap_or(1),
-                pending_approvals: {
-                    let current_pending = current
-                        .as_ref()
-                        .map(|activity| activity.pending_approvals)
-                        .unwrap_or(0);
-                    let policy = conversation.state.authority.policy();
-                    if policy.approval_required
-                        && !conversation.state.is_trusted(author)
-                    {
-                        current_pending + 1
-                    } else {
-                        current_pending
-                    }
-                },
-                generation: current
-                    .as_ref()
-                    .map(|activity| activity.generation + 1)
-                    .unwrap_or(1),
-            };
-            let authorized = AuthorizedTopicActivityV1 {
-                signature: plaza_core::util::sign_struct(&value, &board.self_sk),
-                activity: value,
-                signer: Some(author),
-                signer_key: Some(board.self_sk.verifying_key()),
-            };
-            let _ = entry;
-            ChatBoardStateV1Delta {
-                topics: Some(TopicIndexDelta {
-                    activity: vec![authorized],
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }
-        });
+                    .map(|activity| activity.pending_approvals)
+                    .unwrap_or(0);
+                let policy = conversation.state.authority.policy();
+                if policy.approval_required
+                    && !conversation.state.is_trusted(author)
+                {
+                    current_pending + 1
+                } else {
+                    current_pending
+                }
+            },
+            generation: current
+                .as_ref()
+                .map(|activity| activity.generation + 1)
+                .unwrap_or(1),
+        };
+        AuthorizedTopicActivityV1 {
+            signature: plaza_core::util::sign_struct(&value, &board.self_sk),
+            activity: value,
+            signer: Some(author),
+            signer_key: Some(board.self_sk.verifying_key()),
+        }
+    });
 
     Ok(PreparedReply {
         contract_id,
         topic_id,
+        part,
         topic_delta,
-        board_delta,
+        activity,
     })
 }
 
@@ -2791,10 +2785,7 @@ pub async fn approve_post(
     }
     publish_topic_delta(*conversation.key.id(), delta).await?;
 
-    let index = crate::components::app::section_contract::merged_index(
-        owner,
-        &board.board_state.topics,
-    );
+    let index = board.clone().with_merged_topics().board_state.topics;
     if let Some(current) = index
         .activity_for(&topic_id)
         .map(|entry| entry.activity.clone())
@@ -2813,16 +2804,16 @@ pub async fn approve_post(
             signer: Some(signer),
             signer_key: Some(signer_sk.verifying_key()),
         };
-        let board_delta = ChatBoardStateV1Delta {
-            topics: Some(TopicIndexDelta {
-                activity: vec![authorized_activity],
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        if let Err(error) = apply_topic_board_delta(owner, topic_id, board_delta).await {
+        if let Err(error) = crate::components::app::activity_contract::record_activity(
+            owner,
+            topic_id,
+            part,
+            authorized_activity,
+        )
+        .await
+        {
             dioxus::logger::tracing::warn!(
-                "approval sent but the board pending count was not updated: {}",
+                "approval sent but the pending count was not updated: {}",
                 error
             );
         }

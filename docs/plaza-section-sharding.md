@@ -53,9 +53,11 @@ board; la board la conserva in `authority_root`. Un cambio guidato da un
 membro o la cleanup azzera la radice fino alla firma successiva dell'owner, e
 i topic tornano temporaneamente alle liste complete. Le figlie continuano a
 ricevere token e ruoli dei membri che referenziano, altrimenti la verifica
-dell'invito fallisce. Board revision 27; contratti board, section e topic
-ri-keyati; board e topic esistenti vanno ricreati. Real-node 15/15, static
-Chromium 29/3. Il PUT di un topic puo' essere
+dell'invito fallisce. L'activity recente e' uscita dall'indice: vive in
+`plaza-activity-contract`, un contratto per board con al massimo 200 entry;
+la board e le figlie non ricevono piu' una scrittura per risposta. Board
+revision 27; contratti board, section, topic e activity ri-keyati; board e
+topic esistenti vanno ricreati. Real-node 15/15, static Chromium 29/3. Il PUT di un topic puo' essere
 confermato da un `GetResponse` (stato della sottoscrizione) invece che da un
 `PutResponse`; `wait_topic_synced` accetta entrambi.
 
