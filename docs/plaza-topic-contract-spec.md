@@ -2,7 +2,8 @@
 
 Versione: 1 (implementata).
 Stato: fasi 0–4 completate; move e merge tra sezioni pubblicati nella build
-locale v678. Le nuove board topic usano lo shard per sezione come default.
+locale v711. Le nuove board topic usano lo shard per sezione come default e i
+topic usano una radice Merkle dell'autorita' con prove per membro.
 Nessuna migrazione delle vecchie board.
 
 ## Stato dell'implementazione
@@ -14,7 +15,7 @@ Nessuna migrazione delle vecchie board.
   attività, flag, report e risoluzioni.
 - Client `ui/src/components/app/topic_contract.rs`; UI
   `topic_index_view.rs`, `topic_view.rs`, ricerca, notifiche e code in Manage.
-- Test: 44 in `topic-core`, 330 in `plaza-core`, 15 scenari real-node dei
+- Test: 51 in `topic-core`, 330 in `plaza-core`, 15 scenari real-node dei
   topic (shard della sezione, ruolo-prima-del-topic, draft e parti precedenti
   inclusi) e 116 test statici Playwright.
 
@@ -33,8 +34,11 @@ le build precedenti vanno ricreati.
 
 Limiti noti: le approvazioni non-owner condividono il percorso owner ma non
 hanno uno scenario e2e dedicato; lo stato di lettura è per board/dispositivo;
-la ricerca copre i metadati dell'indice, non il testo completo. La suite
-real-node è isolata da un marker nel delegate e passa 15/15 in sequenza.
+la ricerca copre i metadati dell'indice, non il testo completo; la radice
+dell'autorità è un commitment Merkle non firmato, quindi un client può
+scegliere un sottoinsieme (come già poteva fare con la copia completa); una
+radice firmata dall'owner è il prossimo passo. La suite real-node è isolata da
+un marker nel delegate e passa 15/15 in sequenza.
 
 ## 1. Scopo
 
@@ -158,19 +162,40 @@ AuthorizedSectionSnapshotV1 {
 TopicAuthorityV1 {
     ownership: OwnershipV1,
     admins: AdminsV1,
-    roles: RolesV1,
-    bans: BansV1,
+    roles: RolesV1,                 // definizioni; le assegnazioni stanno nelle prove
+    bans: BansV1,                   // vuoto nei topic nuovi
     ban_revocations: BanRevocationsV1,
     suspensions: SuspensionsV1,
     policy: Option<AuthorizedTopicPolicyV1>,
     source_configuration: Option<AuthorizedConfigurationV1>,
+    root: Option<AuthorityRootV1>,
+    member_proofs: Vec<MemberStatusProofV1>,
 }
 ```
 
 - Record firmati con gli stessi tipi della board.
-- `roles` contiene tutte le definizioni; delle assegnazioni solo quelle dei
-  partecipanti e dei moderatori. `bans` e `suspensions` solo per i
-  partecipanti.
+- `roles` contiene le definizioni; delle assegnazioni solo quelle dei
+  partecipanti e dei moderatori. `bans` e `suspensions` viaggiano nelle prove
+  del membro, non in liste globali.
+- `AuthorityRootV1 { version, epoch, content_hash, digest }` è la radice
+  Merkle degli stati dei membri. `MemberStatusV1` raggruppa il record del
+  membro, le definizioni dei suoi ruoli, le assegnazioni, i ban, le revoca e
+  le sospensioni. Il topic conserva la radice e una prova per ogni
+  partecipante/moderatore che referenzia.
+- `epoch` è un timestamp monotono usato nel merge: una radice più vecchia non
+  sostituisce quella corrente. `content_hash` identifica il contenuto
+  dell'autorità e permette a `sync_topic_authority` di evitare un update
+  quando radice e prove non cambiano.
+- La radice non è firmata: il contratto verifica il percorso Merkle e i record
+  firmati, ma non l'autenticità della radice. Il passo successivo è una radice
+  firmata dall'owner pubblicata nella board, così anche i topic creati da un
+  membro non possono scegliere un sottoinsieme.
+- Una radice può includere un membro bannato che la board ha già rimosso:
+  `AuthorityTreeV1::from_board` usa `UserBan.target_member` come foglia, così
+  il topic mostra "Banned author" e rifiuta i post successivi.
+- Le definizioni dei ruoli restano complete: un invito via token e un
+  moderatore con ruolo hanno bisogno della definizione anche senza
+  un'assegnazione firmata.
 - `policy` è firmata dall'owner. Un membro che non può firmarla porta
   `source_configuration`, la configurazione owner-signed della board, e il
   topic deriva la policy effettiva da quella (`effective_policy`).
@@ -563,6 +588,12 @@ Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
   topic non porta lo snapshot firmato dall'owner, quindi le policy
   solo-sezione restano riservate all'owner. L'indice della board verifica
   comunque i ruoli della sezione per ogni entry (revisione 26).
+- `authority_from_board` costruisce la radice Merkle degli stati dei membri e
+  le prove per l'autore, i partecipanti e i firmatari di azioni/approvazioni.
+  `sync_topic_authority` aggiorna un topic solo se `content_hash`, `digest` o
+  le prove cambiano; `propagate_authority` carica ogni topic e invia la sua
+  radice+prove, senza il limite di 100 topic. Il payload non cresce con i ban
+  della board, ma la passata carica tutti i topic.
 - La creazione di un topic attende la conferma del nodo prima di indicizzarlo:
   il nodo pu� rispondere con `PutResponse` oppure con il `GetResponse` che
   avvia la sottoscrizione (`subscribe: true`). `wait_topic_synced` accetta
@@ -573,7 +604,7 @@ Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
 
 ## 11. Test
 
-`topic-core` ha 44 test: creazione, post, risposta, edit, delete, due client
+`topic-core` ha 51 test: creazione, post, risposta, edit, delete, due client
 convergenti, merge commutativo/associativo/idempotente, catena di invito e
 token join, moderatori con e senza prova, scope di sezione, ruolo revocato,
 ban prima e dopo il post, sospensione, pin/close/announce, move/merge/split,

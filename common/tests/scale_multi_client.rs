@@ -330,8 +330,8 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
     );
 
     println!(
-        "authority propagation now reaches every topic; each topic still \
-         carries a copy of roles/bans/suspensions"
+        "authority propagation now reaches every topic with a Merkle root and \
+         per-member proofs; role definitions remain in the topic"
     );
 }
 

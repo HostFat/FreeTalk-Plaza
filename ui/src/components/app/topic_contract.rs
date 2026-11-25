@@ -52,7 +52,7 @@ use plaza_topic_core::{
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use rand::RngCore;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -852,6 +852,7 @@ pub async fn create_section(
 fn authority_from_board(
     board: &BoardData,
     is_owner: bool,
+    member_ids: &HashSet<MemberId>,
 ) -> Result<plaza_topic_core::TopicAuthorityV1, String> {
     let now = system_time_ms(get_current_system_time());
     let policy = TopicPolicyV1 {
@@ -898,15 +899,65 @@ fn authority_from_board(
     } else {
         (None, Some(board.board_state.configuration.clone()))
     };
+    let tree = plaza_topic_core::AuthorityTreeV1::from_board(&board.board_state);
+    let mut root = tree.root(system_time_ms(get_current_system_time()));
+    root.content_hash = authority_hash(board);
+    // A ban also needs the banner's key to verify its signature. When the
+    // banner is not the owner or an admin, include that member's proof too.
+    let owner_id = MemberId::from(&board.owner_vk);
+    let admin_ids: HashSet<MemberId> = board
+        .board_state
+        .admin
+        .admins
+        .iter()
+        .map(|admin| admin.admin.member_id)
+        .collect();
+    let mut ids: HashSet<MemberId> = member_ids.iter().copied().collect();
+    loop {
+        let mut added = false;
+        for ban in &board.board_state.bans.0 {
+            if ids.contains(&ban.ban.banned_user)
+                && ban.banned_by != owner_id
+                && !admin_ids.contains(&ban.banned_by)
+                && ids.insert(ban.banned_by)
+            {
+                added = true;
+            }
+        }
+        for suspension in &board.board_state.suspensions.suspensions {
+            if ids.contains(&suspension.suspension.target) {
+                if let Some(signer) = suspension.signer {
+                    if signer != owner_id
+                        && !admin_ids.contains(&signer)
+                        && ids.insert(signer)
+                    {
+                        added = true;
+                    }
+                }
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    let member_proofs = tree.proofs_for(ids.iter());
     Ok(plaza_topic_core::TopicAuthorityV1 {
         ownership: board.board_state.ownership.clone(),
         admins: board.board_state.admin.clone(),
-        roles: board.board_state.roles.clone(),
-        bans: board.board_state.bans.clone(),
-        ban_revocations: board.board_state.ban_revocations.clone(),
-        suspensions: board.board_state.suspensions.clone(),
+        // Role definitions stay complete: a token join and a role-based
+        // moderator need the definition even when the member has no signed
+        // assignment. Assignments travel in the member proofs.
+        roles: plaza_core::board_state::roles::RolesV1 {
+            roles: board.board_state.roles.roles.clone(),
+            assignments: Vec::new(),
+        },
+        bans: Default::default(),
+        ban_revocations: Default::default(),
+        suspensions: Default::default(),
         policy,
         source_configuration,
+        root: Some(root),
+        member_proofs,
     })
 }
 
@@ -958,10 +1009,37 @@ pub async fn sync_topic_authority(
     if conversation.state.header.is_none() {
         return Ok(false);
     }
-    let generated = authority_from_board(&board, board.is_current_owner())?;
-    if conversation.state.authority.merged_with(&generated)
-        == conversation.state.authority
-    {
+    let mut member_ids = HashSet::new();
+    if let Some(header) = &conversation.state.header {
+        member_ids.insert(header.header.author);
+    }
+    for participant in &conversation.state.participants {
+        member_ids.insert(participant.record.member_id);
+    }
+    for action in &conversation.state.actions {
+        member_ids.insert(action.action.signer);
+    }
+    for approval in &conversation.state.approvals {
+        member_ids.insert(approval.approval.signed_by);
+    }
+    for trust in &conversation.state.trust {
+        member_ids.insert(trust.trust.signed_by);
+    }
+    let generated =
+        authority_from_board(&board, board.is_current_owner(), &member_ids)?;
+    let same_root = match (
+        &conversation.state.authority.root,
+        &generated.root,
+    ) {
+        (Some(current), Some(next)) => {
+            current.content_hash == next.content_hash && current.digest == next.digest
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    let same_proofs =
+        conversation.state.authority.member_proofs == generated.member_proofs;
+    if same_root && same_proofs {
         return Ok(false);
     }
     publish_topic_delta(
@@ -975,39 +1053,10 @@ pub async fn sync_topic_authority(
     Ok(true)
 }
 
-/// Send the board authority to one topic without loading its state. The node
-/// applies the delta to the contract; the local cache is updated only if the
-/// topic is already loaded.
-async fn publish_topic_authority(
-    owner: VerifyingKey,
-    topic_id: MessageId,
-    part: u32,
-    authority: &plaza_topic_core::TopicAuthorityV1,
-) -> Result<(), String> {
-    let key = topic_key_for(owner, topic_id, part);
-    let delta = TopicDeltaV1 {
-        authority: Some(authority.clone()),
-        ..Default::default()
-    };
-    let bytes = to_cbor_vec(&delta);
-    send_contract_request(ContractRequest::Update {
-        key,
-        data: UpdateData::Delta(bytes.into()),
-    })
-    .await?;
-    TOPIC_CACHE.with_mut(|topics| {
-        if let Some(conversation) = topics.get_mut(key.id()) {
-            conversation.state.authority =
-                conversation.state.authority.merged_with(authority);
-            conversation.synced = true;
-        }
-    });
-    Ok(())
-}
-
 /// Push bans, suspensions, roles, admins, ownership and the policy to every
-/// topic in the board index. The updates are authority-only and do not need a
-/// GET, so the pass is no longer capped at a fixed number of topics.
+/// topic in the board index. Each topic gets the authority root and the proofs
+/// for its own participants/moderators, so the payload does not grow with the
+/// board. The pass is not capped at a fixed number of topics.
 pub async fn propagate_authority(owner: VerifyingKey) -> Result<(), String> {
     let board = board_for(owner)?;
     if !board.board_state.mode.is_topic_index() {
@@ -1032,14 +1081,33 @@ pub async fn propagate_authority(owner: VerifyingKey) -> Result<(), String> {
         owner,
         &board.board_state.topics,
     );
-    let authority = authority_from_board(&board, board.is_current_owner())?;
     let topics: Vec<(MessageId, u32)> = index
         .entries
         .iter()
         .map(|entry| (entry.entry.topic_id, index.part_of(&entry.entry.topic_id)))
         .collect();
     for (position, (topic_id, part)) in topics.into_iter().enumerate() {
-        if let Err(error) = publish_topic_authority(owner, topic_id, part, &authority).await {
+        let key = topic_key_for(owner, topic_id, part);
+        let loaded = TOPIC_CACHE
+            .read()
+            .get(key.id())
+            .map(|conversation| conversation.state.header.is_some())
+            .unwrap_or(false);
+        if !loaded {
+            let _ = load_topic(owner, topic_id, part).await;
+            for _ in 0..30 {
+                let ready = TOPIC_CACHE
+                    .read()
+                    .get(key.id())
+                    .map(|conversation| conversation.state.header.is_some())
+                    .unwrap_or(false);
+                if ready {
+                    break;
+                }
+                crate::util::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+        if let Err(error) = sync_topic_authority(owner, topic_id, part).await {
             dioxus::logger::tracing::warn!(
                 "authority propagation failed for topic {}: {}",
                 topic_id,
@@ -1534,7 +1602,11 @@ fn prepare_topic(
     };
     let authorized_header = AuthorizedTopicHeaderV1::new(header.clone(), &board.self_sk);
 
-    let authority = authority_from_board(&board, is_owner)?;
+    let mut authority_ids = HashSet::new();
+    if !is_owner {
+        authority_ids.insert(author);
+    }
+    let authority = authority_from_board(&board, is_owner, &authority_ids)?;
 
     let participants = participant
         .map(|participant| vec![participant])

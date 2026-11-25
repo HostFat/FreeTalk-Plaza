@@ -4,6 +4,12 @@
 //! participants, posts, moderation actions, approvals and the state envelope.
 //! The client and the UI are Phase 3+.
 
+pub mod authority;
+pub use authority::{
+    AuthorityRootV1, AuthorityTreeV1, MemberStatusProofV1, MemberStatusV1,
+    AUTHORITY_ROOT_VERSION,
+};
+
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use plaza_core::board_state::admin::{AdminsV1, AuthorizedAdmin};
@@ -328,6 +334,12 @@ pub struct TopicAuthorityV1 {
     /// sign a topic policy themselves. The topic derives its policy from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_configuration: Option<AuthorizedConfigurationV1>,
+    /// Compact commitment to the board authority. When present, the topic
+    /// keeps only the proofs of the members it references.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<AuthorityRootV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_proofs: Vec<MemberStatusProofV1>,
 }
 
 impl TopicAuthorityV1 {
@@ -1074,6 +1086,64 @@ impl TopicStateV1 {
             .ban_revocations
             .verify(view, board_params)?;
         self.authority.suspensions.verify(view, board_params)?;
+        if let Some(root) = &self.authority.root {
+            if root.version != AUTHORITY_ROOT_VERSION {
+                return Err("unsupported authority root version".to_string());
+            }
+            let mut seen_members = HashSet::new();
+            let mut proof_roles = RolesV1::default();
+            let mut proof_bans = BansV1(Vec::new());
+            let mut proof_revocations = BanRevocationsV1 {
+                revocations: Vec::new(),
+            };
+            let mut proof_suspensions = SuspensionsV1 {
+                suspensions: Vec::new(),
+            };
+            for proof in &self.authority.member_proofs {
+                proof.verify(root)?;
+                if !seen_members.insert(proof.status.member_id()) {
+                    return Err("duplicate authority proof".to_string());
+                }
+                proof_roles.roles.extend(proof.status.roles.iter().cloned());
+                proof_roles
+                    .assignments
+                    .extend(proof.status.assignments.iter().cloned());
+                proof_bans.0.extend(proof.status.bans.iter().cloned());
+                proof_revocations
+                    .revocations
+                    .extend(proof.status.revocations.iter().cloned());
+                proof_suspensions
+                    .suspensions
+                    .extend(proof.status.suspensions.iter().cloned());
+            }
+            let mut seen_roles = HashSet::new();
+            proof_roles.roles.retain(|role| seen_roles.insert(role.role.id));
+            let mut seen_assignments = HashSet::new();
+            proof_roles.assignments.retain(|assignment| {
+                seen_assignments.insert((
+                    assignment.assignment.role_id,
+                    assignment.assignment.member_id,
+                    assignment.assignment.generation,
+                ))
+            });
+            let mut seen_bans = HashSet::new();
+            proof_bans.0.retain(|ban| seen_bans.insert(ban.id()));
+            let mut seen_revocations = HashSet::new();
+            proof_revocations
+                .revocations
+                .retain(|revocation| seen_revocations.insert(revocation.revocation.ban_id.clone()));
+            let mut seen_suspensions = HashSet::new();
+            proof_suspensions.suspensions.retain(|suspension| {
+                seen_suspensions.insert((
+                    suspension.suspension.target,
+                    suspension.suspension.generation,
+                ))
+            });
+            proof_roles.verify(view, board_params)?;
+            proof_bans.verify(view, board_params)?;
+            proof_revocations.verify(view, board_params)?;
+            proof_suspensions.verify(view, board_params)?;
+        }
         let owner_id = view.ownership.current_owner(board_params);
         if let Some(source) = &self.authority.source_configuration {
             let at_ms = system_time_ms(source.configuration.updated_at);
@@ -1703,13 +1773,51 @@ impl TopicStateV1 {
             suspensions: self.authority.suspensions.clone(),
             ..Default::default()
         };
-        view.members = MembersV1 {
-            members: self
-                .participants
-                .iter()
-                .map(|p| p.record.certificate.member.clone())
-                .collect(),
-        };
+        let mut members: Vec<AuthorizedMember> = self
+            .participants
+            .iter()
+            .map(|p| p.record.certificate.member.clone())
+            .collect();
+        for proof in &self.authority.member_proofs {
+            view.roles.roles.extend(proof.status.roles.iter().cloned());
+            view.roles
+                .assignments
+                .extend(proof.status.assignments.iter().cloned());
+            view.bans.0.extend(proof.status.bans.iter().cloned());
+            view.ban_revocations
+                .revocations
+                .extend(proof.status.revocations.iter().cloned());
+            view.suspensions
+                .suspensions
+                .extend(proof.status.suspensions.iter().cloned());
+            members.push(proof.status.member.clone());
+        }
+        let mut seen_members = HashSet::new();
+        members.retain(|member| seen_members.insert(member.member.id()));
+        view.members = MembersV1 { members };
+        let mut seen_roles = HashSet::new();
+        view.roles.roles.retain(|role| seen_roles.insert(role.role.id));
+        let mut seen_assignments = HashSet::new();
+        view.roles.assignments.retain(|assignment| {
+            seen_assignments.insert((
+                assignment.assignment.role_id,
+                assignment.assignment.member_id,
+                assignment.assignment.generation,
+            ))
+        });
+        let mut seen_bans = HashSet::new();
+        view.bans.0.retain(|ban| seen_bans.insert(ban.id()));
+        let mut seen_revocations = HashSet::new();
+        view.ban_revocations
+            .revocations
+            .retain(|revocation| seen_revocations.insert(revocation.revocation.ban_id.clone()));
+        let mut seen_suspensions = HashSet::new();
+        view.suspensions.suspensions.retain(|suspension| {
+            seen_suspensions.insert((
+                suspension.suspension.target,
+                suspension.suspension.generation,
+            ))
+        });
         let _ = params;
         view
     }
@@ -1779,20 +1887,42 @@ impl TopicStateV1 {
     }
 
     fn is_banned(&self, member: MemberId, at_ms: i64) -> bool {
-        self.authority.bans.0.iter().any(|ban| {
-            if ban.ban.banned_user != member {
-                return false;
-            }
-            let banned_at = system_time_ms(ban.ban.banned_at);
-            let expired = ban
-                .ban
-                .expires_at
-                .map(|expires| system_time_ms(expires) <= at_ms)
-                .unwrap_or(false);
-            banned_at <= at_ms
-                && !expired
-                && !self.authority.ban_revocations.revoked(&ban.id())
-        })
+        let revoked: HashSet<_> = self
+            .authority
+            .ban_revocations
+            .revocations
+            .iter()
+            .map(|revocation| revocation.revocation.ban_id.clone())
+            .chain(
+                self.authority
+                    .member_proofs
+                    .iter()
+                    .flat_map(|proof| proof.status.revocations.iter())
+                    .map(|revocation| revocation.revocation.ban_id.clone()),
+            )
+            .collect();
+        self.authority
+            .bans
+            .0
+            .iter()
+            .chain(
+                self.authority
+                    .member_proofs
+                    .iter()
+                    .flat_map(|proof| proof.status.bans.iter()),
+            )
+            .any(|ban| {
+                if ban.ban.banned_user != member {
+                    return false;
+                }
+                let banned_at = system_time_ms(ban.ban.banned_at);
+                let expired = ban
+                    .ban
+                    .expires_at
+                    .map(|expires| system_time_ms(expires) <= at_ms)
+                    .unwrap_or(false);
+                banned_at <= at_ms && !expired && !revoked.contains(&ban.id())
+            })
     }
 
     fn is_suspended(&self, member: MemberId, at_ms: i64) -> bool {
@@ -1800,6 +1930,12 @@ impl TopicStateV1 {
             .suspensions
             .suspensions
             .iter()
+            .chain(
+                self.authority
+                    .member_proofs
+                    .iter()
+                    .flat_map(|proof| proof.status.suspensions.iter()),
+            )
             .filter(|entry| {
                 entry.suspension.target == member && entry.suspension.created_at <= at_ms
             })
@@ -2049,6 +2185,7 @@ fn merge_authority(left: &TopicAuthorityV1, right: &TopicAuthorityV1) -> TopicAu
     let policy = merge_policy(&left.policy, &right.policy);
     let source_configuration =
         merge_source_configuration(&left.source_configuration, &right.source_configuration);
+    let (root, member_proofs) = merge_authority_root(left, right);
     TopicAuthorityV1 {
         ownership,
         admins: merge_admins(&left.admins, &right.admins),
@@ -2061,7 +2198,42 @@ fn merge_authority(left: &TopicAuthorityV1, right: &TopicAuthorityV1) -> TopicAu
         suspensions: merge_suspensions(&left.suspensions, &right.suspensions),
         policy,
         source_configuration,
+        root,
+        member_proofs,
     }
+}
+
+fn merge_authority_root(
+    left: &TopicAuthorityV1,
+    right: &TopicAuthorityV1,
+) -> (Option<AuthorityRootV1>, Vec<MemberStatusProofV1>) {
+    let root = match (left.root.as_ref(), right.root.as_ref()) {
+        (None, None) => None,
+        (Some(root), None) | (None, Some(root)) => Some(root.clone()),
+        (Some(left), Some(right)) => {
+            if right.epoch > left.epoch
+                || (right.epoch == left.epoch && right.digest < left.digest)
+            {
+                Some(right.clone())
+            } else {
+                Some(left.clone())
+            }
+        }
+    };
+    let Some(root) = root else {
+        return (None, Vec::new());
+    };
+    let mut proofs: BTreeMap<MemberId, MemberStatusProofV1> = BTreeMap::new();
+    for proof in left
+        .member_proofs
+        .iter()
+        .chain(right.member_proofs.iter())
+    {
+        if proof.verify(&root).is_ok() {
+            proofs.insert(proof.status.member_id(), proof.clone());
+        }
+    }
+    (Some(root), proofs.into_values().collect())
 }
 
 fn merge_policy(
@@ -2470,6 +2642,44 @@ mod scale_bench {
                 start.elapsed().as_secs_f64() * 1000.0
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod authority_root_tests {
+    use super::tests::*;
+    use super::*;
+
+    fn topic_with_root() -> TopicStateV1 {
+        let mut state = base_state();
+        let member_record = state.participants[0].record.certificate.member.clone();
+        let mut board = ChatBoardStateV1::default();
+        board.members.members.push(member_record);
+        let tree = AuthorityTreeV1::from_board(&board);
+        let member_id = MemberId::from(&member().verifying_key());
+        state.authority.roles = RolesV1::default();
+        state.authority.bans = BansV1(Vec::new());
+        state.authority.ban_revocations = BanRevocationsV1::default();
+        state.authority.suspensions = SuspensionsV1::default();
+        state.authority.root = Some(tree.root(1));
+        state.authority.member_proofs = tree.proofs_for([&member_id]);
+        state
+    }
+
+    #[test]
+    fn a_topic_with_a_root_and_proofs_verifies() {
+        topic_with_root().verify(&params()).unwrap();
+    }
+
+    #[test]
+    fn a_tampered_proof_is_rejected() {
+        let mut state = topic_with_root();
+        state.authority.member_proofs[0]
+            .status
+            .member
+            .member
+            .member_vk = SigningKey::from_bytes(&[9u8; 32]).verifying_key();
+        assert!(state.verify(&params()).is_err());
     }
 }
 

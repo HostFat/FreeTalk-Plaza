@@ -10,6 +10,7 @@ use freenet_stdlib::prelude::{
     Parameters, UpdateData, WrappedContract, WrappedState,
 };
 use plaza_core::board_state::ban::{AuthorizedBanRevocation, AuthorizedUserBan};
+use plaza_core::board_state::invites::{AuthorizedInviteToken, InviteTokensDelta};
 use plaza_core::board_state::member::{AuthorizedMember, MemberId, MembersDelta};
 use plaza_core::board_state::member_moderation::{AuthorizedSuspension, SuspensionsDelta};
 use plaza_core::board_state::roles::{AuthorizedRole, AuthorizedRoleAssignment, RolesDelta};
@@ -480,6 +481,71 @@ fn relevant_roles(parent: &ChatBoardStateV1, ids: &HashSet<MemberId>) -> RolesDe
     RolesDelta { roles, assignments }
 }
 
+/// A token-joined member carries the join proof; the section child checks it
+/// against the token record, so the token must travel with the member.
+fn relevant_invites(
+    parent: &ChatBoardStateV1,
+    child: &ChatBoardStateV1,
+    ids: &HashSet<MemberId>,
+) -> Vec<AuthorizedInviteToken> {
+    let known: HashSet<[u8; 16]> = child
+        .invites
+        .tokens
+        .iter()
+        .map(|token| token.token.id)
+        .collect();
+    let mut tokens = Vec::new();
+    for member in &parent.members.members {
+        if !ids.contains(&member.member.id()) {
+            continue;
+        }
+        let Some(proof) = member.member.join_proof.as_ref() else {
+            continue;
+        };
+        if known.contains(&proof.token_id) {
+            continue;
+        }
+        if let Some(token) = parent
+            .invites
+            .tokens
+            .iter()
+            .find(|token| token.token.id == proof.token_id)
+            .cloned()
+        {
+            if !tokens
+                .iter()
+                .any(|existing: &AuthorizedInviteToken| existing.token.id == token.token.id)
+            {
+                tokens.push(token);
+            }
+        }
+    }
+    tokens
+}
+
+fn add_token_roles(
+    parent: &ChatBoardStateV1,
+    invites: &[AuthorizedInviteToken],
+    roles: &mut RolesDelta,
+) {
+    for token in invites {
+        if let Some(role) = parent
+            .roles
+            .roles
+            .iter()
+            .find(|role| role.role.id == token.token.role_id)
+        {
+            if !roles
+                .roles
+                .iter()
+                .any(|existing| existing.role.id == role.role.id)
+            {
+                roles.roles.push(role.clone());
+            }
+        }
+    }
+}
+
 fn relevant_bans(parent: &ChatBoardStateV1, ids: &HashSet<MemberId>) -> Vec<AuthorizedUserBan> {
     parent
         .bans
@@ -546,7 +612,12 @@ fn with_section_records(
     if !added.is_empty() {
         delta.members = Some(MembersDelta::new(added));
     }
-    let roles = relevant_roles(parent, &ids);
+    let invites = relevant_invites(parent, child, &ids);
+    let mut roles = relevant_roles(parent, &ids);
+    add_token_roles(parent, &invites, &mut roles);
+    if !invites.is_empty() {
+        delta.invites = Some(InviteTokensDelta { tokens: invites });
+    }
     let new_roles: Vec<_> = roles
         .roles
         .into_iter()
@@ -687,7 +758,12 @@ pub async fn sync_section_authority(
         if !added.is_empty() {
             delta.members = Some(MembersDelta::new(added));
         }
-        let roles = relevant_roles(parent, &ids);
+        let invites = relevant_invites(parent, &child, &ids);
+        let mut roles = relevant_roles(parent, &ids);
+        add_token_roles(parent, &invites, &mut roles);
+        if !invites.is_empty() {
+            delta.invites = Some(InviteTokensDelta { tokens: invites });
+        }
         if !roles.roles.is_empty() || !roles.assignments.is_empty() {
             delta.roles = Some(roles);
         }
@@ -706,6 +782,7 @@ pub async fn sync_section_authority(
         let has_changes = delta.configuration.is_some()
             || delta.sections.is_some()
             || delta.members.is_some()
+            || delta.invites.is_some()
             || delta.roles.is_some()
             || delta.bans.is_some()
             || delta.ban_revocations.is_some()

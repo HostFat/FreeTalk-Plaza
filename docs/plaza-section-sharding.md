@@ -44,7 +44,15 @@ come delta (lo stato completo resta per admin/ownership). Su un benchmark con
 verifica piena da 3,5 a 1,9 s. Lo stato locale resta `dirty` fino
 all'`UpdateResponse`; un `Get` con lo stato precedente fa merge invece di
 scartare entry e attivita' locali, e le attività ripristinate dal delegate
-vengono rimesse in coda al reload. Il PUT di un topic puo' essere
+vengono rimesse in coda al reload.
+
+I topic usano una radice Merkle dell'autorita': ogni topic conserva la radice,
+le definizioni dei ruoli e una prova per partecipanti e moderatori, invece di
+copiare bans e sospensioni. La radice non e' firmata; una radice owner-signed
+nella board e' il passo successivo. Le figlie continuano a ricevere token e
+ruoli dei membri che referenziano, altrimenti la verifica dell'invito fallisce.
+Il contratto topic e' stato ri-keyato; i topic esistenti vanno ricreati.
+Real-node 15/15, static Chromium 29/3. Il PUT di un topic puo' essere
 confermato da un `GetResponse` (stato della sottoscrizione) invece che da un
 `PutResponse`; `wait_topic_synced` accetta entrambi.
 
