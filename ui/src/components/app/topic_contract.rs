@@ -447,9 +447,14 @@ pub async fn merge_topic(
     }
     let source_section = index.section_of(&topic_id).0;
     let destination_section = index.section_of(&destination).0;
+    let dest_on_page0 = source_section
+        .and_then(|section| {
+            crate::components::app::section_contract::section_page_state(owner, section, 0)
+        })
+        .is_some_and(|manifest| manifest.topics.entry(&destination).is_some());
     let (flag_section, flag_section_chain) = if board.board_state.mode
         == BoardModeV1::SectionedTopicIndex
-        && source_section != destination_section
+        && (source_section != destination_section || !dest_on_page0)
     {
         let section = destination_section
             .ok_or("a cross-section merge needs a destination section")?;
@@ -1559,13 +1564,13 @@ async fn prepare_topic(
     if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
         let section_id = section.ok_or("choose a section for the topic")?;
         page = crate::components::app::section_contract::active_page(owner, section_id).await?;
-        let child = crate::components::app::section_contract::section_page_state(
+        let child_topics = crate::components::app::section_contract::section_page_index(
             owner,
             section_id,
             page,
         )
         .ok_or("the section page is still loading")?;
-        board.board_state.topics = child.topics;
+        board.board_state.topics = child_topics;
     }
     if title.trim().is_empty() {
         return Err("the topic needs a title".to_string());
@@ -1999,10 +2004,7 @@ fn section_for_topic(owner: VerifyingKey, topic_id: MessageId) -> Option<(Messag
     if let Some(board) = crate::components::app::section_contract::SECTION_BOARDS
         .read()
         .values()
-        .find(|board| {
-            board.params.owner == owner
-                && board.state.topics.entry(&topic_id).is_some()
-        })
+        .find(|board| board.params.owner == owner && board.contains_topic(&topic_id))
     {
         return Some((board.params.section, board.params.page));
     }
@@ -2069,8 +2071,15 @@ async fn apply_topic_board_delta(
     if board.board_state.mode != BoardModeV1::SectionedTopicIndex {
         return apply_board_delta(owner, delta);
     }
+    let has_entries = delta
+        .topics
+        .as_ref()
+        .is_some_and(|topics| !topics.entries.is_empty());
     let (section, page) = locate_section_page(owner, topic_id).await?;
-    crate::components::app::section_contract::apply_section_delta(owner, section, page, delta)
+    // Section flags live on page 0 (the manifest) so compact extra pages
+    // (`page > 0`) stay immutable once sealed and never need authority syncs.
+    let target_page = if has_entries { page } else { 0 };
+    crate::components::app::section_contract::apply_section_delta(owner, section, target_page, delta)
         .await
 }
 

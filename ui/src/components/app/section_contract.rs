@@ -1,22 +1,36 @@
-//! Section child boards. A sectioned parent keeps only the section list and
-//! authority; each section's topic index lives in its own contract.
+//! Section child boards and compact extra topic pages.
+//!
+//! A sectioned parent board keeps only the section list and global authority.
+//! Each section has:
+//! - Page 0 (the manifest, `ChatBoardStateV1`): section authority (pruned),
+//!   `topic_pages` manifest, page 0's topic entries, and all section flags.
+//! - Pages `page > 0` (`SectionPageStateV1`): compact topic-entry pages with no
+//!   board configuration, sections, bans, suspensions, activity, reports, or
+//!   flags. When full, the owner seals a page, dropping all duplicated author,
+//!   invite, and role records so new subscribers verify it with 1 signature.
 
 use dioxus::prelude::*;
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use freenet_stdlib::client_api::{ClientRequest, ContractRequest, ContractResponse};
 use freenet_stdlib::prelude::{
     ContractCode, ContractContainer, ContractInstanceId, ContractKey, ContractWasmAPIVersion,
     Parameters, UpdateData, WrappedContract, WrappedState,
 };
+use plaza_core::board_state::admin::AdminsV1;
 use plaza_core::board_state::ban::{AuthorizedBanRevocation, AuthorizedUserBan};
 use plaza_core::board_state::invites::{AuthorizedInviteToken, InviteTokensDelta};
 use plaza_core::board_state::member::{AuthorizedMember, MemberId, MembersDelta};
 use plaza_core::board_state::member_moderation::{AuthorizedSuspension, SuspensionsDelta};
+use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::pages::{
     AuthorizedTopicPageListV1, DEFAULT_TOPIC_PAGE_SIZE, MAX_TOPIC_PAGE_SIZE,
 };
 use plaza_core::board_state::roles::{AuthorizedRole, AuthorizedRoleAssignment, RolesDelta};
+use plaza_core::board_state::section_pages::{
+    ownership_referenced_members, AuthorizedSectionPageHeaderV1, AuthorizedSectionPageSealV1,
+    SectionPageDeltaV1, SectionPageHeaderV1, SectionPageStateV1,
+};
 use plaza_core::board_state::sections::{
     AuthorizedSectionV1, SectionId, SectionParametersV1, SectionsDelta,
 };
@@ -35,6 +49,71 @@ use crate::constants::SECTION_CONTRACT_WASM;
 use crate::util::to_cbor_vec;
 use plaza_core::chat_delegate::{ChatDelegateKey, ChatDelegateRequestMsg, ChatDelegateResponseMsg};
 
+/// State stored for a section contract: page 0 is the full manifest; extra
+/// pages (`page > 0`) use the compact `SectionPageStateV1` format.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub enum SectionBoardState {
+    Manifest(ChatBoardStateV1),
+    CompactPage(SectionPageStateV1),
+}
+
+impl SectionBoardState {
+    pub fn is_initialized(&self) -> bool {
+        match self {
+            Self::Manifest(state) => state.mode == BoardModeV1::SectionedTopicIndex,
+            Self::CompactPage(page) => page.header.is_some(),
+        }
+    }
+
+    pub fn is_sealed(&self) -> bool {
+        match self {
+            Self::Manifest(_) => false,
+            Self::CompactPage(page) => page.is_sealed(),
+        }
+    }
+
+    pub fn entry_count(&self) -> usize {
+        match self {
+            Self::Manifest(state) => state.topics.entries.len(),
+            Self::CompactPage(page) => page.entries.len(),
+        }
+    }
+
+    pub fn contains_topic(&self, topic_id: &MessageId) -> bool {
+        match self {
+            Self::Manifest(state) => state.topics.entry(topic_id).is_some(),
+            Self::CompactPage(page) => page
+                .entries
+                .iter()
+                .any(|entry| entry.entry.topic_id == *topic_id),
+        }
+    }
+
+    pub fn topic_index(&self) -> TopicIndexV1 {
+        match self {
+            Self::Manifest(state) => state.topics.clone(),
+            Self::CompactPage(page) => TopicIndexV1 {
+                entries: page.effective_entries(),
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn as_manifest(&self) -> Option<&ChatBoardStateV1> {
+        match self {
+            Self::Manifest(state) => Some(state),
+            Self::CompactPage(_) => None,
+        }
+    }
+
+    pub fn as_compact_page(&self) -> Option<&SectionPageStateV1> {
+        match self {
+            Self::Manifest(_) => None,
+            Self::CompactPage(page) => Some(page),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct PersistedSectionBoard {
     owner: VerifyingKey,
@@ -43,7 +122,7 @@ struct PersistedSectionBoard {
     page: u32,
     #[serde(default)]
     last_used: i64,
-    state: ChatBoardStateV1,
+    state: SectionBoardState,
 }
 
 /// Number of topics in a page before the owner is asked to create the next.
@@ -95,14 +174,14 @@ fn cbor_len<T: serde::Serialize>(value: &T) -> usize {
 }
 
 async fn save_section_boards_now() -> Result<(), String> {
-    let (mut manifests, mut pages) = {
+    let (manifests, mut pages) = {
         let boards = SECTION_BOARDS.read();
         let mut manifests = Vec::new();
         let mut pages = Vec::new();
         for board in boards.values() {
-            // A placeholder inserted by `load_section_board` has a default
+            // A placeholder inserted by `load_section_page` has a default
             // state; saving it would restore an invalid child on the next load.
-            if board.state.mode != BoardModeV1::SectionedTopicIndex {
+            if !board.state.is_initialized() {
                 continue;
             }
             let entry = PersistedSectionBoard {
@@ -125,9 +204,7 @@ async fn save_section_boards_now() -> Result<(), String> {
     let mut bytes: usize = entries.iter().map(|entry| cbor_len(&entry.state)).sum();
     let mut kept_pages = 0;
     for entry in pages {
-        if kept_pages >= MAX_PERSISTED_SECTION_PAGES
-            || bytes >= MAX_PERSISTED_SECTION_BYTES
-        {
+        if kept_pages >= MAX_PERSISTED_SECTION_PAGES || bytes >= MAX_PERSISTED_SECTION_BYTES {
             break;
         }
         let size = cbor_len(&entry.state);
@@ -182,46 +259,38 @@ pub async fn load_persisted_section_boards() {
     let mut restored_activity = Vec::new();
     SECTION_BOARDS.with_mut(|boards| {
         for entry in entries {
-            // Older blobs could contain a placeholder with the default state;
-            // it has no signatures to verify.
-            if entry.state.mode != BoardModeV1::SectionedTopicIndex {
+            if !entry.state.is_initialized() {
                 continue;
             }
             let key = section_page_key(entry.owner, entry.section, entry.page);
             let contract_id = *key.id();
-            let activity = entry.state.topics.activity.clone();
+            let activity = entry
+                .state
+                .as_manifest()
+                .map(|s| s.topics.activity.clone())
+                .unwrap_or_default();
             let has_local_activity = !activity.is_empty();
             if has_local_activity {
                 restored_activity.push((contract_id, key, activity));
             }
-            // Replace a placeholder inserted by the route effect; otherwise
-            // the persisted state would lose to an empty default.
-            boards.insert(
-                contract_id,
-                {
-                    let last_used = if entry.last_used > 0 {
-                        entry.last_used
-                    } else {
-                        now_ms()
-                    };
-                    let mut board = SectionBoard::new(
-                        SectionParametersV1 {
-                            owner: entry.owner,
-                            section: entry.section,
-                            page: entry.page,
-                        },
-                        entry.state,
-                        has_local_activity,
-                    );
-                    board.last_used = last_used;
-                    board
+            let last_used = if entry.last_used > 0 {
+                entry.last_used
+            } else {
+                now_ms()
+            };
+            let mut board = SectionBoard::new(
+                SectionParametersV1 {
+                    owner: entry.owner,
+                    section: entry.section,
+                    page: entry.page,
                 },
+                entry.state,
+                has_local_activity,
             );
+            board.last_used = last_used;
+            boards.insert(contract_id, board);
         }
     });
-    // Activity applied locally before the reload still has to reach the
-    // network. Queue it again; otherwise the next GET overwrites the restored
-    // reply count with the older network state.
     for (contract_id, key, activity) in restored_activity {
         queue_section_activity(contract_id, key, activity);
     }
@@ -229,13 +298,13 @@ pub async fn load_persisted_section_boards() {
 
 pub struct SectionBoard {
     pub params: SectionParametersV1,
-    pub state: ChatBoardStateV1,
+    pub state: SectionBoardState,
     pub synced: bool,
-    /// State has arrived and the parent authority has been copied in.
+    /// State has arrived and (for page 0) parent authority has been copied in.
     pub ready: bool,
-    /// An authority sync is in flight.
+    /// An authority sync is in flight (page 0 only).
     pub syncing: bool,
-    /// Local activity has not been confirmed by the network yet.
+    /// Local changes have not been confirmed by the network yet.
     pub dirty: bool,
     /// Last time this page was read or written, for the persistence budget.
     pub last_used: i64,
@@ -245,7 +314,7 @@ pub struct SectionBoard {
 }
 
 impl SectionBoard {
-    fn new(params: SectionParametersV1, state: ChatBoardStateV1, dirty: bool) -> Self {
+    fn new(params: SectionParametersV1, state: SectionBoardState, dirty: bool) -> Self {
         Self {
             params,
             state,
@@ -257,6 +326,10 @@ impl SectionBoard {
             last_fetch: 0,
         }
     }
+
+    pub fn contains_topic(&self, topic_id: &MessageId) -> bool {
+        self.state.contains_topic(topic_id)
+    }
 }
 
 pub static SECTION_BOARDS: GlobalSignal<HashMap<ContractInstanceId, SectionBoard>> =
@@ -264,7 +337,7 @@ pub static SECTION_BOARDS: GlobalSignal<HashMap<ContractInstanceId, SectionBoard
 
 struct PendingSectionActivity {
     key: ContractKey,
-    activity: HashMap<plaza_core::board_state::message::MessageId, AuthorizedTopicActivityV1>,
+    activity: HashMap<MessageId, AuthorizedTopicActivityV1>,
 }
 
 static SECTION_ACTIVITY: Mutex<Vec<(ContractInstanceId, PendingSectionActivity)>> =
@@ -402,7 +475,21 @@ pub fn section_page_state(
     SECTION_BOARDS
         .read()
         .get(key.id())
-        .map(|board| board.state.clone())
+        .and_then(|board| board.state.as_manifest().cloned())
+}
+
+/// Topic index slice held by a loaded section page (works for both page 0
+/// manifests and compact extra pages).
+pub fn section_page_index(
+    owner: VerifyingKey,
+    section: SectionId,
+    page: u32,
+) -> Option<TopicIndexV1> {
+    let key = section_page_key(owner, section, page);
+    SECTION_BOARDS
+        .read()
+        .get(key.id())
+        .map(|board| board.state.topic_index())
 }
 
 /// Page 0 plus the owner-signed extra pages of a section.
@@ -420,20 +507,29 @@ pub fn page_size_for(owner: VerifyingKey, section: SectionId) -> Option<u32> {
 }
 
 /// Merge the parent index (used by non-sharded boards) with every loaded
-/// child index of this owner. The UI reads the union as one index.
+/// child manifest and compact page of this owner. The UI reads the union as
+/// one index.
 pub fn merged_index(owner: VerifyingKey, parent: &TopicIndexV1) -> TopicIndexV1 {
     let mut merged = parent.clone();
     let boards = SECTION_BOARDS.read();
     for board in boards.values().filter(|board| board.params.owner == owner) {
-        merge_index(&mut merged, &board.state.topics);
+        match &board.state {
+            SectionBoardState::Manifest(state) => merge_index(&mut merged, &state.topics),
+            SectionBoardState::CompactPage(page) => {
+                let effective = page.effective_entries();
+                merge_entries(&mut merged.entries, &effective);
+            }
+        }
     }
     merged
 }
 
-fn merge_index(dst: &mut TopicIndexV1, src: &TopicIndexV1) {
-    for entry in &src.entries {
+fn merge_entries(
+    dst: &mut Vec<plaza_core::board_state::topics::AuthorizedTopicEntryV1>,
+    src: &[plaza_core::board_state::topics::AuthorizedTopicEntryV1],
+) {
+    for entry in src {
         match dst
-            .entries
             .iter_mut()
             .find(|existing| existing.entry.topic_id == entry.entry.topic_id)
         {
@@ -445,9 +541,13 @@ fn merge_index(dst: &mut TopicIndexV1, src: &TopicIndexV1) {
                     *existing = entry.clone();
                 }
             }
-            None => dst.entries.push(entry.clone()),
+            None => dst.push(entry.clone()),
         }
     }
+}
+
+fn merge_index(dst: &mut TopicIndexV1, src: &TopicIndexV1) {
+    merge_entries(&mut dst.entries, &src.entries);
     for entry in &src.activity {
         match dst
             .activity
@@ -469,7 +569,7 @@ fn merge_index(dst: &mut TopicIndexV1, src: &TopicIndexV1) {
             Some(existing) => {
                 let take = entry.flag.generation > existing.flag.generation
                     || (entry.flag.generation == existing.flag.generation
-                        && entry.flag.value == false
+                        && !entry.flag.value
                         && existing.flag.value)
                     || (entry.flag.generation == existing.flag.generation
                         && entry.flag.value == existing.flag.value
@@ -511,11 +611,10 @@ fn merge_index(dst: &mut TopicIndexV1, src: &TopicIndexV1) {
     }
 }
 
-/// Copy the parent's authority, members and global settings into a loaded
-/// section child, keeping the section's own topic index and content.
-/// Members whose records a section child needs: topic authors, activity
-/// signers, flag moderators, reporters and report resolvers.
-fn section_member_ids(state: &ChatBoardStateV1) -> HashSet<MemberId> {
+/// Members whose records a section manifest needs: topic authors, activity
+/// signers, flag moderators, reporters, report resolvers, and any ownership
+/// transfer targets/voters.
+fn section_member_ids(state: &ChatBoardStateV1, parent: &ChatBoardStateV1) -> HashSet<MemberId> {
     let mut ids = HashSet::new();
     for entry in &state.topics.entries {
         ids.insert(entry.entry.author);
@@ -536,6 +635,7 @@ fn section_member_ids(state: &ChatBoardStateV1) -> HashSet<MemberId> {
     for entry in &state.topics.report_resolutions {
         ids.insert(entry.resolution.resolved_by);
     }
+    ids.extend(ownership_referenced_members(&parent.ownership));
     ids
 }
 
@@ -566,6 +666,56 @@ fn delta_member_ids(delta: &ChatBoardStateV1Delta, owner_id: MemberId) -> HashSe
     ids
 }
 
+/// Resolve the `AuthorizedMember` records for `ids` plus their invite-chain
+/// ancestors from both `parent.members` and loaded `member_contract` shards,
+/// skipping any member already in `known`.
+fn collect_members_with_ancestors(
+    owner: VerifyingKey,
+    parent: &ChatBoardStateV1,
+    ids: &HashSet<MemberId>,
+    known: &HashSet<MemberId>,
+) -> Vec<AuthorizedMember> {
+    let owner_id = MemberId::from(&owner);
+    let mut merged = parent.members.clone();
+    crate::components::app::member_contract::apply_to_members(owner, parent, &mut merged);
+    let by_id: HashMap<MemberId, AuthorizedMember> = merged
+        .members
+        .into_iter()
+        .map(|m| (m.member.id(), m))
+        .collect();
+
+    let mut added = Vec::new();
+    let mut added_ids: HashSet<MemberId> = HashSet::new();
+    let mut stack: Vec<MemberId> = ids.iter().copied().collect();
+
+    while let Some(id) = stack.pop() {
+        if id == owner_id || known.contains(&id) || !added_ids.insert(id) {
+            continue;
+        }
+        if let Some(member) = by_id.get(&id) {
+            if member.member.join_proof.is_none()
+                && member.member.invited_by != owner_id
+                && member.member.invited_by != id
+            {
+                stack.push(member.member.invited_by);
+            }
+            added.push(member.clone());
+        }
+        if let Some(entry) = crate::components::app::member_contract::find_member_entry(owner, id) {
+            if !by_id.contains_key(&id) {
+                added.push(entry.member);
+            }
+            for ancestor in entry.invite_chain {
+                let anc_id = ancestor.member.id();
+                if anc_id != owner_id && !known.contains(&anc_id) && added_ids.insert(anc_id) {
+                    added.push(ancestor);
+                }
+            }
+        }
+    }
+    added
+}
+
 fn relevant_roles(parent: &ChatBoardStateV1, ids: &HashSet<MemberId>) -> RolesDelta {
     let mut roles: Vec<AuthorizedRole> = Vec::new();
     let mut assignments: Vec<AuthorizedRoleAssignment> = Vec::new();
@@ -593,35 +743,31 @@ fn relevant_roles(parent: &ChatBoardStateV1, ids: &HashSet<MemberId>) -> RolesDe
 
 /// A token-joined member carries the join proof; the section child checks it
 /// against the token record, so the token must travel with the member.
-fn relevant_invites(
+fn relevant_invites_for_members(
+    owner: VerifyingKey,
     parent: &ChatBoardStateV1,
-    child: &ChatBoardStateV1,
-    ids: &HashSet<MemberId>,
+    known_tokens: &HashSet<[u8; 16]>,
+    members: &[AuthorizedMember],
 ) -> Vec<AuthorizedInviteToken> {
-    let known: HashSet<[u8; 16]> = child
-        .invites
-        .tokens
-        .iter()
-        .map(|token| token.token.id)
-        .collect();
     let mut tokens = Vec::new();
-    for member in &parent.members.members {
-        if !ids.contains(&member.member.id()) {
-            continue;
-        }
+    for member in members {
         let Some(proof) = member.member.join_proof.as_ref() else {
             continue;
         };
-        if known.contains(&proof.token_id) {
+        if known_tokens.contains(&proof.token_id) {
             continue;
         }
-        if let Some(token) = parent
+        let token = parent
             .invites
             .tokens
             .iter()
-            .find(|token| token.token.id == proof.token_id)
+            .find(|t| t.token.id == proof.token_id)
             .cloned()
-        {
+            .or_else(|| {
+                crate::components::app::member_contract::find_member_entry(owner, member.member.id())
+                    .and_then(|entry| entry.invite_token)
+            });
+        if let Some(token) = token {
             if !tokens
                 .iter()
                 .any(|existing: &AuthorizedInviteToken| existing.token.id == token.token.id)
@@ -631,6 +777,30 @@ fn relevant_invites(
         }
     }
     tokens
+}
+
+fn relevant_invites(
+    owner: VerifyingKey,
+    parent: &ChatBoardStateV1,
+    child: &ChatBoardStateV1,
+    ids: &HashSet<MemberId>,
+    extra_members: &[AuthorizedMember],
+) -> Vec<AuthorizedInviteToken> {
+    let known: HashSet<[u8; 16]> = child
+        .invites
+        .tokens
+        .iter()
+        .map(|token| token.token.id)
+        .collect();
+    let mut candidates: Vec<AuthorizedMember> = parent
+        .members
+        .members
+        .iter()
+        .filter(|member| ids.contains(&member.member.id()))
+        .cloned()
+        .collect();
+    candidates.extend(extra_members.iter().cloned());
+    relevant_invites_for_members(owner, parent, &known, &candidates)
 }
 
 fn add_token_roles(
@@ -692,9 +862,8 @@ fn relevant_suspensions(
         .collect()
 }
 
-/// Add the member, role and moderation records that a section delta needs to
-/// verify its new topic records. A member that the child already knows costs
-/// nothing.
+/// Add the member, role and moderation records that a manifest delta needs to
+/// verify its new topic/flag records.
 fn with_section_records(
     owner: VerifyingKey,
     parent: &ChatBoardStateV1,
@@ -712,34 +881,11 @@ fn with_section_records(
         .iter()
         .map(|member| member.member.id())
         .collect();
-    let mut merged_members = parent.members.clone();
-    crate::components::app::member_contract::apply_to_members(owner, parent, &mut merged_members);
-    let mut added: Vec<AuthorizedMember> = merged_members
-        .members
-        .iter()
-        .filter(|member| ids.contains(&member.member.id()) && !known.contains(&member.member.id()))
-        .cloned()
-        .collect();
-    // Include any missing invite-chain ancestors carried by shard entries.
-    let mut added_ids: HashSet<MemberId> =
-        added.iter().map(|member| member.member.id()).collect();
-    for id in &ids {
-        if known.contains(id) {
-            continue;
-        }
-        if let Some(entry) = crate::components::app::member_contract::find_member_entry(owner, *id) {
-            for ancestor in entry.invite_chain {
-                let anc_id = ancestor.member.id();
-                if !known.contains(&anc_id) && added_ids.insert(anc_id) {
-                    added.push(ancestor);
-                }
-            }
-        }
-    }
+    let added = collect_members_with_ancestors(owner, parent, &ids, &known);
+    let invites = relevant_invites(owner, parent, child, &ids, &added);
     if !added.is_empty() {
         delta.members = Some(MembersDelta::new(added));
     }
-    let invites = relevant_invites(parent, child, &ids);
     let mut roles = relevant_roles(parent, &ids);
     add_token_roles(parent, &invites, &mut roles);
     if !invites.is_empty() {
@@ -809,22 +955,21 @@ fn with_section_records(
     delta
 }
 
+/// Sync parent authority to page 0 (the section manifest) only. Compact extra
+/// pages (`page > 0`) do not duplicate board authority and never receive
+/// authority syncs.
 pub async fn sync_section_authority(
     owner: VerifyingKey,
     section: SectionId,
     parent: &ChatBoardStateV1,
 ) -> Result<(), String> {
-    for page in pages_for(owner, section) {
-        // A page whose GET is still in flight syncs when its own response
-        // arrives; one missing page must not block the manifest.
-        let loaded = SECTION_BOARDS
-            .read()
-            .get(section_page_key(owner, section, page).id())
-            .map(|board| board.synced)
-            .unwrap_or(false);
-        if loaded {
-            sync_section_page_authority(owner, section, page, parent).await?;
-        }
+    let loaded = SECTION_BOARDS
+        .read()
+        .get(section_page_key(owner, section, 0).id())
+        .map(|board| board.synced)
+        .unwrap_or(false);
+    if loaded {
+        sync_section_page_authority(owner, section, parent).await?;
     }
     Ok(())
 }
@@ -832,15 +977,19 @@ pub async fn sync_section_authority(
 async fn sync_section_page_authority(
     owner: VerifyingKey,
     section: SectionId,
-    page: u32,
     parent: &ChatBoardStateV1,
 ) -> Result<(), String> {
-    let key = section_page_key(owner, section, page);
+    let key = section_page_key(owner, section, 0);
     let contract_id = *key.id();
     let Some((child, synced, syncing)) = SECTION_BOARDS
         .read()
         .get(&contract_id)
-        .map(|board| (board.state.clone(), board.synced, board.syncing))
+        .and_then(|board| {
+            board
+                .state
+                .as_manifest()
+                .map(|manifest| (manifest.clone(), board.synced, board.syncing))
+        })
     else {
         return Err("the section board is not loaded".to_string());
     };
@@ -857,11 +1006,11 @@ async fn sync_section_page_authority(
         }
     });
     let board_params = ChatBoardParametersV1 { owner };
-    let ids = section_member_ids(&child);
+    let ids = section_member_ids(&child, parent);
 
     // Admin and ownership changes are rare and touch the whole chain; keep the
-    // existing full-state path for them. Everything else travels as a delta
-    // with only the records this section actually needs.
+    // full-state path for them, but prune members/roles/bans/suspensions to
+    // only the records this manifest and its ownership chain actually need.
     let full_state = parent.admin != child.admin || parent.ownership != child.ownership;
     let mut state = child.clone();
     let data = if full_state {
@@ -870,11 +1019,23 @@ async fn sync_section_page_authority(
         state.ownership = parent.ownership.clone();
         state.sections = parent.sections.chain_only(&section);
         state.authority_root = Default::default();
-        state.members = parent.members.clone();
-        state.roles = parent.roles.clone();
-        state.bans = parent.bans.clone();
-        state.ban_revocations = parent.ban_revocations.clone();
-        state.suspensions = parent.suspensions.clone();
+        let members = collect_members_with_ancestors(owner, parent, &ids, &HashSet::new());
+        let invites = relevant_invites_for_members(owner, parent, &HashSet::new(), &members);
+        let mut roles = relevant_roles(parent, &ids);
+        add_token_roles(parent, &invites, &mut roles);
+        state.members = plaza_core::board_state::member::MembersV1 { members };
+        state.invites = plaza_core::board_state::invites::InviteTokensV1 { tokens: invites };
+        state.roles = plaza_core::board_state::roles::RolesV1 {
+            roles: roles.roles,
+            assignments: roles.assignments,
+        };
+        state.bans = plaza_core::board_state::ban::BansV1(relevant_bans(parent, &ids));
+        state.ban_revocations = plaza_core::board_state::ban::BanRevocationsV1 {
+            revocations: relevant_revocations(parent, &ids),
+        };
+        state.suspensions = plaza_core::board_state::member_moderation::SuspensionsV1 {
+            suspensions: relevant_suspensions(parent, &ids),
+        };
         state
             .verify_with_section(&board_params, Some(section))
             .map_err(|error| format!("section authority does not verify: {error}"))?;
@@ -896,36 +1057,74 @@ async fn sync_section_page_authority(
             .iter()
             .map(|member| member.member.id())
             .collect();
-        let added: Vec<AuthorizedMember> = parent
-            .members
-            .members
-            .iter()
-            .filter(|member| {
-                ids.contains(&member.member.id()) && !known.contains(&member.member.id())
-            })
-            .cloned()
-            .collect();
+        let added = collect_members_with_ancestors(owner, parent, &ids, &known);
+        let invites = relevant_invites(owner, parent, &child, &ids, &added);
         if !added.is_empty() {
             delta.members = Some(MembersDelta::new(added));
         }
-        let invites = relevant_invites(parent, &child, &ids);
         let mut roles = relevant_roles(parent, &ids);
         add_token_roles(parent, &invites, &mut roles);
         if !invites.is_empty() {
             delta.invites = Some(InviteTokensDelta { tokens: invites });
         }
-        if !roles.roles.is_empty() || !roles.assignments.is_empty() {
-            delta.roles = Some(roles);
+        let new_roles: Vec<_> = roles
+            .roles
+            .into_iter()
+            .filter(|role| {
+                !child.roles.roles.iter().any(|known| {
+                    known.role.id == role.role.id
+                        && known.role.generation == role.role.generation
+                        && known.role.deleted == role.role.deleted
+                })
+            })
+            .collect();
+        let new_assignments: Vec<_> = roles
+            .assignments
+            .into_iter()
+            .filter(|assignment| {
+                !child.roles.assignments.iter().any(|known| {
+                    known.assignment.role_id == assignment.assignment.role_id
+                        && known.assignment.member_id == assignment.assignment.member_id
+                        && known.assignment.generation == assignment.assignment.generation
+                        && known.assignment.revoked == assignment.assignment.revoked
+                })
+            })
+            .collect();
+        if !new_roles.is_empty() || !new_assignments.is_empty() {
+            delta.roles = Some(RolesDelta {
+                roles: new_roles,
+                assignments: new_assignments,
+            });
         }
-        let bans = relevant_bans(parent, &ids);
+        let bans: Vec<_> = relevant_bans(parent, &ids)
+            .into_iter()
+            .filter(|ban| !child.bans.0.iter().any(|known| known.id() == ban.id()))
+            .collect();
         if !bans.is_empty() {
             delta.bans = Some(bans);
         }
-        let revocations = relevant_revocations(parent, &ids);
+        let revocations: Vec<_> = relevant_revocations(parent, &ids)
+            .into_iter()
+            .filter(|revocation| {
+                !child
+                    .ban_revocations
+                    .revocations
+                    .iter()
+                    .any(|known| known.revocation.ban_id == revocation.revocation.ban_id)
+            })
+            .collect();
         if !revocations.is_empty() {
             delta.ban_revocations = Some(revocations);
         }
-        let suspensions = relevant_suspensions(parent, &ids);
+        let suspensions: Vec<_> = relevant_suspensions(parent, &ids)
+            .into_iter()
+            .filter(|suspension| {
+                !child.suspensions.suspensions.iter().any(|known| {
+                    known.suspension.target == suspension.suspension.target
+                        && known.suspension.generation == suspension.suspension.generation
+                })
+            })
+            .collect();
         if !suspensions.is_empty() {
             delta.suspensions = Some(SuspensionsDelta { suspensions });
         }
@@ -966,7 +1165,7 @@ async fn sync_section_page_authority(
 
     SECTION_BOARDS.with_mut(|boards| {
         if let Some(board) = boards.get_mut(&contract_id) {
-            board.state = state.clone();
+            board.state = SectionBoardState::Manifest(state.clone());
             board.synced = true;
             board.ready = false;
             board.dirty = true;
@@ -991,13 +1190,147 @@ async fn sync_section_page_authority(
     result.map_err(|error| format!("send section authority: {error}"))
 }
 
-/// Apply a delta to a section child and publish it. The child contract
-/// verifies its own records and section layout.
+/// Build a compact [`SectionPageDeltaV1`] for `page > 0` from topic entries,
+/// attaching only the minimal author/invite/role records missing from `page_state`.
+fn build_compact_page_delta(
+    owner: VerifyingKey,
+    parent: Option<&ChatBoardStateV1>,
+    page_state: &SectionPageStateV1,
+    entries: Vec<plaza_core::board_state::topics::AuthorizedTopicEntryV1>,
+) -> SectionPageDeltaV1 {
+    if page_state.is_sealed() {
+        return SectionPageDeltaV1 {
+            entry_edits: entries,
+            ..Default::default()
+        };
+    }
+    let owner_id = MemberId::from(&owner);
+    let mut author_ids: HashSet<MemberId> = entries
+        .iter()
+        .map(|entry| entry.entry.author)
+        .collect();
+    author_ids.remove(&owner_id);
+
+    let mut delta = SectionPageDeltaV1 {
+        entries,
+        ..Default::default()
+    };
+    let Some(parent) = parent else {
+        return delta;
+    };
+    if author_ids.is_empty() {
+        return delta;
+    }
+
+    let known_authors: HashSet<MemberId> = page_state
+        .authors
+        .iter()
+        .map(|m| m.member.id())
+        .collect();
+    let authors = collect_members_with_ancestors(owner, parent, &author_ids, &known_authors);
+    let known_tokens: HashSet<[u8; 16]> = page_state.invites.iter().map(|t| t.token.id).collect();
+    let invites = relevant_invites_for_members(owner, parent, &known_tokens, &authors);
+
+    let needs_roles = page_state
+        .header
+        .as_ref()
+        .is_some_and(|h| !h.header.allowed_roles.is_empty());
+    let mut roles = if needs_roles {
+        relevant_roles(parent, &author_ids)
+    } else {
+        RolesDelta {
+            roles: Vec::new(),
+            assignments: Vec::new(),
+        }
+    };
+    add_token_roles(parent, &invites, &mut roles);
+
+    let new_roles: Vec<_> = roles
+        .roles
+        .into_iter()
+        .filter(|role| {
+            !page_state.roles.iter().any(|known| {
+                known.role.id == role.role.id
+                    && known.role.generation == role.role.generation
+                    && known.role.deleted == role.role.deleted
+            })
+        })
+        .collect();
+    let new_assignments: Vec<_> = roles
+        .assignments
+        .into_iter()
+        .filter(|assignment| {
+            !page_state.role_assignments.iter().any(|known| {
+                known.assignment.role_id == assignment.assignment.role_id
+                    && known.assignment.member_id == assignment.assignment.member_id
+                    && known.assignment.generation == assignment.assignment.generation
+                    && known.assignment.revoked == assignment.assignment.revoked
+            })
+        })
+        .collect();
+
+    // Only include admin records when an invite token or role record was
+    // signed by a non-owner admin not already present on the page.
+    let mut needed_admin_ids: HashSet<MemberId> = HashSet::new();
+    for token in &invites {
+        if let Some(signer) = token.signer {
+            if signer != owner_id {
+                needed_admin_ids.insert(signer);
+            }
+        }
+    }
+    for role in &new_roles {
+        if let Some(signer) = role.signer {
+            if signer != owner_id {
+                needed_admin_ids.insert(signer);
+            }
+        }
+    }
+    for assignment in &new_assignments {
+        if let Some(signer) = assignment.signer {
+            if signer != owner_id {
+                needed_admin_ids.insert(signer);
+            }
+        }
+    }
+    if !needed_admin_ids.is_empty() {
+        let missing_admins: Vec<_> = parent
+            .admin
+            .admins
+            .iter()
+            .filter(|a| {
+                needed_admin_ids.contains(&a.admin.id())
+                    && !page_state
+                        .admin
+                        .admins
+                        .iter()
+                        .any(|known| known.admin.id() == a.admin.id())
+            })
+            .cloned()
+            .collect();
+        if !missing_admins.is_empty() {
+            delta.admin = Some(AdminsV1 {
+                admins: missing_admins,
+                revoked: Vec::new(),
+            });
+        }
+    }
+
+    delta.authors = authors;
+    delta.invites = invites;
+    delta.roles = new_roles;
+    delta.role_assignments = new_assignments;
+    delta
+}
+
+/// Apply a delta to a section page and publish it. Page 0 accepts full
+/// manifest deltas (`ChatBoardStateV1Delta`); extra pages (`page > 0`) accept
+/// compact topic entry deltas (`SectionPageDeltaV1`).
 pub async fn apply_section_delta(
     owner: VerifyingKey,
     section: SectionId,
     page: u32,
-    delta: plaza_core::board_state::ChatBoardStateV1Delta,
+    delta: ChatBoardStateV1Delta,
 ) -> Result<(), String> {
     let key = section_page_key(owner, section, page);
     let contract_id = *key.id();
@@ -1009,10 +1342,62 @@ pub async fn apply_section_delta(
     {
         ensure_section_page_loaded(owner, section, page).await?;
     }
+
+    if page > 0 {
+        let page_state = SECTION_BOARDS
+            .read()
+            .get(&contract_id)
+            .and_then(|board| board.state.as_compact_page().cloned())
+            .ok_or("the section page is not loaded")?;
+        let entries = delta
+            .topics
+            .as_ref()
+            .map(|topics| topics.entries.clone())
+            .unwrap_or_default();
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let parent_state = {
+            let boards = crate::components::app::BOARDS.read();
+            boards.map.get(&owner).map(|board| board.board_state.clone())
+        };
+        let page_delta =
+            build_compact_page_delta(owner, parent_state.as_ref(), &page_state, entries);
+        let section_params = SectionParametersV1 {
+            owner,
+            section,
+            page,
+        };
+        let mut next = page_state;
+        next.apply_delta(&section_params, &page_delta)
+            .map_err(|error| format!("apply compact section page delta: {error}"))?;
+        SECTION_BOARDS.with_mut(|boards| {
+            if let Some(board) = boards.get_mut(&contract_id) {
+                board.state = SectionBoardState::CompactPage(next);
+                board.synced = false;
+                board.dirty = true;
+                board.last_used = now_ms();
+            }
+        });
+        schedule_section_save();
+        let bytes = to_cbor_vec(&page_delta);
+        let result = send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
+            key,
+            data: UpdateData::Delta(bytes.into()),
+        }))
+        .await;
+        SECTION_BOARDS.with_mut(|boards| {
+            if let Some(board) = boards.get_mut(&contract_id) {
+                board.dirty = true;
+            }
+        });
+        return result.map_err(|error| format!("send section page delta: {error}"));
+    }
+
     let parent = SECTION_BOARDS
         .read()
         .get(&contract_id)
-        .map(|board| board.state.clone())
+        .and_then(|board| board.state.as_manifest().cloned())
         .ok_or("the section board is not loaded")?;
     let delta = {
         let boards = crate::components::app::BOARDS.read();
@@ -1038,7 +1423,7 @@ pub async fn apply_section_delta(
     }
     SECTION_BOARDS.with_mut(|boards| {
         if let Some(board) = boards.get_mut(&contract_id) {
-            board.state = state;
+            board.state = SectionBoardState::Manifest(state);
             board.synced = false;
             board.dirty = true;
             board.last_used = now_ms();
@@ -1059,8 +1444,6 @@ pub async fn apply_section_delta(
     .await;
     SECTION_BOARDS.with_mut(|boards| {
         if let Some(board) = boards.get_mut(&contract_id) {
-            // Keep the cache marked until the node acknowledges this update;
-            // a Get that still carries the older state must not drop it.
             board.dirty = true;
         }
     });
@@ -1078,9 +1461,7 @@ pub fn is_section_contract_response(response: &ContractResponse) -> bool {
     }
 }
 
-/// Build a child board from the parent and publish it. The section record must
-/// already contain the child contract id, so the parent and the child sign the
-/// same section.
+/// Build a section manifest (page 0) from the parent board and publish it.
 pub async fn create_section_board(
     owner: VerifyingKey,
     section: &AuthorizedSectionV1,
@@ -1107,15 +1488,9 @@ pub async fn create_section_board(
             .sections
             .sort_by_key(|entry| (*entry.section.id.as_bytes(), entry.section.generation));
     }
-    // A child only needs its own section and its ancestors. Cross-section
-    // moves carry the destination records in the flag.
     child.sections = sections.chain_only(&section_id);
     child.topics = TopicIndexV1::default();
-    // The child carries only the pruned authority records; the parent's root
-    // commits to the full board and would not match this state.
     child.authority_root = Default::default();
-    // The manifest signs the page size from the first section state, so every
-    // client agrees where page 0 ends.
     child.topic_pages = plaza_core::board_state::pages::TopicPageListV1(topic_pages);
     child.recent_messages = Default::default();
     child.trash = Default::default();
@@ -1124,15 +1499,27 @@ pub async fn create_section_board(
     child.reports = Default::default();
     child.approvals = Default::default();
     child.invites = Default::default();
-    // The child starts without a copy of the board authority. Members, roles
-    // and moderation records are added as the section index needs them, so a
-    // board with many members does not pay for all of them in every section.
-    // A board with ownership transfers keeps the member/role lists: the
-    // transfer target must be resolvable from the child.
+    child.member_info = Default::default();
+    // Only retain the tiny subset of members/invites/roles required to verify
+    // an ownership transfer chain; never copy the full board member list.
     if parent.ownership.transfers.is_empty() {
         child.members = Default::default();
-        child.member_info = Default::default();
         child.roles = Default::default();
+    } else {
+        let transfer_ids = ownership_referenced_members(&parent.ownership);
+        let members = collect_members_with_ancestors(owner, parent, &transfer_ids, &HashSet::new());
+        let invites = relevant_invites_for_members(owner, parent, &HashSet::new(), &members);
+        let mut roles = RolesDelta {
+            roles: Vec::new(),
+            assignments: Vec::new(),
+        };
+        add_token_roles(parent, &invites, &mut roles);
+        child.members = plaza_core::board_state::member::MembersV1 { members };
+        child.invites = plaza_core::board_state::invites::InviteTokensV1 { tokens: invites };
+        child.roles = plaza_core::board_state::roles::RolesV1 {
+            roles: roles.roles,
+            assignments: roles.assignments,
+        };
     }
     child.bans = Default::default();
     child.ban_revocations = Default::default();
@@ -1170,7 +1557,7 @@ pub async fn create_section_board(
     SECTION_BOARDS.with_mut(|boards| {
         boards.insert(
             child_id,
-            SectionBoard::new(params.clone(), child.clone(), true),
+            SectionBoard::new(params.clone(), SectionBoardState::Manifest(child), true),
         );
     });
     schedule_section_save();
@@ -1186,8 +1573,60 @@ pub async fn create_section_board(
     Ok(key)
 }
 
-/// Create the next topic-entry page of a section and add it to the manifest's
-/// owner-signed page list. Only the owner can add pages.
+/// Seal a full extra page (`page > 0`) as the board owner, compacting away all
+/// duplicated author/invite/role records.
+async fn seal_section_page(
+    owner: VerifyingKey,
+    section: SectionId,
+    page: u32,
+    owner_sk: &SigningKey,
+) -> Result<(), String> {
+    if page == 0 {
+        return Ok(());
+    }
+    let key = section_page_key(owner, section, page);
+    let contract_id = *key.id();
+    let Some(page_state) = SECTION_BOARDS
+        .read()
+        .get(&contract_id)
+        .and_then(|board| board.state.as_compact_page().cloned())
+    else {
+        return Ok(());
+    };
+    if page_state.is_sealed() || page_state.entries.is_empty() {
+        return Ok(());
+    }
+    let params = SectionParametersV1 {
+        owner,
+        section,
+        page,
+    };
+    let seal = AuthorizedSectionPageSealV1::new(&params, &page_state.entries, owner_sk, now_ms())?;
+    let delta = SectionPageDeltaV1 {
+        seal: Some(seal),
+        ..Default::default()
+    };
+    let mut next = page_state;
+    next.apply_delta(&params, &delta)?;
+    SECTION_BOARDS.with_mut(|boards| {
+        if let Some(board) = boards.get_mut(&contract_id) {
+            board.state = SectionBoardState::CompactPage(next);
+            board.dirty = true;
+            board.last_used = now_ms();
+        }
+    });
+    schedule_section_save();
+    send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
+        key,
+        data: UpdateData::Delta(to_cbor_vec(&delta).into()),
+    }))
+    .await
+    .map_err(|error| format!("seal section page {page}: {error}"))
+}
+
+/// Create the next compact topic-entry page (`page > 0`) of a section, seal
+/// any full unsealed previous extra pages, and add the new page to the
+/// manifest's owner-signed page list. Only the current owner can add pages.
 pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Result<u32, String> {
     let parent = {
         let boards = crate::components::app::BOARDS.read();
@@ -1207,70 +1646,99 @@ pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Res
     let owner_sk = owner_sk
         .filter(|key| key.verifying_key() == current_owner)
         .ok_or("only the current owner can add a page")?;
-    let pages = pages_for(owner, section);
-    let page = pages.iter().copied().max().unwrap_or(0) + 1;
+    let existing_pages = pages_for(owner, section);
+    let page_size = page_size_for(owner, section).unwrap_or_else(current_topic_page_size);
+
+    // Compact any full, unsealed extra pages before spilling to the next page.
+    for existing in existing_pages.iter().copied().filter(|p| *p > 0) {
+        let should_seal = SECTION_BOARDS
+            .read()
+            .get(section_page_key(owner, section, existing).id())
+            .map(|board| {
+                board.synced
+                    && !board.state.is_sealed()
+                    && board.state.entry_count() >= page_size as usize
+            })
+            .unwrap_or(false);
+        if should_seal {
+            if let Err(error) = seal_section_page(owner, section, existing, &owner_sk).await {
+                dioxus::logger::tracing::warn!("could not seal section page {existing}: {error}");
+            }
+        }
+    }
+
+    let page = existing_pages.iter().copied().max().unwrap_or(0) + 1;
     let key = section_page_key(owner, section, page);
     let contract_id = *key.id();
 
-    let mut child = parent_state.clone();
-    child.mode = BoardModeV1::SectionedTopicIndex;
-    child.topics = TopicIndexV1::default();
-    child.authority_root = Default::default();
-    child.topic_pages = Default::default();
-    child.recent_messages = Default::default();
-    child.trash = Default::default();
-    child.message_keys = Default::default();
-    child.moderation = Default::default();
-    child.reports = Default::default();
-    child.approvals = Default::default();
-    child.invites = Default::default();
-    if parent_state.ownership.transfers.is_empty() {
-        child.members = Default::default();
-        child.member_info = Default::default();
-        child.roles = Default::default();
-    }
-    child.bans = Default::default();
-    child.ban_revocations = Default::default();
-    child.suspensions = Default::default();
-    child.category_secrets = Default::default();
-    child.secrets = Default::default();
-    child.pq_secrets = Default::default();
-    child.warnings = Default::default();
-    child.image_retirements = Default::default();
-    child.upgrade = Default::default();
-    child.mail_addresses = Default::default();
-    child.sections = child.sections.chain_only(&section);
+    let section_data = parent_state
+        .sections
+        .section(&section)
+        .ok_or("the section does not exist")?;
+    let section_chain = parent_state.sections.chain(&section);
+    let header = AuthorizedSectionPageHeaderV1::new(
+        SectionPageHeaderV1 {
+            board: owner.to_bytes(),
+            section,
+            section_chain,
+            page,
+            page_size,
+            allowed_roles: section_data.allowed_roles.clone(),
+            created_at: now_ms(),
+        },
+        &owner_sk,
+    );
 
-    let board_params = ChatBoardParametersV1 { owner };
-    child
-        .verify_with_section(&board_params, Some(section))
-        .map_err(|error| format!("section page does not verify: {error}"))?;
-    let mut normalized = child.clone();
-    normalized
-        .normalize(&board_params)
-        .map_err(|error| format!("section page cleanup failed: {error}"))?;
-    if normalized != child {
-        return Err("section page state is not normalized".to_string());
+    let mut compact_page = SectionPageStateV1 {
+        header: Some(header),
+        ..Default::default()
+    };
+    if !parent_state.ownership.transfers.is_empty() {
+        compact_page.ownership = parent_state.ownership.clone();
+        compact_page.admin = parent_state.admin.clone();
+        let transfer_ids = ownership_referenced_members(&parent_state.ownership);
+        let authors =
+            collect_members_with_ancestors(owner, &parent_state, &transfer_ids, &HashSet::new());
+        let invites =
+            relevant_invites_for_members(owner, &parent_state, &HashSet::new(), &authors);
+        let mut roles = RolesDelta {
+            roles: Vec::new(),
+            assignments: Vec::new(),
+        };
+        add_token_roles(&parent_state, &invites, &mut roles);
+        compact_page.authors = authors;
+        compact_page.invites = invites;
+        compact_page.roles = roles.roles;
+        compact_page.sort();
     }
+
     let params = SectionParametersV1 {
         owner,
         section,
         page,
     };
+    compact_page
+        .verify(&params)
+        .map_err(|error| format!("section page does not verify: {error}"))?;
+
     let contract = ContractContainer::from(ContractWasmAPIVersion::V1(WrappedContract::new(
         Arc::new(ContractCode::from(SECTION_CONTRACT_WASM)),
         Parameters::from(to_cbor_vec(&params)),
     )));
+    let encoded_state = WrappedState::new(to_cbor_vec(&compact_page));
     SECTION_BOARDS.with_mut(|boards| {
-        boards.insert(
-            contract_id,
-            SectionBoard::new(params.clone(), child.clone(), true),
+        let mut board = SectionBoard::new(
+            params.clone(),
+            SectionBoardState::CompactPage(compact_page),
+            true,
         );
+        board.ready = true;
+        boards.insert(contract_id, board);
     });
     schedule_section_save();
     send_client_request(ClientRequest::ContractOp(ContractRequest::Put {
         contract,
-        state: WrappedState::new(to_cbor_vec(&child)),
+        state: encoded_state,
         related_contracts: Default::default(),
         subscribe: true,
         blocking_subscribe: false,
@@ -1278,8 +1746,7 @@ pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Res
     .await
     .map_err(|error| format!("put section page: {error}"))?;
 
-    // The manifest owns the page list. Its signature is verified by the
-    // section contract; an unlisted page is simply not loaded by clients.
+    // The manifest owns the page list.
     let page0_key = section_page_key(owner, section, 0);
     let page0_id = *page0_key.id();
     if !SECTION_BOARDS
@@ -1293,17 +1760,12 @@ pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Res
     let mut pages = pages_for(owner, section);
     pages.retain(|existing| *existing > 0);
     pages.push(page);
-    let page_size = page_size_for(owner, section).unwrap_or_else(current_topic_page_size);
-    let list = AuthorizedTopicPageListV1::new(
-        section,
-        pages,
-        page_size,
-        &owner_sk,
-        now_ms(),
-    );
+    let list = AuthorizedTopicPageListV1::new(section, pages, page_size, &owner_sk, now_ms());
     SECTION_BOARDS.with_mut(|boards| {
         if let Some(board) = boards.get_mut(&page0_id) {
-            board.state.topic_pages.0 = Some(list.clone());
+            if let SectionBoardState::Manifest(manifest) = &mut board.state {
+                manifest.topic_pages.0 = Some(list.clone());
+            }
             board.dirty = true;
         }
     });
@@ -1323,15 +1785,12 @@ pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Res
     Ok(page)
 }
 
-/// The first page with room for another topic, creating a page when the owner
-/// is active and all existing pages are full.
 pub async fn ensure_section_page_loaded(
     owner: VerifyingKey,
     section: SectionId,
     page: u32,
 ) -> Result<(), String> {
     if page == 0 {
-        // Page 0 is the manifest; `ensure_section_loaded` handles it.
         return Ok(());
     }
     let key = section_page_key(owner, section, page);
@@ -1361,17 +1820,25 @@ pub async fn ensure_section_page_loaded(
     Err("the section page is not loaded yet".to_string())
 }
 
+/// Choose the active page with room for another topic without fetching older
+/// sealed pages. Checks the newest page first, creating a new page when the
+/// current active page is full or sealed.
 pub async fn active_page(owner: VerifyingKey, section: SectionId) -> Result<u32, String> {
     ensure_section_loaded(owner, section).await?;
-    load_section_pages(owner, section).await?;
     let limit = page_size_for(owner, section).unwrap_or_else(current_topic_page_size) as usize;
     let pages = pages_for(owner, section);
-    for page in pages.iter().copied() {
-        ensure_section_page_loaded(owner, section, page).await?;
-        if let Some(state) = section_page_state(owner, section, page) {
-            if state.topics.entries.len() < limit {
-                return Ok(page);
-            }
+
+    // Check the newest page first so a section with many sealed archive pages
+    // only touches its active tail page.
+    if let Some(&last_page) = pages.last() {
+        ensure_section_page_loaded(owner, section, last_page).await?;
+        let has_room = SECTION_BOARDS
+            .read()
+            .get(section_page_key(owner, section, last_page).id())
+            .map(|board| !board.state.is_sealed() && board.state.entry_count() < limit)
+            .unwrap_or(false);
+        if has_room {
+            return Ok(last_page);
         }
     }
     create_section_page(owner, section).await
@@ -1402,7 +1869,6 @@ pub async fn load_section_page(
     if known {
         return Ok(contract_id);
     }
-    // A GET that is still in flight must not be sent again on every render.
     let pending = SECTION_BOARDS
         .read()
         .get(&contract_id)
@@ -1413,6 +1879,11 @@ pub async fn load_section_page(
     }
     SECTION_BOARDS.with_mut(|boards| {
         if !boards.contains_key(&contract_id) {
+            let empty_state = if page == 0 {
+                SectionBoardState::Manifest(ChatBoardStateV1::default())
+            } else {
+                SectionBoardState::CompactPage(SectionPageStateV1::default())
+            };
             boards.insert(
                 contract_id,
                 SectionBoard::new(
@@ -1421,7 +1892,7 @@ pub async fn load_section_page(
                         section,
                         page,
                     },
-                    ChatBoardStateV1::default(),
+                    empty_state,
                     false,
                 ),
             );
@@ -1564,8 +2035,6 @@ pub async fn ensure_section_loaded(owner: VerifyingKey, section: SectionId) -> R
             .map(|board| board.ready)
             .unwrap_or(false)
         {
-            // Page 0 is enough to list the section. Extra pages load on
-            // demand; views that scan every page call `load_all_section_pages`.
             return Ok(());
         }
         let synced = SECTION_BOARDS
@@ -1617,60 +2086,90 @@ pub async fn ensure_section_loaded(owner: VerifyingKey, section: SectionId) -> R
 pub async fn handle_contract_response(response: ContractResponse) -> Result<(), String> {
     match response {
         ContractResponse::GetResponse { key, state, .. } => {
-            let network = ciborium::de::from_reader::<ChatBoardStateV1, _>(state.as_ref())
-                .map_err(|error| format!("decode section state: {error}"))?;
-            let Some((owner, section, _page, cached, dirty)) =
+            let Some((section_params, cached, dirty)) =
                 SECTION_BOARDS.read().get(key.id()).map(|board| {
-                    (
-                        board.params.owner,
-                        board.params.section,
-                        board.params.page,
-                        board.state.clone(),
-                        board.dirty,
-                    )
+                    (board.params.clone(), board.state.clone(), board.dirty)
                 })
             else {
                 return Err("unknown section board".to_string());
             };
+
+            if section_params.page > 0 {
+                let network = ciborium::de::from_reader::<SectionPageStateV1, _>(state.as_ref())
+                    .map_err(|error| format!("decode compact section page: {error}"))?;
+                network
+                    .verify(&section_params)
+                    .map_err(|error| format!("compact section page does not verify: {error}"))?;
+                let next = if dirty {
+                    if let SectionBoardState::CompactPage(cached_page) = cached {
+                        let mut merged = cached_page;
+                        match merged.merge(&section_params, &network) {
+                            Ok(()) => merged,
+                            Err(error) => {
+                                dioxus::logger::tracing::warn!(
+                                    "could not merge compact section page: {error}"
+                                );
+                                network
+                            }
+                        }
+                    } else {
+                        network
+                    }
+                } else {
+                    network
+                };
+                SECTION_BOARDS.with_mut(|boards| {
+                    if let Some(board) = boards.get_mut(key.id()) {
+                        board.state = SectionBoardState::CompactPage(next);
+                        board.synced = true;
+                        board.ready = true;
+                        board.last_used = now_ms();
+                        board.last_fetch = 0;
+                        board.dirty = dirty;
+                    }
+                });
+                schedule_section_save();
+                return Ok(());
+            }
+
+            let owner = section_params.owner;
+            let section = section_params.section;
+            let network = ciborium::de::from_reader::<ChatBoardStateV1, _>(state.as_ref())
+                .map_err(|error| format!("decode section state: {error}"))?;
             let params = ChatBoardParametersV1 { owner };
             network
                 .verify_with_section(&params, Some(section))
                 .map_err(|error| format!("section state does not verify: {error}"))?;
-            // Any unconfirmed local change (a new entry, a flag or activity)
-            // must survive a Get that still carries the older state.
             let state = if dirty {
-                let mut merged = cached.clone();
-                match merged.merge(&cached, &params, &network) {
-                    Ok(()) => {
-                        if let Err(error) = merged.verify_with_section(&params, Some(section)) {
-                            // The cached copy can be a stale placeholder. The
-                            // network state has already been verified; use it
-                            // and let the queued activity reach the contract.
+                if let SectionBoardState::Manifest(cached_manifest) = cached {
+                    let mut merged = cached_manifest.clone();
+                    match merged.merge(&cached_manifest, &params, &network) {
+                        Ok(()) => {
+                            if let Err(error) = merged.verify_with_section(&params, Some(section)) {
+                                dioxus::logger::tracing::warn!(
+                                    "ignoring an unverifiable cached section state: {error}"
+                                );
+                                network
+                            } else {
+                                merged
+                            }
+                        }
+                        Err(error) => {
                             dioxus::logger::tracing::warn!(
-                                "ignoring an unverifiable cached section state: {error}"
+                                "could not merge cached section state: {error}"
                             );
                             network
-                        } else {
-                            merged
                         }
                     }
-                    Err(error) => {
-                        dioxus::logger::tracing::warn!(
-                            "could not merge cached section state: {error}"
-                        );
-                        network
-                    }
+                } else {
+                    network
                 }
             } else {
                 network
             };
-            match (|| -> Result<(), String> {
-                state.verify_with_section(&params, Some(section))?;
-                Ok(())
-            })() {
-                Ok(()) => {}
-                Err(error) => return Err(error),
-            }
+            state
+                .verify_with_section(&params, Some(section))
+                .map_err(|error| format!("section state does not verify: {error}"))?;
             let parent_state = {
                 let boards = crate::components::app::BOARDS.read();
                 boards
@@ -1680,27 +2179,19 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
             };
             SECTION_BOARDS.with_mut(|boards| {
                 if let Some(board) = boards.get_mut(key.id()) {
-                    board.state = state;
+                    board.state = SectionBoardState::Manifest(state);
                     board.synced = true;
                     board.last_used = now_ms();
                     board.last_fetch = 0;
-                    // Keep a local change marked until our UpdateResponse
-                    // confirms it; a stale Get must not clear it.
                     board.dirty = dirty;
                 }
             });
             schedule_section_save();
             if let Some(parent_state) = parent_state {
                 if parent_state.mode == BoardModeV1::SectionedTopicIndex {
-                    let section = SECTION_BOARDS
-                        .read()
-                        .get(key.id())
-                        .map(|board| board.params.section);
-                    if let Some(section) = section {
-                        crate::util::safe_spawn_local(async move {
-                            let _ = sync_section_authority(owner, section, &parent_state).await;
-                        });
-                    }
+                    crate::util::safe_spawn_local(async move {
+                        let _ = sync_section_authority(owner, section, &parent_state).await;
+                    });
                 }
             }
         }
@@ -1711,39 +2202,118 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 if let Some(board) = boards.get_mut(key.id()) {
                     board.synced = true;
                     board.dirty = false;
+                    if board.params.page > 0 {
+                        board.ready = true;
+                    }
                     board.last_used = now_ms();
                     board.last_fetch = 0;
                 }
             });
         }
         ContractResponse::UpdateNotification { key, update } => {
-            let entry = SECTION_BOARDS
-                .read()
-                .get(key.id())
-                .map(|board| (board.params.owner, board.params.section, board.params.page))
-                .ok_or("unknown section board")?;
-            let params = ChatBoardParametersV1 { owner: entry.0 };
-            let mut state = SECTION_BOARDS
-                .read()
-                .get(key.id())
-                .map(|board| board.state.clone())
-                .ok_or("unknown section board")?;
+            let Some((section_params, current_state, dirty)) =
+                SECTION_BOARDS.read().get(key.id()).map(|board| {
+                    (board.params.clone(), board.state.clone(), board.dirty)
+                })
+            else {
+                return Err("unknown section board".to_string());
+            };
+
+            if section_params.page > 0 {
+                let mut page_state = match current_state {
+                    SectionBoardState::CompactPage(page) => page,
+                    SectionBoardState::Manifest(_) => SectionPageStateV1::default(),
+                };
+                match update {
+                    UpdateData::State(bytes) => {
+                        if !bytes.as_ref().is_empty() {
+                            let network: SectionPageStateV1 =
+                                ciborium::de::from_reader(bytes.as_ref()).map_err(|error| {
+                                    format!("decode compact section page update: {error}")
+                                })?;
+                            network.verify(&section_params).map_err(|error| {
+                                format!("compact section page update does not verify: {error}")
+                            })?;
+                            if dirty {
+                                page_state.merge(&section_params, &network).map_err(|error| {
+                                    format!("merge compact section page update: {error}")
+                                })?;
+                            } else {
+                                page_state = network;
+                            }
+                        }
+                    }
+                    UpdateData::Delta(bytes) => {
+                        if !bytes.as_ref().is_empty() {
+                            let delta: SectionPageDeltaV1 =
+                                ciborium::de::from_reader(bytes.as_ref()).map_err(|error| {
+                                    format!("decode compact section page delta: {error}")
+                                })?;
+                            page_state
+                                .apply_delta(&section_params, &delta)
+                                .map_err(|error| {
+                                    format!("apply compact section page delta: {error}")
+                                })?;
+                        }
+                    }
+                    UpdateData::StateAndDelta { state, delta } => {
+                        if !state.as_ref().is_empty() {
+                            let network: SectionPageStateV1 =
+                                ciborium::de::from_reader(state.as_ref()).map_err(|error| {
+                                    format!("decode compact section page state: {error}")
+                                })?;
+                            network.verify(&section_params).map_err(|error| {
+                                format!("compact section page state does not verify: {error}")
+                            })?;
+                            page_state.merge(&section_params, &network).map_err(|error| {
+                                format!("merge compact section page state: {error}")
+                            })?;
+                        }
+                        if !delta.as_ref().is_empty() {
+                            let delta: SectionPageDeltaV1 =
+                                ciborium::de::from_reader(delta.as_ref()).map_err(|error| {
+                                    format!("decode compact section page delta: {error}")
+                                })?;
+                            page_state
+                                .apply_delta(&section_params, &delta)
+                                .map_err(|error| {
+                                    format!("apply compact section page delta: {error}")
+                                })?;
+                        }
+                    }
+                    _ => {}
+                }
+                SECTION_BOARDS.with_mut(|boards| {
+                    if let Some(board) = boards.get_mut(key.id()) {
+                        board.state = SectionBoardState::CompactPage(page_state);
+                        board.synced = true;
+                        board.ready = true;
+                        board.last_used = now_ms();
+                        board.last_fetch = 0;
+                    }
+                });
+                schedule_section_save();
+                return Ok(());
+            }
+
+            let params = ChatBoardParametersV1 {
+                owner: section_params.owner,
+            };
+            let mut state = match current_state {
+                SectionBoardState::Manifest(manifest) => manifest,
+                SectionBoardState::CompactPage(_) => ChatBoardStateV1::default(),
+            };
             match update {
                 UpdateData::State(bytes) => {
                     let network = ciborium::de::from_reader(bytes.as_ref())
                         .map_err(|error| format!("decode section update: {error}"))?;
                     let cached = state.clone();
-                    let dirty = SECTION_BOARDS
-                        .read()
-                        .get(key.id())
-                        .map(|board| board.dirty)
-                        .unwrap_or(false);
                     if dirty {
                         let mut merged = cached.clone();
                         match merged.merge(&cached, &params, &network) {
                             Ok(()) => {
                                 if let Err(error) =
-                                    merged.verify_with_section(&params, Some(entry.1))
+                                    merged.verify_with_section(&params, Some(section_params.section))
                                 {
                                     dioxus::logger::tracing::warn!(
                                         "ignoring an unverifiable merged section notification: {error}"
@@ -1765,27 +2335,47 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                     }
                 }
                 UpdateData::Delta(bytes) => {
-                    let delta = ciborium::de::from_reader(bytes.as_ref())
-                        .map_err(|error| format!("decode section delta: {error}"))?;
-                    let parent = state.clone();
-                    state
-                        .apply_delta(&parent, &params, &Some(delta))
-                        .map_err(|error| format!("apply section delta: {error}"))?;
+                    if !bytes.as_ref().is_empty() {
+                        let delta = ciborium::de::from_reader(bytes.as_ref())
+                            .map_err(|error| format!("decode section delta: {error}"))?;
+                        let parent = state.clone();
+                        state
+                            .apply_delta(&parent, &params, &Some(delta))
+                            .map_err(|error| format!("apply section delta: {error}"))?;
+                    }
+                }
+                UpdateData::StateAndDelta {
+                    state: state_bytes,
+                    delta: delta_bytes,
+                } => {
+                    if !state_bytes.as_ref().is_empty() {
+                        let network = ciborium::de::from_reader(state_bytes.as_ref())
+                            .map_err(|error| format!("decode section state: {error}"))?;
+                        let cached = state.clone();
+                        state
+                            .merge(&cached, &params, &network)
+                            .map_err(|error| format!("merge section state: {error}"))?;
+                    }
+                    if !delta_bytes.as_ref().is_empty() {
+                        let delta = ciborium::de::from_reader(delta_bytes.as_ref())
+                            .map_err(|error| format!("decode section delta: {error}"))?;
+                        let parent = state.clone();
+                        state
+                            .apply_delta(&parent, &params, &Some(delta))
+                            .map_err(|error| format!("apply section delta: {error}"))?;
+                    }
                 }
                 _ => {}
             }
             state
-                .verify_with_section(&params, Some(entry.1))
+                .verify_with_section(&params, Some(section_params.section))
                 .map_err(|error| format!("section update does not verify: {error}"))?;
             SECTION_BOARDS.with_mut(|boards| {
                 if let Some(board) = boards.get_mut(key.id()) {
-                    board.state = state;
+                    board.state = SectionBoardState::Manifest(state);
                     board.synced = true;
                     board.last_used = now_ms();
                     board.last_fetch = 0;
-                    // Keep dirty as it was: only the UpdateResponse for our
-                    // own request confirms that the local change reached the
-                    // node.
                 }
             });
             schedule_section_save();
