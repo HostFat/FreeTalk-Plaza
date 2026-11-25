@@ -20,6 +20,7 @@ use plaza_core::ChatBoardStateV1;
 fn verify_section_layout(
     state: &ChatBoardStateV1,
     section: plaza_core::board_state::sections::SectionId,
+    page: u32,
 ) -> Result<(), String> {
     if state.mode != plaza_core::board_state::BoardModeV1::SectionedTopicIndex {
         return Err("a section board must use the sectioned layout".to_string());
@@ -34,6 +35,14 @@ fn verify_section_layout(
     }
     if !state.recent_messages.messages.is_empty() {
         return Err("a section board cannot carry legacy messages".to_string());
+    }
+    if let Some(pages) = &state.topic_pages.0 {
+        if page != 0 {
+            return Err("only the section manifest can list topic pages".to_string());
+        }
+        if pages.data.section != section {
+            return Err("the topic page list belongs to another section".to_string());
+        }
     }
     for entry in &state.topics.entries {
         if entry.entry.section != Some(section) {
@@ -70,7 +79,7 @@ impl ContractInterface for SectionContract {
             .map_err(|e| ContractError::InvalidUpdateWithInfo {
                 reason: format!("State verification failed: {e}"),
             })?;
-        verify_section_layout(&chat_state, section_params.section).map_err(|e| {
+        verify_section_layout(&chat_state, section_params.section, section_params.page).map_err(|e| {
             ContractError::InvalidUpdateWithInfo {
                 reason: format!("Section layout does not verify: {e}"),
             }
@@ -130,7 +139,7 @@ impl ContractInterface for SectionContract {
                                     reason: e.to_string(),
                                 })?;
                         }
-                        verify_section_layout(&chat_state, section_params.section).map_err(
+                        verify_section_layout(&chat_state, section_params.section, section_params.page).map_err(
                             |e| ContractError::InvalidUpdateWithInfo {
                                 reason: format!("Section layout does not verify: {e}"),
                             },
@@ -152,7 +161,7 @@ impl ContractInterface for SectionContract {
                                 .map_err(|e| ContractError::InvalidUpdateWithInfo {
                                     reason: format!("Delta does not verify: {e}"),
                                 })?;
-                            verify_section_layout(&chat_state, section_params.section)
+                            verify_section_layout(&chat_state, section_params.section, section_params.page)
                                 .map_err(|e| ContractError::InvalidUpdateWithInfo {
                                     reason: format!("Section layout does not verify: {e}"),
                                 })?;
@@ -172,7 +181,7 @@ impl ContractInterface for SectionContract {
                 .map_err(|e| ContractError::InvalidUpdateWithInfo {
                     reason: format!("Merged state does not verify: {e}"),
                 })?;
-            verify_section_layout(&chat_state, section_params.section).map_err(|e| {
+            verify_section_layout(&chat_state, section_params.section, section_params.page).map_err(|e| {
                 ContractError::InvalidUpdateWithInfo {
                     reason: format!("Section layout does not verify: {e}"),
                 }

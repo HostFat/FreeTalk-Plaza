@@ -206,6 +206,12 @@ pub fn TopicIndexView(board_id: String) -> Element {
                                             .contract
                                             .map(|id| id.to_string())
                                             .unwrap_or_default(),
+                                        "data-pages": crate::components::app::section_contract::pages_for(
+                                            board_data.owner_vk,
+                                            id,
+                                        )
+                                        .len()
+                                        .to_string(),
                                         "{label}"
                                     }
                                 }

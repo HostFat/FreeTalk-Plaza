@@ -19,6 +19,7 @@ pub mod message;
 pub mod message_keys;
 pub mod moderation;
 pub mod ownership;
+pub mod pages;
 pub mod pq_secrets;
 pub mod privacy;
 pub mod rate_limit;
@@ -245,6 +246,11 @@ pub struct ChatBoardStateV1 {
     /// were applied in the same delta.
     #[serde(default)]
     pub authority_root: crate::board_state::authority::AuthorityRootStateV1,
+
+    /// Owner-signed list of extra topic-entry pages. Only a section manifest
+    /// (page 0) uses it; other boards keep it empty.
+    #[serde(default)]
+    pub topic_pages: crate::board_state::pages::TopicPageListV1,
 }
 
 impl ChatBoardStateV1 {
@@ -408,6 +414,9 @@ impl ChatBoardStateV1 {
         {
             self.authority_root.verify(self, parameters)?;
         }
+        if delta.topic_pages.is_some() {
+            self.topic_pages.verify(self, parameters)?;
+        }
         self.topics.verify_limits()?;
         Ok(())
     }
@@ -445,6 +454,7 @@ impl ChatBoardStateV1Delta {
             && self.mode.is_none()
             && self.sections.is_none()
             && self.authority_root.is_none()
+            && self.topic_pages.is_none()
             && self.topics.is_some()
     }
 

@@ -57,7 +57,12 @@ board e le figlie non ricevono piu' l'activity.
    con una verifica piena di 1,75-1,90 s invece di 3,5 s. La radice firmata
    elimina le copie nei topic; restano le sezioni copiate in ogni figlia
    (`O(sezioni^2)`) e le definizioni dei ruoli.
-5. **La propagazione dell'autorita' e' il caso peggiore.** Un cambio di
+5. **Le pagine limitano la scrittura dell'indice.** Con `TOPIC_PAGE_SIZE=200`
+   una nuova entry riscrive solo la pagina attiva: il fan-out e' quello della
+   pagina invece che della sezione intera, e il manifest cambia solo quando
+   nasce una pagina. Le pagine duplicano l'autorita' potata, quindi lo storage
+   cresce con il numero di pagine e la verifica iniziale resta per pagina.
+6. **La propagazione dell'autorita' e' il caso peggiore.** Un cambio di
    ruolo o un ban sincronizza tutte le figlie (39,7 MiB nello scenario da 100
    sezioni dopo il pruning) e poi aggiorna ogni topic. Il limite di 100 topic
    e' stato rimosso. Ogni topic riceve una radice Merkle firmata dall'owner e
@@ -70,13 +75,15 @@ board e le figlie non ricevono piu' l'activity.
 
 ## Prossimi passi
 
-1. Indice a pagine con manifest; aggiornamenti limitati alla pagina.
-2. Topic a pagine append-only; una risposta scrive una pagina.
-3. Compattare le sezioni nelle figlie (`O(sezioni^2)`) e le definizioni dei
+1. Indice a pagine con manifest (fatto): aggiornamenti limitati alla pagina.
+2. Compattare le pagine e l'autorita' duplicata; oggi ogni pagina copia
+   l'autorita' potata.
+3. Topic a pagine append-only; una risposta scrive una pagina.
+4. Compattare le sezioni nelle figlie (`O(sezioni^2)`) e le definizioni dei
    ruoli.
-4. Aggiornamenti incrementali della sola radice per i topic, senza caricare
+5. Aggiornamenti incrementali della sola radice per i topic, senza caricare
    ogni topic nella passata di propagazione.
-5. Subscription lazy con budget/TTL e `Unsubscribe` quando la stdlib lo
+6. Subscription lazy con budget/TTL e `Unsubscribe` quando la stdlib lo
    espone.
 
 ## Limiti del benchmark

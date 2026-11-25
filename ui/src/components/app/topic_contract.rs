@@ -1193,7 +1193,7 @@ pub async fn create_topic(
             .await?;
         }
     }
-    let prepared = prepare_topic(owner, &title, &body, target_section)?;
+    let prepared = prepare_topic(owner, &title, &body, target_section).await?;
     let contract_id = *prepared.key.id();
 
     TOPIC_CACHE.with_mut(|topics| {
@@ -1245,6 +1245,7 @@ pub async fn create_topic(
             if let Err(error) = crate::components::app::section_contract::apply_section_delta(
                 owner,
                 section_id,
+                prepared.page,
                 prepared.board_delta,
             )
             .await
@@ -1524,10 +1525,11 @@ struct PreparedTopic {
     key: ContractKey,
     state: TopicStateV1,
     topic_id: MessageId,
+    page: u32,
     board_delta: ChatBoardStateV1Delta,
 }
 
-fn prepare_topic(
+async fn prepare_topic(
     owner: VerifyingKey,
     title: &str,
     body: &str,
@@ -1537,10 +1539,16 @@ fn prepare_topic(
     if !board.board_state.mode.is_topic_index() {
         return Err("this board does not use topic contracts".to_string());
     }
+    let mut page = 0;
     if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
         let section_id = section.ok_or("choose a section for the topic")?;
-        let child = crate::components::app::section_contract::section_state(owner, section_id)
-            .ok_or("the section board is still loading")?;
+        page = crate::components::app::section_contract::active_page(owner, section_id).await?;
+        let child = crate::components::app::section_contract::section_page_state(
+            owner,
+            section_id,
+            page,
+        )
+        .ok_or("the section page is still loading")?;
         board.board_state.topics = child.topics;
     }
     if title.trim().is_empty() {
@@ -1702,6 +1710,7 @@ fn prepare_topic(
         key,
         state,
         topic_id,
+        page,
         board_delta,
     })
 }
@@ -1943,10 +1952,10 @@ fn conversation_for(
         .ok_or_else(|| "the topic is not loaded".to_string())
 }
 
-fn section_for_topic(owner: VerifyingKey, topic_id: MessageId) -> Option<MessageId> {
+fn section_for_topic(owner: VerifyingKey, topic_id: MessageId) -> Option<(MessageId, u32)> {
     let board = board_for(owner).ok()?;
     if let Some(entry) = board.board_state.topics.entry(&topic_id) {
-        return entry.entry.section;
+        return entry.entry.section.map(|section| (section, 0));
     }
     if let Some(board) = crate::components::app::section_contract::SECTION_BOARDS
         .read()
@@ -1956,7 +1965,7 @@ fn section_for_topic(owner: VerifyingKey, topic_id: MessageId) -> Option<Message
                 && board.state.topics.entry(&topic_id).is_some()
         })
     {
-        return Some(board.params.section);
+        return Some((board.params.section, board.params.page));
     }
     TOPIC_CACHE
         .read()
@@ -1973,7 +1982,7 @@ fn section_for_topic(owner: VerifyingKey, topic_id: MessageId) -> Option<Message
                 .state
                 .section
                 .as_ref()
-                .map(|section| section.snapshot.section)
+                .map(|section| (section.snapshot.section, 0))
         })
 }
 
@@ -1986,9 +1995,9 @@ async fn apply_topic_board_delta(
     if board.board_state.mode != BoardModeV1::SectionedTopicIndex {
         return apply_board_delta(owner, delta);
     }
-    let section =
+    let (section, page) =
         section_for_topic(owner, topic_id).ok_or("the topic section is not loaded")?;
-    crate::components::app::section_contract::apply_section_delta(owner, section, delta)
+    crate::components::app::section_contract::apply_section_delta(owner, section, page, delta)
         .await
 }
 

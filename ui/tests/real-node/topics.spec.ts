@@ -24,6 +24,12 @@ function withSections(url: string): string {
   return next.toString();
 }
 
+function withPagedSections(url: string, pageSize: number): string {
+  const next = new URL(withSections(url));
+  next.searchParams.set("pageSize", pageSize.toString());
+  return next.toString();
+}
+
 async function appFrame(page: import("@playwright/test").Page) {
   const frame = page.frames().find((candidate) => candidate !== page.mainFrame());
   if (!frame) throw new Error("The app iframe is not available");
@@ -1095,6 +1101,107 @@ test("a sectioned report reaches the moderation queue", async ({ page }) => {
     timeout: 30_000,
   });
   await expect(app.getByText("Spam report")).toBeVisible({ timeout: 30_000 });
+});
+
+test("a full section index spills into a second page", async ({ page }) => {
+  test.setTimeout(360_000);
+  const pageSize = 3;
+  // Keep one document URL for the whole test: the shell does not forward the
+  // outer query to the app iframe, so the page size comes from the route and
+  // must survive the hash-only navigations between topics. Run the route
+  // inside the loaded app instead of relying on the initial hash delivery.
+  const url = withPagedSections(BASE, pageSize);
+  await page.goto(`${url}#/`);
+  const app = page.frameLocator("iframe");
+  await expect(app.getByText(/Select or Create Board/).first()).toBeVisible({
+    timeout: 30_000,
+  });
+  const frame = await appFrame(page);
+  await frame.evaluate((route) => {
+    location.hash = route;
+  }, `#/enable-sections/${pageSize}`);
+  await expect
+    .poll(
+      () => frame.evaluate(() => document.documentElement.dataset.topicPageSize),
+      { timeout: 30_000 },
+    )
+    .toBe(pageSize.toString());
+  await expect(app.getByText(/Select or Create Board/).first()).toBeVisible({
+    timeout: 30_000,
+  });
+  const suffix = Date.now().toString(36);
+  const boardKey = await createBoard(
+    page,
+    `PagedBoard-${suffix}`,
+    `PagedOwner-${suffix}`,
+  );
+
+  await app.getByPlaceholder("New section name").fill("Paged section");
+  await app.getByRole("button", { name: "Create section" }).click();
+  const option = app.locator("option", { hasText: "Paged section" }).first();
+  await expect(option).toHaveCount(1, { timeout: 60_000 });
+  await expect(option).toHaveAttribute("data-pages", "1", { timeout: 60_000 });
+
+  // The shell only mirrors the app hash outward, so navigate inside the app to
+  // keep the page-size setting and the loaded section pages alive.
+  const gotoBoard = async () => {
+    await frame.evaluate((hash) => {
+      location.hash = hash;
+    }, `#/board/${boardKey}`);
+  };
+
+  // The first page holds `pageSize` topics. The next one creates page 1.
+  const titles: string[] = [];
+  for (let index = 1; index <= pageSize + 2; index += 1) {
+    const title = `Paged topic ${index}`;
+    titles.push(title);
+    await gotoBoard();
+    await expect(app.getByPlaceholder("Title")).toBeVisible({ timeout: 60_000 });
+    // The board also has its default General section; always target the
+    // section under test so the page split happens where the test looks.
+    await app
+      .getByRole("combobox")
+      .first()
+      .selectOption({ label: "Paged section" });
+    await app.getByPlaceholder("Title").fill(title);
+    await app
+      .getByPlaceholder("Write the first message…")
+      .fill(`Body of paged topic ${index}`);
+    await app.getByRole("button", { name: "Create topic" }).click();
+    await expect(app.getByRole("heading", { name: title })).toBeVisible({
+      timeout: 60_000,
+    });
+    await waitForTopicRoute(page);
+  }
+
+  await gotoBoard();
+  await expect(option).toHaveAttribute("data-pages", "2", { timeout: 60_000 });
+  for (const title of titles) {
+    await expect(app.getByText(title, { exact: true })).toBeVisible({ timeout: 90_000 });
+  }
+
+  // The half-full second page still has room.
+  await app
+    .getByRole("combobox")
+    .first()
+    .selectOption({ label: "Paged section" });
+  await app.getByPlaceholder("Title").fill("Paged topic last");
+  await app
+    .getByPlaceholder("Write the first message…")
+    .fill("Body of the last paged topic");
+  await app.getByRole("button", { name: "Create topic" }).click();
+  await expect(
+    app.getByRole("heading", { name: "Paged topic last" }),
+  ).toBeVisible({ timeout: 60_000 });
+  titles.push("Paged topic last");
+
+  // A reload rebuilds the index from the manifest and every listed page.
+  await page.goto(`${url}#/board/${boardKey}`);
+  await page.reload();
+  await expect(option).toHaveAttribute("data-pages", "2", { timeout: 60_000 });
+  for (const title of titles) {
+    await expect(app.getByText(title, { exact: true })).toBeVisible({ timeout: 90_000 });
+  }
 });
 
 test("the index search finds a topic by title and preview", async ({ page }) => {

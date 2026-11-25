@@ -57,9 +57,52 @@ dell'invito fallisce. L'activity recente e' uscita dall'indice: vive in
 `plaza-activity-contract`, un contratto per board con al massimo 200 entry;
 la board e le figlie non ricevono piu' una scrittura per risposta. Board
 revision 27; contratti board, section, topic e activity ri-keyati; board e
-topic esistenti vanno ricreati. Real-node 15/15, static Chromium 29/3. Il PUT di un topic puo' essere
+topic esistenti vanno ricreati. Real-node 16/16, static Chromium 29/3. Il PUT di un topic puo' essere
 confermato da un `GetResponse` (stato della sottoscrizione) invece che da un
 `PutResponse`; `wait_topic_synced` accetta entrambi.
+
+## Indice a pagine
+
+Con molti topic in una sola sezione ogni nuova entry riscriveva l'intero
+indice della figlia. La sezione ora divide l'indice in **pagine**: la pagina 0
+(manifest) tiene autorità, sezione e un elenco di pagine extra firmato
+dall'owner (`TopicPageListV1` in `ChatBoardStateV1.topic_pages`); ogni pagina
+extra è un contratto con parametri `{ owner, section, page }` che contiene solo
+la propria fetta di topic. Un aggiornamento tocca una pagina, non tutte.
+
+- `TOPIC_PAGE_SIZE` (default 200) è la soglia client: `active_page` sceglie la
+  prima pagina con meno entry della soglia e, se sono tutte piene, l'owner
+  crea la pagina successiva (`create_section_page`). La creazione fa un PUT
+  della pagina e poi aggiorna il manifest con un delta firmato; il manifest
+  accetta il delta solo se la lista è firmata dall'owner corrente, ordinata,
+  senza duplicati, senza pagina 0 e sotto `MAX_TOPIC_PAGES = 1000`.
+- La pagina 0 resta anche la prima pagina di topic, quindi una sezione appena
+  creata non aggiunge contratti.
+- Il client carica il manifest, poi ogni pagina elencata, e `merged_index`
+  unisce le entry di tutte le pagine. Flag e report di un topic vengono
+  scritti nella pagina che contiene l'entry (`section_for_topic`).
+- Persistenza, GET, notifiche e sincronizzazione dell'autorità sono per
+  pagina; una pagina non ancora arrivata non blocca il manifest né le altre
+  pagine.
+- Solo l'owner crea pagine: un membro che trova tutte le pagine piene riceve
+  un errore finché l'owner non ne aggiunge una.
+- Limiti attuali: ogni pagina duplica l'autorità potata (lo storage cresce con
+  il numero di pagine); le pagine accettano ancora flag e report, quindi non
+  sono immutabili; la soglia è un valore del client e il contratto non impone
+  un massimo di entry per pagina; l'aggiunta di una pagina resta una singola
+  scrittura sul manifest. Se l'aggiornamento del manifest fallisce, la pagina
+  resta orfana: non viene caricata e l'owner può crearne un'altra.
+
+Il test real-node "a full section index spills into a second page" usa
+`#/enable-sections/3` (o `?pageSize=3` quando l'app è servita direttamente,
+senza la shell), crea cinque topic, verifica
+`option[data-pages="2"]`, ricarica la board e trova tutti i topic; poi crea un
+altro topic nella pagina 1, che ha ancora spazio. La shell non inoltra la
+query esterna all'iframe, quindi il test naviga dentro l'app con l'hash per
+mantenere la soglia.
+
+Board revision 28; board, section, topic e activity ri-keyati; board e topic
+esistenti vanno ricreati.
 
 ## Problema
 
@@ -73,8 +116,9 @@ con l'intera board.
 ## Scelta: board figlie per sezione
 
 Ogni sezione di una board indicizzata diventa una **board figlia** con lo
-stesso codice di `ChatBoardStateV1`, parametri `{ owner, section_id }` e stato
-limitato alla sezione:
+stesso codice di `ChatBoardStateV1`, parametri `{ owner, section_id, page }` e
+stato limitato alla sezione (la page è 0 per il manifest e per la prima fetta
+di topic, maggiore di 0 per le pagine successive):
 
 - membri, ruoli, ban, admin e ownership sono una copia della board madre;
 - `sections` contiene solo la sezione della figlia;
@@ -215,8 +259,12 @@ l'indice dei topic. La UI tratta ogni sezione come una board.
    quindi aggiorna anche i topic che vivono nelle sezioni. Il test di ban su
    una board sectioned è stato rimosso perché il nodo locale accumulato rende
    il flusso instabile; la copertura resta sul ban della board normale.
-6. **Benchmark**: 10 sezioni × 200 topic; verificare che una risposta tocchi
-   solo la figlia e che la madre resti piccola.
+7. **Pagine** (fatto): `TopicPageListV1` firmata dall'owner nel manifest,
+   `SectionParametersV1.page`, pagina 0 come manifest e prima fetta,
+   `active_page`/`create_section_page`, merge di tutte le pagine e routing di
+   flag/report alla pagina del topic. Test real-node dedicato.
+8. **Benchmark**: 10 sezioni × 200 topic; verificare che una risposta tocchi
+   solo la figlia e che una nuova entry tocchi una sola pagina.
 
 ## Rischi
 

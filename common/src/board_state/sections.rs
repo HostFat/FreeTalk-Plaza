@@ -29,6 +29,9 @@ pub type SectionId = MessageId;
 pub struct SectionParametersV1 {
     pub owner: VerifyingKey,
     pub section: SectionId,
+    /// Topic-entry page; 0 is the section manifest itself.
+    #[serde(default)]
+    pub page: u32,
 }
 
 impl SectionParametersV1 {

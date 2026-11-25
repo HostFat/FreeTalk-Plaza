@@ -58,6 +58,8 @@ pub enum Route {
     EnableTopics,
     #[route("/enable-sections")]
     EnableSections,
+    #[route("/enable-sections/:page_size")]
+    EnableSectionsPage { page_size: u32 },
     #[route("/test-reset")]
     TestReset,
     #[route("/dm/join/:contract_id/:token/:key_version/:key_b58")]
@@ -741,6 +743,41 @@ fn EnableSections() -> Element {
 }
 
 #[component]
+fn EnableSectionsPage(page_size: u32) -> Element {
+    let navigator = navigator();
+    let mut done = use_signal(|| false);
+    use_effect(move || {
+        if *done.read() || !*BOARDS_LOADED.read() {
+            return;
+        }
+        done.set(true);
+        BOARDS.with_mut(|boards| {
+            boards.client_features.topic_boards = true;
+            boards.client_features.sectioned_boards = true;
+        });
+        let size = page_size.max(1);
+        crate::components::app::section_contract::TOPIC_PAGE_SIZE
+            .with_mut(|value| *value = size as usize);
+        // Test hook: the shell does not forward the outer query to the app
+        // iframe, so tests confirm the route ran through this attribute.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(root) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.document_element())
+        {
+            let _ = root.set_attribute("data-topic-page-size", &size.to_string());
+        }
+        info!("Section-sharded topic boards enabled with page size {size}");
+        navigator.push(Route::Home);
+    });
+    rsx! {
+        div { class: "min-h-screen flex items-center justify-center p-6 text-text-muted",
+            "Enabling section boards."
+        }
+    }
+}
+
+#[component]
 fn EnableTopics() -> Element {
     let navigator = navigator();
     let mut done = use_signal(|| false);
@@ -1332,6 +1369,19 @@ fn enable_topic_boards_from_query() {
                 boards.client_features.topic_boards = true;
             });
             info!("Section-sharded topic boards enabled for new boards");
+        }
+        // Test and developer hook: keep the page window small so a real-node
+        // test can create a second page without thousands of topics.
+        for part in search.trim_start_matches('?').split('&') {
+            if let Some(value) = part.strip_prefix("pageSize=") {
+                if let Ok(size) = value.parse::<usize>() {
+                    if size > 0 {
+                        crate::components::app::section_contract::TOPIC_PAGE_SIZE
+                            .with_mut(|value| *value = size);
+                        info!("Topic page size set to {size}");
+                    }
+                }
+            }
         }
     }
 }
