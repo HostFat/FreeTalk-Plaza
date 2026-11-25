@@ -5461,9 +5461,11 @@ name = "plaza-section-contract"
 version = "0.1.0"
 dependencies = [
  "ciborium",
+ "ed25519-dalek",
  "freenet-scaffold",
  "freenet-stdlib 0.12.1",
  "plaza-core",
+ "serde",
 ]
 
 [[package]]

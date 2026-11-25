@@ -484,9 +484,28 @@ impl TopicIndexV1 {
         entry: &AuthorizedTopicFlagV1,
     ) -> Result<(), String> {
         let value = &entry.flag;
-        let topic = self
-            .entry(&value.topic_id)
-            .ok_or("topic flag targets a missing topic")?;
+        let chain = match self.entry(&value.topic_id) {
+            Some(topic) => topic.entry.section_chain.clone(),
+            None => {
+                // Extra section pages (`page > 0`) are compact and immutable
+                // once sealed, so flags targeting topics on extra pages live in
+                // the section manifest (page 0).
+                let list = state
+                    .topic_pages
+                    .0
+                    .as_ref()
+                    .filter(|list| !list.data.pages.is_empty())
+                    .ok_or("topic flag targets a missing topic")?;
+                if state.mode != crate::board_state::BoardModeV1::SectionedTopicIndex {
+                    return Err("topic flag targets a missing topic".to_string());
+                }
+                let manifest_section = list.data.section;
+                if !state.sections.exists(&manifest_section) {
+                    return Err("topic flag targets a missing section".to_string());
+                }
+                state.sections.chain(&manifest_section)
+            }
+        };
         if value.generation == 0 {
             return Err("topic flag generation must be positive".to_string());
         }
@@ -503,9 +522,9 @@ impl TopicIndexV1 {
                         return Err("a local merge flag cannot move the section".to_string());
                     }
                 } else {
-                    // A cross-section merge points into another child board.
-                    // The flag carries the destination records, so the source
-                    // child does not need to store every sibling section.
+                    // A cross-section or cross-page merge points outside this
+                    // index. The flag carries the destination section proof so
+                    // the manifest does not need sibling sections or extra pages.
                     let section = value.section.ok_or(
                         "a cross-section merge needs the destination section",
                     )?;
@@ -523,7 +542,7 @@ impl TopicIndexV1 {
             if value.destination.is_some() {
                 return Err("a section move cannot carry a topic destination".to_string());
             }
-            if value.scope_chain != topic.entry.section_chain {
+            if value.scope_chain != chain {
                 return Err("a section move must name the current section chain".to_string());
             }
         } else if value.kind == TopicFlagKind::Part {
@@ -544,6 +563,7 @@ impl TopicIndexV1 {
             }
             let signer = entry.signer.unwrap_or(parameters.owner_id());
             let is_member = signer == parameters.owner_id()
+                || signer == state.ownership.current_owner(parameters)
                 || state
                     .members
                     .members
@@ -552,6 +572,9 @@ impl TopicIndexV1 {
             if !is_member {
                 return Err("only a board member can continue a topic".to_string());
             }
+            let key = Self::member_key(state, parameters, signer, entry.signer_key)?;
+            verify_struct(value, &entry.signature, &key)
+                .map_err(|error| format!("invalid continuation flag signature: {error}"))?;
             return Ok(());
         } else if value.destination.is_some()
             || value.section.is_some()
@@ -561,7 +584,6 @@ impl TopicIndexV1 {
         {
             return Err("only a merge, section or part flag carries a destination".to_string());
         }
-        let chain = topic.entry.section_chain.clone();
         if !value.scope_chain.is_empty() && value.scope_chain != chain {
             return Err("the flag scope chain does not match the topic".to_string());
         }
@@ -1618,6 +1640,77 @@ mod continuation_flag_tests {
         });
         index.verify(&state, &params()).unwrap();
         assert_eq!(index.part_of(&TopicId::from_bytes([7u8; 32])), 2);
+    }
+
+    #[test]
+    fn manifest_accepts_flags_for_topics_on_extra_pages() {
+        use crate::board_state::pages::{AuthorizedTopicPageListV1, TopicPageListV1};
+        use crate::board_state::sections::{AuthorizedSectionV1, SectionV1};
+        use crate::board_state::BoardModeV1;
+        use std::time::SystemTime;
+
+        let mut state = board();
+        state.mode = BoardModeV1::SectionedTopicIndex;
+        let section_id = SectionId::from_bytes([0x44u8; 32]);
+        state.sections.sections.push(AuthorizedSectionV1::new(
+            SectionV1 {
+                id: section_id,
+                parent: None,
+                name: "Paged".to_string(),
+                description: None,
+                icon: None,
+                color: "#6366f1".to_string(),
+                allowed_roles: Vec::new(),
+                sealed_name: None,
+                hidden: false,
+                is_group: false,
+                images_allowed: true,
+                auto_moderated_topics: None,
+                generation: 1,
+                deleted: false,
+                contract: None,
+                signed_at: SystemTime::UNIX_EPOCH,
+            },
+            &owner(),
+            None,
+        ));
+
+        let remote_topic = TopicId::from_bytes([0x99u8; 32]);
+        let flag = TopicFlagV1 {
+            topic_id: remote_topic,
+            kind: TopicFlagKind::Pinned,
+            value: true,
+            destination: None,
+            section: None,
+            section_chain: Vec::new(),
+            destination_sections: Vec::new(),
+            part: None,
+            scope_chain: vec![section_id],
+            generation: 1,
+            created_at: 10,
+        };
+        let mut index = TopicIndexV1::default();
+        index.flags.push(AuthorizedTopicFlagV1 {
+            signature: sign_struct(&flag, &owner()),
+            flag,
+            signer: Some(MemberId::from(&owner().verifying_key())),
+            signer_key: Some(owner().verifying_key()),
+            authority: None,
+        });
+
+        // Without extra pages listed, a flag targeting a missing topic is rejected.
+        assert!(index.verify(&state, &params()).is_err());
+
+        // Once the manifest lists page 1, the flag verifies against the manifest section chain.
+        state.topic_pages = TopicPageListV1(Some(AuthorizedTopicPageListV1::new(
+            section_id,
+            vec![1],
+            200,
+            &owner(),
+            10,
+        )));
+        index.verify(&state, &params()).unwrap();
+        assert!(index.is_pinned(&remote_topic));
     }
 }
 

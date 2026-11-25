@@ -10,6 +10,10 @@ freenet-stdlib.workspace = true
 freenet-scaffold.workspace = true
 plaza-core.workspace = true
 
+[dev-dependencies]
+ed25519-dalek.workspace = true
+serde.workspace = true
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 

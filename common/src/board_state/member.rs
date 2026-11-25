@@ -164,7 +164,7 @@ impl ComposableState for MembersV1 {
 impl MembersV1 {
     /// A member who joined through a link signs their own record, and the link
     /// key signs the join proof. No inviter is involved.
-    fn verify_token_join(
+    pub(crate) fn verify_token_join(
         member: &AuthorizedMember,
         proof: &crate::board_state::invites::JoinProof,
         parent_state: &ChatBoardStateV1,
@@ -324,7 +324,7 @@ impl MembersV1 {
 
     /// Get the full invite chain with Ed25519 signature verification, using a pre-built
     /// HashMap for O(1) member lookups instead of linear scans.
-    fn get_invite_chain_with_lookup(
+    pub(crate) fn get_invite_chain_with_lookup(
         &self,
         member: &AuthorizedMember,
         parameters: &ChatBoardParametersV1,

@@ -29,6 +29,7 @@ pub mod report_feed;
 pub mod reports;
 pub mod roles;
 pub mod secret;
+pub mod section_pages;
 pub mod sections;
 pub mod topics;
 pub mod trash;
