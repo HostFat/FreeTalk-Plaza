@@ -34,6 +34,33 @@ pub fn TopicIndexView(board_id: String) -> Element {
             .map(|board| board.with_merged_topics())
     });
 
+    // Lazily load only the member and profile shard buckets for authors visible
+    // in the loaded topic index.
+    use_effect(move || {
+        let Some(board_data) = board.read().clone() else {
+            return;
+        };
+        let owner = board_data.owner_vk;
+        let authors: Vec<plaza_core::board_state::member::MemberId> = board_data
+            .board_state
+            .topics
+            .entries
+            .iter()
+            .map(|entry| entry.entry.author)
+            .collect();
+        if authors.is_empty() {
+            return;
+        }
+        crate::util::safe_spawn_local(async move {
+            crate::components::app::member_contract::load_member_shards_for(
+                owner,
+                authors.iter().copied(),
+            )
+            .await;
+            crate::components::app::profile_contract::load_profile_shards_for(owner, authors).await;
+        });
+    });
+
     let Some(board_data) = board.read().clone() else {
         return rsx! {
             div { class: "max-w-4xl mx-auto px-4 py-8 text-text-muted", "Loading board…" }

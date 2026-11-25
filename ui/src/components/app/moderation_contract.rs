@@ -165,28 +165,57 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 .unwrap_or_default();
             match update {
                 UpdateData::State(bytes) => {
-                    let network = ciborium::de::from_reader::<ReportFeedStateV1, _>(bytes.as_ref())
-                        .map_err(|error| format!("decode moderation update: {error}"))?;
-                    let delta = ReportFeedDeltaV1 {
-                        reports: network.reports,
-                        resolutions: network.resolutions,
-                    };
-                    state
-                        .apply_delta(&delta)
-                        .map_err(|error| format!("apply moderation state: {error}"))?;
+                    if !bytes.as_ref().is_empty() {
+                        let network =
+                            ciborium::de::from_reader::<ReportFeedStateV1, _>(bytes.as_ref())
+                                .map_err(|error| format!("decode moderation update: {error}"))?;
+                        let delta = ReportFeedDeltaV1 {
+                            reports: network.reports,
+                            resolutions: network.resolutions,
+                        };
+                        state
+                            .apply_delta(&delta)
+                            .map_err(|error| format!("apply moderation state: {error}"))?;
+                    }
                 }
                 UpdateData::Delta(bytes) => {
-                    let delta = ciborium::de::from_reader::<ReportFeedDeltaV1, _>(bytes.as_ref())
+                    if !bytes.as_ref().is_empty() {
+                        let delta =
+                            ciborium::de::from_reader::<ReportFeedDeltaV1, _>(bytes.as_ref())
+                                .map_err(|error| format!("decode moderation delta: {error}"))?;
+                        state
+                            .apply_delta(&delta)
+                            .map_err(|error| format!("apply moderation delta: {error}"))?;
+                    }
+                }
+                UpdateData::StateAndDelta {
+                    state: state_bytes,
+                    delta: delta_bytes,
+                } => {
+                    if !delta_bytes.as_ref().is_empty() {
+                        let delta = ciborium::de::from_reader::<ReportFeedDeltaV1, _>(
+                            delta_bytes.as_ref(),
+                        )
                         .map_err(|error| format!("decode moderation delta: {error}"))?;
-                    state
-                        .apply_delta(&delta)
-                        .map_err(|error| format!("apply moderation delta: {error}"))?;
+                        state
+                            .apply_delta(&delta)
+                            .map_err(|error| format!("apply moderation delta: {error}"))?;
+                    } else if !state_bytes.as_ref().is_empty() {
+                        let network = ciborium::de::from_reader::<ReportFeedStateV1, _>(
+                            state_bytes.as_ref(),
+                        )
+                        .map_err(|error| format!("decode moderation update: {error}"))?;
+                        let delta = ReportFeedDeltaV1 {
+                            reports: network.reports,
+                            resolutions: network.resolutions,
+                        };
+                        state
+                            .apply_delta(&delta)
+                            .map_err(|error| format!("apply moderation state: {error}"))?;
+                    }
                 }
                 _ => {}
             }
-            state
-                .verify()
-                .map_err(|error| format!("moderation update does not verify: {error}"))?;
             MODERATION_BOARDS.with_mut(|boards| {
                 if let Some(board) = boards.get_mut(key.id()) {
                     board.state = state;

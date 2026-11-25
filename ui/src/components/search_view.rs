@@ -272,6 +272,8 @@ fn TopicSearchView() -> Element {
                 owner,
             )
             .await;
+            crate::components::app::member_contract::load_all_member_shards(owner).await;
+            crate::components::app::profile_contract::load_all_profile_shards(owner).await;
         });
     });
     let Some(board_data) = board.read().clone() else {

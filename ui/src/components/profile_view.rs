@@ -12,6 +12,17 @@ use std::str::FromStr;
 pub fn ProfileView(member_key: String) -> Element {
     let member_id = MemberId::from_str(&member_key).ok();
 
+    use_effect(move || {
+        let (Some(owner), Some(target)) = (CURRENT_BOARD.read().owner_key, member_id) else {
+            return;
+        };
+        crate::util::safe_spawn_local(async move {
+            crate::components::app::member_contract::load_member_shards_for(owner, [target]).await;
+            crate::components::app::profile_contract::load_profile_shards_for(owner, [target])
+                .await;
+        });
+    });
+
     let board = use_memo(move || {
         let current = CURRENT_BOARD.read().owner_key?;
         let boards = BOARDS.read();
@@ -24,7 +35,10 @@ pub fn ProfileView(member_key: String) -> Element {
             &board.category_secrets,
             &board.old_category_secrets,
         );
-        Some((board.owner_vk, messages))
+        let nickname = member_id
+            .and_then(|target| board.display_nickname(target))
+            .unwrap_or_else(|| member_id.map(|t| t.to_string()).unwrap_or_default());
+        Some((board.owner_vk, messages, nickname))
     });
 
     let board_id = CURRENT_BOARD
@@ -36,25 +50,8 @@ pub fn ProfileView(member_key: String) -> Element {
     let Some(target) = member_id else {
         return rsx! {};
     };
-    let Some((owner_vk, messages)) = board.read().clone() else {
+    let Some((owner_vk, messages, nickname)) = board.read().clone() else {
         return rsx! {};
-    };
-
-    let nickname = {
-        let boards = BOARDS.read();
-        boards
-            .map
-            .get(&owner_vk)
-            .and_then(|board| {
-                board
-                    .board_state
-                    .member_info
-                    .member_info
-                    .iter()
-                    .find(|info| info.member_info.member_id == target)
-                    .map(|info| info.member_info.preferred_nickname.to_string_lossy())
-            })
-            .unwrap_or_else(|| target.to_string())
     };
 
     let roles: Vec<String> = {

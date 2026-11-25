@@ -1358,6 +1358,33 @@ pub fn Conversation(
         }
     });
 
+    // Lazily load profile shards for message authors on legacy boards.
+    use_effect(move || {
+        let Some(owner) = CURRENT_BOARD.read().owner_key else {
+            return;
+        };
+        let authors: Vec<MemberId> = BOARDS
+            .read()
+            .map
+            .get(&owner)
+            .map(|board| {
+                board
+                    .board_state
+                    .recent_messages
+                    .messages
+                    .iter()
+                    .map(|msg| msg.message.author)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if authors.is_empty() {
+            return;
+        }
+        crate::util::safe_spawn_local(async move {
+            crate::components::app::profile_contract::load_profile_shards_for(owner, authors).await;
+        });
+    });
+
     // Build message tree for the given parent
     let message_tree = use_memo({
         let parent_id = parent_message_id.clone();

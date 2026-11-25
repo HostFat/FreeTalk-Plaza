@@ -181,6 +181,35 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
         });
     });
 
+    // Lazily load only the member and profile shard buckets for authors and
+    // participants present in this topic.
+    use_effect(move || {
+        let Some(topic_state) = topic_contract::topic_state(owner, topic_id_value, part) else {
+            return;
+        };
+        let mut ids: Vec<plaza_core::board_state::member::MemberId> = Vec::new();
+        if let Some(header) = &topic_state.header {
+            ids.push(header.header.author);
+        }
+        for post in topic_state.posts.values() {
+            ids.push(post.post.author);
+        }
+        for participant in &topic_state.participants {
+            ids.push(participant.record.member_id);
+        }
+        if ids.is_empty() {
+            return;
+        }
+        crate::util::safe_spawn_local(async move {
+            crate::components::app::member_contract::load_member_shards_for(
+                owner,
+                ids.iter().copied(),
+            )
+            .await;
+            crate::components::app::profile_contract::load_profile_shards_for(owner, ids).await;
+        });
+    });
+
     let state = topic_contract::topic_state(owner, topic_id_value, part);
     let Some(state) = state else {
         return rsx! {

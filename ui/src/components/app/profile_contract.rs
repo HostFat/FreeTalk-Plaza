@@ -1,9 +1,10 @@
-//! Per-board profile feed.
+//! Sharded per-board profile directory client.
 //!
-//! Nicknames used to live in the board state: every join or rename rewrote the
-//! board, and a board with thousands of members carried MiB of profile
-//! records. The client sends a small delta to this contract instead and
-//! overlays the verified nickname on the board for display.
+//! Nicknames live in `PROFILE_SHARD_COUNT` deterministic bucket contracts
+//! addressed by `ProfileShardParametersV1 { owner, bucket }`, matching
+//! `member_contract`. On board open only the current user's bucket is loaded
+//! (`GET`-only); topic and list views load the buckets of visible authors on
+//! demand, and directory views (Members, Manage) load all buckets lazily.
 
 use dioxus::prelude::*;
 use ed25519_dalek::VerifyingKey;
@@ -15,42 +16,57 @@ use freenet_stdlib::prelude::{
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfoV1};
 use plaza_core::board_state::profiles::{
-    merge_into, ProfileDeltaV1, ProfileEntryV1, ProfileStateV1,
+    merge_into, profile_shard_bucket, ProfileDeltaV1, ProfileEntryV1, ProfileShardParametersV1,
+    ProfileStateV1, PROFILE_SHARD_COUNT,
 };
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::components::app::send_client_request;
 use crate::constants::PROFILE_CONTRACT_WASM;
 use crate::util::to_cbor_vec;
 
+/// Cooldown before retrying a GET for an unsynced (previously missing) shard.
+const UNSYNCED_RETRY_COOLDOWN_MS: i64 = 10_000;
+
+fn now_ms() -> i64 {
+    plaza_core::board_state::rate_limit::system_time_ms(crate::util::get_current_system_time())
+}
+
 #[derive(Clone)]
-pub struct ProfileBoard {
+pub struct ProfileShardBoard {
+    pub params: ProfileShardParametersV1,
     pub state: ProfileStateV1,
     pub synced: bool,
     /// A local nickname has not been confirmed by the node yet.
     pub dirty: bool,
+    pub last_fetch: i64,
 }
 
-pub static PROFILE_BOARDS: GlobalSignal<HashMap<ContractInstanceId, ProfileBoard>> =
+pub static PROFILE_SHARDS: GlobalSignal<HashMap<ContractInstanceId, ProfileShardBoard>> =
     Global::new(HashMap::new);
 
-pub fn profile_key(owner: VerifyingKey) -> ContractKey {
-    let parameters = Parameters::from(to_cbor_vec(&ChatBoardParametersV1 { owner }));
+static LOADED_ALL_BOARDS: std::sync::Mutex<Option<HashSet<VerifyingKey>>> =
+    std::sync::Mutex::new(None);
+
+pub fn profile_shard_key(owner: VerifyingKey, bucket: u16) -> ContractKey {
+    let params = ProfileShardParametersV1 { owner, bucket };
+    let parameters = Parameters::from(to_cbor_vec(&params));
     let code = ContractCode::from(PROFILE_CONTRACT_WASM);
     ContractKey::from_params_and_code(parameters, &code)
 }
 
-fn profile_contract(owner: VerifyingKey) -> ContractContainer {
+fn profile_shard_contract(owner: VerifyingKey, bucket: u16) -> ContractContainer {
+    let params = ProfileShardParametersV1 { owner, bucket };
     ContractContainer::from(ContractWasmAPIVersion::V1(WrappedContract::new(
         Arc::new(ContractCode::from(PROFILE_CONTRACT_WASM)),
-        Parameters::from(to_cbor_vec(&ChatBoardParametersV1 { owner })),
+        Parameters::from(to_cbor_vec(&params)),
     )))
 }
 
 pub fn is_known_profile_contract(key: &ContractInstanceId) -> bool {
-    PROFILE_BOARDS.read().contains_key(key)
+    PROFILE_SHARDS.read().contains_key(key)
 }
 
 pub fn is_profile_contract_response(response: &ContractResponse) -> bool {
@@ -66,38 +82,33 @@ pub fn is_profile_contract_response(response: &ContractResponse) -> bool {
     }
 }
 
-pub async fn load_profile(owner: VerifyingKey) -> Result<(), String> {
-    let key = profile_key(owner);
+pub async fn load_profile_shard(owner: VerifyingKey, bucket: u16) -> Result<(), String> {
+    if bucket >= PROFILE_SHARD_COUNT {
+        return Err(format!("profile shard bucket {bucket} out of range"));
+    }
+    let key = profile_shard_key(owner, bucket);
     let contract_id = *key.id();
-    let already_synced = PROFILE_BOARDS
-        .read()
-        .get(&contract_id)
-        .map(|board| board.synced)
-        .unwrap_or(false);
-    if already_synced {
+    let now = now_ms();
+    // Read-only loads never PUT an empty shard contract; only
+    // `record_member_info` creates a shard on demand. Skip buckets that are
+    // already synced or were requested recently.
+    let should_skip = PROFILE_SHARDS.read().get(&contract_id).is_some_and(|board| {
+        board.synced || now.saturating_sub(board.last_fetch) < UNSYNCED_RETRY_COOLDOWN_MS
+    });
+    if should_skip {
         return Ok(());
     }
-    PROFILE_BOARDS.with_mut(|boards| {
-        boards.entry(contract_id).or_insert(ProfileBoard {
+    let params = ProfileShardParametersV1 { owner, bucket };
+    PROFILE_SHARDS.with_mut(|shards| {
+        let entry = shards.entry(contract_id).or_insert(ProfileShardBoard {
+            params,
             state: ProfileStateV1::default(),
             synced: false,
             dirty: false,
+            last_fetch: now,
         });
+        entry.last_fetch = now;
     });
-    let put = send_client_request(ClientRequest::ContractOp(ContractRequest::Put {
-        contract: profile_contract(owner),
-        state: WrappedState::new(to_cbor_vec(&ProfileStateV1::default())),
-        related_contracts: Default::default(),
-        subscribe: true,
-        blocking_subscribe: false,
-    }))
-    .await;
-    if let Err(error) = put {
-        dioxus::logger::tracing::warn!(
-            "profile contract put failed for {:?}: {error}",
-            owner
-        );
-    }
     send_client_request(ClientRequest::ContractOp(ContractRequest::Get {
         key: contract_id,
         return_contract_code: false,
@@ -105,31 +116,65 @@ pub async fn load_profile(owner: VerifyingKey) -> Result<(), String> {
         blocking_subscribe: false,
     }))
     .await
-    .map_err(|error| format!("get profile contract: {error}"))
+    .map_err(|error| format!("get profile shard {bucket}: {error}"))
+}
+
+/// Load only the profile buckets that contain the given member ids.
+pub async fn load_profile_shards_for(
+    owner: VerifyingKey,
+    ids: impl IntoIterator<Item = MemberId>,
+) {
+    let buckets: HashSet<u16> = ids
+        .into_iter()
+        .map(|id| profile_shard_bucket(&id))
+        .collect();
+    for bucket in buckets {
+        let _ = load_profile_shard(owner, bucket).await;
+    }
+}
+
+/// Lazily load all profile buckets of a board once per session (GET-only, no
+/// PUT of empty contracts), used by views that enumerate the full member list.
+pub async fn load_all_profile_shards(owner: VerifyingKey) {
+    {
+        let mut guard = LOADED_ALL_BOARDS.lock().unwrap();
+        let set = guard.get_or_insert_with(HashSet::new);
+        if !set.insert(owner) {
+            return;
+        }
+    }
+    for bucket in 0..PROFILE_SHARD_COUNT {
+        let _ = load_profile_shard(owner, bucket).await;
+    }
 }
 
 pub async fn handle_contract_response(response: ContractResponse) -> Result<(), String> {
     match response {
         ContractResponse::GetResponse { key, state, .. } => {
+            let params = PROFILE_SHARDS
+                .read()
+                .get(key.id())
+                .map(|board| board.params.clone())
+                .ok_or_else(|| "unknown profile shard key".to_string())?;
             let network = if state.as_ref().is_empty() {
                 ProfileStateV1::default()
             } else {
                 ciborium::de::from_reader::<ProfileStateV1, _>(state.as_ref())
-                    .map_err(|error| format!("decode profile state: {error}"))?
+                    .map_err(|error| format!("decode profile shard state: {error}"))?
             };
             network
-                .verify()
-                .map_err(|error| format!("profile state does not verify: {error}"))?;
-            PROFILE_BOARDS.with_mut(|boards| {
-                if let Some(board) = boards.get_mut(key.id()) {
+                .verify(&params)
+                .map_err(|error| format!("profile shard state does not verify: {error}"))?;
+            PROFILE_SHARDS.with_mut(|shards| {
+                if let Some(board) = shards.get_mut(key.id()) {
                     // A Get can still carry the state from before our delta.
-                    // The feed is additive, so merging keeps the local entry.
+                    // The shard is additive, so merging keeps the local entry.
                     board.state = if board.dirty {
                         let mut merged = board.state.clone();
                         let delta = ProfileDeltaV1 {
                             entries: network.entries.clone(),
                         };
-                        if merged.apply_delta(&delta).is_ok() {
+                        if merged.apply_delta(&params, &delta).is_ok() {
                             merged
                         } else {
                             network
@@ -144,44 +189,70 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
         ContractResponse::PutResponse { key }
         | ContractResponse::UpdateResponse { key, .. }
         | ContractResponse::SubscribeResponse { key, .. } => {
-            PROFILE_BOARDS.with_mut(|boards| {
-                if let Some(board) = boards.get_mut(key.id()) {
+            PROFILE_SHARDS.with_mut(|shards| {
+                if let Some(board) = shards.get_mut(key.id()) {
                     board.synced = true;
                     board.dirty = false;
                 }
             });
         }
         ContractResponse::UpdateNotification { key, update } => {
-            let mut state = PROFILE_BOARDS
+            let (params, mut state) = PROFILE_SHARDS
                 .read()
                 .get(key.id())
-                .map(|board| board.state.clone())
-                .unwrap_or_default();
+                .map(|board| (board.params.clone(), board.state.clone()))
+                .ok_or_else(|| "unknown profile shard key".to_string())?;
             match update {
                 UpdateData::State(bytes) => {
-                    let network = ciborium::de::from_reader::<ProfileStateV1, _>(bytes.as_ref())
-                        .map_err(|error| format!("decode profile update: {error}"))?;
-                    let delta = ProfileDeltaV1 {
-                        entries: network.entries,
-                    };
-                    state
-                        .apply_delta(&delta)
-                        .map_err(|error| format!("apply profile state: {error}"))?;
+                    if !bytes.as_ref().is_empty() {
+                        let network =
+                            ciborium::de::from_reader::<ProfileStateV1, _>(bytes.as_ref())
+                                .map_err(|error| format!("decode profile shard update: {error}"))?;
+                        let delta = ProfileDeltaV1 {
+                            entries: network.entries,
+                        };
+                        state
+                            .apply_delta(&params, &delta)
+                            .map_err(|error| format!("apply profile shard state: {error}"))?;
+                    }
                 }
                 UpdateData::Delta(bytes) => {
-                    let delta = ciborium::de::from_reader::<ProfileDeltaV1, _>(bytes.as_ref())
-                        .map_err(|error| format!("decode profile delta: {error}"))?;
-                    state
-                        .apply_delta(&delta)
-                        .map_err(|error| format!("apply profile delta: {error}"))?;
+                    if !bytes.as_ref().is_empty() {
+                        let delta =
+                            ciborium::de::from_reader::<ProfileDeltaV1, _>(bytes.as_ref())
+                                .map_err(|error| format!("decode profile shard delta: {error}"))?;
+                        state
+                            .apply_delta(&params, &delta)
+                            .map_err(|error| format!("apply profile shard delta: {error}"))?;
+                    }
+                }
+                UpdateData::StateAndDelta {
+                    state: state_bytes,
+                    delta: delta_bytes,
+                } => {
+                    if !delta_bytes.as_ref().is_empty() {
+                        let delta =
+                            ciborium::de::from_reader::<ProfileDeltaV1, _>(delta_bytes.as_ref())
+                                .map_err(|error| format!("decode profile shard delta: {error}"))?;
+                        state
+                            .apply_delta(&params, &delta)
+                            .map_err(|error| format!("apply profile shard delta: {error}"))?;
+                    } else if !state_bytes.as_ref().is_empty() {
+                        let network =
+                            ciborium::de::from_reader::<ProfileStateV1, _>(state_bytes.as_ref())
+                                .map_err(|error| format!("decode profile shard update: {error}"))?;
+                        let delta = ProfileDeltaV1 {
+                            entries: network.entries,
+                        };
+                        state
+                            .apply_delta(&params, &delta)
+                            .map_err(|error| format!("apply profile shard state: {error}"))?;
+                    }
                 }
                 _ => {}
             }
-            state
-                .verify()
-                .map_err(|error| format!("profile update does not verify: {error}"))?;
-            PROFILE_BOARDS.with_mut(|boards| {
-                if let Some(board) = boards.get_mut(key.id()) {
+            PROFILE_SHARDS.with_mut(|shards| {
+                if let Some(board) = shards.get_mut(key.id()) {
                     board.state = state;
                     board.synced = true;
                 }
@@ -192,38 +263,42 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
     Ok(())
 }
 
-pub fn state_for(owner: VerifyingKey) -> Option<ProfileStateV1> {
-    let key = profile_key(owner);
-    PROFILE_BOARDS
-        .read()
-        .get(key.id())
-        .map(|board| board.state.clone())
-}
-
-/// Overlay the verified profile feed on the board's legacy member-info list.
-/// Only entries whose signature checks out against the board authority and
-/// whose nickname fits the board configuration are shown.
+/// Overlay verified entries from all loaded profile shards of `owner` onto
+/// the board's legacy member-info list. Only entries belonging to current
+/// board members (or the owner) and within `max_nickname_size` are shown.
 pub fn apply_to_member_info(
     owner: VerifyingKey,
     state: &ChatBoardStateV1,
     legacy: &mut MemberInfoV1,
 ) {
-    let Some(feed) = state_for(owner) else {
-        return;
+    let entries: Vec<ProfileEntryV1> = {
+        let shards = PROFILE_SHARDS.read();
+        shards
+            .values()
+            .filter(|shard| shard.params.owner == owner)
+            .flat_map(|shard| shard.state.entries.iter().cloned())
+            .collect()
     };
+    if entries.is_empty() {
+        return;
+    }
     let parameters = ChatBoardParametersV1 { owner };
     let owner_id = parameters.owner_id();
+    let current_owner_id = state.ownership.current_owner(&parameters);
     let max_nickname = state.configuration.configuration.max_nickname_size;
-    let members: std::collections::HashSet<MemberId> = state
+    let members: HashSet<MemberId> = state
         .members
         .members
         .iter()
         .map(|member| member.member.id())
         .collect();
     let mut verified = Vec::new();
-    for entry in feed.entries {
+    for entry in entries {
         let member_id = entry.member_id();
-        if member_id != owner_id && !members.contains(&member_id) {
+        if member_id != owner_id
+            && member_id != current_owner_id
+            && !members.contains(&member_id)
+        {
             continue;
         }
         if entry.info.preferred_nickname.declared_len() > max_nickname {
@@ -235,16 +310,31 @@ pub fn apply_to_member_info(
     merge_into(&mut legacy.member_info, verified);
 }
 
-async fn send_delta(owner: VerifyingKey, delta: ProfileDeltaV1) -> Result<(), String> {
-    let key = profile_key(owner);
+/// Publish one member's nickname into its deterministic profile shard contract.
+pub async fn record_member_info(
+    owner: VerifyingKey,
+    info: AuthorizedMemberInfo,
+    signer_key: VerifyingKey,
+) -> Result<(), String> {
+    let entry = ProfileEntryV1::from_authorized(info, signer_key);
+    let bucket = profile_shard_bucket(&entry.member_id());
+    let params = ProfileShardParametersV1 { owner, bucket };
+    entry.verify(&params)?;
+    let key = profile_shard_key(owner, bucket);
     let contract_id = *key.id();
-    PROFILE_BOARDS.with_mut(|boards| {
-        let board = boards.entry(contract_id).or_insert(ProfileBoard {
+    let delta = ProfileDeltaV1 {
+        entries: vec![entry],
+    };
+    let now = now_ms();
+    PROFILE_SHARDS.with_mut(|shards| {
+        let board = shards.entry(contract_id).or_insert(ProfileShardBoard {
+            params: params.clone(),
             state: ProfileStateV1::default(),
             synced: false,
             dirty: true,
+            last_fetch: now,
         });
-        let _ = board.state.apply_delta(&delta);
+        let _ = board.state.apply_delta(&params, &delta);
         board.dirty = true;
     });
     let update = send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
@@ -255,15 +345,15 @@ async fn send_delta(owner: VerifyingKey, delta: ProfileDeltaV1) -> Result<(), St
     if update.is_ok() {
         return Ok(());
     }
-    // The contract may not exist yet on a board opened before the load
-    // finished. A state PUT is merged additively by the contract.
-    let state = PROFILE_BOARDS
+    // The shard may not exist yet on the network. A state PUT is merged
+    // additively by the contract.
+    let state = PROFILE_SHARDS
         .read()
         .get(&contract_id)
         .map(|board| board.state.clone())
         .unwrap_or_default();
     send_client_request(ClientRequest::ContractOp(ContractRequest::Put {
-        contract: profile_contract(owner),
+        contract: profile_shard_contract(owner, bucket),
         state: WrappedState::new(to_cbor_vec(&state)),
         related_contracts: Default::default(),
         subscribe: true,
@@ -272,22 +362,8 @@ async fn send_delta(owner: VerifyingKey, delta: ProfileDeltaV1) -> Result<(), St
     .await
     .map_err(|error| {
         format!(
-            "send profile delta failed ({}), put failed: {error}",
+            "send profile shard delta failed ({}), put failed: {error}",
             update.err().map(|error| error.to_string()).unwrap_or_default()
         )
     })
-}
-
-pub async fn record_member_info(
-    owner: VerifyingKey,
-    info: AuthorizedMemberInfo,
-    signer_key: VerifyingKey,
-) -> Result<(), String> {
-    send_delta(
-        owner,
-        ProfileDeltaV1 {
-            entries: vec![ProfileEntryV1::from_authorized(info, signer_key)],
-        },
-    )
-    .await
 }

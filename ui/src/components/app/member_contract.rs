@@ -103,7 +103,6 @@ pub async fn load_member_shard(owner: VerifyingKey, bucket: u16) -> Result<(), S
 }
 
 /// Load only the buckets that contain the given member ids.
-#[allow(dead_code)]
 pub async fn load_member_shards_for(
     owner: VerifyingKey,
     ids: impl IntoIterator<Item = MemberId>,
@@ -207,6 +206,31 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                         state
                             .apply_delta(&params, &delta)
                             .map_err(|error| format!("apply member shard delta: {error}"))?;
+                    }
+                }
+                UpdateData::StateAndDelta {
+                    state: state_bytes,
+                    delta: delta_bytes,
+                } => {
+                    if !delta_bytes.as_ref().is_empty() {
+                        let delta = ciborium::de::from_reader::<MemberShardDeltaV1, _>(
+                            delta_bytes.as_ref(),
+                        )
+                        .map_err(|error| format!("decode member shard delta: {error}"))?;
+                        state
+                            .apply_delta(&params, &delta)
+                            .map_err(|error| format!("apply member shard delta: {error}"))?;
+                    } else if !state_bytes.as_ref().is_empty() {
+                        let network = ciborium::de::from_reader::<MemberShardStateV1, _>(
+                            state_bytes.as_ref(),
+                        )
+                        .map_err(|error| format!("decode member shard update: {error}"))?;
+                        let delta = MemberShardDeltaV1 {
+                            entries: network.entries,
+                        };
+                        state
+                            .apply_delta(&params, &delta)
+                            .map_err(|error| format!("apply member shard state: {error}"))?;
                     }
                 }
                 _ => {}

@@ -14,6 +14,7 @@ pub fn AddAdminModal(on_close: EventHandler<()>) -> Element {
         if let Some(owner) = CURRENT_BOARD.read().owner_key {
             crate::util::safe_spawn_local(async move {
                 crate::components::app::member_contract::load_all_member_shards(owner).await;
+                crate::components::app::profile_contract::load_all_profile_shards(owner).await;
             });
         }
     });

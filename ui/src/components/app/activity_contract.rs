@@ -150,21 +150,52 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 .unwrap_or_default();
             match update {
                 UpdateData::State(bytes) => {
-                    activity = ciborium::de::from_reader::<ActivityStateV1, _>(bytes.as_ref())
-                        .map_err(|error| format!("decode activity update: {error}"))?;
+                    if !bytes.as_ref().is_empty() {
+                        let network =
+                            ciborium::de::from_reader::<ActivityStateV1, _>(bytes.as_ref())
+                                .map_err(|error| format!("decode activity update: {error}"))?;
+                        let delta = ActivityDeltaV1 {
+                            entries: network.entries,
+                        };
+                        activity
+                            .apply_delta(&delta)
+                            .map_err(|error| format!("apply activity state: {error}"))?;
+                    }
                 }
                 UpdateData::Delta(bytes) => {
-                    let delta = ciborium::de::from_reader::<ActivityDeltaV1, _>(bytes.as_ref())
-                        .map_err(|error| format!("decode activity delta: {error}"))?;
-                    activity
-                        .apply_delta(&delta)
-                        .map_err(|error| format!("apply activity delta: {error}"))?;
+                    if !bytes.as_ref().is_empty() {
+                        let delta = ciborium::de::from_reader::<ActivityDeltaV1, _>(bytes.as_ref())
+                            .map_err(|error| format!("decode activity delta: {error}"))?;
+                        activity
+                            .apply_delta(&delta)
+                            .map_err(|error| format!("apply activity delta: {error}"))?;
+                    }
+                }
+                UpdateData::StateAndDelta {
+                    state: state_bytes,
+                    delta: delta_bytes,
+                } => {
+                    if !delta_bytes.as_ref().is_empty() {
+                        let delta =
+                            ciborium::de::from_reader::<ActivityDeltaV1, _>(delta_bytes.as_ref())
+                                .map_err(|error| format!("decode activity delta: {error}"))?;
+                        activity
+                            .apply_delta(&delta)
+                            .map_err(|error| format!("apply activity delta: {error}"))?;
+                    } else if !state_bytes.as_ref().is_empty() {
+                        let network =
+                            ciborium::de::from_reader::<ActivityStateV1, _>(state_bytes.as_ref())
+                                .map_err(|error| format!("decode activity update: {error}"))?;
+                        let delta = ActivityDeltaV1 {
+                            entries: network.entries,
+                        };
+                        activity
+                            .apply_delta(&delta)
+                            .map_err(|error| format!("apply activity state: {error}"))?;
+                    }
                 }
                 _ => {}
             }
-            activity
-                .verify()
-                .map_err(|error| format!("activity update does not verify: {error}"))?;
             ACTIVITY_BOARDS.with_mut(|boards| {
                 if let Some(board) = boards.get_mut(key.id()) {
                     board.state = activity;
