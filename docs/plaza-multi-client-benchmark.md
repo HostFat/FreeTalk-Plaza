@@ -37,15 +37,21 @@ Le figlie ora tengono solo la propria catena di sezioni: la dimensione pruned è
 la stessa con 20 e con 100 sezioni sorelle (363 KiB), e lo storage cresce con
 le figlie, non con il quadrato delle sezioni.
 
-Indice a pagine, 1.000 membri, 2.000 topic, pagine da 200:
+Indice a pagine, 1.000 membri, 2.000 topic, pagine da 200 (10 pagine):
 
-| Unità | Dimensione | Verify | Bootstrap nuovo subscriber |
-|---|---:|---:|---:|
-| Sezione intera | 3.278 KiB | 14,9 s | 3,3 MiB |
-| Una pagina | 363 KiB | 1,7 s | 363 KiB |
+| Unità | Dimensione | Verify | Summary / note |
+|---|---:|---:|---|
+| Sezione intera | 3.278,4 KiB | 15,5 s | bootstrap 3,3 MiB |
+| Manifest (pagina 0, `ChatBoardStateV1`) | 363,1 KiB | 1,73 s | autorità potata + `topic_pages` + flag sezione |
+| Pagina compatta aperta (`page > 0`, `SectionPageStateV1`) | 190,9 KiB | 813 ms | summary 21,4 KiB; delta 1 topic 0,97 KiB (4,33 ms) |
+| Pagina compatta sigillata (`page > 0`, `SectionPageStateV1`) | 124,4 KiB | 5,19 ms | summary 9,0 KiB; 0 autori/autorità duplicati (~333× più veloce) |
 
-Un nuovo topic è un delta da 0,7 KiB: con 50 subscriber il fan-out è
-0,03 MiB. Il manifest cambia solo quando nasce una pagina.
+Lo storage della sezione da 10 pagine scende da 3,55 MiB (10 copie di
+`ChatBoardStateV1` potato) a 1,51 MiB (1 manifest + 8 pagine sigillate + 1
+aperta, -57%). Il fan-out di sincronizzazione dell'autorità tocca 1 solo
+contratto per sezione (il manifest) invece di tutte le pagine. Un nuovo topic
+è un delta da 0,7–0,97 KiB: con 50 subscriber il fan-out è 0,03–0,05 MiB. Il
+manifest cambia solo quando nasce una pagina o arriva un flag.
 
 Moderazione, 500 report e 500 risoluzioni:
 
@@ -131,11 +137,15 @@ la board e le figlie non ricevono più l'activity.
    sezioni: 363 KiB invece di 639-674 KiB, con una verifica piena di 1,7 s
    invece di 3,5 s. La dimensione pruned non dipende dalle sezioni sorelle.
    Le definizioni dei ruoli restano nel topic.
-5. **Le pagine limitano scrittura e bootstrap.** Con `page_size=200` una nuova
-   entry tocca solo la pagina attiva; il bootstrap di un nuovo subscriber
-   passa da 3,3 MiB (sezione da 2.000 topic) a 363 KiB (una pagina), con la
-   verifica da 14,9 s a 1,7 s. Le pagine duplicano l'autorità potata, quindi
-   lo storage cresce con il numero di pagine.
+5. **Le pagine compatte e sigillate eliminano l'autorità duplicata.** Con
+   `page_size=200` una nuova entry tocca solo la pagina attiva (`O(1)` lookup
+   della coda); le pagine extra (`page > 0`) usano `SectionPageStateV1` senza
+   `configuration`/`sections`/`bans`/`suspensions`/`flags` e non ricevono mai
+   `sync_section_authority`. Quando la pagina si riempie e l'owner crea la
+   successiva, la pagina piena viene sigillata (`AuthorizedSectionPageSealV1`):
+   tutti gli autori duplicati vengono rimossi (124,4 KiB invece di 363,1 KiB)
+   e la verifica di bootstrap passa da 1,73 s a 5,19 ms (~333× più veloce).
+   Lo storage di 10 pagine scende da 3,55 MiB a 1,51 MiB.
 6. **La propagazione dell'autorita' e' il caso peggiore.** Un cambio di
    ruolo o un ban sincronizza tutte le figlie (35,4 MiB nello scenario da 100
    sezioni dopo il pruning) e poi aggiorna ogni topic. Il limite di 100 topic
@@ -177,8 +187,15 @@ la board e le figlie non ricevono più l'activity.
    e `summarize_state`/`get_state_delta` incrementali in `profile-contract`,
    `activity-contract` (delta 0,42 KiB vs 83,2 KiB) e `moderation-contract`
    (delta 0,34–0,42 KiB vs 362,8 KiB).
-7. Compattare le pagine e l'autorita' duplicata; oggi ogni pagina copia
-   l'autorita' potata.
+7. Compattare le pagine e l'autorita' duplicata (fatto, rev 35): le pagine
+   extra (`page > 0`) usano `SectionPageStateV1` senza autorità duplicata né
+   flag (tutti i flag di sezione vivono nel manifest pagina 0) e non ricevono
+   `sync_section_authority`; alla creazione della pagina successiva l'owner
+   sigilla le pagine piene (`AuthorizedSectionPageSealV1`), azzerando gli
+   autori duplicati (124,4 KiB, verifica 5,19 ms vs 363,1 KiB / 1,73 s; 10
+   pagine 1,51 MiB vs 3,55 MiB) e permettendo comunque gli edit autore tramite
+   `entry_edits`. Fixata anche la potatura su pagina 0 nei sync `admin`/
+   `ownership`.
 8. Topic a pagine append-only; una risposta scrive una pagina.
 9. Compattare le sezioni nelle figlie (`O(sezioni^2)`) e le definizioni dei
    ruoli.

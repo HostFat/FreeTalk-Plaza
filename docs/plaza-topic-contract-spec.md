@@ -573,18 +573,26 @@ Le nuove board topic usano `BoardModeV1::SectionedTopicIndex`; le board
   con parametri `{ owner, section, page }`, la propria sezione e l'indice dei
   suoi topic. La madre rifiuta i topic nel proprio stato; la figlia rifiuta
   entry di altre sezioni.
-- L'indice di una sezione è diviso in pagine. La pagina 0 (manifest) tiene
-  autorità, sezione e `topic_pages`: un `AuthorizedTopicPageListV1` firmato
-  dall'owner con la dimensione di pagina (`page_size`, default 200, massimo
-  500) e l'elenco ordinato delle pagine extra (massimo 1.000, nessuna pagina
-  0). Ogni pagina extra è un contratto con `{ owner, section, page }`. La
-  pagina 0 è anche la prima fetta di topic; `active_page` usa la dimensione
-  firmata e, quando tutte le pagine sono piene, l'owner ne crea una nuova.
-  Solo l'owner crea pagine; il manifest verifica firma, dimensione,
-  ordinamento e sezione, e rifiuta una lista su una pagina diversa da 0. Il
-  contratto di sezione impone `MAX_TOPICS_PER_PAGE = 500` su ogni pagina. Il
-  client unisce solo le pagine caricate in `merged_index` e scrive flag sulla
-  pagina che contiene il topic.
+- L'indice di una sezione è diviso in pagine. La pagina 0 (manifest,
+  `ChatBoardStateV1`) tiene autorità potata, sezione, tutti i flag della
+  sezione (inclusi quelli per topic delle pagine extra) e `topic_pages`: un
+  `AuthorizedTopicPageListV1` firmato dall'owner con la dimensione di pagina
+  (`page_size`, default 200, massimo 500) e l'elenco ordinato delle pagine
+  extra (massimo 1.000, nessuna pagina 0). Ogni pagina extra (`page > 0`) usa
+  il formato compatto `SectionPageStateV1` (`AuthorizedSectionPageHeaderV1`
+  firmato dall'owner + `entries` + certificati autori deduplicati finché
+  aperta, con `summarize_state`/`get_state_delta` incrementali); quando è
+  piena l'owner la sigilla con `AuthorizedSectionPageSealV1` rimuovendo i
+  record di autorità duplicati (verifica in ~5 ms con 1 firma + BLAKE3;
+  eventuali edit autore del titolo/anteprima passano da `entry_edits`). La
+  pagina 0 è anche la prima fetta di topic; `active_page` controlla l'ultima
+  pagina senza caricare le pagine sigillate precedenti e, quando è piena,
+  l'owner la sigilla e crea la successiva. Solo l'owner crea/sigilla pagine;
+  il manifest verifica firma, dimensione, ordinamento e sezione, e rifiuta
+  una lista su una pagina diversa da 0. `plaza-section-contract` impone
+  `MAX_TOPICS_PER_PAGE = 500` su ogni pagina. Il client unisce le pagine
+  caricate in `merged_index` e instrada tutti i flag sulla pagina 0. Contratto
+  board/section alla revisione 35.
 - Ogni figlia conserva solo la propria catena di sezioni. Un move o un merge
   cross-section porta nel flag i record firmati della destinazione
   (`destination_sections`); il child di origine li verifica senza conoscere le

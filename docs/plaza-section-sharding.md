@@ -100,13 +100,27 @@ la propria fetta di topic. Un aggiornamento tocca una pagina, non tutte.
   per il test.
 - Solo l'owner crea pagine: un membro che trova tutte le pagine piene riceve
   un errore finché l'owner non ne aggiunge una.
-- Limiti attuali: ogni pagina duplica l'autorità potata (lo storage cresce con
-  il numero di pagine); le pagine accettano ancora flag e report, quindi non
-  sono immutabili; l'aggiunta di una pagina resta una singola scrittura sul
-  manifest. Se l'aggiornamento del manifest fallisce, la pagina resta orfana:
-  non viene caricata e l'owner può crearne un'altra. Il badge dei non letti
-  nel top bar conta le pagine caricate: si allinea quando l'utente apre la
-  sezione o carica le pagine.
+- **Pagine extra compatte e sigillate (`SectionPageStateV1`, rev 35)**: le
+  pagine `page > 0` non duplicano più `ChatBoardStateV1` (nessuna
+  configurazione, sezioni, ban, sospensioni, activity, report o flag) e non
+  ricevono mai `sync_section_authority` (che tocca solo il manifest pagina 0,
+  `O(sezioni)` invece di `O(sezioni × pagine)`). Tutti i flag di sezione
+  vivono sul manifest pagina 0 (`TopicIndexV1::verify_flag` accetta flag per
+  topic delle pagine extra quando `topic_pages` è popolato). Finché una pagina
+  extra è aperta tiene solo `AuthorizedSectionPageHeaderV1`, `entries` e i
+  certificati deduplicati degli autori (190,9 KiB, delta 1 topic 0,97 KiB in
+  4,3 ms); quando è piena e l'owner crea la pagina successiva, la sigilla con
+  `AuthorizedSectionPageSealV1` azzerando autori/inviti/ruoli (124,4 KiB,
+  verifica 5,19 ms con 1 firma Ed25519 + BLAKE3 invece di 1,73 s; 10 pagine
+  1,51 MiB vs 3,55 MiB). Gli autori possono comunque modificare titolo e
+  anteprima di un topic su pagina sigillata tramite `entry_edits`, verificato
+  direttamente contro la chiave dell'entry sigillata. `active_page` controlla
+  direttamente l'ultima pagina senza scaricare le pagine sigillate precedenti.
+- Limiti attuali: l'aggiunta di una pagina resta una singola scrittura sul
+  manifest (solo l'owner può creare/sigillare pagine). Se l'aggiornamento del
+  manifest fallisce, la pagina resta orfana: non viene caricata e l'owner può
+  crearne un'altra. Il badge dei non letti nel top bar conta le pagine
+  caricate: si allinea quando l'utente apre la sezione o carica le pagine.
 
 ## Membri shardati e successione per quorum admin (rev 34, v735)
 

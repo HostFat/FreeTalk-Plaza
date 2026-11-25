@@ -32,7 +32,11 @@ use plaza_core::board_state::report_feed::{
     ReportFeedDeltaV1, ReportFeedStateV1, MAX_REPORT_FEED,
 };
 use plaza_core::board_state::reports::ReportReason;
-use plaza_core::board_state::sections::{AuthorizedSectionV1, SectionV1};
+use plaza_core::board_state::section_pages::{
+    AuthorizedSectionPageHeaderV1, AuthorizedSectionPageSealV1, SectionPageDeltaV1,
+    SectionPageHeaderV1, SectionPageStateV1,
+};
+use plaza_core::board_state::sections::{AuthorizedSectionV1, SectionParametersV1, SectionV1};
 use plaza_core::board_state::topics::{
     AuthorizedTopicActivityV1, AuthorizedTopicEntryV1, AuthorizedTopicFlagV1,
     AuthorizedTopicReportResolutionV1, AuthorizedTopicReportV1, TopicActivityV1,
@@ -558,17 +562,167 @@ fn page_scenario(members: usize, topics: usize, page_size: usize, subscribers: u
     };
     let delta_kib = serialized_len_value(&delta) as f64 / 1024.0;
 
+    // Compact extra page (`page > 0`): open vs sealed (`SectionPageStateV1`).
+    let compact_params = SectionParametersV1 {
+        owner: owner().verifying_key(),
+        section: section_id,
+        page: 1,
+    };
+    let mut compact_open = SectionPageStateV1 {
+        header: Some(AuthorizedSectionPageHeaderV1::new(
+            SectionPageHeaderV1 {
+                board: owner().verifying_key().to_bytes(),
+                section: section_id,
+                section_chain: vec![section_id],
+                page: 1,
+                page_size: page_size as u32,
+                allowed_roles: Vec::new(),
+                created_at: 1_000,
+            },
+            &owner(),
+        )),
+        ..Default::default()
+    };
+    let owner_id = MemberId::from(&owner().verifying_key());
+    let mut compact_entries = Vec::with_capacity(page_size);
+    let mut compact_authors = Vec::new();
+    let mut seen_authors = std::collections::HashSet::new();
+    for index in page_start..topics {
+        let e = entry(section_id, index, members);
+        if seen_authors.insert(e.entry.author) {
+            let author_sk = member_key(index % members);
+            compact_authors.push(AuthorizedMember::new(
+                Member {
+                    owner_member_id: owner_id,
+                    invited_by: owner_id,
+                    member_vk: author_sk.verifying_key(),
+                    join_proof: None,
+                },
+                &owner(),
+            ));
+        }
+        compact_entries.push(e);
+    }
+    compact_open
+        .apply_delta(
+            &compact_params,
+            &SectionPageDeltaV1 {
+                authors: compact_authors,
+                entries: compact_entries,
+                ..Default::default()
+            },
+        )
+        .expect("compact open page applies");
+    let compact_open_kib = serialized_len_value(&compact_open) as f64 / 1024.0;
+    let compact_open_summary_kib =
+        serialized_len_value(&compact_open.summarize()) as f64 / 1024.0;
+    let start = Instant::now();
+    black_box(compact_open.verify(&compact_params).unwrap());
+    let compact_open_verify = start.elapsed().as_secs_f64() * 1000.0;
+
+    // Incremental 1-topic delta on an open compact page (199 -> 200).
+    let mut compact_199 = SectionPageStateV1 {
+        header: compact_open.header.clone(),
+        ..Default::default()
+    };
+    let mut entries_199 = compact_open.entries.clone();
+    let last_entry = entries_199.pop().unwrap();
+    let last_author = compact_open
+        .authors
+        .iter()
+        .find(|m| m.member.id() == last_entry.entry.author)
+        .cloned()
+        .unwrap();
+    let authors_199: Vec<_> = compact_open
+        .authors
+        .iter()
+        .filter(|m| m.member.id() != last_entry.entry.author)
+        .cloned()
+        .collect();
+    compact_199
+        .apply_delta(
+            &compact_params,
+            &SectionPageDeltaV1 {
+                authors: authors_199,
+                entries: entries_199,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let one_topic_delta = SectionPageDeltaV1 {
+        authors: vec![last_author],
+        entries: vec![last_entry],
+        ..Default::default()
+    };
+    let compact_delta_kib = serialized_len_value(&one_topic_delta) as f64 / 1024.0;
+    let start = Instant::now();
+    compact_199
+        .apply_delta(&compact_params, &one_topic_delta)
+        .unwrap();
+    let compact_delta_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    // Owner seals the full page: duplicated authors are dropped.
+    let mut compact_sealed = compact_open.clone();
+    let seal = AuthorizedSectionPageSealV1::new(
+        &compact_params,
+        &compact_sealed.entries,
+        &owner(),
+        9_000_000,
+    )
+    .unwrap();
+    compact_sealed
+        .apply_delta(
+            &compact_params,
+            &SectionPageDeltaV1 {
+                seal: Some(seal),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(compact_sealed.authors.is_empty());
+    let compact_sealed_kib = serialized_len_value(&compact_sealed) as f64 / 1024.0;
+    let compact_sealed_summary_kib =
+        serialized_len_value(&compact_sealed.summarize()) as f64 / 1024.0;
+    let start = Instant::now();
+    black_box(compact_sealed.verify(&compact_params).unwrap());
+    let compact_sealed_verify = start.elapsed().as_secs_f64() * 1000.0;
+
+    let legacy_total_mib = (page_kib * page_count as f64) / 1024.0;
+    let compact_total_mib = if page_count <= 1 {
+        page_kib / 1024.0
+    } else {
+        let sealed_pages = page_count.saturating_sub(2) as f64;
+        (page_kib + sealed_pages * compact_sealed_kib + compact_open_kib) / 1024.0
+    };
+
     println!("\n=== pages ===");
     println!(
         "members={members} topics/section={topics} page_size={page_size} pages={page_count} subscribers={subscribers}"
     );
     println!(
-        "section:  {:>7.1} KiB   verify {:>8.1} ms   (all topics)",
+        "section:         {:>7.1} KiB   verify {:>8.1} ms   (all topics)",
         whole_kib, whole_verify
     );
     println!(
-        "page:     {:>7.1} KiB   verify {:>8.1} ms   (topics {page_start}..{topics})",
+        "manifest (p0):   {:>7.1} KiB   verify {:>8.1} ms   (ChatBoardStateV1, topics {page_start}..{topics})",
         page_kib, page_verify
+    );
+    println!(
+        "compact open:    {:>7.1} KiB   verify {:>8.1} ms   (summary {:.1} KiB; 1-topic delta {:.2} KiB in {:.2} ms)",
+        compact_open_kib, compact_open_verify, compact_open_summary_kib, compact_delta_kib, compact_delta_ms
+    );
+    println!(
+        "compact sealed:  {:>7.1} KiB   verify {:>8.2} ms   (summary {:.1} KiB; 0 duplicated authors)",
+        compact_sealed_kib, compact_sealed_verify, compact_sealed_summary_kib
+    );
+    println!(
+        "storage ({page_count} pages): {:.2} MiB compact (p0 + {} sealed + 1 open) vs {:.2} MiB legacy ({page_count} x pruned ChatBoardStateV1)",
+        compact_total_mib,
+        page_count.saturating_sub(2),
+        legacy_total_mib
+    );
+    println!(
+        "authority sync fan-out: 1 contract/section (manifest only) instead of {page_count} pages/section"
     );
     println!(
         "new topic delta: {:>6.1} KiB; fan-out {:.2} MiB ({subscribers} subscribers)",
@@ -576,8 +730,8 @@ fn page_scenario(members: usize, topics: usize, page_size: usize, subscribers: u
         delta_kib / 1024.0 * subscribers as f64
     );
     println!(
-        "new subscriber bootstrap: page {:.1} KiB instead of section {:.1} KiB",
-        page_kib, whole_kib
+        "new subscriber bootstrap: manifest {:.1} KiB + sealed page {:.1} KiB ({:.2} ms verify) instead of section {:.1} KiB",
+        page_kib, compact_sealed_kib, compact_sealed_verify, whole_kib
     );
 }
 
