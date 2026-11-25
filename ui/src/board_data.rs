@@ -491,6 +491,45 @@ impl BoardData {
         self.owner_key().verifying_key() == self.current_owner_key()
     }
 
+    /// Recompute and sign the board authority root when the member, role, ban
+    /// or suspension records changed. Members cannot sign it; they receive the
+    /// owner's root through the board state.
+    pub fn refresh_authority_root(&mut self) {
+        let Some(owner_sk) = self.owner_sk.as_ref() else {
+            return;
+        };
+        if owner_sk.verifying_key() != self.current_owner_key() {
+            return;
+        }
+        let tree = plaza_core::board_state::authority::AuthorityTreeV1::from_board(
+            &self.board_state,
+        );
+        let content_hash = tree.content_hash();
+        let digest = tree.root(0).digest;
+        if self
+            .board_state
+            .authority_root
+            .0
+            .as_ref()
+            .is_some_and(|root| {
+                root.root.digest == digest && root.root.content_hash == content_hash
+            })
+        {
+            return;
+        }
+        let now = plaza_core::board_state::rate_limit::system_time_ms(
+            get_current_system_time(),
+        );
+        let mut root = tree.root(now);
+        root.content_hash = content_hash;
+        self.board_state.authority_root =
+            plaza_core::board_state::authority::AuthorityRootStateV1(Some(
+                plaza_core::board_state::authority::AuthorizedAuthorityRootV1::new(
+                    root, owner_sk,
+                ),
+            ));
+    }
+
     /// Whether the visible identity is the owner, not only whether this client
     /// holds the owner key. The owner key stays available after switching to a
     /// member profile; using it must not put the owner crown or Manage on that
@@ -3601,6 +3640,7 @@ impl Boards {
             board_data.ensure_pq_key();
             board_data.generate_missing_pq_secrets();
         }
+        board_data.refresh_authority_root();
 
         info!("🟢 Inserting board into map...");
         self.removed.retain(|vk| *vk != owner_vk);

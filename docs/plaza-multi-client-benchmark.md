@@ -59,11 +59,13 @@ il fan-out 31,2/32,9 MiB e la sincronizzazione dell'autorita' 12,5/65,9 MiB.
 5. **La propagazione dell'autorita' e' il caso peggiore.** Un cambio di
    ruolo o un ban sincronizza tutte le figlie (39,7 MiB nello scenario da 100
    sezioni dopo il pruning) e poi aggiorna ogni topic. Il limite di 100 topic
-   e' stato rimosso. Ogni topic riceve una radice Merkle e le prove dei suoi
-   membri, non la copia globale di ban/sospensioni; le definizioni dei ruoli
-   restano nel topic. La passata carica ogni topic, quindi il costo CPU del
-   client cresce con il numero di topic: una radice firmata e aggiornamenti
-   incrementali dei topic sono il passo successivo.
+   e' stato rimosso. Ogni topic riceve una radice Merkle firmata dall'owner e
+   le prove dei suoi membri, non la copia globale di ban/sospensioni; le
+   definizioni dei ruoli restano nel topic. Un cambio guidato da un membro
+   azzera la radice fino alla firma successiva dell'owner, e i topic usano
+   temporaneamente le liste complete. La passata carica ogni topic, quindi il
+   costo CPU del client cresce con il numero di topic: aggiornamenti
+   incrementali della sola radice sono il passo successivo.
 
 ## Prossimi passi
 

@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod approvals;
+pub mod authority;
 pub mod ban;
 pub mod category_secrets;
 pub mod configuration;
@@ -237,6 +238,12 @@ pub struct ChatBoardStateV1 {
     /// Topic index for index boards.
     #[serde(default)]
     pub topics: TopicIndexV1,
+
+    /// Owner-signed Merkle root of the member authority. It is the last
+    /// composable field so its verification sees the authority records that
+    /// were applied in the same delta.
+    #[serde(default)]
+    pub authority_root: crate::board_state::authority::AuthorityRootStateV1,
 }
 
 impl ChatBoardStateV1 {
@@ -391,6 +398,15 @@ impl ChatBoardStateV1 {
         if delta.mail_addresses.is_some() {
             self.mail_addresses.verify(self, parameters)?;
         }
+        if delta.authority_root.is_some()
+            || delta.members.is_some()
+            || delta.roles.is_some()
+            || delta.bans.is_some()
+            || delta.ban_revocations.is_some()
+            || delta.suspensions.is_some()
+        {
+            self.authority_root.verify(self, parameters)?;
+        }
         self.topics.verify_limits()?;
         Ok(())
     }
@@ -427,6 +443,7 @@ impl ChatBoardStateV1Delta {
             && self.mail_addresses.is_none()
             && self.mode.is_none()
             && self.sections.is_none()
+            && self.authority_root.is_none()
             && self.topics.is_some()
     }
 
@@ -836,6 +853,19 @@ impl ChatBoardStateV1 {
         self.member_info
             .member_info
             .sort_by_key(|info| info.member_info.member_id);
+
+        // The root is a commitment, not the authority itself. A member-driven
+        // delta or member cleanup can change the tree without a new owner
+        // signature; drop the stale root and let the owner sign a new one on
+        // the next sync. Topics then use the full authority lists.
+        if let Some(root) = &self.authority_root.0 {
+            let tree = crate::board_state::authority::AuthorityTreeV1::from_board(self);
+            if tree.root(root.root.epoch).digest != root.root.digest
+                || tree.content_hash() != root.root.content_hash
+            {
+                self.authority_root.0 = None;
+            }
+        }
 
         Ok(())
     }

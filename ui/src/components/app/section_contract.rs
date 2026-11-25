@@ -721,6 +721,7 @@ pub async fn sync_section_authority(
         state.admin = parent.admin.clone();
         state.ownership = parent.ownership.clone();
         state.sections = parent.sections.clone();
+        state.authority_root = Default::default();
         state.members = parent.members.clone();
         state.roles = parent.roles.clone();
         state.bans = parent.bans.clone();
@@ -954,6 +955,9 @@ pub async fn create_section_board(
         .sort_by_key(|entry| (*entry.section.id.as_bytes(), entry.section.generation));
     child.sections = sections;
     child.topics = TopicIndexV1::default();
+    // The child carries only the pruned authority records; the parent's root
+    // commits to the full board and would not match this state.
+    child.authority_root = Default::default();
     child.recent_messages = Default::default();
     child.trash = Default::default();
     child.message_keys = Default::default();

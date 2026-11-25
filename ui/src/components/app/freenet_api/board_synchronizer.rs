@@ -605,6 +605,15 @@ impl BoardSynchronizer {
 
         info!("Checking for boards to update");
 
+        // The owner signs a new authority root after any member, role or ban
+        // change. Signing before the delta comparison puts the root in the
+        // outgoing delta; members receive the owner's root instead.
+        BOARDS.with_mut(|boards| {
+            for board in boards.map.values_mut() {
+                board.refresh_authority_root();
+            }
+        });
+
         // Only check for boards needing updates if WebAPI is available
         let boards_to_sync = if web_api_available {
             SYNC_INFO.with_mut(|sync_info| sync_info.needs_to_send_update())

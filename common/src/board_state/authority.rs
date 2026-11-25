@@ -6,11 +6,16 @@
 //! member it references. A role or ban change moves one leaf, and the topic
 //! only needs that member's new proof.
 
-use plaza_core::board_state::ban::{AuthorizedBanRevocation, AuthorizedUserBan};
-use plaza_core::board_state::member::{AuthorizedMember, MemberId};
-use plaza_core::board_state::member_moderation::AuthorizedSuspension;
-use plaza_core::board_state::roles::{AuthorizedRole, AuthorizedRoleAssignment};
-use plaza_core::ChatBoardStateV1;
+use crate::board_state::ban::{AuthorizedBanRevocation, AuthorizedUserBan};
+use crate::board_state::member::{AuthorizedMember, MemberId};
+use crate::board_state::member_moderation::AuthorizedSuspension;
+use crate::board_state::rate_limit::system_time_from_ms;
+use crate::board_state::roles::{AuthorizedRole, AuthorizedRoleAssignment};
+use crate::board_state::ChatBoardParametersV1;
+use crate::util::{sign_struct, verify_struct};
+use crate::ChatBoardStateV1;
+use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
+use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
 
 pub const AUTHORITY_ROOT_VERSION: u8 = 1;
@@ -54,12 +59,135 @@ impl MemberStatusV1 {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct AuthorityRootV1 {
     pub version: u8,
+    /// Board owner key this root belongs to, so a root cannot be replayed on
+    /// another board with the same owner and member set.
+    #[serde(default)]
+    pub board: [u8; 32],
     /// Monotonic client timestamp; a newer root wins when merging.
     pub epoch: i64,
     /// Hash of the authority content, so a sync can skip an unchanged set.
     #[serde(default)]
     pub content_hash: i64,
     pub digest: [u8; 32],
+}
+
+/// A root signed by the board owner. Members copy this value into their
+/// topics, so a topic can verify that the root is the board's canonical one
+/// instead of accepting a root assembled by whichever client created it.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct AuthorizedAuthorityRootV1 {
+    pub root: AuthorityRootV1,
+    pub signer: MemberId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    pub signature: Signature,
+}
+
+impl AuthorizedAuthorityRootV1 {
+    pub fn new(mut root: AuthorityRootV1, owner: &SigningKey) -> Self {
+        root.board = owner.verifying_key().to_bytes();
+        Self {
+            signature: sign_struct(&root, owner),
+            root,
+            signer: MemberId::from(&owner.verifying_key()),
+            signer_key: Some(owner.verifying_key()),
+        }
+    }
+
+    pub fn verify(&self, owner_key: &VerifyingKey) -> Result<(), String> {
+        if self.signer != MemberId::from(owner_key) {
+            return Err("authority root is signed by someone other than the owner".to_string());
+        }
+        if self.root.board != owner_key.to_bytes() {
+            return Err("authority root belongs to another board".to_string());
+        }
+        verify_struct(&self.root, &self.signature, owner_key)
+            .map_err(|error| format!("invalid authority root signature: {error}"))
+    }
+}
+
+/// The board's stored root. It is the last composable field, so its
+/// verification sees the authority records that were applied in the same delta.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+pub struct AuthorityRootStateV1(pub Option<AuthorizedAuthorityRootV1>);
+
+impl ComposableState for AuthorityRootStateV1 {
+    type ParentState = ChatBoardStateV1;
+    type Summary = Option<AuthorizedAuthorityRootV1>;
+    type Delta = AuthorizedAuthorityRootV1;
+    type Parameters = ChatBoardParametersV1;
+
+    fn verify(
+        &self,
+        parent_state: &Self::ParentState,
+        parameters: &Self::Parameters,
+    ) -> Result<(), String> {
+        let Some(root) = &self.0 else {
+            return Ok(());
+        };
+        self.verify_signature(parent_state, parameters)?;
+        let tree = AuthorityTreeV1::from_board(parent_state);
+        let expected = tree.root(root.root.epoch);
+        if expected.digest != root.root.digest {
+            return Err("the authority root does not match the board members".to_string());
+        }
+        if tree.content_hash() != root.root.content_hash {
+            return Err("the authority root content hash is stale".to_string());
+        }
+        Ok(())
+    }
+
+    fn summarize(
+        &self,
+        _parent_state: &Self::ParentState,
+        _parameters: &Self::Parameters,
+    ) -> Self::Summary {
+        self.0.clone()
+    }
+
+    fn delta(
+        &self,
+        _parent_state: &Self::ParentState,
+        _parameters: &Self::Parameters,
+        old_state_summary: &Self::Summary,
+    ) -> Option<Self::Delta> {
+        let current = self.0.as_ref()?;
+        match old_state_summary {
+            Some(previous) if previous.root.epoch >= current.root.epoch => None,
+            _ => Some(current.clone()),
+        }
+    }
+
+    fn apply_delta(
+        &mut self,
+        parent_state: &Self::ParentState,
+        parameters: &Self::Parameters,
+        delta: &Option<Self::Delta>,
+    ) -> Result<(), String> {
+        if let Some(root) = delta {
+            self.0 = Some(root.clone());
+        }
+        // The tree may still change in `post_apply_cleanup` (a member can be
+        // pruned); the board verifies the full root after cleanup. Here we
+        // only need the signature and the board binding.
+        self.verify_signature(parent_state, parameters)
+    }
+}
+
+impl AuthorityRootStateV1 {
+    fn verify_signature(
+        &self,
+        parent_state: &ChatBoardStateV1,
+        parameters: &ChatBoardParametersV1,
+    ) -> Result<(), String> {
+        let Some(root) = &self.0 else {
+            return Ok(());
+        };
+        let owner_key = parent_state
+            .ownership
+            .owner_key_at(parameters, system_time_from_ms(root.root.epoch));
+        root.verify(&owner_key)
+    }
 }
 
 /// One member's leaf and its path to the root. `leaf_count` is the padded tree
@@ -183,6 +311,7 @@ impl AuthorityTreeV1 {
     pub fn root(&self, epoch: i64) -> AuthorityRootV1 {
         AuthorityRootV1 {
             version: AUTHORITY_ROOT_VERSION,
+            board: [0u8; 32],
             epoch,
             content_hash: 0,
             digest: *self
@@ -191,6 +320,17 @@ impl AuthorityTreeV1 {
                 .and_then(|level| level.first())
                 .unwrap_or(&[0u8; 32]),
         }
+    }
+
+    /// Canonical hash of the leaf set. Both the board contract and the client
+    /// derive it from the same sorted leaves.
+    pub fn content_hash(&self) -> i64 {
+        let mut bytes = Vec::with_capacity(self.leaves.len() * 32);
+        for leaf in &self.leaves {
+            bytes.extend_from_slice(leaf);
+        }
+        let hash = blake3::hash(&bytes);
+        i64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap_or([0u8; 8]))
     }
 
     pub fn proof(&self, member_id: MemberId) -> Option<MemberStatusProofV1> {
@@ -269,7 +409,7 @@ impl MemberStatusProofV1 {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use plaza_core::board_state::member::{Member, MembersV1};
+    use crate::board_state::member::{Member, MembersV1};
     use std::time::SystemTime;
 
     fn member(index: u8, owner: &SigningKey) -> AuthorizedMember {
@@ -327,8 +467,53 @@ mod tests {
     }
 
     #[test]
+    fn a_signed_root_matches_the_board() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let mut state = ChatBoardStateV1::default();
+        state.members.members.push(member(2, &owner));
+        let tree = AuthorityTreeV1::from_board(&state);
+        let mut root = tree.root(1);
+        root.content_hash = tree.content_hash();
+        let stored = AuthorityRootStateV1(Some(AuthorizedAuthorityRootV1::new(root, &owner)));
+        let params = crate::board_state::ChatBoardParametersV1 {
+            owner: owner.verifying_key(),
+        };
+        stored.verify(&state, &params).unwrap();
+    }
+
+    #[test]
+    fn a_root_from_another_board_is_rejected() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let other = SigningKey::from_bytes(&[9u8; 32]);
+        let mut state = ChatBoardStateV1::default();
+        state.members.members.push(member(2, &owner));
+        let tree = AuthorityTreeV1::from_board(&state);
+        let root = AuthorizedAuthorityRootV1::new(tree.root(1), &other);
+        let params = crate::board_state::ChatBoardParametersV1 {
+            owner: owner.verifying_key(),
+        };
+        assert!(root.verify(&params.owner).is_err());
+    }
+
+    #[test]
+    fn a_stale_root_is_rejected() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let mut state = ChatBoardStateV1::default();
+        state.members.members.push(member(2, &owner));
+        let tree = AuthorityTreeV1::from_board(&state);
+        let mut root = tree.root(1);
+        root.content_hash = tree.content_hash();
+        let stored = AuthorityRootStateV1(Some(AuthorizedAuthorityRootV1::new(root, &owner)));
+        let params = crate::board_state::ChatBoardParametersV1 {
+            owner: owner.verifying_key(),
+        };
+        state.members.members.push(member(3, &owner));
+        assert!(stored.verify(&state, &params).is_err());
+    }
+
+    #[test]
     fn a_banned_non_member_gets_a_status_leaf() {
-        use plaza_core::board_state::ban::UserBan;
+        use crate::board_state::ban::UserBan;
         let owner = SigningKey::from_bytes(&[1u8; 32]);
         let owner_id = MemberId::from(&owner.verifying_key());
         let target = member(2, &owner);

@@ -4,10 +4,9 @@
 //! participants, posts, moderation actions, approvals and the state envelope.
 //! The client and the UI are Phase 3+.
 
-pub mod authority;
-pub use authority::{
-    AuthorityRootV1, AuthorityTreeV1, MemberStatusProofV1, MemberStatusV1,
-    AUTHORITY_ROOT_VERSION,
+pub use plaza_core::board_state::authority::{
+    AuthorityRootV1, AuthorityTreeV1, AuthorizedAuthorityRootV1,
+    MemberStatusProofV1, MemberStatusV1, AUTHORITY_ROOT_VERSION,
 };
 
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
@@ -334,10 +333,10 @@ pub struct TopicAuthorityV1 {
     /// sign a topic policy themselves. The topic derives its policy from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_configuration: Option<AuthorizedConfigurationV1>,
-    /// Compact commitment to the board authority. When present, the topic
-    /// keeps only the proofs of the members it references.
+    /// Compact commitment to the board authority, signed by the owner. When
+    /// present, the topic keeps only the proofs of the members it references.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root: Option<AuthorityRootV1>,
+    pub root: Option<AuthorizedAuthorityRootV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub member_proofs: Vec<MemberStatusProofV1>,
 }
@@ -1087,9 +1086,14 @@ impl TopicStateV1 {
             .verify(view, board_params)?;
         self.authority.suspensions.verify(view, board_params)?;
         if let Some(root) = &self.authority.root {
-            if root.version != AUTHORITY_ROOT_VERSION {
+            if root.root.version != AUTHORITY_ROOT_VERSION {
                 return Err("unsupported authority root version".to_string());
             }
+            let owner_key = self.authority.ownership.owner_key_at(
+                board_params,
+                system_time_from_ms(root.root.epoch),
+            );
+            root.verify(&owner_key)?;
             let mut seen_members = HashSet::new();
             let mut proof_roles = RolesV1::default();
             let mut proof_bans = BansV1(Vec::new());
@@ -1100,7 +1104,7 @@ impl TopicStateV1 {
                 suspensions: Vec::new(),
             };
             for proof in &self.authority.member_proofs {
-                proof.verify(root)?;
+                proof.verify(&root.root)?;
                 if !seen_members.insert(proof.status.member_id()) {
                     return Err("duplicate authority proof".to_string());
                 }
@@ -2206,13 +2210,14 @@ fn merge_authority(left: &TopicAuthorityV1, right: &TopicAuthorityV1) -> TopicAu
 fn merge_authority_root(
     left: &TopicAuthorityV1,
     right: &TopicAuthorityV1,
-) -> (Option<AuthorityRootV1>, Vec<MemberStatusProofV1>) {
+) -> (Option<AuthorizedAuthorityRootV1>, Vec<MemberStatusProofV1>) {
     let root = match (left.root.as_ref(), right.root.as_ref()) {
         (None, None) => None,
         (Some(root), None) | (None, Some(root)) => Some(root.clone()),
         (Some(left), Some(right)) => {
-            if right.epoch > left.epoch
-                || (right.epoch == left.epoch && right.digest < left.digest)
+            if right.root.epoch > left.root.epoch
+                || (right.root.epoch == left.root.epoch
+                    && right.root.digest < left.root.digest)
             {
                 Some(right.clone())
             } else {
@@ -2229,7 +2234,7 @@ fn merge_authority_root(
         .iter()
         .chain(right.member_proofs.iter())
     {
-        if proof.verify(&root).is_ok() {
+        if proof.verify(&root.root).is_ok() {
             proofs.insert(proof.status.member_id(), proof.clone());
         }
     }
@@ -2661,7 +2666,7 @@ mod authority_root_tests {
         state.authority.bans = BansV1(Vec::new());
         state.authority.ban_revocations = BanRevocationsV1::default();
         state.authority.suspensions = SuspensionsV1::default();
-        state.authority.root = Some(tree.root(1));
+        state.authority.root = Some(AuthorizedAuthorityRootV1::new(tree.root(1), &owner()));
         state.authority.member_proofs = tree.proofs_for([&member_id]);
         state
     }

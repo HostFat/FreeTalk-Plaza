@@ -900,8 +900,24 @@ fn authority_from_board(
         (None, Some(board.board_state.configuration.clone()))
     };
     let tree = plaza_topic_core::AuthorityTreeV1::from_board(&board.board_state);
-    let mut root = tree.root(system_time_ms(get_current_system_time()));
-    root.content_hash = authority_hash(board);
+    let content_hash = tree.content_hash();
+    let digest = tree.root(0).digest;
+    let signed_root = board
+        .board_state
+        .authority_root
+        .0
+        .clone()
+        .filter(|root| {
+            root.root.digest == digest && root.root.content_hash == content_hash
+        })
+        .or_else(|| {
+            board.owner_sk.as_ref().map(|owner_sk| {
+                let mut root =
+                    tree.root(system_time_ms(get_current_system_time()));
+                root.content_hash = content_hash;
+                plaza_topic_core::AuthorizedAuthorityRootV1::new(root, owner_sk)
+            })
+        });
     // A ban also needs the banner's key to verify its signature. When the
     // banner is not the owner or an admin, include that member's proof too.
     let owner_id = MemberId::from(&board.owner_vk);
@@ -940,23 +956,45 @@ fn authority_from_board(
             break;
         }
     }
-    let member_proofs = tree.proofs_for(ids.iter());
+    let (root, member_proofs, roles, bans, ban_revocations, suspensions) =
+        if let Some(root) = signed_root {
+            (
+                Some(root),
+                tree.proofs_for(ids.iter()),
+                plaza_core::board_state::roles::RolesV1 {
+                    // Role definitions stay complete: a token join and a
+                    // role-based moderator need the definition even when the
+                    // member has no signed assignment.
+                    roles: board.board_state.roles.roles.clone(),
+                    assignments: Vec::new(),
+                },
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )
+        } else {
+            // No owner-signed root is available yet (legacy board or a member
+            // that has not received it). Keep the full lists; the contract
+            // still verifies every record.
+            (
+                None,
+                Vec::new(),
+                board.board_state.roles.clone(),
+                board.board_state.bans.clone(),
+                board.board_state.ban_revocations.clone(),
+                board.board_state.suspensions.clone(),
+            )
+        };
     Ok(plaza_topic_core::TopicAuthorityV1 {
         ownership: board.board_state.ownership.clone(),
         admins: board.board_state.admin.clone(),
-        // Role definitions stay complete: a token join and a role-based
-        // moderator need the definition even when the member has no signed
-        // assignment. Assignments travel in the member proofs.
-        roles: plaza_core::board_state::roles::RolesV1 {
-            roles: board.board_state.roles.roles.clone(),
-            assignments: Vec::new(),
-        },
-        bans: Default::default(),
-        ban_revocations: Default::default(),
-        suspensions: Default::default(),
+        roles,
+        bans,
+        ban_revocations,
+        suspensions,
         policy,
         source_configuration,
-        root: Some(root),
+        root,
         member_proofs,
     })
 }
@@ -1032,7 +1070,8 @@ pub async fn sync_topic_authority(
         &generated.root,
     ) {
         (Some(current), Some(next)) => {
-            current.content_hash == next.content_hash && current.digest == next.digest
+            current.root.content_hash == next.root.content_hash
+                && current.root.digest == next.root.digest
         }
         (None, None) => true,
         _ => false,
