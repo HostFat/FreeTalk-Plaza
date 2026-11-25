@@ -4,6 +4,9 @@
 //! participants, posts, moderation actions, approvals and the state envelope.
 //! The client and the UI are Phase 3+.
 
+pub mod pages;
+pub use pages::*;
+
 pub use plaza_core::board_state::authority::{
     AuthorityRootV1, AuthorityTreeV1, AuthorizedAuthorityRootV1,
     MemberStatusProofV1, MemberStatusV1, AUTHORITY_ROOT_VERSION,
@@ -642,6 +645,9 @@ pub struct TopicStateV1 {
     pub approvals: Vec<AuthorizedTopicApprovalV1>,
     #[serde(default)]
     pub generation: TopicGenerationV1,
+    /// Optional owner/admin seal freezing `posts` on `part == 0` once closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posts_seal: Option<AuthorizedTopicPageSealV1>,
 }
 
 impl Default for TopicStateV1 {
@@ -657,6 +663,7 @@ impl Default for TopicStateV1 {
             actions: Vec::new(),
             approvals: Vec::new(),
             generation: TopicGenerationV1::default(),
+            posts_seal: None,
         }
     }
 }
@@ -681,6 +688,8 @@ pub struct TopicDeltaV1 {
     pub approvals: Vec<AuthorizedTopicApprovalV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<TopicGenerationV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posts_seal: Option<AuthorizedTopicPageSealV1>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -704,6 +713,8 @@ pub struct TopicStateSummaryV1 {
     pub approvals: BTreeMap<MessageId, u64>,
     #[serde(default)]
     pub generation: TopicGenerationV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posts_seal_hash: Option<[u8; 32]>,
 }
 
 impl Default for TopicStateSummaryV1 {
@@ -719,11 +730,75 @@ impl Default for TopicStateSummaryV1 {
             actions: BTreeSet::new(),
             approvals: BTreeMap::new(),
             generation: TopicGenerationV1::default(),
+            posts_seal_hash: None,
         }
     }
 }
 
 impl TopicStateV1 {
+    pub fn is_posts_sealed(&self) -> bool {
+        self.posts_seal.is_some()
+    }
+
+    pub fn is_closed_part(&self) -> bool {
+        self.posts_seal.is_some() || self.generation.closed_at.is_some()
+    }
+
+    pub fn state_hash(&self) -> Result<[u8; 32], String> {
+        let bytes = encode(self)?;
+        Ok(*blake3::hash(&bytes).as_bytes())
+    }
+
+    pub fn posts_digest(&self) -> Result<[u8; 32], String> {
+        pages::canonical_posts_digest(&self.posts)
+    }
+
+    /// Build a `TopicPageSealV1` freezing the posts on `part == 0`.
+    pub fn build_posts_seal(
+        &self,
+        params: &TopicParamsV1,
+        sealed_at: i64,
+    ) -> Result<TopicPageSealV1, String> {
+        if params.part != 0 {
+            return Err("posts_seal on TopicStateV1 is only for part 0".to_string());
+        }
+        Ok(TopicPageSealV1 {
+            topic_id: params.topic_id,
+            part: 0,
+            post_count: self.posts.len() as u32,
+            action_count: 0,
+            approval_count: 0,
+            content_digest: self.posts_digest()?,
+            next_part: 1,
+            sealed_at,
+        })
+    }
+
+    fn verify_posts_seal(
+        &self,
+        seal: &AuthorizedTopicPageSealV1,
+        view: &ChatBoardStateV1,
+        board_params: &ChatBoardParametersV1,
+        params: &TopicParamsV1,
+    ) -> Result<(), String> {
+        if params.part != 0 || seal.seal.part != 0 {
+            return Err("posts_seal is only valid on part 0".to_string());
+        }
+        if seal.seal.topic_id != params.topic_id || seal.seal.next_part != 1 {
+            return Err("posts_seal does not match topic parameters".to_string());
+        }
+        if seal.seal.post_count as usize != self.posts.len()
+            || seal.seal.action_count != 0
+            || seal.seal.approval_count != 0
+        {
+            return Err("posts_seal counts do not match posts".to_string());
+        }
+        if seal.seal.content_digest != self.posts_digest()? {
+            return Err("posts_seal digest mismatch".to_string());
+        }
+        pages::verify_page_seal_authority(seal, view, board_params)
+    }
+
     pub fn verify(&self, params: &TopicParamsV1) -> Result<(), String> {
         if !self.verify_shape(params)? {
             return Ok(());
@@ -735,7 +810,11 @@ impl TopicStateV1 {
         self.verify_authority(&view, &board_params)?;
         self.verify_section(&view, &board_params, params)?;
         self.verify_trust(&view, &board_params)?;
-        self.verify_posts(&view, &board_params, params)?;
+        if let Some(seal) = &self.posts_seal {
+            self.verify_posts_seal(seal, &view, &board_params, params)?;
+        } else {
+            self.verify_posts(&view, &board_params, params)?;
+        }
         self.verify_actions(&view, &board_params)?;
         self.verify_approvals(&view, &board_params)?;
 
@@ -772,6 +851,7 @@ impl TopicStateV1 {
                 || !self.posts.is_empty()
                 || !self.actions.is_empty()
                 || !self.approvals.is_empty()
+                || self.posts_seal.is_some()
             {
                 return Err("a topic without a header cannot carry content".to_string());
             }
@@ -841,8 +921,12 @@ impl TopicStateV1 {
         if !delta.trust.is_empty() {
             self.verify_trust(&view, &board_params)?;
         }
-        for entry in &delta.posts {
-            self.verify_post_record(&entry.post.id(), entry, &view, &board_params, params)?;
+        if let Some(seal) = &delta.posts_seal {
+            self.verify_posts_seal(seal, &view, &board_params, params)?;
+        } else {
+            for entry in &delta.posts {
+                self.verify_post_record(&entry.post.id(), entry, &view, &board_params, params)?;
+            }
         }
         for entry in &delta.actions {
             self.verify_action_record(entry, &view, &board_params)?;
@@ -858,218 +942,7 @@ impl TopicStateV1 {
         params: &TopicParamsV1,
         board_params: &ChatBoardParametersV1,
     ) -> Result<(), String> {
-        let mut ids = HashSet::new();
-        let mut keys = HashSet::new();
-        for participant in &self.participants {
-            let record = &participant.record;
-            if record.member_id != MemberId::from(&record.member_vk) {
-                return Err("participant id does not match its key".to_string());
-            }
-            if record.certificate.member.member.id() != record.member_id {
-                return Err("participant certificate is for another member".to_string());
-            }
-            if record.certificate.member.member.member_vk != record.member_vk {
-                return Err("participant key does not match its certificate".to_string());
-            }
-            verify_struct(&record, &participant.signature, &record.member_vk)
-                .map_err(|error| format!("invalid participant signature: {error}"))?;
-            if !ids.insert(record.member_id) || !keys.insert(record.member_vk) {
-                return Err("duplicate participant".to_string());
-            }
-            self.verify_certificate(&record.certificate, record.joined_at, params, board_params)?;
-        }
-        Ok(())
-    }
-
-    fn verify_certificate(
-        &self,
-        certificate: &ParticipantCertificateV1,
-        joined_at: i64,
-        params: &TopicParamsV1,
-        board_params: &ChatBoardParametersV1,
-    ) -> Result<(), String> {
-        let owner_id = params.owner_id();
-        let owner_key = self
-            .authority
-            .ownership
-            .owner_key_at(board_params, system_time_from_ms(joined_at));
-        let member = &certificate.member.member;
-        if member.owner_member_id != owner_id {
-            return Err("the member record belongs to another board".to_string());
-        }
-
-        if certificate.token.is_some() || certificate.join_proof.is_some() {
-            let token = certificate
-                .token
-                .as_ref()
-                .ok_or("a token join needs its token record")?;
-            let proof = certificate
-                .join_proof
-                .as_ref()
-                .ok_or("a token join needs its join proof")?;
-            if member.invited_by != member.id() {
-                return Err("a token-joined member must be self-signed".to_string());
-            }
-            certificate
-                .member
-                .verify_signature(&member.member_vk)
-                .map_err(|error| format!("invalid token-joined member signature: {error}"))?;
-            if token.token.deleted {
-                return Err("the invite token is deleted".to_string());
-            }
-            if token.token.id != proof.token_id {
-                return Err("the join proof names another token".to_string());
-            }
-            if let Some(not_after) = token.token.not_after {
-                if system_time_ms(not_after) < joined_at {
-                    return Err("the invite token had expired".to_string());
-                }
-            }
-            self.authority
-                .roles
-                .role(&token.token.role_id)
-                .ok_or("the invite token grants a role that no longer exists")?;
-            proof
-                .verify(
-                    &token.token.verifying_key,
-                    &join_message(&params.board_owner, &member.member_vk),
-                )
-                .map_err(|error| format!("invalid join proof: {error}"))?;
-
-            let signer = token.signer.unwrap_or(owner_id);
-            let manager_at = system_time_from_ms(token.token.created_at.map(system_time_ms).unwrap_or(joined_at));
-            if signer == owner_id {
-                let token_owner_key = self
-                    .authority
-                    .ownership
-                    .owner_key_at(board_params, manager_at);
-                token
-                    .verify_signature(&token_owner_key)
-                    .map_err(|error| format!("invalid invite token signature: {error}"))?;
-            } else {
-                let key = resolve_signer_key(
-                    &self.board_view(params),
-                    board_params,
-                    &signer,
-                    token.signer_key.as_ref(),
-                )?;
-                verify_struct(&token.token, &token.signature, &key)
-                    .map_err(|error| format!("invalid invite token signature: {error}"))?;
-            }
-            self.verify_token_manager(&signer, token, board_params, params, manager_at)?;
-            return Ok(());
-        }
-
-        // Invite chain up to the owner.
-        let mut current = &certificate.member;
-        let mut seen = HashSet::new();
-        let current_owner = self
-            .authority
-            .ownership
-            .owner_at(board_params, system_time_from_ms(joined_at));
-        for _ in 0..MAX_JOIN_DEPTH {
-            let current_member = &current.member;
-            let inviter = current_member.invited_by;
-            if inviter == owner_id {
-                current
-                    .verify_signature(&params.board_owner)
-                    .map_err(|error| format!("invalid invite chain signature: {error}"))?;
-                return Ok(());
-            }
-            if inviter == current_owner {
-                current
-                    .verify_signature(&owner_key)
-                    .map_err(|error| format!("invalid invite chain signature: {error}"))?;
-                return Ok(());
-            }
-            if !seen.insert(current_member.id()) {
-                return Err("circular invite chain".to_string());
-            }
-            let parent = certificate
-                .chain
-                .iter()
-                .find(|candidate| candidate.member.id() == inviter)
-                .ok_or("the invite chain is incomplete")?;
-            current
-                .verify_signature(&parent.member.member_vk)
-                .map_err(|error| format!("invalid invite chain signature: {error}"))?;
-            current = parent;
-        }
-        Err("the invite chain is too deep".to_string())
-    }
-
-    fn verify_token_manager(
-        &self,
-        signer: &MemberId,
-        token: &AuthorizedInviteToken,
-        board_params: &ChatBoardParametersV1,
-        params: &TopicParamsV1,
-        at: SystemTime,
-    ) -> Result<(), String> {
-        let view = self.board_view(params);
-        if *signer == self.authority.ownership.owner_at(board_params, at) {
-            return Ok(());
-        }
-        if verify_owner_or_admin(&view, board_params, signer, token.authority.as_deref(), at)
-            .is_ok()
-        {
-            return Ok(());
-        }
-        if view.roles.can_manage_access(signer) {
-            return Ok(());
-        }
-        if let Some(proof) = token.authority.as_deref() {
-            if let Some(grant) = proof.grant.as_ref() {
-                if grant.role.role.can_manage_access
-                    && !grant.role.role.deleted
-                    && grant.assignment.assignment.member_id == *signer
-                    && grant.assignment.assignment.role_id == grant.role.role.id
-                    && !grant.assignment.assignment.revoked
-                {
-                    let role_signer = grant.role.signer_id(board_params);
-                    let role_key = resolve_signer_key(
-                        &view,
-                        board_params,
-                        &role_signer,
-                        grant.role.signer_key.as_ref(),
-                    )?;
-                    grant.role.verify_signature_with(&role_key)?;
-                    verify_owner_or_admin(
-                        &view,
-                        board_params,
-                        &role_signer,
-                        grant.role.authority.as_deref(),
-                        grant.role.role.signed_at,
-                    )?;
-                    let assignment_signer = grant.assignment.signer_id(board_params);
-                    let assignment_key = resolve_signer_key(
-                        &view,
-                        board_params,
-                        &assignment_signer,
-                        grant.assignment.signer_key.as_ref(),
-                    )?;
-                    verify_struct(
-                        &grant.assignment.assignment,
-                        &grant.assignment.signature,
-                        &assignment_key,
-                    )
-                    .map_err(|error| format!("invalid role assignment signature: {error}"))?;
-                    if verify_owner_or_admin(
-                        &view,
-                        board_params,
-                        &assignment_signer,
-                        grant.assignment.authority.as_deref(),
-                        grant.assignment.assignment.signed_at,
-                    )
-                    .is_ok()
-                        || view.roles.can_manage_access(&assignment_signer)
-                    {
-                        return Ok(());
-                    }
-                }
-            }
-        }
-        Err("the invite token signer cannot manage access".to_string())
+        verify_participants_list(&self.authority, &self.participants, params, board_params)
     }
 
     fn verify_authority(
@@ -1077,98 +950,7 @@ impl TopicStateV1 {
         view: &ChatBoardStateV1,
         board_params: &ChatBoardParametersV1,
     ) -> Result<(), String> {
-        self.authority.ownership.verify(view, board_params)?;
-        self.authority.admins.verify(view, board_params)?;
-        self.authority.roles.verify(view, board_params)?;
-        self.authority.bans.verify(view, board_params)?;
-        self.authority
-            .ban_revocations
-            .verify(view, board_params)?;
-        self.authority.suspensions.verify(view, board_params)?;
-        if let Some(root) = &self.authority.root {
-            if root.root.version != AUTHORITY_ROOT_VERSION {
-                return Err("unsupported authority root version".to_string());
-            }
-            let owner_key = self.authority.ownership.owner_key_at(
-                board_params,
-                system_time_from_ms(root.root.epoch),
-            );
-            root.verify(&owner_key)?;
-            let mut seen_members = HashSet::new();
-            let mut proof_roles = RolesV1::default();
-            let mut proof_bans = BansV1(Vec::new());
-            let mut proof_revocations = BanRevocationsV1 {
-                revocations: Vec::new(),
-            };
-            let mut proof_suspensions = SuspensionsV1 {
-                suspensions: Vec::new(),
-            };
-            for proof in &self.authority.member_proofs {
-                proof.verify(&root.root)?;
-                if !seen_members.insert(proof.status.member_id()) {
-                    return Err("duplicate authority proof".to_string());
-                }
-                proof_roles.roles.extend(proof.status.roles.iter().cloned());
-                proof_roles
-                    .assignments
-                    .extend(proof.status.assignments.iter().cloned());
-                proof_bans.0.extend(proof.status.bans.iter().cloned());
-                proof_revocations
-                    .revocations
-                    .extend(proof.status.revocations.iter().cloned());
-                proof_suspensions
-                    .suspensions
-                    .extend(proof.status.suspensions.iter().cloned());
-            }
-            let mut seen_roles = HashSet::new();
-            proof_roles.roles.retain(|role| seen_roles.insert(role.role.id));
-            let mut seen_assignments = HashSet::new();
-            proof_roles.assignments.retain(|assignment| {
-                seen_assignments.insert((
-                    assignment.assignment.role_id,
-                    assignment.assignment.member_id,
-                    assignment.assignment.generation,
-                ))
-            });
-            let mut seen_bans = HashSet::new();
-            proof_bans.0.retain(|ban| seen_bans.insert(ban.id()));
-            let mut seen_revocations = HashSet::new();
-            proof_revocations
-                .revocations
-                .retain(|revocation| seen_revocations.insert(revocation.revocation.ban_id.clone()));
-            let mut seen_suspensions = HashSet::new();
-            proof_suspensions.suspensions.retain(|suspension| {
-                seen_suspensions.insert((
-                    suspension.suspension.target,
-                    suspension.suspension.generation,
-                ))
-            });
-            proof_roles.verify(view, board_params)?;
-            proof_bans.verify(view, board_params)?;
-            proof_revocations.verify(view, board_params)?;
-            proof_suspensions.verify(view, board_params)?;
-        }
-        let owner_id = view.ownership.current_owner(board_params);
-        if let Some(source) = &self.authority.source_configuration {
-            let at_ms = system_time_ms(source.configuration.updated_at);
-            let owner_key = self
-                .authority
-                .ownership
-                .owner_key_at(board_params, system_time_from_ms(at_ms));
-            source
-                .verify_signature(&owner_key)
-                .map_err(|error| format!("invalid source configuration signature: {error}"))?;
-        } else if let Some(policy) = &self.authority.policy {
-            let at_ms = policy.policy.updated_at;
-            let owner_key = self
-                .authority
-                .ownership
-                .owner_key_at(board_params, system_time_from_ms(at_ms));
-            policy.verify(&owner_key, owner_id)?;
-        } else {
-            return Err("the topic has no policy".to_string());
-        }
-        Ok(())
+        verify_authority_records(&self.authority, view, board_params)
     }
 
     fn verify_section(
@@ -1494,13 +1276,13 @@ impl TopicStateV1 {
                 Some(_) => return Err("topic header is immutable".to_string()),
             }
         }
-        if (self.generation.closed_at.is_some()
-            || delta
+        let already_closed = self.posts_seal.is_some() || self.generation.closed_at.is_some();
+        let closing_without_seal = delta.posts_seal.is_none()
+            && delta
                 .generation
                 .as_ref()
-                .is_some_and(|generation| generation.closed_at.is_some()))
-            && !delta.posts.is_empty()
-        {
+                .is_some_and(|generation| generation.closed_at.is_some());
+        if (already_closed || closing_without_seal) && !delta.posts.is_empty() {
             return Err("the topic is closed to new posts".to_string());
         }
         if let Some(section) = &delta.section {
@@ -1534,8 +1316,21 @@ impl TopicStateV1 {
         if let Some(generation) = &delta.generation {
             self.generation = merge_generation(&self.generation, generation);
         }
+        if let Some(seal) = &delta.posts_seal {
+            match &self.posts_seal {
+                None => {
+                    self.posts_seal = Some(seal.clone());
+                    if self.generation.closed_at.is_none() {
+                        self.generation.closed_at = Some(seal.seal.sealed_at);
+                    }
+                    self.generation.next_part = Some(seal.seal.next_part);
+                }
+                Some(existing) if existing == seal => {}
+                Some(_) => return Err("cannot replace an existing posts seal".to_string()),
+            }
+        }
 
-        if !delta.posts.is_empty() {
+        if !delta.posts.is_empty() && delta.posts_seal.is_none() {
             self.check_rate_limit(&delta.posts)?;
         }
         Ok(())
@@ -1589,8 +1384,23 @@ impl TopicStateV1 {
         for trust in &other.trust {
             merge_trust(&mut self.trust, trust);
         }
-        for (id, post) in &other.posts {
-            self.posts.entry(*id).or_insert_with(|| post.clone());
+        match (&self.posts_seal, &other.posts_seal) {
+            (None, None) => {
+                for (id, post) in &other.posts {
+                    self.posts.entry(*id).or_insert_with(|| post.clone());
+                }
+            }
+            (Some(_), None) => {}
+            (None, Some(other_seal)) => {
+                self.posts = other.posts.clone();
+                self.posts_seal = Some(other_seal.clone());
+            }
+            (Some(left), Some(right)) => {
+                if pages::compare_seals(right, left) == std::cmp::Ordering::Greater {
+                    self.posts = other.posts.clone();
+                    self.posts_seal = Some(right.clone());
+                }
+            }
         }
         for action in &other.actions {
             let id = action.id();
@@ -1602,6 +1412,12 @@ impl TopicStateV1 {
             merge_approval(&mut self.approvals, approval);
         }
         self.generation = merge_generation(&self.generation, &other.generation);
+        if let Some(seal) = &self.posts_seal {
+            if self.generation.closed_at.is_none() {
+                self.generation.closed_at = Some(seal.seal.sealed_at);
+            }
+            self.generation.next_part = Some(seal.seal.next_part);
+        }
         self.normalize();
         self.verify(params)
     }
@@ -1635,29 +1451,7 @@ impl TopicStateV1 {
     }
 
     fn check_rate_limit(&self, incoming: &[AuthorizedTopicPostV1]) -> Result<(), String> {
-        let policy = self.authority.policy();
-        if policy.max_posts_per_window == 0 || policy.rate_window_ms == 0 {
-            return Ok(());
-        }
-        let window = policy.rate_window_ms as i64;
-        let limit = policy.max_posts_per_window as usize;
-        for post in incoming {
-            let author = post.post.author;
-            let at = post.post.created_at;
-            let mut count = 0usize;
-            for existing in self.posts.values() {
-                if existing.post.author == author
-                    && existing.post.created_at <= at
-                    && existing.post.created_at >= at - window
-                {
-                    count += 1;
-                }
-            }
-            if count > limit {
-                return Err("the author exceeded the topic rate limit".to_string());
-            }
-        }
-        Ok(())
+        check_posts_rate_limit(&self.authority, &self.posts, incoming)
     }
 
     pub fn summarize(&self) -> TopicStateSummaryV1 {
@@ -1690,6 +1484,7 @@ impl TopicStateV1 {
             actions: self.actions.iter().map(AuthorizedTopicActionV1::id).collect(),
             approvals,
             generation: self.generation.clone(),
+            posts_seal_hash: self.posts_seal.as_ref().map(AuthorizedTopicPageSealV1::hash),
         }
     }
 
@@ -1744,6 +1539,10 @@ impl TopicStateV1 {
         if summary.generation != self.generation {
             delta.generation = Some(self.generation.clone());
         }
+        let seal_hash = self.posts_seal.as_ref().map(AuthorizedTopicPageSealV1::hash);
+        if summary.posts_seal_hash != seal_hash {
+            delta.posts_seal = self.posts_seal.clone();
+        }
         if delta.header.is_none()
             && delta.section.is_none()
             && delta.authority.is_none()
@@ -1753,6 +1552,7 @@ impl TopicStateV1 {
             && delta.actions.is_empty()
             && delta.approvals.is_empty()
             && delta.generation.is_none()
+            && delta.posts_seal.is_none()
         {
             None
         } else {
@@ -1761,69 +1561,7 @@ impl TopicStateV1 {
     }
 
     pub fn board_view(&self, params: &TopicParamsV1) -> ChatBoardStateV1 {
-        let mut configuration = Configuration::default();
-        configuration.max_admins = 1_000_000;
-        configuration.max_user_bans = 1_000_000;
-        configuration.max_message_size = MAX_POST_BYTES;
-        configuration.owner_member_id = params.owner_id();
-        let dummy = SigningKey::from_bytes(&[0u8; 32]);
-        let mut view = ChatBoardStateV1 {
-            configuration: AuthorizedConfigurationV1::new(configuration, &dummy),
-            ownership: self.authority.ownership.clone(),
-            admin: self.authority.admins.clone(),
-            roles: self.authority.roles.clone(),
-            bans: self.authority.bans.clone(),
-            ban_revocations: self.authority.ban_revocations.clone(),
-            suspensions: self.authority.suspensions.clone(),
-            ..Default::default()
-        };
-        let mut members: Vec<AuthorizedMember> = self
-            .participants
-            .iter()
-            .map(|p| p.record.certificate.member.clone())
-            .collect();
-        for proof in &self.authority.member_proofs {
-            view.roles.roles.extend(proof.status.roles.iter().cloned());
-            view.roles
-                .assignments
-                .extend(proof.status.assignments.iter().cloned());
-            view.bans.0.extend(proof.status.bans.iter().cloned());
-            view.ban_revocations
-                .revocations
-                .extend(proof.status.revocations.iter().cloned());
-            view.suspensions
-                .suspensions
-                .extend(proof.status.suspensions.iter().cloned());
-            members.push(proof.status.member.clone());
-        }
-        let mut seen_members = HashSet::new();
-        members.retain(|member| seen_members.insert(member.member.id()));
-        view.members = MembersV1 { members };
-        let mut seen_roles = HashSet::new();
-        view.roles.roles.retain(|role| seen_roles.insert(role.role.id));
-        let mut seen_assignments = HashSet::new();
-        view.roles.assignments.retain(|assignment| {
-            seen_assignments.insert((
-                assignment.assignment.role_id,
-                assignment.assignment.member_id,
-                assignment.assignment.generation,
-            ))
-        });
-        let mut seen_bans = HashSet::new();
-        view.bans.0.retain(|ban| seen_bans.insert(ban.id()));
-        let mut seen_revocations = HashSet::new();
-        view.ban_revocations
-            .revocations
-            .retain(|revocation| seen_revocations.insert(revocation.revocation.ban_id.clone()));
-        let mut seen_suspensions = HashSet::new();
-        view.suspensions.suspensions.retain(|suspension| {
-            seen_suspensions.insert((
-                suspension.suspension.target,
-                suspension.suspension.generation,
-            ))
-        });
-        let _ = params;
-        view
+        build_board_view(&self.authority, &self.participants, params)
     }
 
     fn author_key(
@@ -1891,61 +1629,11 @@ impl TopicStateV1 {
     }
 
     fn is_banned(&self, member: MemberId, at_ms: i64) -> bool {
-        let revoked: HashSet<_> = self
-            .authority
-            .ban_revocations
-            .revocations
-            .iter()
-            .map(|revocation| revocation.revocation.ban_id.clone())
-            .chain(
-                self.authority
-                    .member_proofs
-                    .iter()
-                    .flat_map(|proof| proof.status.revocations.iter())
-                    .map(|revocation| revocation.revocation.ban_id.clone()),
-            )
-            .collect();
-        self.authority
-            .bans
-            .0
-            .iter()
-            .chain(
-                self.authority
-                    .member_proofs
-                    .iter()
-                    .flat_map(|proof| proof.status.bans.iter()),
-            )
-            .any(|ban| {
-                if ban.ban.banned_user != member {
-                    return false;
-                }
-                let banned_at = system_time_ms(ban.ban.banned_at);
-                let expired = ban
-                    .ban
-                    .expires_at
-                    .map(|expires| system_time_ms(expires) <= at_ms)
-                    .unwrap_or(false);
-                banned_at <= at_ms && !expired && !revoked.contains(&ban.id())
-            })
+        is_member_banned(&self.authority, member, at_ms)
     }
 
     fn is_suspended(&self, member: MemberId, at_ms: i64) -> bool {
-        self.authority
-            .suspensions
-            .suspensions
-            .iter()
-            .chain(
-                self.authority
-                    .member_proofs
-                    .iter()
-                    .flat_map(|proof| proof.status.suspensions.iter()),
-            )
-            .filter(|entry| {
-                entry.suspension.target == member && entry.suspension.created_at <= at_ms
-            })
-            .max_by_key(|entry| entry.suspension.generation)
-            .map(|entry| entry.suspension.until > at_ms)
-            .unwrap_or(false)
+        is_member_suspended(&self.authority, member, at_ms)
     }
 
     pub fn is_banned_member(&self, member: MemberId, at_ms: i64) -> bool {
@@ -2125,7 +1813,488 @@ impl TopicStateV1 {
     }
 }
 
-fn post_cycle(posts: &BTreeMap<MessageId, AuthorizedTopicPostV1>, start: MessageId) -> bool {
+pub(crate) fn build_board_view(
+    authority: &TopicAuthorityV1,
+    participants: &[AuthorizedParticipantV1],
+    params: &TopicParamsV1,
+) -> ChatBoardStateV1 {
+    let mut configuration = Configuration::default();
+    configuration.max_admins = 1_000_000;
+    configuration.max_user_bans = 1_000_000;
+    configuration.max_message_size = MAX_POST_BYTES;
+    configuration.owner_member_id = params.owner_id();
+    let dummy = SigningKey::from_bytes(&[0u8; 32]);
+    let mut view = ChatBoardStateV1 {
+        configuration: AuthorizedConfigurationV1::new(configuration, &dummy),
+        ownership: authority.ownership.clone(),
+        admin: authority.admins.clone(),
+        roles: authority.roles.clone(),
+        bans: authority.bans.clone(),
+        ban_revocations: authority.ban_revocations.clone(),
+        suspensions: authority.suspensions.clone(),
+        ..Default::default()
+    };
+    let mut members: Vec<AuthorizedMember> = participants
+        .iter()
+        .map(|p| p.record.certificate.member.clone())
+        .collect();
+    for proof in &authority.member_proofs {
+        view.roles.roles.extend(proof.status.roles.iter().cloned());
+        view.roles
+            .assignments
+            .extend(proof.status.assignments.iter().cloned());
+        view.bans.0.extend(proof.status.bans.iter().cloned());
+        view.ban_revocations
+            .revocations
+            .extend(proof.status.revocations.iter().cloned());
+        view.suspensions
+            .suspensions
+            .extend(proof.status.suspensions.iter().cloned());
+        members.push(proof.status.member.clone());
+    }
+    let mut seen_members = HashSet::new();
+    members.retain(|member| seen_members.insert(member.member.id()));
+    view.members = MembersV1 { members };
+    let mut seen_roles = HashSet::new();
+    view.roles.roles.retain(|role| seen_roles.insert(role.role.id));
+    let mut seen_assignments = HashSet::new();
+    view.roles.assignments.retain(|assignment| {
+        seen_assignments.insert((
+            assignment.assignment.role_id,
+            assignment.assignment.member_id,
+            assignment.assignment.generation,
+        ))
+    });
+    let mut seen_bans = HashSet::new();
+    view.bans.0.retain(|ban| seen_bans.insert(ban.id()));
+    let mut seen_revocations = HashSet::new();
+    view.ban_revocations
+        .revocations
+        .retain(|revocation| seen_revocations.insert(revocation.revocation.ban_id.clone()));
+    let mut seen_suspensions = HashSet::new();
+    view.suspensions.suspensions.retain(|suspension| {
+        seen_suspensions.insert((
+            suspension.suspension.target,
+            suspension.suspension.generation,
+        ))
+    });
+    view
+}
+
+pub(crate) fn verify_participants_list(
+    authority: &TopicAuthorityV1,
+    participants: &[AuthorizedParticipantV1],
+    params: &TopicParamsV1,
+    board_params: &ChatBoardParametersV1,
+) -> Result<(), String> {
+    let mut ids = HashSet::new();
+    let mut keys = HashSet::new();
+    for participant in participants {
+        let record = &participant.record;
+        if record.member_id != MemberId::from(&record.member_vk) {
+            return Err("participant id does not match its key".to_string());
+        }
+        if record.certificate.member.member.id() != record.member_id {
+            return Err("participant certificate is for another member".to_string());
+        }
+        if record.certificate.member.member.member_vk != record.member_vk {
+            return Err("participant key does not match its certificate".to_string());
+        }
+        verify_struct(&record, &participant.signature, &record.member_vk)
+            .map_err(|error| format!("invalid participant signature: {error}"))?;
+        if !ids.insert(record.member_id) || !keys.insert(record.member_vk) {
+            return Err("duplicate participant".to_string());
+        }
+        verify_participant_certificate(
+            authority,
+            participants,
+            &record.certificate,
+            record.joined_at,
+            params,
+            board_params,
+        )?;
+    }
+    Ok(())
+}
+
+fn verify_participant_certificate(
+    authority: &TopicAuthorityV1,
+    participants: &[AuthorizedParticipantV1],
+    certificate: &ParticipantCertificateV1,
+    joined_at: i64,
+    params: &TopicParamsV1,
+    board_params: &ChatBoardParametersV1,
+) -> Result<(), String> {
+    let owner_id = params.owner_id();
+    let owner_key = authority
+        .ownership
+        .owner_key_at(board_params, system_time_from_ms(joined_at));
+    let member = &certificate.member.member;
+    if member.owner_member_id != owner_id {
+        return Err("the member record belongs to another board".to_string());
+    }
+
+    if certificate.token.is_some() || certificate.join_proof.is_some() {
+        let token = certificate
+            .token
+            .as_ref()
+            .ok_or("a token join needs its token record")?;
+        let proof = certificate
+            .join_proof
+            .as_ref()
+            .ok_or("a token join needs its join proof")?;
+        if member.invited_by != member.id() {
+            return Err("a token-joined member must be self-signed".to_string());
+        }
+        certificate
+            .member
+            .verify_signature(&member.member_vk)
+            .map_err(|error| format!("invalid token-joined member signature: {error}"))?;
+        if token.token.deleted {
+            return Err("the invite token is deleted".to_string());
+        }
+        if token.token.id != proof.token_id {
+            return Err("the join proof names another token".to_string());
+        }
+        if let Some(not_after) = token.token.not_after {
+            if system_time_ms(not_after) < joined_at {
+                return Err("the invite token had expired".to_string());
+            }
+        }
+        authority
+            .roles
+            .role(&token.token.role_id)
+            .ok_or("the invite token grants a role that no longer exists")?;
+        proof
+            .verify(
+                &token.token.verifying_key,
+                &join_message(&params.board_owner, &member.member_vk),
+            )
+            .map_err(|error| format!("invalid join proof: {error}"))?;
+
+        let signer = token.signer.unwrap_or(owner_id);
+        let manager_at = system_time_from_ms(
+            token
+                .token
+                .created_at
+                .map(system_time_ms)
+                .unwrap_or(joined_at),
+        );
+        if signer == owner_id {
+            let token_owner_key = authority.ownership.owner_key_at(board_params, manager_at);
+            token
+                .verify_signature(&token_owner_key)
+                .map_err(|error| format!("invalid invite token signature: {error}"))?;
+        } else {
+            let view = build_board_view(authority, participants, params);
+            let key = resolve_signer_key(&view, board_params, &signer, token.signer_key.as_ref())?;
+            verify_struct(&token.token, &token.signature, &key)
+                .map_err(|error| format!("invalid invite token signature: {error}"))?;
+        }
+        verify_token_manager_for(authority, participants, &signer, token, board_params, params, manager_at)?;
+        return Ok(());
+    }
+
+    // Invite chain up to the owner.
+    let mut current = &certificate.member;
+    let mut seen = HashSet::new();
+    let current_owner = authority
+        .ownership
+        .owner_at(board_params, system_time_from_ms(joined_at));
+    for _ in 0..MAX_JOIN_DEPTH {
+        let current_member = &current.member;
+        let inviter = current_member.invited_by;
+        if inviter == owner_id {
+            current
+                .verify_signature(&params.board_owner)
+                .map_err(|error| format!("invalid invite chain signature: {error}"))?;
+            return Ok(());
+        }
+        if inviter == current_owner {
+            current
+                .verify_signature(&owner_key)
+                .map_err(|error| format!("invalid invite chain signature: {error}"))?;
+            return Ok(());
+        }
+        if !seen.insert(current_member.id()) {
+            return Err("circular invite chain".to_string());
+        }
+        let parent = certificate
+            .chain
+            .iter()
+            .find(|candidate| candidate.member.id() == inviter)
+            .ok_or("the invite chain is incomplete")?;
+        current
+            .verify_signature(&parent.member.member_vk)
+            .map_err(|error| format!("invalid invite chain signature: {error}"))?;
+        current = parent;
+    }
+    Err("the invite chain is too deep".to_string())
+}
+
+fn verify_token_manager_for(
+    authority: &TopicAuthorityV1,
+    participants: &[AuthorizedParticipantV1],
+    signer: &MemberId,
+    token: &AuthorizedInviteToken,
+    board_params: &ChatBoardParametersV1,
+    params: &TopicParamsV1,
+    at: SystemTime,
+) -> Result<(), String> {
+    let view = build_board_view(authority, participants, params);
+    if *signer == authority.ownership.owner_at(board_params, at) {
+        return Ok(());
+    }
+    if verify_owner_or_admin(&view, board_params, signer, token.authority.as_deref(), at).is_ok() {
+        return Ok(());
+    }
+    if view.roles.can_manage_access(signer) {
+        return Ok(());
+    }
+    if let Some(proof) = token.authority.as_deref() {
+        if let Some(grant) = proof.grant.as_ref() {
+            if grant.role.role.can_manage_access
+                && !grant.role.role.deleted
+                && grant.assignment.assignment.member_id == *signer
+                && grant.assignment.assignment.role_id == grant.role.role.id
+                && !grant.assignment.assignment.revoked
+            {
+                let role_signer = grant.role.signer_id(board_params);
+                let role_key = resolve_signer_key(
+                    &view,
+                    board_params,
+                    &role_signer,
+                    grant.role.signer_key.as_ref(),
+                )?;
+                grant.role.verify_signature_with(&role_key)?;
+                verify_owner_or_admin(
+                    &view,
+                    board_params,
+                    &role_signer,
+                    grant.role.authority.as_deref(),
+                    grant.role.role.signed_at,
+                )?;
+                let assignment_signer = grant.assignment.signer_id(board_params);
+                let assignment_key = resolve_signer_key(
+                    &view,
+                    board_params,
+                    &assignment_signer,
+                    grant.assignment.signer_key.as_ref(),
+                )?;
+                verify_struct(
+                    &grant.assignment.assignment,
+                    &grant.assignment.signature,
+                    &assignment_key,
+                )
+                .map_err(|error| format!("invalid role assignment signature: {error}"))?;
+                if verify_owner_or_admin(
+                    &view,
+                    board_params,
+                    &assignment_signer,
+                    grant.assignment.authority.as_deref(),
+                    grant.assignment.assignment.signed_at,
+                )
+                .is_ok()
+                    || view.roles.can_manage_access(&assignment_signer)
+                {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Err("the invite token signer cannot manage access".to_string())
+}
+
+pub(crate) fn verify_authority_records(
+    authority: &TopicAuthorityV1,
+    view: &ChatBoardStateV1,
+    board_params: &ChatBoardParametersV1,
+) -> Result<(), String> {
+    authority.ownership.verify(view, board_params)?;
+    authority.admins.verify(view, board_params)?;
+    authority.roles.verify(view, board_params)?;
+    authority.bans.verify(view, board_params)?;
+    authority.ban_revocations.verify(view, board_params)?;
+    authority.suspensions.verify(view, board_params)?;
+    if let Some(root) = &authority.root {
+        if root.root.version != AUTHORITY_ROOT_VERSION {
+            return Err("unsupported authority root version".to_string());
+        }
+        let owner_key = authority
+            .ownership
+            .owner_key_at(board_params, system_time_from_ms(root.root.epoch));
+        root.verify(&owner_key)?;
+        let mut seen_members = HashSet::new();
+        let mut proof_roles = RolesV1::default();
+        let mut proof_bans = BansV1(Vec::new());
+        let mut proof_revocations = BanRevocationsV1 {
+            revocations: Vec::new(),
+        };
+        let mut proof_suspensions = SuspensionsV1 {
+            suspensions: Vec::new(),
+        };
+        for proof in &authority.member_proofs {
+            proof.verify(&root.root)?;
+            if !seen_members.insert(proof.status.member_id()) {
+                return Err("duplicate authority proof".to_string());
+            }
+            proof_roles.roles.extend(proof.status.roles.iter().cloned());
+            proof_roles
+                .assignments
+                .extend(proof.status.assignments.iter().cloned());
+            proof_bans.0.extend(proof.status.bans.iter().cloned());
+            proof_revocations
+                .revocations
+                .extend(proof.status.revocations.iter().cloned());
+            proof_suspensions
+                .suspensions
+                .extend(proof.status.suspensions.iter().cloned());
+        }
+        let mut seen_roles = HashSet::new();
+        proof_roles
+            .roles
+            .retain(|role| seen_roles.insert(role.role.id));
+        let mut seen_assignments = HashSet::new();
+        proof_roles.assignments.retain(|assignment| {
+            seen_assignments.insert((
+                assignment.assignment.role_id,
+                assignment.assignment.member_id,
+                assignment.assignment.generation,
+            ))
+        });
+        let mut seen_bans = HashSet::new();
+        proof_bans.0.retain(|ban| seen_bans.insert(ban.id()));
+        let mut seen_revocations = HashSet::new();
+        proof_revocations
+            .revocations
+            .retain(|revocation| seen_revocations.insert(revocation.revocation.ban_id.clone()));
+        let mut seen_suspensions = HashSet::new();
+        proof_suspensions.suspensions.retain(|suspension| {
+            seen_suspensions.insert((
+                suspension.suspension.target,
+                suspension.suspension.generation,
+            ))
+        });
+        proof_roles.verify(view, board_params)?;
+        proof_bans.verify(view, board_params)?;
+        proof_revocations.verify(view, board_params)?;
+        proof_suspensions.verify(view, board_params)?;
+    }
+    let owner_id = view.ownership.current_owner(board_params);
+    if let Some(source) = &authority.source_configuration {
+        let at_ms = system_time_ms(source.configuration.updated_at);
+        let owner_key = authority
+            .ownership
+            .owner_key_at(board_params, system_time_from_ms(at_ms));
+        source
+            .verify_signature(&owner_key)
+            .map_err(|error| format!("invalid source configuration signature: {error}"))?;
+    } else if let Some(policy) = &authority.policy {
+        let at_ms = policy.policy.updated_at;
+        let owner_key = authority
+            .ownership
+            .owner_key_at(board_params, system_time_from_ms(at_ms));
+        policy.verify(&owner_key, owner_id)?;
+    } else {
+        return Err("the topic has no policy".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn is_member_banned(
+    authority: &TopicAuthorityV1,
+    member: MemberId,
+    at_ms: i64,
+) -> bool {
+    let revoked: HashSet<_> = authority
+        .ban_revocations
+        .revocations
+        .iter()
+        .map(|revocation| revocation.revocation.ban_id.clone())
+        .chain(
+            authority
+                .member_proofs
+                .iter()
+                .flat_map(|proof| proof.status.revocations.iter())
+                .map(|revocation| revocation.revocation.ban_id.clone()),
+        )
+        .collect();
+    authority
+        .bans
+        .0
+        .iter()
+        .chain(
+            authority
+                .member_proofs
+                .iter()
+                .flat_map(|proof| proof.status.bans.iter()),
+        )
+        .any(|ban| {
+            if ban.ban.banned_user != member {
+                return false;
+            }
+            let banned_at = system_time_ms(ban.ban.banned_at);
+            let expired = ban
+                .ban
+                .expires_at
+                .map(|expires| system_time_ms(expires) <= at_ms)
+                .unwrap_or(false);
+            banned_at <= at_ms && !expired && !revoked.contains(&ban.id())
+        })
+}
+
+pub(crate) fn is_member_suspended(
+    authority: &TopicAuthorityV1,
+    member: MemberId,
+    at_ms: i64,
+) -> bool {
+    authority
+        .suspensions
+        .suspensions
+        .iter()
+        .chain(
+            authority
+                .member_proofs
+                .iter()
+                .flat_map(|proof| proof.status.suspensions.iter()),
+        )
+        .filter(|entry| entry.suspension.target == member && entry.suspension.created_at <= at_ms)
+        .max_by_key(|entry| entry.suspension.generation)
+        .map(|entry| entry.suspension.until > at_ms)
+        .unwrap_or(false)
+}
+
+pub(crate) fn check_posts_rate_limit(
+    authority: &TopicAuthorityV1,
+    posts: &BTreeMap<MessageId, AuthorizedTopicPostV1>,
+    incoming: &[AuthorizedTopicPostV1],
+) -> Result<(), String> {
+    let policy = authority.policy();
+    if policy.max_posts_per_window == 0 || policy.rate_window_ms == 0 {
+        return Ok(());
+    }
+    let window = policy.rate_window_ms as i64;
+    let limit = policy.max_posts_per_window as usize;
+    for post in incoming {
+        let author = post.post.author;
+        let at = post.post.created_at;
+        let mut count = 0usize;
+        for existing in posts.values() {
+            if existing.post.author == author
+                && existing.post.created_at <= at
+                && existing.post.created_at >= at - window
+            {
+                count += 1;
+            }
+        }
+        if count > limit {
+            return Err("the author exceeded the topic rate limit".to_string());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn post_cycle(posts: &BTreeMap<MessageId, AuthorizedTopicPostV1>, start: MessageId) -> bool {
     let mut seen = HashSet::new();
     let mut current = Some(start);
     for _ in 0..MAX_POSTS {
@@ -2140,7 +2309,7 @@ fn post_cycle(posts: &BTreeMap<MessageId, AuthorizedTopicPostV1>, start: Message
     true
 }
 
-fn verify_owner_or_admin(
+pub(crate) fn verify_owner_or_admin(
     view: &ChatBoardStateV1,
     board_params: &ChatBoardParametersV1,
     signer: &MemberId,
@@ -2184,7 +2353,7 @@ fn verify_owner_or_admin(
     Err("signer is not the owner or an admin".to_string())
 }
 
-fn merge_authority(left: &TopicAuthorityV1, right: &TopicAuthorityV1) -> TopicAuthorityV1 {
+pub(crate) fn merge_authority(left: &TopicAuthorityV1, right: &TopicAuthorityV1) -> TopicAuthorityV1 {
     let ownership = merge_ownership(&left.ownership, &right.ownership);
     let policy = merge_policy(&left.policy, &right.policy);
     let source_configuration =
@@ -2281,7 +2450,7 @@ fn merge_source_configuration(
     }
 }
 
-fn merge_ownership(left: &OwnershipV1, right: &OwnershipV1) -> OwnershipV1 {
+pub(crate) fn merge_ownership(left: &OwnershipV1, right: &OwnershipV1) -> OwnershipV1 {
     let mut transfers: BTreeMap<u64, _> = BTreeMap::new();
     for entry in left.transfers.iter().chain(right.transfers.iter()) {
         let generation = entry.transfer.generation;
@@ -2304,7 +2473,7 @@ fn merge_ownership(left: &OwnershipV1, right: &OwnershipV1) -> OwnershipV1 {
     }
 }
 
-fn merge_admins(left: &AdminsV1, right: &AdminsV1) -> AdminsV1 {
+pub(crate) fn merge_admins(left: &AdminsV1, right: &AdminsV1) -> AdminsV1 {
     let mut grants: BTreeMap<MemberId, AuthorizedAdmin> = left
         .admins
         .iter()
@@ -2466,7 +2635,7 @@ fn merge_suspensions(
     }
 }
 
-fn merge_participant(
+pub(crate) fn merge_participant(
     participants: &mut Vec<AuthorizedParticipantV1>,
     incoming: &AuthorizedParticipantV1,
 ) {
@@ -2486,7 +2655,7 @@ fn merge_participant(
     }
 }
 
-fn merge_trust(trust: &mut Vec<AuthorizedTrustV1>, incoming: &AuthorizedTrustV1) {
+pub(crate) fn merge_trust(trust: &mut Vec<AuthorizedTrustV1>, incoming: &AuthorizedTrustV1) {
     if let Some(existing) = trust
         .iter_mut()
         .find(|entry| entry.trust.member_id == incoming.trust.member_id)
@@ -2506,7 +2675,7 @@ fn merge_trust(trust: &mut Vec<AuthorizedTrustV1>, incoming: &AuthorizedTrustV1)
     }
 }
 
-fn merge_approval(
+pub(crate) fn merge_approval(
     approvals: &mut Vec<AuthorizedTopicApprovalV1>,
     incoming: &AuthorizedTopicApprovalV1,
 ) {
@@ -2529,25 +2698,34 @@ fn merge_approval(
     }
 }
 
-fn merge_generation(
+pub(crate) fn merge_generation(
     left: &TopicGenerationV1,
     right: &TopicGenerationV1,
 ) -> TopicGenerationV1 {
-    if right.part > left.part || right.next_part.unwrap_or(0) > left.next_part.unwrap_or(0) {
+    let key = |g: &TopicGenerationV1| {
+        (
+            g.part,
+            g.next_part.unwrap_or(0),
+            g.closed_at.is_some(),
+            g.closed_at.map(std::cmp::Reverse),
+            g.previous_hash,
+        )
+    };
+    if key(right) > key(left) {
         right.clone()
     } else {
         left.clone()
     }
 }
 
-fn value_hash<T: Serialize>(value: &T) -> [u8; 32] {
+pub(crate) fn value_hash<T: Serialize>(value: &T) -> [u8; 32] {
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(value, &mut bytes)
         .expect("topic value serialization should not fail");
     *blake3::hash(&bytes).as_bytes()
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
