@@ -3,8 +3,23 @@ name: Rust
 on:
   push:
     branches: [ "trunk" ]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "LICENSE"
+      - ".gitignore"
   pull_request:
     branches: [ "trunk" ]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "LICENSE"
+      - ".gitignore"
+
+# A newer push supersedes an older run on the same branch.
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,6 +36,11 @@ jobs:
       with:
         nix_path: nixpkgs=channel:nixos-unstable
         github_access_token: ${{ secrets.GITHUB_TOKEN }}
+    - uses: nix-community/cache-nix-action@v6
+      with:
+        primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+        restore-prefixes-first-match: nix-${{ runner.os }}-
+        gc-max-store-size-linux: 2G
     - uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true

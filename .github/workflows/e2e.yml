@@ -12,6 +12,11 @@ permissions:
   actions: read
   contents: read
 
+# A newer Rust completion supersedes the previous E2E on the same branch.
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -30,6 +35,12 @@ jobs:
     - uses: cachix/install-nix-action@v31
       with:
         nix_path: nixpkgs=channel:nixos-unstable
+
+    - uses: nix-community/cache-nix-action@v6
+      with:
+        primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+        restore-prefixes-first-match: nix-${{ runner.os }}-
+        gc-max-store-size-linux: 2G
 
     # Playwright itself runs on the runner's Node.
     - uses: actions/setup-node@v4
@@ -123,7 +134,14 @@ jobs:
       env:
         CI: "true"
         DX_BIN: ${{ runner.temp }}/dx-nix
-      run: npx playwright test
+      run: |
+        # Push runs use the fast Chromium project; PRs and manual runs keep
+        # the full browser matrix.
+        if [ "${{ github.event_name }}" = "workflow_run" ] && [ "${{ github.event.workflow_run.event }}" = "push" ]; then
+          npx playwright test --project=chromium
+        else
+          npx playwright test
+        fi
 
     - name: Upload Playwright report
       if: failure()
