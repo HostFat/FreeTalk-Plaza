@@ -117,7 +117,18 @@ impl ComposableState for CategorySecretsV1 {
                 return Err("Duplicate category secret set".to_string());
             }
             for record in &set.versions {
-                record.verify_signature(&parameters.owner)?;
+                let current_key = parent_state.ownership.current_owner_key(parameters);
+                let signed_by_owner = record.verify_signature(&current_key).is_ok()
+                    || (current_key != parameters.owner
+                        && record.verify_signature(&parameters.owner).is_ok())
+                    || parent_state
+                        .ownership
+                        .transfers
+                        .iter()
+                        .any(|t| record.verify_signature(&t.transfer.to_key).is_ok());
+                if !signed_by_owner {
+                    record.verify_signature(&current_key)?;
+                }
                 if let Some(bound_category) = record.record.category_id {
                     if bound_category != set.category_id {
                         return Err(
@@ -231,9 +242,10 @@ impl ComposableState for CategorySecretsV1 {
         delta: &Option<Self::Delta>,
     ) -> Result<(), String> {
         if let Some(delta) = delta {
+            let current_owner_key = parent_state.ownership.current_owner_key(parameters);
             for incoming in &delta.sets {
                 for record in &incoming.versions {
-                    record.verify_signature(&parameters.owner)?;
+                    record.verify_signature(&current_owner_key)?;
                     if let Some(bound_category) = record.record.category_id {
                         if bound_category != incoming.category_id {
                             return Err(

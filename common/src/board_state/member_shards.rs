@@ -121,6 +121,7 @@ pub fn verify_ownership_chain(
     if transfer_admins.len() > MAX_SUCCESSION_VOTES {
         return Err("too many transfer admin records in standalone proof".to_string());
     }
+    let mut owner_history: Vec<(i64, VerifyingKey)> = vec![(i64::MIN, *founding_owner)];
     let mut keys = vec![*founding_owner];
     let mut from_key = *founding_owner;
     let mut from_id = MemberId::from(&from_key);
@@ -152,18 +153,42 @@ pub fn verify_ownership_chain(
             if entry.succession_approvals.len() > MAX_SUCCESSION_VOTES {
                 return Err("too many succession approvals on transfer".to_string());
             }
-            let admin_verified = |member_id: &MemberId| -> bool {
-                transfer_admins.iter().any(|admin| {
-                    admin.admin.id() == *member_id
-                        && system_time_ms(admin.admin.signed_at) <= at
-                        && keys.iter().any(|k| admin.verify_signature(k).is_ok())
-                })
+            let owner_key_at_ms = |ms: i64| -> VerifyingKey {
+                owner_history
+                    .iter()
+                    .rev()
+                    .find(|(since, _)| *since <= ms)
+                    .map(|(_, k)| *k)
+                    .unwrap_or(*founding_owner)
             };
-            if transfer.to != MemberId::from(founding_owner) && !admin_verified(&transfer.to) {
+            let mut active_admins: std::collections::HashMap<MemberId, i64> =
+                std::collections::HashMap::new();
+            for admin in transfer_admins {
+                let admin_ms = system_time_ms(admin.admin.signed_at);
+                if admin_ms > at || admin.admin.id() == transfer.from {
+                    continue;
+                }
+                let expected_owner = owner_key_at_ms(admin_ms);
+                if admin.verify_signature(&expected_owner).is_ok() {
+                    active_admins
+                        .entry(admin.admin.id())
+                        .and_modify(|prev| *prev = (*prev).min(admin_ms))
+                        .or_insert(admin_ms);
+                }
+            }
+            if transfer.to != MemberId::from(founding_owner)
+                && !active_admins.contains_key(&transfer.to)
+            {
                 return Err(
                     "succession transfer target lacks an owner-signed admin record".to_string(),
                 );
             }
+            let quorum = crate::board_state::ownership::required_succession_quorum(
+                active_admins.len(),
+            )
+            .ok_or_else(|| {
+                "succession transfer requires at least 2 active admin records".to_string()
+            })?;
             let mut voters = HashSet::new();
             let mut valid_keys = Vec::new();
             for approval in &entry.succession_approvals {
@@ -176,21 +201,36 @@ pub fn verify_ownership_chain(
                 {
                     return Err("succession approval does not match transfer".to_string());
                 }
-                if system_time_ms(vote.signed_at) > at {
+                let vote_ms = system_time_ms(vote.signed_at);
+                if vote_ms > at {
                     return Err("succession approval is dated after the transfer".to_string());
+                }
+                if vote_ms < last_time {
+                    return Err(
+                        "succession approval predates the previous ownership transfer".to_string(),
+                    );
                 }
                 if !voters.insert(vote.voter) {
                     return Err("duplicate voter in succession approvals".to_string());
                 }
-                if !admin_verified(&vote.voter) {
+                let Some(&admin_since) = active_admins.get(&vote.voter) else {
                     return Err(
                         "succession voter lacks an owner-signed admin record".to_string(),
+                    );
+                };
+                if vote_ms < admin_since {
+                    return Err(
+                        "succession approval predates the voter's admin appointment".to_string(),
                     );
                 }
                 valid_keys.push(vote.voter_key);
             }
-            if voters.len() < 2 {
-                return Err("succession transfer requires at least 2 admin approvals".to_string());
+            if voters.len() < quorum {
+                return Err(format!(
+                    "succession transfer lacks admin quorum: {} < {}",
+                    voters.len(),
+                    quorum
+                ));
             }
             if !valid_keys
                 .iter()
@@ -204,6 +244,7 @@ pub fn verify_ownership_chain(
 
         from_key = transfer.to_key;
         from_id = transfer.to;
+        owner_history.push((at, from_key));
         if !keys.contains(&from_key) {
             keys.push(from_key);
         }

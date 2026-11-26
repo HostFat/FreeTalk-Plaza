@@ -79,10 +79,25 @@ impl ComposableState for OptionalUpgradeV1 {
         if let Some(delta) = delta {
             // Verify the delta before applying it
             delta.verify_against(parent_state, parameters)?;
+            let rank = |u: &AuthorizedUpgradeV1| {
+                let epoch = if u.upgrade.created_at > 0 {
+                    parent_state
+                        .ownership
+                        .epoch_at(system_time_from_ms(u.upgrade.created_at))
+                } else {
+                    parent_state.ownership.current_epoch()
+                };
+                (
+                    epoch,
+                    u.upgrade.version,
+                    u.upgrade.created_at,
+                    u.signature.to_bytes(),
+                )
+            };
             if self
                 .0
                 .as_ref()
-                .is_none_or(|existing| delta.upgrade.version >= existing.upgrade.version)
+                .is_none_or(|existing| rank(delta) > rank(existing))
             {
                 *self = OptionalUpgradeV1(Some(delta.clone()));
             }
@@ -117,8 +132,8 @@ impl AuthorizedUpgradeV1 {
         verify_struct(&self.upgrade, &self.signature, verifying_key)
     }
 
-    /// Verify against the board's current owner (supporting ownership transfer
-    /// and admin-quorum succession in addition to the founding owner).
+    /// Verify against the board's owner at `created_at` (or current owner when
+    /// `created_at == 0`), preventing a deposed founder from hijacking upgrades.
     pub fn verify_against(
         &self,
         parent_state: &ChatBoardStateV1,
@@ -132,16 +147,11 @@ impl AuthorizedUpgradeV1 {
             parent_state.ownership.current_owner_key(parameters)
         };
         if let Some(key) = self.signer_key {
-            if key != owner_key && key != parameters.owner {
+            if key != owner_key {
                 return Err("upgrade signer key does not match the board owner".to_string());
             }
         }
         if self.validate(&owner_key).is_ok() {
-            return Ok(());
-        }
-        // Preserve compatibility for upgrades signed before a later transfer
-        // when `created_at` was omitted (legacy 0).
-        if self.upgrade.created_at == 0 && self.validate(&parameters.owner).is_ok() {
             return Ok(());
         }
         Err("Invalid upgrade signature".to_string())

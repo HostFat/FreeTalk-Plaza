@@ -180,7 +180,7 @@ impl ContractInterface for ProfileContract {
 
 #[no_mangle]
 pub extern "C" fn plaza_profile_contract_revision() -> u32 {
-    3
+    plaza_core::CONTRACT_REVISION
 }
 
 #[cfg(test)]

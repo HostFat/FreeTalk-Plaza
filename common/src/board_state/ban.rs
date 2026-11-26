@@ -239,7 +239,9 @@ impl BansV1 {
             invalid_bans.insert(ban.id(), BanValidationError::OwnerMismatch);
             return;
         }
-        if ban.ban.banned_user == parameters.owner_id() {
+        if ban.ban.banned_user == parameters.owner_id()
+            || ban.ban.banned_user == ownership.current_owner(parameters)
+        {
             invalid_bans.insert(ban.id(), BanValidationError::TargetIsOwner);
             return;
         }

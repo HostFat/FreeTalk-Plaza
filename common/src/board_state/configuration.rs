@@ -70,6 +70,29 @@ impl ComposableState for AuthorizedConfigurationV1 {
                 .verify_signature(&owner_key)
                 .map_err(|e| format!("Invalid signature: {}", e))?;
 
+            // Prevent a deposed former owner from overwriting a newer owner's
+            // configuration by backdating `updated_at`.
+            let incoming_epoch = parent_state
+                .ownership
+                .epoch_at(delta.configuration.updated_at);
+            let current_epoch = parent_state
+                .ownership
+                .epoch_at(self.configuration.updated_at);
+            if incoming_epoch < current_epoch {
+                return Err(
+                    "Configuration signed by a former owner cannot overwrite a newer owner's configuration"
+                        .to_string(),
+                );
+            }
+            if !parent_state.ownership.transfers.is_empty()
+                && delta.configuration.updated_at == std::time::SystemTime::UNIX_EPOCH
+            {
+                return Err(
+                    "Configuration update after ownership transfer must carry a post-transfer timestamp"
+                        .to_string(),
+                );
+            }
+
             // Check if the new version is greater than the current version
             if delta.configuration.configuration_version <= self.configuration.configuration_version
             {
@@ -84,8 +107,10 @@ impl ComposableState for AuthorizedConfigurationV1 {
                 return Err("Cannot change the owner_member_id".to_string());
             }
 
-            // Verify that the new configuration is valid
+            // Verify that the new configuration is valid and bounded against OOM
+            const MAX_ALLOWED_USER_BANS: usize = 10_000;
             if delta.configuration.max_user_bans == 0
+                || delta.configuration.max_user_bans > MAX_ALLOWED_USER_BANS
                 || delta.configuration.max_message_size == 0
                 || delta.configuration.max_title_size == 0
                 || delta.configuration.max_nickname_size == 0

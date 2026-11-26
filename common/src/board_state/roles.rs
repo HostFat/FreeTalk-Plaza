@@ -253,10 +253,14 @@ fn verify_role_grant(
     signer: &MemberId,
     proof: Option<&AuthorityProof>,
     depth: u8,
+    at: SystemTime,
     qualifies: &dyn Fn(&Role) -> bool,
 ) -> Result<(), String> {
     if depth == 0 {
         return Err("Authority proof is nested too deeply".to_string());
+    }
+    if state.ownership.is_deactivated_at(signer, at) {
+        return Err("Signer key was deactivated before this action".to_string());
     }
     let proof = proof.ok_or("Signer carries no role authority proof")?;
     let grant = proof
@@ -271,6 +275,29 @@ fn verify_role_grant(
         || grant.assignment.assignment.revoked
     {
         return Err("The proof assignment does not grant this role".to_string());
+    }
+
+    // Reject proofs for roles deleted or assignments revoked at or before `at`.
+    if at != SystemTime::UNIX_EPOCH {
+        let at_ms = crate::board_state::rate_limit::system_time_ms(at);
+        if state.roles.roles.iter().any(|current| {
+            current.role.id == grant.role.role.id
+                && current.role.deleted
+                && current.role.generation >= grant.role.role.generation
+                && crate::board_state::rate_limit::system_time_ms(current.role.signed_at) <= at_ms
+        }) {
+            return Err("Role was deleted before this action".to_string());
+        }
+        if state.roles.assignments.iter().any(|current| {
+            current.assignment.role_id == grant.role.role.id
+                && current.assignment.member_id == *signer
+                && current.assignment.revoked
+                && current.assignment.generation >= grant.assignment.assignment.generation
+                && crate::board_state::rate_limit::system_time_ms(current.assignment.signed_at)
+                    <= at_ms
+        }) {
+            return Err("Role assignment was revoked before this action".to_string());
+        }
     }
 
     let role_signer = grant.role.signer_id(parameters);
@@ -324,6 +351,9 @@ pub(crate) fn verify_manager_authority(
     depth: u8,
     at: SystemTime,
 ) -> Result<(), String> {
+    if state.ownership.is_deactivated_at(signer, at) {
+        return Err("Signer key was deactivated before this action".to_string());
+    }
     if *signer == state.ownership.owner_at(parameters, at)
         || state.roles.can_manage_access(signer)
     {
@@ -336,7 +366,7 @@ pub(crate) fn verify_manager_authority(
     {
         return Ok(());
     }
-    verify_role_grant(state, parameters, signer, proof, depth, &|role| {
+    verify_role_grant(state, parameters, signer, proof, depth, at, &|role| {
         role.can_manage_access
     })
 }
@@ -352,6 +382,9 @@ pub fn verify_moderation_authority(
     proof: Option<&AuthorityProof>,
     at: SystemTime,
 ) -> Result<(), String> {
+    if state.ownership.is_deactivated_at(signer, at) {
+        return Err("Signer key was deactivated before this action".to_string());
+    }
     if *signer == state.ownership.owner_at(parameters, at) {
         return Ok(());
     }
@@ -367,6 +400,7 @@ pub fn verify_moderation_authority(
         signer,
         proof,
         MAX_AUTHORITY_DEPTH,
+        at,
         &|role| role_grants_power(role, power, scope_chain),
     )
 }
@@ -381,6 +415,9 @@ pub fn verify_image_retire_authority(
     proof: Option<&AuthorityProof>,
     at: SystemTime,
 ) -> Result<(), String> {
+    if state.ownership.is_deactivated_at(signer, at) {
+        return Err("Signer key was deactivated before this action".to_string());
+    }
     if state.roles.can_retire_images(signer) {
         return Ok(());
     }
@@ -391,6 +428,7 @@ pub fn verify_image_retire_authority(
             signer,
             proof,
             MAX_AUTHORITY_DEPTH,
+            at,
             &|role| role.can_retire_images,
         )
     })
@@ -460,7 +498,11 @@ pub fn verify_distributor_authority(
     proof: Option<&AuthorityProof>,
     at: SystemTime,
 ) -> Result<(), String> {
+    if state.ownership.is_deactivated_at(signer, at) {
+        return Err("Signer key was deactivated before this action".to_string());
+    }
     if *signer == state.ownership.owner_at(parameters, at)
+        || *signer == state.ownership.current_owner(parameters)
         || state.roles.can_distribute_keys(signer)
     {
         return Ok(());
@@ -471,6 +513,7 @@ pub fn verify_distributor_authority(
         signer,
         proof,
         MAX_AUTHORITY_DEPTH,
+        at,
         &|role| role.can_distribute_keys,
     )
 }
@@ -486,6 +529,9 @@ pub fn verify_trash_authority(
     proof: Option<&AuthorityProof>,
     at: SystemTime,
 ) -> Result<(), String> {
+    if state.ownership.is_deactivated_at(signer, at) {
+        return Err("Signer key was deactivated before this action".to_string());
+    }
     if state.roles.can_manage_trash(signer) {
         return Ok(());
     }
@@ -496,6 +542,7 @@ pub fn verify_trash_authority(
             signer,
             proof,
             MAX_AUTHORITY_DEPTH,
+            at,
             &|role| role.can_manage_trash,
         )
     })

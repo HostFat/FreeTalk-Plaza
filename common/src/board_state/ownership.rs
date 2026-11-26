@@ -258,6 +258,20 @@ impl OwnershipV1 {
             .unwrap_or(parameters.owner)
     }
 
+    /// Number of ownership transfers effective at `at` (`0` = founding owner).
+    pub fn epoch_at(&self, at: SystemTime) -> usize {
+        let at_ms = system_time_ms(at);
+        self.transfers
+            .iter()
+            .filter(|entry| system_time_ms(entry.transfer.transferred_at) <= at_ms)
+            .count()
+    }
+
+    /// Current ownership epoch (`0` = founding owner, `N` = after N transfers).
+    pub fn current_epoch(&self) -> usize {
+        self.transfers.len()
+    }
+
     /// Whether the member has been an owner of this board.
     pub fn was_owner(&self, member: &MemberId) -> bool {
         self.transfers
@@ -477,8 +491,12 @@ impl OwnershipV1 {
                 let quorum = required_succession_quorum(active_admins.len()).ok_or_else(|| {
                     "Emergency succession requires at least two active admins".to_string()
                 })?;
-                let timelock_ms = (state.configuration.configuration.succession_timelock_secs
-                    as i64)
+                let max_timelock_secs = (i64::MAX / 1_000) as u64;
+                let timelock_ms = (state
+                    .configuration
+                    .configuration
+                    .succession_timelock_secs
+                    .min(max_timelock_secs) as i64)
                     .saturating_mul(1_000);
                 let mut voters = std::collections::HashSet::new();
                 let mut matured_voters = 0usize;
@@ -501,6 +519,12 @@ impl OwnershipV1 {
                             "Succession approval is dated after the transfer".to_string()
                         );
                     }
+                    if vote_ms < last_time {
+                        return Err(
+                            "Succession approval predates the previous ownership transfer"
+                                .to_string(),
+                        );
+                    }
                     if !voters.insert(vote.voter) {
                         return Err("Duplicate voter in succession approvals".to_string());
                     }
@@ -508,6 +532,19 @@ impl OwnershipV1 {
                         return Err(
                             "Succession voter was not an active admin at the transfer".to_string()
                         );
+                    }
+                    if let Some(admin_record) = state
+                        .admin
+                        .admins
+                        .iter()
+                        .find(|a| a.admin.id() == vote.voter)
+                    {
+                        if vote_ms < system_time_ms(admin_record.admin.signed_at) {
+                            return Err(
+                                "Succession approval predates the voter's admin appointment"
+                                    .to_string(),
+                            );
+                        }
                     }
                     let expected_key =
                         Self::resolve_key(state, parameters, &known_owner_keys, &vote.voter)

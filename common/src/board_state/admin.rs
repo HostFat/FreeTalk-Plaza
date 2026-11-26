@@ -175,15 +175,19 @@ impl ComposableState for AdminsV1 {
             }
 
             for admin in &delta.added {
-                let incoming = admin.admin.generation;
-                match self.record_for(&admin.admin.id()) {
-                    Some((local, revoked)) if revoked => {
+                let incoming_epoch = parent_state.ownership.epoch_at(admin.admin.signed_at);
+                let incoming = (incoming_epoch, admin.admin.generation);
+                let local_rank = self.record_with_time_for(&admin.admin.id()).map(
+                    |(gen, time, revoked)| (parent_state.ownership.epoch_at(time), gen, revoked),
+                );
+                match local_rank {
+                    Some((le, lg, true)) => {
                         // A revocation only gives way to a strictly newer grant.
-                        if incoming <= local {
+                        if incoming <= (le, lg) {
                             continue;
                         }
                     }
-                    Some((local, _)) if incoming <= local => continue,
+                    Some((le, lg, false)) if incoming <= (le, lg) => continue,
                     _ => {}
                 }
                 self.remove_records_for(&admin.admin.id());
@@ -191,10 +195,16 @@ impl ComposableState for AdminsV1 {
             }
 
             for revocation in &delta.revoked {
-                let incoming = revocation.revocation.generation;
-                match self.record_for(&revocation.id()) {
-                    Some((local, false)) if incoming < local => continue,
-                    Some((local, true)) if incoming <= local => continue,
+                let incoming_epoch = parent_state
+                    .ownership
+                    .epoch_at(revocation.revocation.signed_at);
+                let incoming = (incoming_epoch, revocation.revocation.generation);
+                let local_rank = self.record_with_time_for(&revocation.id()).map(
+                    |(gen, time, revoked)| (parent_state.ownership.epoch_at(time), gen, revoked),
+                );
+                match local_rank {
+                    Some((le, lg, false)) if incoming < (le, lg) => continue,
+                    Some((le, lg, true)) if incoming <= (le, lg) => continue,
                     _ => {}
                 }
                 self.remove_records_for(&revocation.id());
@@ -233,6 +243,18 @@ impl AdminsV1 {
             .iter()
             .find(|r| r.id() == *member_id)
             .map(|r| (r.revocation.generation, true))
+    }
+
+    /// The winning record for a member with its signed timestamp:
+    /// (generation, signed_at, is_revocation).
+    pub fn record_with_time_for(&self, member_id: &MemberId) -> Option<(u64, SystemTime, bool)> {
+        if let Some(admin) = self.admins.iter().find(|a| a.admin.id() == *member_id) {
+            return Some((admin.admin.generation, admin.admin.signed_at, false));
+        }
+        self.revoked
+            .iter()
+            .find(|r| r.id() == *member_id)
+            .map(|r| (r.revocation.generation, r.revocation.signed_at, true))
     }
 
     pub fn is_revoked(&self, member_id: &MemberId) -> bool {

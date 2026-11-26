@@ -171,7 +171,15 @@ impl ComposableState for AuthorityRootStateV1 {
         delta: &Option<Self::Delta>,
     ) -> Result<(), String> {
         if let Some(root) = delta {
-            self.0 = Some(root.clone());
+            let mut candidate = AuthorityRootStateV1(Some(root.clone()));
+            candidate.verify_signature(parent_state, parameters)?;
+            let should_replace = match &self.0 {
+                Some(existing) => root.root.epoch > existing.root.epoch,
+                None => true,
+            };
+            if should_replace {
+                self.0 = Some(root.clone());
+            }
         }
         // The tree may still change in `post_apply_cleanup` (a member can be
         // pruned); the board verifies the full root after cleanup. Here we
@@ -189,6 +197,17 @@ impl AuthorityRootStateV1 {
         let Some(root) = &self.0 else {
             return Ok(());
         };
+        if let Some(last_transfer) = parent_state.ownership.transfers.last() {
+            let last_ms = crate::board_state::rate_limit::system_time_ms(
+                last_transfer.transfer.transferred_at,
+            );
+            if root.root.epoch < last_ms {
+                return Err(
+                    "Authority root signed by a former owner before the latest ownership transfer is no longer valid"
+                        .to_string(),
+                );
+            }
+        }
         let owner_key = parent_state
             .ownership
             .owner_key_at(parameters, system_time_from_ms(root.root.epoch));

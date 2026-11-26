@@ -7,7 +7,7 @@ use crate::ChatBoardStateV1;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::SystemTime;
 
 /// Board secrets state managing encrypted secret distribution
@@ -18,6 +18,29 @@ pub struct BoardSecretsV1 {
     pub encrypted_secrets: Vec<AuthorizedEncryptedSecretForMember>,
 }
 
+fn verify_owner_signature_any_epoch<F>(
+    parent_state: &ChatBoardStateV1,
+    parameters: &ChatBoardParametersV1,
+    verify: F,
+) -> Result<(), String>
+where
+    F: Fn(&VerifyingKey) -> Result<(), String>,
+{
+    let current_key = parent_state.ownership.current_owner_key(parameters);
+    if verify(&current_key).is_ok() {
+        return Ok(());
+    }
+    if current_key != parameters.owner && verify(&parameters.owner).is_ok() {
+        return Ok(());
+    }
+    for transfer in &parent_state.ownership.transfers {
+        if verify(&transfer.transfer.to_key).is_ok() {
+            return Ok(());
+        }
+    }
+    verify(&current_key)
+}
+
 impl ComposableState for BoardSecretsV1 {
     type ParentState = ChatBoardStateV1;
     type Summary = SecretsSummary;
@@ -26,21 +49,27 @@ impl ComposableState for BoardSecretsV1 {
 
     fn verify(
         &self,
-        _parent_state: &Self::ParentState,
+        parent_state: &Self::ParentState,
         parameters: &Self::Parameters,
     ) -> Result<(), String> {
-        // Verify all secret version records are signed by owner
+        // Verify all secret version records are signed by an owner key along the
+        // ownership chain (supporting post-transfer owners while keeping prior
+        // rotated versions verifiable).
         for version_record in &self.versions {
-            version_record
-                .verify_signature(&parameters.owner)
-                .map_err(|e| format!("Invalid version record signature: {}", e))?;
+            verify_owner_signature_any_epoch(parent_state, parameters, |key| {
+                version_record
+                    .verify_signature(key)
+                    .map_err(|e| format!("Invalid version record signature: {}", e))
+            })?;
         }
 
-        // Verify all encrypted secrets are signed by owner
+        // Verify all encrypted secrets are signed by an owner key along the chain.
         for encrypted_secret in &self.encrypted_secrets {
-            encrypted_secret
-                .verify_signature(&parameters.owner)
-                .map_err(|e| format!("Invalid encrypted secret signature: {}", e))?;
+            verify_owner_signature_any_epoch(parent_state, parameters, |key| {
+                encrypted_secret
+                    .verify_signature(key)
+                    .map_err(|e| format!("Invalid encrypted secret signature: {}", e))
+            })?;
         }
 
         // Verify current_version matches the maximum version in versions
@@ -63,10 +92,10 @@ impl ComposableState for BoardSecretsV1 {
         _parent_state: &Self::ParentState,
         _parameters: &Self::Parameters,
     ) -> Self::Summary {
-        let version_ids: HashSet<SecretVersion> =
+        let version_ids: BTreeSet<SecretVersion> =
             self.versions.iter().map(|v| v.record.version).collect();
 
-        let member_secrets: HashSet<(SecretVersion, MemberId)> = self
+        let member_secrets: BTreeSet<(SecretVersion, MemberId)> = self
             .encrypted_secrets
             .iter()
             .map(|s| (s.secret.secret_version, s.secret.member_id))
@@ -128,10 +157,12 @@ impl ComposableState for BoardSecretsV1 {
         delta: &Option<Self::Delta>,
     ) -> Result<(), String> {
         if let Some(delta) = delta {
-            // Verify and add new version records
+            let current_owner_key = parent_state.ownership.current_owner_key(parameters);
+            let current_owner_id = parent_state.ownership.current_owner(parameters);
+            // Verify and add new version records (must be signed by current owner)
             for version_record in &delta.new_versions {
                 version_record
-                    .verify_signature(&parameters.owner)
+                    .verify_signature(&current_owner_key)
                     .map_err(|e| format!("Invalid version record signature in delta: {}", e))?;
 
                 // Check for duplicate version
@@ -149,17 +180,20 @@ impl ComposableState for BoardSecretsV1 {
                 self.versions.push(version_record.clone());
             }
 
-            // Verify and add new encrypted secrets
+            // Verify and add new encrypted secrets (must be signed by current owner)
             let members_by_id = parent_state.members.members_by_member_id();
             for encrypted_secret in &delta.new_encrypted_secrets {
                 encrypted_secret
-                    .verify_signature(&parameters.owner)
+                    .verify_signature(&current_owner_key)
                     .map_err(|e| format!("Invalid encrypted secret signature in delta: {}", e))?;
 
                 let member_id = encrypted_secret.secret.member_id;
 
                 // Skip secrets for removed members — they'll be pruned below.
-                if member_id != parameters.owner_id() && !members_by_id.contains_key(&member_id) {
+                if member_id != parameters.owner_id()
+                    && member_id != current_owner_id
+                    && !members_by_id.contains_key(&member_id)
+                {
                     continue;
                 }
 
@@ -233,8 +267,8 @@ impl ComposableState for BoardSecretsV1 {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SecretsSummary {
     pub current_version: SecretVersion,
-    pub version_ids: HashSet<SecretVersion>,
-    pub member_secrets: HashSet<(SecretVersion, MemberId)>,
+    pub version_ids: BTreeSet<SecretVersion>,
+    pub member_secrets: BTreeSet<(SecretVersion, MemberId)>,
 }
 
 /// Delta for board secrets state
@@ -682,8 +716,8 @@ mod tests {
 
         let old_summary = SecretsSummary {
             current_version: 0,
-            version_ids: HashSet::new(),
-            member_secrets: HashSet::new(),
+            version_ids: BTreeSet::new(),
+            member_secrets: BTreeSet::new(),
         };
 
         let delta = secrets.delta(&state, &params, &old_summary).unwrap();
@@ -712,8 +746,8 @@ mod tests {
 
         let mut old_summary = SecretsSummary {
             current_version: 1,
-            version_ids: HashSet::new(),
-            member_secrets: HashSet::new(),
+            version_ids: BTreeSet::new(),
+            member_secrets: BTreeSet::new(),
         };
         old_summary.version_ids.insert(1);
         old_summary.member_secrets.insert((1, owner_id));
