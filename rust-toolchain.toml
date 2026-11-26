@@ -1,6 +1,7 @@
 [toolchain]
 # Pinned so `plaza_contract.wasm` and `plaza_delegate.wasm` rebuild to the
-# same bytes on every machine.
+# same bytes on every machine. This channel matches `flake.nix` (the Nix
+# dev shell CI uses). A mismatch re-keys every WASM.
 #
 # Why this matters: the delegate key is BLAKE3(BLAKE3(wasm) || params), and the
 # contract key includes the code hash. A different rustc produces different WASM
@@ -12,6 +13,6 @@
 #      delegate key is recorded in legacy_delegates.toml
 #   2. Rebuild and commit the WASMs in ui/public/contracts and cli/contracts
 #   3. Commit the new legacy_delegates.toml entry in the same change
-channel = "1.94.1"
+channel = "1.94.0"
 components = ["rustfmt", "clippy"]
 targets = ["wasm32-unknown-unknown"]

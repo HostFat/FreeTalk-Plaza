@@ -6,11 +6,22 @@
 
 use crate::board_data::Boards;
 use crate::components::app::BOARDS;
+use argon2::{Algorithm, Argon2, Params, Version};
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use dioxus::prelude::ReadableExt;
 use ed25519_dalek::VerifyingKey;
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use wasm_bindgen::JsCast;
+use zeroize::Zeroize;
+
+const BACKUP_MAGIC: &[u8] = b"PLAZABK1";
+const MIN_PASSPHRASE: usize = 8;
+const SALT_LEN: usize = 16;
+const NONCE_LEN: usize = 12;
 
 #[derive(Serialize, Deserialize)]
 pub struct BackupV1 {
@@ -81,9 +92,12 @@ pub async fn export_bytes() -> Result<Vec<u8>, String> {
 
 /// Merge a backup into the current store. Boards in the file win; local-only
 /// preferences from this device are kept when the file has none.
-pub async fn import_bytes(bytes: &[u8]) -> Result<usize, String> {
-    let backup: BackupV1 = ciborium::from_reader(bytes)
-        .map_err(|error| format!("This is not a FreeTalk Plaza backup: {error}"))?;
+pub async fn import_bytes(bytes: &[u8], passphrase: &str) -> Result<usize, String> {
+    let mut plain = open_backup(bytes, passphrase)?;
+    let decoded = ciborium::from_reader::<BackupV1, _>(plain.as_slice())
+        .map_err(|error| format!("This is not a FreeTalk Plaza backup: {error}"));
+    plain.zeroize();
+    let backup = decoded?;
     if backup.format == 0 || backup.format > 2 {
         return Err(format!("Unsupported backup format {}", backup.format));
     }
@@ -185,9 +199,76 @@ pub async fn import_bytes(bytes: &[u8]) -> Result<usize, String> {
     Ok(imported)
 }
 
+/// Wrap the cleartext CBOR backup. The file starts with `PLAZABK1`, then a
+/// 16-byte salt, a 12-byte nonce, and the ChaCha20-Poly1305 ciphertext.
+pub fn seal_backup(plaintext: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
+    if passphrase.chars().count() < MIN_PASSPHRASE {
+        return Err("Use a passphrase of at least 8 characters.".to_string());
+    }
+    let mut salt = [0u8; SALT_LEN];
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut salt);
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let mut key = derive_backup_key(passphrase, &salt)?;
+    let cipher = ChaCha20Poly1305::new((&key).into());
+    let encrypted = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext)
+        .map_err(|_| "Could not encrypt the backup.".to_string());
+    key.zeroize();
+    let ciphertext = encrypted?;
+    let mut out = Vec::with_capacity(BACKUP_MAGIC.len() + SALT_LEN + NONCE_LEN + ciphertext.len());
+    out.extend_from_slice(BACKUP_MAGIC);
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+/// Decrypt a sealed backup. Only passphrase-encrypted `PLAZABK1` files are
+/// accepted.
+pub fn open_backup(bytes: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
+    if !bytes.starts_with(BACKUP_MAGIC) {
+        return Err("This is not an encrypted FreeTalk Plaza backup.".to_string());
+    }
+    if bytes.len() < BACKUP_MAGIC.len() + SALT_LEN + NONCE_LEN + 16 {
+        return Err("This backup file is incomplete.".to_string());
+    }
+    if passphrase.chars().count() < MIN_PASSPHRASE {
+        return Err("Enter the backup passphrase (at least 8 characters).".to_string());
+    }
+    let salt_at = BACKUP_MAGIC.len();
+    let nonce_at = salt_at + SALT_LEN;
+    let body_at = nonce_at + NONCE_LEN;
+    let salt: [u8; SALT_LEN] = bytes[salt_at..nonce_at]
+        .try_into()
+        .map_err(|_| "This backup file is incomplete.".to_string())?;
+    let nonce = Nonce::from_slice(&bytes[nonce_at..body_at]);
+    let mut key = derive_backup_key(passphrase, &salt)?;
+    let cipher = ChaCha20Poly1305::new((&key).into());
+    let decrypted = cipher
+        .decrypt(nonce, &bytes[body_at..])
+        .map_err(|_| "Wrong passphrase, or the backup file is damaged.".to_string());
+    key.zeroize();
+    decrypted
+}
+
+fn derive_backup_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32], String> {
+    let params = Params::new(19_456, 2, 1, Some(32))
+        .map_err(|error| format!("Could not prepare the passphrase: {error}"))?;
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = [0u8; 32];
+    argon
+        .hash_password_into(passphrase.as_bytes(), salt, &mut key)
+        .map_err(|error| format!("Could not derive the backup key: {error}"))?;
+    Ok(key)
+}
+
 /// Download the backup through a temporary object URL.
-pub async fn download() -> Result<(), String> {
-    let bytes = export_bytes().await?;
+pub async fn download(passphrase: &str) -> Result<(), String> {
+    let mut plain = export_bytes().await?;
+    let sealed = seal_backup(&plain, passphrase);
+    plain.zeroize();
+    let bytes = sealed?;
     let parts = js_sys::Array::new();
     parts.push(&js_sys::Uint8Array::from(bytes.as_slice()));
     let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)
@@ -233,15 +314,39 @@ pub fn peek_selected_file() -> Option<web_sys::File> {
     input.files()?.get(0)
 }
 
-/// File chosen in the restore input, clearing it for the next attempt.
-pub fn selected_file() -> Option<web_sys::File> {
-    let document = web_sys::window()?.document()?;
-    let input = document
-        .get_element_by_id("plaza-backup-file")?
-        .dyn_into::<web_sys::HtmlInputElement>()
-        .ok()?;
-    let files = input.files()?;
-    let file = files.get(0);
+/// Clear the restore file input after a completed restore.
+pub fn clear_selected_file() {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Some(input) = document
+        .get_element_by_id("plaza-backup-file")
+        .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
+    else {
+        return;
+    };
     input.set_value("");
-    file
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_passphrase_round_trips_and_a_wrong_one_fails() {
+        let sealed = seal_backup(b"board-keys", "correct horse").unwrap();
+        assert!(sealed.starts_with(BACKUP_MAGIC));
+        assert_eq!(open_backup(&sealed, "correct horse").unwrap(), b"board-keys");
+        assert!(open_backup(&sealed, "wrong passphrase").is_err());
+    }
+
+    #[test]
+    fn a_short_passphrase_is_rejected() {
+        assert!(seal_backup(b"x", "short").is_err());
+    }
+
+    #[test]
+    fn an_unencrypted_file_is_rejected() {
+        assert!(open_backup(b"legacy-cbor", "correct horse").is_err());
+    }
 }

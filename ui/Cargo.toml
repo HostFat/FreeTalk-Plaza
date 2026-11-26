@@ -27,6 +27,8 @@ rand.workspace = true
 getrandom = { version = "0.2.15", features = ["js", "wasm-bindgen", "js-sys"], default-features = false }
 ml-kem = { version = "0.3.4", default-features = false }
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
+zeroize = { version = "1.9", default-features = false }
 rand_core = { version = "0.10", default-features = false }
 
 # UI Framework

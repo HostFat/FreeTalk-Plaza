@@ -67,8 +67,8 @@ locale non è cancellabile a distanza.
 **Minaccia:** accesso a delegate, chiavi, cronologia e backup.
 
 **Mitigazione:** chiavi per dispositivo, revoca firmata, rotazione della chiave
-di conversazione, nessuna chiave in localStorage, backup cifrato con password
-(da decidere), blocco locale. Il dispositivo revocato non può firmare nuovi
+di conversazione, nessuna chiave in localStorage, backup cifrato con
+passphrase (Argon2id + ChaCha20-Poly1305), blocco locale. Il dispositivo revocato non può firmare nuovi
 record dopo la revoca; i client rifiutano le sue firme.
 
 **Residuo:** il dispositivo compromesso ha già letto la storia e può conservare

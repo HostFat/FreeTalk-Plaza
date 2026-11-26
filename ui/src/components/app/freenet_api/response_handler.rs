@@ -193,7 +193,11 @@ impl ResponseHandler {
                 );
                 for (i, v) in values.iter().enumerate() {
                     info!("Processing delegate response value #{}", i);
-                    if is_dm_delegate_key(key.bytes()) {
+                    if is_dm_delegate_key(key.bytes())
+                        || crate::components::app::dm_delegate::is_legacy_dm_delegate_key(
+                            key.bytes(),
+                        )
+                    {
                         if let OutboundDelegateMsg::ApplicationMessage(app_msg) = v {
                             match from_reader::<DmDelegateResponseEnvelope, _>(
                                 app_msg.payload.as_slice(),

@@ -690,6 +690,9 @@ test("a DM conversation survives backup and restore", async ({ page }) => {
   await app.getByRole("button", { name: "Open identities" }).click();
   const drawer = app.locator(".device-drawer");
   await drawer.getByRole("tab", { name: "Backup" }).click();
+  const backupPassphrase = "plaza-e2e-backup-passphrase";
+  await drawer.getByLabel("Backup passphrase").fill(backupPassphrase);
+  await drawer.getByLabel("Confirm passphrase").fill(backupPassphrase);
   const [download] = await Promise.all([
     page.waitForEvent("download"),
     drawer.getByRole("button", { name: "Download backup" }).click(),
@@ -714,6 +717,7 @@ test("a DM conversation survives backup and restore", async ({ page }) => {
   await drawer
     .locator("#plaza-backup-file")
     .setInputFiles(backupPath);
+  await drawer.getByLabel("Restore passphrase").fill(backupPassphrase);
   const restore = drawer.getByRole("button", { name: "Restore now" });
   await expect(restore).toBeEnabled({ timeout: 30_000 });
   await restore.click();

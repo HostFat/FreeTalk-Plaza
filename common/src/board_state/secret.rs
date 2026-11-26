@@ -972,6 +972,31 @@ mod tests {
     }
 
     #[test]
+    fn secrets_summary_encoding_does_not_depend_on_insertion_order() {
+        let mut first = BTreeSet::new();
+        first.insert(2);
+        first.insert(1);
+        let mut second = BTreeSet::new();
+        second.insert(1);
+        second.insert(2);
+        let left = SecretsSummary {
+            current_version: 2,
+            version_ids: first,
+            member_secrets: BTreeSet::new(),
+        };
+        let right = SecretsSummary {
+            current_version: 2,
+            version_ids: second,
+            member_secrets: BTreeSet::new(),
+        };
+        let mut left_bytes = Vec::new();
+        let mut right_bytes = Vec::new();
+        ciborium::ser::into_writer(&left, &mut left_bytes).unwrap();
+        ciborium::ser::into_writer(&right, &mut right_bytes).unwrap();
+        assert_eq!(left_bytes, right_bytes);
+    }
+
+    #[test]
     fn test_has_complete_distribution_empty() {
         let secrets = BoardSecretsV1::default();
         let members = HashMap::new();

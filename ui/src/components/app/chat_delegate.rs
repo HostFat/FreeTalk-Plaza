@@ -72,18 +72,25 @@ const DEFAULT_NONCE: [u8; 24] = [
 // `cargo make add-migration`, never by hand.
 include!(concat!(env!("OUT_DIR"), "/legacy_delegates.rs"));
 
-/// Check if a delegate key matches any known legacy delegate
+/// Check if a delegate key matches a generation older than the one in this build.
+/// The registry also keeps the current baseline so the next re-key can prove
+/// the outgoing hash was recorded. That baseline is not a legacy delegate.
 pub fn is_legacy_delegate_key(key_bytes: &[u8]) -> bool {
+    if chat_delegate_key().bytes() == key_bytes {
+        return false;
+    }
     LEGACY_DELEGATES
         .iter()
         .any(|(dk, _)| dk.as_slice() == key_bytes)
 }
 
-/// Check if an error message references one of the known legacy delegate keys.
+/// Check if an error message references a delegate generation older than this build.
 pub fn is_legacy_delegate_error(error_msg: &str) -> bool {
-    LEGACY_DELEGATES
-        .iter()
-        .any(|(dk, _)| error_msg.contains(&bs58::encode(dk).into_string()))
+    let current = bs58::encode(chat_delegate_key().bytes()).into_string();
+    LEGACY_DELEGATES.iter().any(|(dk, _)| {
+        let encoded = bs58::encode(dk).into_string();
+        encoded != current && error_msg.contains(&encoded)
+    })
 }
 
 // Prefixes for different pending request types (disjoint per operation so
@@ -96,8 +103,7 @@ const SIGNING_KEY_PREFIX: &[u8] = b"__signing_key:";
 const PUBLIC_KEY_PREFIX: &[u8] = b"__public_key:";
 const SIGN_PREFIX: &[u8] = b"__sign:";
 
-const CHAT_DELEGATE_WASM: &[u8] =
-    include_bytes!("../../../../target/wasm32-unknown-unknown/release/plaza_delegate.wasm");
+const CHAT_DELEGATE_WASM: &[u8] = crate::constants::CHAT_DELEGATE_WASM;
 
 static CHAT_DELEGATE_KEY: std::sync::LazyLock<DelegateKey> = std::sync::LazyLock::new(|| {
     let delegate_code = DelegateCode::from(CHAT_DELEGATE_WASM.to_vec());
@@ -695,9 +701,7 @@ async fn merge_stored_boards() {
 }
 
 fn create_chat_delegate_container() -> DelegateContainer {
-    let delegate_bytes =
-        include_bytes!("../../../../target/wasm32-unknown-unknown/release/plaza_delegate.wasm");
-    let delegate_code = DelegateCode::from(delegate_bytes.to_vec());
+    let delegate_code = DelegateCode::from(CHAT_DELEGATE_WASM.to_vec());
     let params = Parameters::from(Vec::<u8>::new());
     let delegate = Delegate::from((&delegate_code, &params));
     DelegateContainer::Wasm(DelegateWasmAPIVersion::V1(delegate))
@@ -1052,6 +1056,9 @@ async fn fire_legacy_migration_request() {
     );
 
     for (i, (key_bytes, code_hash_bytes)) in LEGACY_DELEGATES.iter().enumerate() {
+        if chat_delegate_key().bytes() == key_bytes.as_slice() {
+            continue;
+        }
         let legacy_code_hash = CodeHash::new(*code_hash_bytes);
         let legacy_delegate_key = DelegateKey::new(*key_bytes, legacy_code_hash);
 
@@ -1084,5 +1091,20 @@ async fn fire_legacy_migration_request() {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod legacy_registry_tests {
+    use super::{chat_delegate_key, is_legacy_delegate_error, is_legacy_delegate_key};
+
+    #[test]
+    fn the_day1_delegate_is_not_treated_as_legacy() {
+        let current = chat_delegate_key();
+        assert!(!is_legacy_delegate_key(current.bytes()));
+        let encoded = bs58::encode(current.bytes()).into_string();
+        assert!(!is_legacy_delegate_error(&format!(
+            "delegate {encoded} not found in store"
+        )));
     }
 }

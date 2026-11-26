@@ -1,91 +1,32 @@
 # Legacy Delegate Registry
 #
-# Single source of truth for every delegate generation that may still hold a
-# user's boards. A delegate's address is BLAKE3(BLAKE3(wasm) || params), so any
-# change to the delegate WASM re-keys it and the new generation starts with an
-# EMPTY secret store. Recording the keys here is what lets the UI find data
-# written by a previous build instead of silently orphaning it.
+# Single source of truth for every board-delegate generation that may still
+# hold a user's boards. A delegate's address is BLAKE3(BLAKE3(wasm) || params).
+# Pre-launch generations were dropped: nobody has boards stored under them.
+# This entry is the day-1 baseline. The next WASM change must keep this
+# code_hash in the file. The UI skips the entry whose key matches the
+# delegate in this build, so the baseline is not probed as a legacy store.
 #
 # Fields:
 #   code_hash    = BLAKE3 hash of the raw delegate WASM bytes (hex)
 #   delegate_key = BLAKE3(code_hash_bytes) - the delegate key (hex)
 #
-# The Rust side (ui/build.rs) turns every entry into the LEGACY_DELEGATES const,
-# so adding an entry here is enough - do not edit chat_delegate.rs by hand.
+# The Rust side (ui/build.rs) turns every entry into the LEGACY_DELEGATES const.
 #
 # To add an entry:   cargo make add-migration
 # To validate:       cargo make check-migration
 # To rebuild WASMs:  cargo make sync-wasm
-#
-# The last entry is the current baseline. When the committed WASM changes, the
-# previous entry must stay in this file or CI fails.
 
 [[entry]]
 version = "V1"
-description = "Before the freenet-stdlib 0.3.2 MessageOrigin change"
-date = "2026-03-14"
-delegate_key = "a6da849ddefea203fa2a3f9890eaff5a1803411d6b9196b5a2871d065e7eae61"
-code_hash = "1c42668348d7b1a6e0fb34d6f00d0876a56b95b68f6313ce231ddcd8dbb0ab50"
+description = "Day-1 baseline after dropping pre-launch board-delegate generations"
+date = "2026-11-26"
+delegate_key = "453407ffa1983a456d76da65c2a2af81664c71a931846912f845bc0f6584bffe"
+code_hash = "9109c04d26b65e0affeade2f132ffd87bd2396b14903819fb70cd7298ab0463b"
 
 [[entry]]
 version = "V2"
-description = "Baseline after the freenet-stdlib 0.12.1 and Dioxus 0.7.10 upgrade"
-date = "2026-11-12"
-delegate_key = "d635c76ddc61e778a83f9f45bd53d61fe80a2608243238dec8d28b742e00abe3"
-code_hash = "96e880ce0e920f8699117acd935f18c55e00fbaf9ac781c6ee42ad54bc67bf58"
-
-[[entry]]
-version = "V3"
-description = "Rename to FreeTalk Plaza (plaza-core/plaza-contract/plaza-delegate)"
-date = "2026-11-12"
-delegate_key = "41610d94254c49fe365a7ff97168098155ea1facfc7d05c6739e4993c96473fd"
-code_hash = "64c1e96519036994101515380ceac9f30ff689f28624981a5529c5209c78f73a"
-
-[[entry]]
-version = "V4"
-description = "Per-category secrets and restricted categories (owner-signed category keys)"
-date = "2026-11-12"
-delegate_key = "aaa265f4052a9310903dee44d9997f88c7755f7271866dee398af4f0a2cbaea6"
-code_hash = "66d2bdd044d8b75392b4e29c02e1449e738e31264621c55e1fb634c4a69adb44"
-
-[[entry]]
-version = "V5"
-description = "Delegated category key distribution and invite links that carry category keys"
-date = "2026-11-12"
-delegate_key = "c8bf8dcd9c13b3ee48ef8cb8e0e6988c06d1468d4d36026ff5780811d9c6f476"
-code_hash = "125665757a756a381595609cbae10daafa6c84609238a72b1e118d9a02634941"
-
-[[entry]]
-version = "V6"
-description = "Phase 2: reports, approval queue, announcements and polls"
-date = "2026-11-13"
-delegate_key = "4bcd537a1287c2699e2b90c594a34c081851886b5c1a869ac06f2ef44445e467"
-code_hash = "89a0cc4d05284649e9524befa24aa566f72a755a0cd6f7a1d2dc6487fc1e10cb"
-
-[[entry]]
-version = "V7"
-description = "Phase 4: temporary ban expiry and owner-signed revocations"
-date = "2026-11-13"
-delegate_key = "94722f210cd215b69cefbf9e3663b435aef52e30f784e77fb1e738ae18c398f2"
-code_hash = "a723cbaefff4f53a36c587a3e81afa36fc0c098a0470f5e28323e635a342d3b8"
-
-[[entry]]
-version = "V8"
-description = "Phase 5: PQ KEM client for private boards"
-date = "2026-11-13"
-delegate_key = "e794bc87bda5f509c3e8b48727934347d7d84b18b455f775d6437223848ba8ee"
-code_hash = "1924c4945a568d419292f3405d67b156fd329a6584708c60bf4c31a6aa71fc08"
-
-[[entry]]
-version = "V9"
-description = "Baseline before per-topic contracts (DM, mail and device backup builds)"
-date = "2026-11-23"
-delegate_key = "6e6443be740805a2e7507f467dcfa71cdfa7bd5b2ad4a42b13f538a2bad009b9"
-code_hash = "95ae5eed87cfd1139bcbf069a7634413126985bcb85b09aa6b21d5aac601e64b"
-
-[[entry]]
-version = "V10"
-description = "Baseline before section-sharded boards"
-date = "2026-11-23"
-delegate_key = "620c0eb51ad468e04602b36fe4e66d03df64cb32ae088573ff6d400392e0a5d0"
-code_hash = "30748a3307ce59b08521432b4995b881354303f63f13998c1fd527966c02b81f"
+description = "Reproducible path-remapped board delegate baseline"
+date = "2026-11-26"
+delegate_key = "f2e08cd9c188d3f3019b07d00d78e369374dd87592be1ff2aa7ce27b5da85107"
+code_hash = "ba951edab317f5709156c51d87397d0a1b8db7c981873ca61c0bffe53bd39724"

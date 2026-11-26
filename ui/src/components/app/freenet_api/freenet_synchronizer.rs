@@ -432,6 +432,14 @@ impl FreenetSynchronizer {
                                     info!("Legacy delegate not found error - marking migration complete");
                                     mark_legacy_migration_done();
                                 }
+                                if err_str.contains("delegate")
+                                    && err_str.contains("not found")
+                                    && crate::components::app::dm_delegate::fail_pending_for_legacy_dm_error(
+                                        &err_str,
+                                    )
+                                {
+                                    info!("Legacy DM delegate not found error - skipping unavailable generation");
+                                }
 
                                 // Special handling for "not supported" errors
                                 if err_str.contains("not supported") {
