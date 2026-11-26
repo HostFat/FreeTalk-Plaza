@@ -1,5 +1,5 @@
 {
-  description = "Pizza Order Manager for Freenet - Development Environment";
+  description = "FreeTalk Plaza - Decentralized Forum on Freenet";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -23,9 +23,8 @@
         };
         freenet-shared-pkg = freenet-shared.packages.${system}.default;
 
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+        rustToolchain = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
           extensions = [ "rust-src" "rust-analyzer" ];
-          targets = [ "wasm32-unknown-unknown" ];
         };
       in
       {

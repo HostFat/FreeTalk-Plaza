@@ -73,6 +73,25 @@ fn cmd_hash(path: Option<&String>) -> Result<(), String> {
     Ok(())
 }
 
+fn escape_toml_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+fn registry_contains_code_hash(registry: &str, hash: &str) -> bool {
+    let expected = format!("\"{hash}\"");
+    registry.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix("code_hash")
+            .and_then(|rest| rest.trim_start().strip_prefix('='))
+            .map(|val| val.trim() == expected)
+            .unwrap_or(false)
+    })
+}
+
 fn cmd_add(version: Option<&String>, description: Option<&String>) -> Result<(), String> {
     let version = version.ok_or("add needs a version, e.g. V3")?;
     let description = description.ok_or("add needs a description")?;
@@ -88,14 +107,16 @@ fn cmd_add(version: Option<&String>, description: Option<&String>) -> Result<(),
     let registry = root.join(REGISTRY);
     let mut text = fs::read_to_string(&registry).map_err(|e| format!("cannot read {}: {e}", registry.display()))?;
 
-    if text.contains(&code_hash) {
+    if registry_contains_code_hash(&text, &code_hash) {
         println!("code_hash {code_hash} is already in {REGISTRY} - nothing to do");
         return Ok(());
     }
 
     let date = today();
+    let escaped_version = escape_toml_string(version);
+    let escaped_description = escape_toml_string(description);
     text.push_str(&format!(
-        "\n[[entry]]\nversion = \"{version}\"\ndescription = \"{description}\"\ndate = \"{date}\"\ndelegate_key = \"{delegate_key}\"\ncode_hash = \"{code_hash}\"\n"
+        "\n[[entry]]\nversion = \"{escaped_version}\"\ndescription = \"{escaped_description}\"\ndate = \"{date}\"\ndelegate_key = \"{delegate_key}\"\ncode_hash = \"{code_hash}\"\n"
     ));
     fs::write(&registry, text).map_err(|e| format!("cannot write {}: {e}", registry.display()))?;
     println!("Added {version} to {REGISTRY}");
@@ -175,6 +196,12 @@ const WASM_TARGETS: &[WasmTarget] = &[
         wasm_file: "plaza_member_contract.wasm",
         destinations: &["ui/public/contracts/plaza_member_contract.wasm"],
         watch_paths: &["member-contract", "common"],
+    },
+    WasmTarget {
+        package: "plaza-blob",
+        wasm_file: "plaza_blob.wasm",
+        destinations: &["ui/public/contracts/blob_contract.wasm"],
+        watch_paths: &["plaza-blob", "plaza-blob-core"],
     },
 ];
 
@@ -372,7 +399,7 @@ fn cmd_check(args: &[String]) -> Result<(), String> {
             return Ok(());
         }
         let head_registry = registry_at_ref(&root, head)?;
-        if head_registry.contains(&base_hash) {
+        if registry_contains_code_hash(&head_registry, &base_hash) {
             println!("committed WASM changed and the old hash is registered - OK");
             return Ok(());
         }
@@ -394,7 +421,7 @@ fn cmd_check(args: &[String]) -> Result<(), String> {
         println!("committed WASM matches HEAD - no migration needed");
         return Ok(());
     }
-    if registry.contains(&head_hash) {
+    if registry_contains_code_hash(&registry, &head_hash) {
         println!("committed WASM changed and the old hash is registered - OK");
         return Ok(());
     }

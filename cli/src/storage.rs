@@ -50,6 +50,11 @@ impl Storage {
         };
 
         fs::create_dir_all(&data_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700));
+        }
 
         let storage_path = data_dir.join("boards.json");
 
@@ -102,7 +107,26 @@ impl Storage {
 
     pub fn save_boards(&self, storage: &BoardStorage) -> Result<()> {
         let contents = serde_json::to_string_pretty(storage)?;
-        fs::write(&self.storage_path, contents)?;
+        let tmp_path = self.storage_path.with_extension("json.tmp");
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)?;
+            file.write_all(contents.as_bytes())?;
+            file.sync_all()?;
+            let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
+        }
+        #[cfg(not(unix))]
+        {
+            fs::write(&tmp_path, contents)?;
+        }
+        fs::rename(&tmp_path, &self.storage_path)?;
         Ok(())
     }
 

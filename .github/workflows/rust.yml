@@ -32,6 +32,9 @@ concurrency:
   group: rust-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -83,11 +86,6 @@ jobs:
       with:
         name: plaza_delegate.wasm
         path: ui/public/contracts/plaza_delegate.wasm
-    - name: Upload styles.css
-      uses: actions/upload-artifact@v4
-      with:
-        name: styles.css
-        path: ui/assets/styles.css
     - name: Upload contract bundle
       uses: actions/upload-artifact@v4
       with:
@@ -147,6 +145,9 @@ jobs:
       run: nix develop --command cargo nextest run --workspace --no-fail-fast
     - name: Run scale SLO regression checks
       run: nix develop --command cargo test -p plaza-core --test scale_slo --release -- --nocapture
+    - name: Run clippy (advisory)
+      continue-on-error: true
+      run: nix develop --command cargo clippy --workspace --all-targets
 
   # Stage 2b (parallel): UI WASM bundle.
   # Regular pushes and PRs build with `release-fast` (no LTO, 16 codegen units)
