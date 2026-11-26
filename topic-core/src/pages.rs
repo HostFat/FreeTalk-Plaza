@@ -27,7 +27,7 @@ use crate::{
     AuthorizedParticipantV1, AuthorizedTopicActionV1, AuthorizedTopicApprovalV1,
     AuthorizedTopicPostV1, AuthorizedTrustV1, SectionId, TopicActionKind, TopicAuthorityV1,
     TopicGenerationV1, TopicParamsV1, MAX_BODY_BYTES, MAX_IMAGES_PER_POST, MAX_PARTS,
-    MAX_POSTS, MAX_POST_BYTES, PROTOCOL_VERSION,
+    MAX_POSTS, MAX_POST_BYTES, MAX_REACTION_PAYLOAD_BYTES, PROTOCOL_VERSION,
 };
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;

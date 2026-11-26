@@ -171,7 +171,7 @@ impl ComposableState for AuthorityRootStateV1 {
         delta: &Option<Self::Delta>,
     ) -> Result<(), String> {
         if let Some(root) = delta {
-            let mut candidate = AuthorityRootStateV1(Some(root.clone()));
+            let candidate = AuthorityRootStateV1(Some(root.clone()));
             candidate.verify_signature(parent_state, parameters)?;
             let should_replace = match &self.0 {
                 Some(existing) => root.root.epoch > existing.root.epoch,

@@ -7,7 +7,6 @@
 
 use crate::board_state::member::MemberId;
 use crate::board_state::message::MessageId;
-use crate::board_state::moderation::category_chain;
 use crate::board_state::roles::{
     resolve_signer_key, verify_moderation_authority, AuthorityProof, ModerationPower,
 };

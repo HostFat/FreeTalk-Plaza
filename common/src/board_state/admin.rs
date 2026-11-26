@@ -178,7 +178,9 @@ impl ComposableState for AdminsV1 {
                 let incoming_epoch = parent_state.ownership.epoch_at(admin.admin.signed_at);
                 let incoming = (incoming_epoch, admin.admin.generation);
                 let local_rank = self.record_with_time_for(&admin.admin.id()).map(
-                    |(gen, time, revoked)| (parent_state.ownership.epoch_at(time), gen, revoked),
+                    |(generation, time, revoked)| {
+                        (parent_state.ownership.epoch_at(time), generation, revoked)
+                    },
                 );
                 match local_rank {
                     Some((le, lg, true)) => {
@@ -200,7 +202,9 @@ impl ComposableState for AdminsV1 {
                     .epoch_at(revocation.revocation.signed_at);
                 let incoming = (incoming_epoch, revocation.revocation.generation);
                 let local_rank = self.record_with_time_for(&revocation.id()).map(
-                    |(gen, time, revoked)| (parent_state.ownership.epoch_at(time), gen, revoked),
+                    |(generation, time, revoked)| {
+                        (parent_state.ownership.epoch_at(time), generation, revoked)
+                    },
                 );
                 match local_rank {
                     Some((le, lg, false)) if incoming < (le, lg) => continue,
