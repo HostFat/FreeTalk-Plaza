@@ -1609,15 +1609,27 @@ pub fn section_name(board: &BoardData, section: &MessageId) -> Option<String> {
 
 /// Create a topic contract owned by the current board owner and add its entry
 /// to the board index.
+#[allow(dead_code)]
 pub async fn create_topic(
     owner: VerifyingKey,
     title: String,
     body: String,
     section: Option<MessageId>,
 ) -> Result<MessageId, String> {
+    create_topic_with_options(owner, title, body, section, false).await
+}
+
+/// Create a topic contract with explicit options (e.g. `auto_moderated`).
+pub async fn create_topic_with_options(
+    owner: VerifyingKey,
+    title: String,
+    body: String,
+    section: Option<MessageId>,
+    auto_moderated: bool,
+) -> Result<MessageId, String> {
     let section_id = section.ok_or("choose a section for the topic")?;
     crate::components::app::section_contract::ensure_section_loaded(owner, section_id).await?;
-    let prepared = prepare_topic(owner, &title, &body, Some(section_id)).await?;
+    let prepared = prepare_topic(owner, &title, &body, Some(section_id), auto_moderated).await?;
     let contract_id = *prepared.key.id();
 
     TOPIC_CACHE.with_mut(|topics| {
@@ -1711,11 +1723,23 @@ async fn ensure_part_for_new_post(
 }
 
 /// Publish a reply in a topic and bump the board activity hint.
+#[allow(dead_code)]
 pub async fn send_reply(
     owner: VerifyingKey,
     topic_id: MessageId,
     part: u32,
     text: String,
+) -> Result<(), String> {
+    send_reply_with_images(owner, topic_id, part, text, Vec::new()).await
+}
+
+/// Publish a reply with optional attached images and bump the board activity hint.
+pub async fn send_reply_with_images(
+    owner: VerifyingKey,
+    topic_id: MessageId,
+    part: u32,
+    text: String,
+    images: Vec<plaza_core::board_state::images::ImageRef>,
 ) -> Result<(), String> {
     let part = ensure_part_for_new_post(owner, topic_id, part).await?;
     let prepared = prepare_reply(
@@ -1723,6 +1747,7 @@ pub async fn send_reply(
         topic_id,
         part,
         TopicPostContentV1::Text(text),
+        images,
     )?;
     publish_prepared_reply(owner, prepared).await
 }
@@ -1764,6 +1789,7 @@ pub async fn send_poll_reply(
         topic_id,
         part,
         TopicPostContentV1::Poll(poll),
+        Vec::new(),
     )?;
     publish_prepared_reply(owner, prepared).await
 }
@@ -1961,6 +1987,7 @@ async fn prepare_topic(
     title: &str,
     body: &str,
     section: Option<MessageId>,
+    auto_moderated: bool,
 ) -> Result<PreparedTopic, String> {
     let mut board = board_for(owner)?;
     if board.board_state.mode != BoardModeV1::SectionedTopicIndex {
@@ -2058,6 +2085,12 @@ async fn prepare_topic(
     OsRng.fill_bytes(&mut nonce);
     let topic_id = MessageId::from_bytes(topic_id_bytes);
 
+    let auto_moderated_allowed = section
+        .and_then(|id| board.board_state.sections.section(&id))
+        .and_then(|s| s.auto_moderated_topics)
+        .unwrap_or(board.board_state.configuration.configuration.auto_moderated_topics);
+    let effective_auto_moderated = auto_moderated && auto_moderated_allowed;
+
     let sealed_title = seal_text(&board, title)?;
     let sealed_body = seal_text(&board, body)?;
     let header = TopicHeaderV1 {
@@ -2072,7 +2105,7 @@ async fn prepare_topic(
         },
         title: sealed_title.clone(),
         body: sealed_body.clone(),
-        auto_moderated: false,
+        auto_moderated: effective_auto_moderated,
         created_at: now,
         nonce,
     };
@@ -2157,6 +2190,7 @@ fn prepare_reply(
     topic_id: MessageId,
     part: u32,
     content: TopicPostContentV1,
+    images: Vec<plaza_core::board_state::images::ImageRef>,
 ) -> Result<PreparedReply, String> {
     let board = board_for(owner)?;
     let conversation = conversation_for(owner, topic_id, part)?;
@@ -2164,7 +2198,7 @@ fn prepare_reply(
         return Err("the topic is still loading".to_string());
     }
     match &content {
-        TopicPostContentV1::Text(text) if text.trim().is_empty() => {
+        TopicPostContentV1::Text(text) if text.trim().is_empty() && images.is_empty() => {
             return Err("the reply is empty".to_string());
         }
         TopicPostContentV1::Poll(poll)
@@ -2182,7 +2216,7 @@ fn prepare_reply(
         author,
         parent: None,
         content: encode_content(&board, &content)?,
-        images: Vec::new(),
+        images,
         created_at: now,
         nonce,
     };
@@ -3139,13 +3173,41 @@ pub fn effective_topic_content(
     Some((edit.title, edit.body))
 }
 
+pub fn is_topic_edited(state: &TopicStateV1) -> bool {
+    state
+        .header
+        .as_ref()
+        .is_some_and(|header| state.latest_action(header.header.id(), TopicActionKind::Edit).is_some())
+}
+
+pub fn is_post_edited(state: &TopicPartState, post_id: MessageId) -> bool {
+    state.latest_action(post_id, TopicActionKind::Edit).is_some()
+        || state.latest_action(post_id, TopicActionKind::EditPoll).is_some()
+}
+
 pub fn effective_post_content(
     board: &BoardData,
     state: &TopicPartState,
     post_id: MessageId,
 ) -> Option<SealedBytes> {
     let post = state.posts().get(&post_id)?;
-    let Some(action) = state.latest_action(post_id, TopicActionKind::Edit) else {
+    let edit_action = state.latest_action(post_id, TopicActionKind::Edit);
+    let poll_action = state.latest_action(post_id, TopicActionKind::EditPoll);
+    let action = match (edit_action, poll_action) {
+        (Some(a), Some(b)) => {
+            if (b.action.created_at, b.action.generation)
+                >= (a.action.created_at, a.action.generation)
+            {
+                Some(b)
+            } else {
+                Some(a)
+            }
+        }
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    let Some(action) = action else {
         return Some(post.post.content.clone());
     };
     let Some(bytes) = open_action_payload(board, &action.action.payload) else {
@@ -3275,6 +3337,71 @@ pub async fn edit_post(
         .unwrap_or(1);
     let action = plaza_topic_core::TopicActionV1 {
         kind: TopicActionKind::Edit,
+        target: post_id,
+        payload,
+        generation,
+        created_at: now,
+        signer,
+    };
+    let authorized = plaza_topic_core::AuthorizedTopicActionV1 {
+        signature: plaza_core::util::sign_struct(&action, &signer_sk),
+        action,
+        signer_key: Some(signer_sk.verifying_key()),
+        authority: None,
+    };
+    publish_part_action(&conversation, authorized).await
+}
+
+/// Edit one poll reply using `TopicActionKind::EditPoll`. The author or the
+/// board owner may edit it.
+pub async fn edit_poll(
+    owner: VerifyingKey,
+    topic_id: MessageId,
+    part: u32,
+    post_id: MessageId,
+    mut poll: PollContentV1,
+) -> Result<(), String> {
+    poll.title = poll.title.trim().to_string();
+    poll.options = poll
+        .options
+        .into_iter()
+        .map(|opt| opt.trim().to_string())
+        .filter(|opt| !opt.is_empty())
+        .collect();
+    if poll.title.is_empty() {
+        return Err("the poll needs a question".to_string());
+    }
+    if poll.options.len() < 2 {
+        return Err("a poll needs at least two options".to_string());
+    }
+    let board = board_for(owner)?;
+    let conversation = conversation_for(owner, topic_id, part)?;
+    let post = conversation
+        .state
+        .posts()
+        .get(&post_id)
+        .ok_or("the poll is not in this topic")?;
+    let self_id = MemberId::from(&board.self_sk.verifying_key());
+    let signer_sk = if post.post.author == self_id {
+        board.self_sk.clone()
+    } else if board.is_current_owner() {
+        board.owner_key().clone()
+    } else {
+        return Err("only the author or the owner can edit this poll".to_string());
+    };
+    let signer = MemberId::from(&signer_sk.verifying_key());
+    let now = system_time_ms(get_current_system_time());
+    let edit = PostEditV1 {
+        content: encode_content(&board, &TopicPostContentV1::Poll(poll))?,
+    };
+    let payload = seal_action_payload(&board, &encode(&edit)?)?;
+    let generation = conversation
+        .state
+        .latest_action(post_id, TopicActionKind::EditPoll)
+        .map(|entry| entry.action.generation + 1)
+        .unwrap_or(1);
+    let action = plaza_topic_core::TopicActionV1 {
+        kind: TopicActionKind::EditPoll,
         target: post_id,
         payload,
         generation,

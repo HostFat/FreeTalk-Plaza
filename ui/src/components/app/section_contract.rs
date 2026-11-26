@@ -133,7 +133,11 @@ pub static TOPIC_PAGE_SIZE: GlobalSignal<usize> =
 
 /// The client default, clamped to the bound the contract accepts.
 pub(crate) fn current_topic_page_size() -> u32 {
-    let size = *TOPIC_PAGE_SIZE.read() as u32;
+    let size = if dioxus::core::Runtime::try_current().is_some() {
+        *TOPIC_PAGE_SIZE.read() as u32
+    } else {
+        DEFAULT_TOPIC_PAGE_SIZE
+    };
     size.clamp(1, MAX_TOPIC_PAGE_SIZE)
 }
 
