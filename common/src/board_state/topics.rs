@@ -199,6 +199,10 @@ pub struct TopicReportV1 {
 pub struct AuthorizedTopicReportV1 {
     pub report: TopicReportV1,
     pub signature: Signature,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key: Option<VerifyingKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<Box<crate::board_state::member_shards::MemberProofV1>>,
 }
 
 
@@ -220,6 +224,10 @@ pub struct AuthorizedTopicReportResolutionV1 {
     pub signer_key: Option<VerifyingKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority: Option<Box<AuthorityProof>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ownership_transfers: Vec<crate::board_state::ownership::AuthorizedOwnerTransfer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transfer_admins: Vec<crate::board_state::admin::AuthorizedAdmin>,
     pub signature: Signature,
 }
 
@@ -1737,6 +1745,8 @@ mod report_tests {
         index.reports.push(AuthorizedTopicReportV1 {
             signature: sign_struct(&report, &member()),
             report,
+            signer_key: Some(member().verifying_key()),
+            proof: None,
         });
         index.verify(&state, &params()).unwrap();
         assert_eq!(index.report_count(&TopicId::from_bytes([7u8; 32])), 1);

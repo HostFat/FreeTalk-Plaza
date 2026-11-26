@@ -215,6 +215,8 @@ mod tests {
             ),
             invite_chain: Vec::new(),
             invite_token: None,
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
         }
     }
 

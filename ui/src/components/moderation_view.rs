@@ -42,18 +42,14 @@ pub fn ModerationView() -> Element {
                 .map(|board| board.with_merged_topics())
         })
     });
-    // The queue aggregates every section page, so load them all on entry.
+    // Load only the board/section moderation feeds on entry instead of pulling
+    // every section page and every member/profile shard up front.
     use_effect(move || {
         let Some(owner) = CURRENT_BOARD.read().owner_key else {
             return;
         };
         spawn(async move {
-            let _ = crate::components::app::section_contract::load_all_section_pages_for_board(
-                owner,
-            )
-            .await;
-            crate::components::app::member_contract::load_all_member_shards(owner).await;
-            crate::components::app::profile_contract::load_all_profile_shards(owner).await;
+            crate::components::app::moderation_contract::load_moderation_for_board(owner).await;
         });
     });
 
@@ -149,6 +145,49 @@ pub fn ModerationView() -> Element {
             ))
         })
         .collect();
+
+    // Load extra pages only for sections whose loaded moderation feed reports a
+    // topic not yet in the loaded manifests, and fetch member/profile shards
+    // only for reporters/authors visible in the queue.
+    {
+        let missing_sections =
+            crate::components::app::moderation_contract::missing_report_sections(
+                owner_vk,
+                &board.board_state.topics,
+            );
+        let mut queue_members: Vec<MemberId> = Vec::new();
+        for entry in &topic_reports {
+            queue_members.push(entry.report.reporter);
+        }
+        for report in &reports {
+            queue_members.push(report.report.reporter);
+        }
+        for message in &pending {
+            queue_members.push(message.author_id);
+        }
+        if !missing_sections.is_empty() || !queue_members.is_empty() {
+            crate::util::safe_spawn_local(async move {
+                for section in missing_sections {
+                    let _ = crate::components::app::section_contract::load_section_pages(
+                        owner_vk, section,
+                    )
+                    .await;
+                }
+                if !queue_members.is_empty() {
+                    crate::components::app::member_contract::load_member_shards_for(
+                        owner_vk,
+                        queue_members.iter().copied(),
+                    )
+                    .await;
+                    crate::components::app::profile_contract::load_profile_shards_for(
+                        owner_vk,
+                        queue_members,
+                    )
+                    .await;
+                }
+            });
+        }
+    }
 
     rsx! {
         div { class: "flex flex-col gap-6",

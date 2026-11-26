@@ -1,6 +1,6 @@
 # Benchmark multi-client: costo strutturale di una board sectioned
 
-Data: 2026-11-24. Build: release locale, Windows. Il test misura lo stato e
+Data: 2026-11-25 (rev 37). Build: release locale, Windows. Il test misura lo stato e
 i payload che il nodo trasmette, poi li moltiplica per il numero di
 subscriber e di sezioni. Non e' una simulazione di rete: e' il costo che la
 struttura attuale impone a ogni aggiornamento.
@@ -28,10 +28,10 @@ copia l'autorita' della madre e aggiunge l'indice della propria sezione.
 | 20 | 345 KiB | 639 KiB | 3,46 s | 363 KiB | 1,71 s | 2,1 ms |
 | 100 | 380 KiB | 674 KiB | 3,61 s | 363 KiB | 1,67 s | 2,0 ms |
 
-| Sezioni | Storage figlie (pruned) | Activity contract | Summary / 1-entry delta | Fan-out activity (50 sub) | Authority sync |
+| Sezioni | Storage figlie (pruned) | Activity contract (con `MemberProofV1`) | Summary / 1-entry delta | Fan-out activity (50 sub) | Authority sync |
 |---:|---:|---:|---:|---:|---:|
-| 20 | 7,1 MiB | 83,2 KiB (200 entry) | 8,6 KiB / 0,42 KiB | 0,021 MiB (delta) / 4,06 MiB (full) | 7,1 MiB |
-| 100 | 35,4 MiB | 83,2 KiB (200 entry) | 8,6 KiB / 0,42 KiB | 0,021 MiB (delta) / 4,06 MiB (full) | 35,4 MiB |
+| 20 | 7,1 MiB | 155,2 KiB (200 entry, per sezione) | 8,6 KiB / 0,79 KiB | 0,038 MiB (delta) | 7,1 MiB |
+| 100 | 35,6 MiB | 155,2 KiB (200 entry, per sezione) | 8,6 KiB / 0,79 KiB | 0,038 MiB (delta) | 35,6 MiB |
 
 Le figlie ora tengono solo la propria catena di sezioni: la dimensione pruned è
 la stessa con 20 e con 100 sezioni sorelle (363 KiB), e lo storage cresce con
@@ -53,13 +53,13 @@ contratto per sezione (il manifest) invece di tutte le pagine. Un nuovo topic
 è un delta da 0,7–0,97 KiB: con 50 subscriber il fan-out è 0,03–0,05 MiB. Il
 manifest cambia solo quando nasce una pagina o arriva un flag.
 
-Moderazione, 500 report e 500 risoluzioni:
+Moderazione (shardata per sezione, con `MemberProofV1` e prova moderatore), 500 report e 500 risoluzioni:
 
 | Unità | Dimensione | Fan-out (50 sub) |
 |---|---:|---:|
-| Feed completo (bootstrap) | 362,8 KiB | — |
+| Feed completo (bootstrap) | 384,8 KiB | — |
 | `ReportFeedSummaryV1` (sync peer) | 100,5 KiB | — |
-| Un nuovo report (delta) | 0,34 KiB | 0,017 MiB |
+| Un nuovo report (delta) | 0,39 KiB | 0,019 MiB |
 | Una risoluzione (delta) | 0,42 KiB | 0,021 MiB |
 
 Le scritture di report sulla board o sulla pagina della sezione sono zero, e la
@@ -81,18 +81,18 @@ passa da 20 s a 6 ms.
 
 I profili sono ora shardati in 32 bucket deterministici (`plaza-profile-contract`,
 `bucket = blake3(member_id)[0..2] % 32`, stesso bucket di `plaza-member-contract`)
-con `ProfileSummaryV1` e `get_state_delta` incrementale:
+con `ProfileSummaryV1`, `get_state_delta` incrementale e verifica on-contract di
+`MemberProofV1` (rev 37):
 
 | Membri | Profili monolitico | Bucket 0 | Max bucket | Summary b0 | Verify b0 | Rename/sync delta |
 |---:|---:|---:|---:|---:|---:|---:|
-| 1.000 | 314,3 KiB | 10,3 KiB (33 p.) | 13,5 KiB | 2,1 KiB | 67,3 ms | 0,32 KiB (2,0 ms) |
-| 5.000 | 1.580,8 KiB | 55,3 KiB (175 p.) | 55,3 KiB | 10,9 KiB | 399,3 ms | 0,32 KiB (2,6 ms) |
-| 10.000 | 3.163,0 KiB | 102,8 KiB (325 p.) | 108,8 KiB | 20,3 KiB | 714,5 ms | 0,32 KiB (2,4–2,5 ms) |
+| 5.000 | 3.382,9 KiB | 118,4 KiB (175 p.) | 118,4 KiB | 10,9 KiB | 809,7 ms | 0,68 KiB (5,1 ms) |
+| 10.000 | 6.767,3 KiB | 219,9 KiB (325 p.) | 232,8 KiB | 20,3 KiB | 1,39–1,44 s | 0,68 KiB (4,6–4,8 ms) |
 
-A 10.000 membri ciascun bucket profili è ~30× più piccolo del feed monolitico;
+A 10.000 membri ciascun bucket profili è ~29× più piccolo del feed monolitico;
 al bootstrap il client scarica solo il proprio bucket (`GET`-only) e i bucket
 degli autori visibili vengono caricati pigro per vista, mentre il sync tra peer
-invia solo i record nuovi/aggiornati (0,32 KiB per un rename).
+invia solo i record nuovi/aggiornati (0,68 KiB con prova membro per un rename).
 
 I membri sono ora shardati in 32 bucket deterministici (`plaza-member-contract`,
 `bucket = blake3(member_id)[0..2] % 32`):
@@ -210,10 +210,13 @@ la board e le figlie non ricevono più l'activity.
    200 post; broadcast per risposta 31,6 KiB vs 133,3 KiB, 4,2× più piccolo;
    4 pagine totali 104,4 KiB vs 133,3 KiB; edit/delete post-sigillo tramite
    `post_seal_actions`).
-9. Compattare le definizioni dei ruoli nei topic (le sezioni nelle figlie sono
-   già potate con `SectionsV1::chain_only`).
-10. Aggiornamenti incrementali della sola radice per i topic, senza caricare
-    ogni topic nella passata di propagazione.
+9. Eliminato fan-out `O(topic)` in `propagate_authority`, lazy loading completo
+   in Search/Notifications/Moderation, sharding per-sezione di `activity` e
+   `moderation`, e chiusura vettori DoS con `MemberProofV1` su `profile`,
+   `activity` e `moderation` + post-transfer/succession su `member-contract`
+   (fatto, rev 37, v739).
+10. Compattare le definizioni dei ruoli nei topic (le sezioni nelle figlie sono
+    già potate con `SectionsV1::chain_only`).
 11. Subscription lazy con budget/TTL e `Unsubscribe` quando la stdlib lo
     espone.
 

@@ -57,6 +57,7 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     let mut reply = use_signal(String::new);
     let mut busy = use_signal(|| false);
     let mut loaded_part = use_signal(|| None::<u32>);
+    let mut synced_authority = use_signal(|| None::<(u32, i64)>);
     let mut marked_read = use_signal(|| 0i64);
     let mut draft_loaded = use_signal(|| false);
     let mut earlier_parts = use_signal(Vec::<u32>::new);
@@ -190,6 +191,44 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
         });
     });
 
+    // On-demand authority sync: whenever this topic finishes loading OR the
+    // board's authority snapshot changes while this topic is open, push the
+    // updated root/proofs to this topic's head (and active page) in O(1).
+    use_effect(move || {
+        let Some(auth_hash) = BOARDS
+            .read()
+            .map
+            .get(&owner)
+            .map(topic_contract::authority_hash)
+        else {
+            return;
+        };
+        let head_ready = topic_contract::topic_head(owner, topic_id_value)
+            .is_some_and(|head| head.header.is_some());
+        if !head_ready {
+            return;
+        }
+        let part_now = (*loaded_part.read()).unwrap_or(0);
+        if part_now > 0 {
+            let page_ready = topic_contract::topic_state(owner, topic_id_value, part_now)
+                .is_some_and(|page| page.is_loaded());
+            if !page_ready {
+                return;
+            }
+        }
+        if *synced_authority.peek() == Some((part_now, auth_hash)) {
+            return;
+        }
+        synced_authority.set(Some((part_now, auth_hash)));
+        spawn(async move {
+            let _ = topic_contract::sync_topic_authority(owner, topic_id_value, 0).await;
+            if part_now > 0 {
+                let _ =
+                    topic_contract::sync_topic_authority(owner, topic_id_value, part_now).await;
+            }
+        });
+    });
+
     // Lazily load only the member and profile shard buckets for authors and
     // participants present in this topic head, active page, and loaded earlier
     // parts.
@@ -287,8 +326,15 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     let now_ms = plaza_core::board_state::rate_limit::system_time_ms(
         crate::util::get_current_system_time(),
     );
+    let is_banned_on_board = |member: plaza_core::board_state::member::MemberId| {
+        board_data.board_state.bans.0.iter().any(|ban| {
+            ban.ban.banned_user == member
+                && !board_data.board_state.ban_revocations.revoked(&ban.id())
+        })
+    };
     let banned = head.is_banned_member(self_id, now_ms)
-        || state.is_banned_member(self_id, now_ms);
+        || state.is_banned_member(self_id, now_ms)
+        || is_banned_on_board(self_id);
     let suspended = head.is_suspended_member(self_id, now_ms)
         || state.is_suspended_member(self_id, now_ms);
     let effective_section = head.effective_section();
@@ -760,7 +806,14 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                             let pending = !state.post_is_visible(&post, head.is_trusted(post_value.author));
                             let author_banned =
                                 head.is_banned_member(post_value.author, now_ms)
-                                    || state.is_banned_member(post_value.author, now_ms);
+                                    || state.is_banned_member(post_value.author, now_ms)
+                                    || board_for_reply.board_state.bans.0.iter().any(|ban| {
+                                        ban.ban.banned_user == post_value.author
+                                            && !board_for_reply
+                                                .board_state
+                                                .ban_revocations
+                                                .revoked(&ban.id())
+                                    });
                             let owner = board_for_reply.owner_vk;
                             let mut editing_post = editing_post;
                             let mut edit_reply = edit_reply;

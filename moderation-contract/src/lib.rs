@@ -11,9 +11,8 @@ use freenet_stdlib::prelude::{
     StateSummary, UpdateData, UpdateModification, ValidateResult,
 };
 use plaza_core::board_state::report_feed::{
-    ReportFeedDeltaV1, ReportFeedStateV1, ReportFeedSummaryV1,
+    ModerationParametersV1, ReportFeedDeltaV1, ReportFeedStateV1, ReportFeedSummaryV1,
 };
-use plaza_core::board_state::ChatBoardParametersV1;
 
 #[allow(dead_code)]
 struct ModerationContract;
@@ -25,14 +24,14 @@ impl ContractInterface for ModerationContract {
         state: State<'static>,
         _related: RelatedContracts<'static>,
     ) -> Result<ValidateResult, ContractError> {
-        let _owner = from_reader::<ChatBoardParametersV1, &[u8]>(parameters.as_ref())
+        let params = from_reader::<ModerationParametersV1, &[u8]>(parameters.as_ref())
             .map_err(|error| ContractError::Deser(error.to_string()))?;
         if state.as_ref().is_empty() {
             return Ok(ValidateResult::Valid);
         }
         let feed = from_reader::<ReportFeedStateV1, &[u8]>(state.as_ref())
             .map_err(|error| ContractError::Deser(error.to_string()))?;
-        feed.verify()
+        feed.verify(&params)
             .map_err(|error| ContractError::InvalidUpdateWithInfo {
                 reason: format!("moderation state does not verify: {error}"),
             })?;
@@ -44,7 +43,7 @@ impl ContractInterface for ModerationContract {
         state: State<'static>,
         data: Vec<UpdateData<'static>>,
     ) -> Result<UpdateModification<'static>, ContractError> {
-        let _owner = from_reader::<ChatBoardParametersV1, &[u8]>(parameters.as_ref())
+        let params = from_reader::<ModerationParametersV1, &[u8]>(parameters.as_ref())
             .map_err(|error| ContractError::Deser(error.to_string()))?;
         let mut feed = if state.as_ref().is_empty() {
             ReportFeedStateV1::default()
@@ -62,10 +61,13 @@ impl ContractInterface for ModerationContract {
                     // drops entries written by another client.
                     let next = from_reader::<ReportFeedStateV1, &[u8]>(bytes.as_ref())
                         .map_err(|error| ContractError::Deser(error.to_string()))?;
-                    feed.apply_delta(&ReportFeedDeltaV1 {
-                        reports: next.reports,
-                        resolutions: next.resolutions,
-                    })
+                    feed.apply_delta(
+                        &params,
+                        &ReportFeedDeltaV1 {
+                            reports: next.reports,
+                            resolutions: next.resolutions,
+                        },
+                    )
                     .map_err(|error| ContractError::InvalidUpdateWithInfo {
                         reason: format!("moderation state does not verify: {error}"),
                     })?;
@@ -76,11 +78,39 @@ impl ContractInterface for ModerationContract {
                     }
                     let delta = from_reader::<ReportFeedDeltaV1, &[u8]>(bytes.as_ref())
                         .map_err(|error| ContractError::Deser(error.to_string()))?;
-                    feed.apply_delta(&delta).map_err(|error| {
+                    feed.apply_delta(&params, &delta).map_err(|error| {
                         ContractError::InvalidUpdateWithInfo {
                             reason: format!("moderation delta does not verify: {error}"),
                         }
                     })?;
+                }
+                UpdateData::StateAndDelta {
+                    state: state_bytes,
+                    delta: delta_bytes,
+                } => {
+                    if !state_bytes.as_ref().is_empty() {
+                        let next = from_reader::<ReportFeedStateV1, &[u8]>(state_bytes.as_ref())
+                            .map_err(|error| ContractError::Deser(error.to_string()))?;
+                        feed.apply_delta(
+                            &params,
+                            &ReportFeedDeltaV1 {
+                                reports: next.reports,
+                                resolutions: next.resolutions,
+                            },
+                        )
+                        .map_err(|error| ContractError::InvalidUpdateWithInfo {
+                            reason: format!("moderation state does not verify: {error}"),
+                        })?;
+                    }
+                    if !delta_bytes.as_ref().is_empty() {
+                        let delta = from_reader::<ReportFeedDeltaV1, &[u8]>(delta_bytes.as_ref())
+                            .map_err(|error| ContractError::Deser(error.to_string()))?;
+                        feed.apply_delta(&params, &delta).map_err(|error| {
+                            ContractError::InvalidUpdateWithInfo {
+                                reason: format!("moderation delta does not verify: {error}"),
+                            }
+                        })?;
+                    }
                 }
                 _ => {}
             }
@@ -138,14 +168,15 @@ impl ContractInterface for ModerationContract {
 
 #[no_mangle]
 pub extern "C" fn plaza_moderation_contract_revision() -> u32 {
-    2
+    3
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use plaza_core::board_state::member::MemberId;
+    use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
+    use plaza_core::board_state::member_shards::{MemberProofV1, MemberShardEntryV1};
     use plaza_core::board_state::message::MessageId;
     use plaza_core::board_state::privacy::SealedBytes;
     use plaza_core::board_state::reports::ReportReason;
@@ -163,7 +194,13 @@ mod tests {
         }};
     }
 
-    fn make_report(topic: u8, reporter: &SigningKey, generation: u64) -> AuthorizedTopicReportV1 {
+    fn make_report(
+        owner: &SigningKey,
+        topic: u8,
+        reporter: &SigningKey,
+        generation: u64,
+    ) -> AuthorizedTopicReportV1 {
+        let owner_id = MemberId::from(&owner.verifying_key());
         let value = TopicReportV1 {
             topic_id: MessageId::from_bytes([topic; 32]),
             post_id: None,
@@ -173,9 +210,34 @@ mod tests {
             created_at: 1_000 + generation as i64,
             generation,
         };
+        let proof = if reporter.verifying_key() == owner.verifying_key() {
+            None
+        } else {
+            Some(Box::new(MemberProofV1 {
+                ownership_transfers: Vec::new(),
+                transfer_admins: Vec::new(),
+                membership: Some(Box::new(MemberShardEntryV1 {
+                    member: AuthorizedMember::new(
+                        Member {
+                            owner_member_id: owner_id,
+                            invited_by: owner_id,
+                            member_vk: reporter.verifying_key(),
+                            join_proof: None,
+                        },
+                        owner,
+                    ),
+                    invite_chain: Vec::new(),
+                    invite_token: None,
+                    ownership_transfers: Vec::new(),
+                    transfer_admins: Vec::new(),
+                })),
+            }))
+        };
         AuthorizedTopicReportV1 {
             signature: sign_struct(&value, reporter),
             report: value,
+            signer_key: Some(reporter.verifying_key()),
+            proof,
         }
     }
 
@@ -198,6 +260,8 @@ mod tests {
             resolution: value,
             signer_key: Some(resolver.verifying_key()),
             authority: None,
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
         }
     }
 
@@ -205,8 +269,9 @@ mod tests {
     fn summarize_and_get_state_delta_round_trip() {
         let reporter = SigningKey::from_bytes(&[1u8; 32]);
         let resolver = SigningKey::from_bytes(&[2u8; 32]);
-        let params = Parameters::from(cbor!(&ChatBoardParametersV1 {
+        let params = Parameters::from(cbor!(&ModerationParametersV1 {
             owner: resolver.verifying_key(),
+            section: Some(MessageId::from_bytes([9u8; 32])),
         }));
 
         let peer_a = ModerationContract::update_state(
@@ -214,7 +279,7 @@ mod tests {
             State::from(Vec::new()),
             vec![UpdateData::Delta(
                 cbor!(&ReportFeedDeltaV1 {
-                    reports: vec![make_report(1, &reporter, 1)],
+                    reports: vec![make_report(&resolver, 1, &reporter, 1)],
                     resolutions: Vec::new(),
                 })
                 .into(),
@@ -229,7 +294,7 @@ mod tests {
             peer_a.clone(),
             vec![UpdateData::Delta(
                 cbor!(&ReportFeedDeltaV1 {
-                    reports: vec![make_report(2, &reporter, 1)],
+                    reports: vec![make_report(&resolver, 2, &reporter, 1)],
                     resolutions: vec![make_resolution(1, &reporter, &resolver, 1)],
                 })
                 .into(),

@@ -296,6 +296,7 @@ fn current_permission_label() -> String {
 
 #[component]
 fn TopicNotificationsView() -> Element {
+    let mut loading_pages = use_signal(|| false);
     let board = use_memo(move || {
         let current = CURRENT_BOARD.read().owner_key?;
         BOARDS
@@ -305,24 +306,10 @@ fn TopicNotificationsView() -> Element {
             .cloned()
             .map(|board| board.with_merged_topics())
     });
-    // Notifications cover the whole index, including pages the board list has
-    // not loaded yet.
-    use_effect(move || {
-        let Some(owner) = CURRENT_BOARD.read().owner_key else {
-            return;
-        };
-        spawn(async move {
-            let _ = crate::components::app::section_contract::load_all_section_pages_for_board(
-                owner,
-            )
-            .await;
-            crate::components::app::member_contract::load_all_member_shards(owner).await;
-            crate::components::app::profile_contract::load_all_profile_shards(owner).await;
-        });
-    });
     let Some(board_data) = board.read().clone() else {
         return rsx! {};
     };
+    let owner = board_data.owner_vk;
 
     let mut unread: Vec<_> = board_data
         .board_state
@@ -360,15 +347,34 @@ fn TopicNotificationsView() -> Element {
             let section = section.and_then(|id| {
                 crate::components::app::topic_contract::section_name(&board_data, &id)
             });
-            Some((topic_id, title, author, last_at, section))
+            Some((topic_id, title, author, last_at, section, entry.entry.author))
         })
         .collect();
     unread.sort_by_key(|entry| std::cmp::Reverse(entry.3));
 
+    // Lazily fetch member/profile shards only for authors of visible unread topics.
+    {
+        let unread_authors: Vec<MemberId> = unread.iter().map(|entry| entry.5).collect();
+        if !unread_authors.is_empty() {
+            crate::util::safe_spawn_local(async move {
+                crate::components::app::member_contract::load_member_shards_for(
+                    owner,
+                    unread_authors.iter().copied(),
+                )
+                .await;
+                crate::components::app::profile_contract::load_profile_shards_for(
+                    owner,
+                    unread_authors,
+                )
+                .await;
+            });
+        }
+    }
+
+    let has_more_pages = crate::components::app::section_contract::has_more_pages(owner);
     let board_id = bs58::encode(board_data.owner_vk.as_bytes()).into_string();
     let result_board = board_id.clone();
     let navigator = navigator();
-    let owner = board_data.owner_vk;
     let mark_all = {
         let entries = board_data.board_state.topics.entries.clone();
         move |_| {
@@ -407,6 +413,28 @@ fn TopicNotificationsView() -> Element {
                 }
                 h1 { class: "text-lg font-semibold text-text ml-2", "Notifications" }
                 div { class: "flex-1" }
+                if has_more_pages {
+                    button {
+                        r#type: "button",
+                        disabled: *loading_pages.read(),
+                        class: "px-3 py-1.5 bg-surface border border-border rounded-lg text-xs text-accent hover:border-accent/50 disabled:opacity-50",
+                        onclick: move |_| {
+                            loading_pages.set(true);
+                            spawn(async move {
+                                let _ = crate::components::app::section_contract::load_next_pages(
+                                    owner, 4,
+                                )
+                                .await;
+                                loading_pages.set(false);
+                            });
+                        },
+                        if *loading_pages.read() {
+                            "Loading older pages…"
+                        } else {
+                            "Check older pages"
+                        }
+                    }
+                }
                 if !unread.is_empty() {
                     button {
                         r#type: "button",
@@ -423,7 +451,7 @@ fn TopicNotificationsView() -> Element {
                     } else {
                         p { class: "text-xs text-text-muted mb-2", "{unread.len()} unread topic(s)" }
                         div { class: "space-y-2",
-                            for (topic_id, title, author, last_at, section) in unread {
+                            for (topic_id, title, author, last_at, section, _) in unread {
                                 {
                                     let topic = bs58::encode(topic_id.as_bytes()).into_string();
                                     let nav = navigator.clone();

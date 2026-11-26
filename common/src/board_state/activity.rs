@@ -6,10 +6,13 @@
 //! ordering. A topic that falls out of this window falls back to its index
 //! `created_at`.
 
-use crate::board_state::message::MessageId;
-use crate::board_state::topics::{AuthorizedTopicActivityV1, TopicActivityV1};
 use crate::board_state::member::MemberId;
+use crate::board_state::member_shards::{verify_member_proof, MemberProofV1};
+use crate::board_state::message::MessageId;
+use crate::board_state::sections::SectionId;
+use crate::board_state::topics::{AuthorizedTopicActivityV1, TopicActivityV1};
 use crate::util::verify_struct;
+use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
@@ -17,11 +20,27 @@ pub const MAX_ACTIVITY_ENTRIES: usize = 200;
 pub const MAX_ACTIVITY_COUNT: u32 = 1_000_000;
 pub const MAX_PENDING_APPROVALS: u32 = 10_000;
 
+/// Contract parameters for a board or per-section activity feed.
+/// `section: None` addresses the board-wide feed (flat `TopicIndex`);
+/// `section: Some(id)` addresses one section's activity feed on
+/// `SectionedTopicIndex` boards so replies in one section do not contend with
+/// or fan out to readers of other sections.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct ActivityParametersV1 {
+    pub owner: VerifyingKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<SectionId>,
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct ActivityEntryV1 {
     pub topic_id: MessageId,
     pub part: u32,
     pub activity: AuthorizedTopicActivityV1,
+    /// Proof that the activity signer is a member (or post-transfer owner) of
+    /// `params.owner`. Omitted only when signed by the founding board owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<Box<MemberProofV1>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
@@ -56,7 +75,7 @@ impl ActivityEntryV1 {
         )
     }
 
-    fn verify(&self) -> Result<(), String> {
+    pub fn verify(&self, params: &ActivityParametersV1) -> Result<(), String> {
         if self.activity.activity.topic_id != self.topic_id {
             return Err("activity entry names another topic".to_string());
         }
@@ -85,18 +104,19 @@ impl ActivityEntryV1 {
             &self.activity.signature,
             &key,
         )
-        .map_err(|error| format!("invalid activity signature: {error}"))
+        .map_err(|error| format!("invalid activity signature: {error}"))?;
+        verify_member_proof(&params.owner, &signer, &key, self.proof.as_deref())
     }
 }
 
 impl ActivityStateV1 {
-    pub fn verify(&self) -> Result<(), String> {
+    pub fn verify(&self, params: &ActivityParametersV1) -> Result<(), String> {
         if self.entries.len() > MAX_ACTIVITY_ENTRIES {
             return Err("too many activity entries".to_string());
         }
         let mut seen = HashSet::new();
         for entry in &self.entries {
-            entry.verify()?;
+            entry.verify(params)?;
             if !seen.insert(entry.key()) {
                 return Err("duplicate activity entry".to_string());
             }
@@ -104,9 +124,13 @@ impl ActivityStateV1 {
         Ok(())
     }
 
-    pub fn apply_delta(&mut self, delta: &ActivityDeltaV1) -> Result<(), String> {
+    pub fn apply_delta(
+        &mut self,
+        params: &ActivityParametersV1,
+        delta: &ActivityDeltaV1,
+    ) -> Result<(), String> {
         for entry in &delta.entries {
-            entry.verify()?;
+            entry.verify(params)?;
         }
         for entry in &delta.entries {
             match self
@@ -173,12 +197,16 @@ impl ActivityStateV1 {
         self.entries.truncate(MAX_ACTIVITY_ENTRIES);
     }
 
-    pub fn merged_with(&self, other: &ActivityStateV1) -> ActivityStateV1 {
+    pub fn merged_with(
+        &self,
+        params: &ActivityParametersV1,
+        other: &ActivityStateV1,
+    ) -> ActivityStateV1 {
         let mut merged = self.clone();
         let delta = ActivityDeltaV1 {
             entries: other.entries.clone(),
         };
-        let _ = merged.apply_delta(&delta);
+        let _ = merged.apply_delta(params, &delta);
         merged
     }
 
@@ -205,6 +233,13 @@ mod tests {
     use crate::util::sign_struct;
     use ed25519_dalek::SigningKey;
 
+    fn params_for(owner: &SigningKey) -> ActivityParametersV1 {
+        ActivityParametersV1 {
+            owner: owner.verifying_key(),
+            section: None,
+        }
+    }
+
     fn activity(
         key: &SigningKey,
         topic: u8,
@@ -230,35 +265,44 @@ mod tests {
                 signer: Some(MemberId::from(&key.verifying_key())),
                 signer_key: Some(key.verifying_key()),
             },
+            proof: None,
         }
     }
 
     #[test]
     fn an_activity_delta_upserts_and_sorts() {
         let key = SigningKey::from_bytes(&[1u8; 32]);
+        let params = params_for(&key);
         let mut state = ActivityStateV1::default();
         state
-            .apply_delta(&ActivityDeltaV1 {
-                entries: vec![activity(&key, 1, 1, 10, 1)],
-            })
+            .apply_delta(
+                &params,
+                &ActivityDeltaV1 {
+                    entries: vec![activity(&key, 1, 1, 10, 1)],
+                },
+            )
             .unwrap();
         state
-            .apply_delta(&ActivityDeltaV1 {
-                entries: vec![
-                    activity(&key, 2, 1, 20, 1),
-                    activity(&key, 1, 2, 30, 2),
-                ],
-            })
+            .apply_delta(
+                &params,
+                &ActivityDeltaV1 {
+                    entries: vec![
+                        activity(&key, 2, 1, 20, 1),
+                        activity(&key, 1, 2, 30, 2),
+                    ],
+                },
+            )
             .unwrap();
         assert_eq!(state.entries[0].topic_id, MessageId::from_bytes([1u8; 32]));
         assert_eq!(state.entries[0].activity.activity.reply_count, 2);
         assert_eq!(state.entries.len(), 2);
-        state.verify().unwrap();
+        state.verify(&params).unwrap();
     }
 
     #[test]
     fn the_activity_window_is_bounded() {
         let key = SigningKey::from_bytes(&[1u8; 32]);
+        let params = params_for(&key);
         let mut state = ActivityStateV1::default();
         let entries = (0..(MAX_ACTIVITY_ENTRIES + 20))
             .map(|index| {
@@ -282,45 +326,76 @@ mod tests {
                         signer: Some(MemberId::from(&key.verifying_key())),
                         signer_key: Some(key.verifying_key()),
                     },
+                    proof: None,
                 }
             })
             .collect();
         state
-            .apply_delta(&ActivityDeltaV1 { entries })
+            .apply_delta(&params, &ActivityDeltaV1 { entries })
             .unwrap();
         assert_eq!(state.entries.len(), MAX_ACTIVITY_ENTRIES);
-        assert_eq!(state.entries[0].activity.activity.last_activity, (MAX_ACTIVITY_ENTRIES + 19) as i64);
-        state.verify().unwrap();
+        assert_eq!(
+            state.entries[0].activity.activity.last_activity,
+            (MAX_ACTIVITY_ENTRIES + 19) as i64
+        );
+        state.verify(&params).unwrap();
     }
 
     #[test]
     fn a_tampered_activity_is_rejected() {
         let key = SigningKey::from_bytes(&[1u8; 32]);
+        let params = params_for(&key);
         let mut entry = activity(&key, 1, 1, 10, 1);
         entry.activity.activity.reply_count = 99;
         let mut state = ActivityStateV1::default();
         assert!(state
-            .apply_delta(&ActivityDeltaV1 {
-                entries: vec![entry],
-            })
+            .apply_delta(
+                &params,
+                &ActivityDeltaV1 {
+                    entries: vec![entry],
+                },
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn unauthenticated_non_member_activity_is_rejected() {
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let stranger = SigningKey::from_bytes(&[99u8; 32]);
+        let params = params_for(&owner);
+        let mut state = ActivityStateV1::default();
+        assert!(state
+            .apply_delta(
+                &params,
+                &ActivityDeltaV1 {
+                    entries: vec![activity(&stranger, 1, 1, 10, 1)],
+                },
+            )
             .is_err());
     }
 
     #[test]
     fn summarize_and_delta_sync_incrementally() {
         let key = SigningKey::from_bytes(&[1u8; 32]);
+        let params = params_for(&key);
         let mut peer_a = ActivityStateV1::default();
         peer_a
-            .apply_delta(&ActivityDeltaV1 {
-                entries: vec![activity(&key, 1, 1, 10, 1), activity(&key, 2, 1, 20, 1)],
-            })
+            .apply_delta(
+                &params,
+                &ActivityDeltaV1 {
+                    entries: vec![activity(&key, 1, 1, 10, 1), activity(&key, 2, 1, 20, 1)],
+                },
+            )
             .unwrap();
 
         let mut peer_b = peer_a.clone();
         peer_b
-            .apply_delta(&ActivityDeltaV1 {
-                entries: vec![activity(&key, 2, 2, 30, 2), activity(&key, 3, 1, 40, 1)],
-            })
+            .apply_delta(
+                &params,
+                &ActivityDeltaV1 {
+                    entries: vec![activity(&key, 2, 2, 30, 2), activity(&key, 3, 1, 40, 1)],
+                },
+            )
             .unwrap();
 
         let delta = peer_b
@@ -328,7 +403,7 @@ mod tests {
             .expect("delta carries only newer/missing entries");
         assert_eq!(delta.entries.len(), 2);
 
-        peer_a.apply_delta(&delta).unwrap();
+        peer_a.apply_delta(&params, &delta).unwrap();
         assert_eq!(peer_a, peer_b);
         assert!(peer_b.delta(&peer_a.summarize()).is_none());
     }

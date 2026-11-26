@@ -97,6 +97,8 @@ fn report(index: u8, created_at: i64) -> AuthorizedTopicReportV1 {
     AuthorizedTopicReportV1 {
         signature: sign_struct(&value, &member()),
         report: value,
+        signer_key: Some(member().verifying_key()),
+        proof: None,
     }
 }
 
@@ -429,6 +431,8 @@ fn scale_board(topics: usize, members: usize, reports: usize) -> ChatBoardStateV
         state.topics.reports.push(AuthorizedTopicReportV1 {
             signature: sign_struct(&value, sk),
             report: value,
+            signer_key: Some(sk.verifying_key()),
+            proof: None,
         });
     }
 

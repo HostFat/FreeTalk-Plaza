@@ -9,8 +9,9 @@ use freenet_stdlib::prelude::{
     contract, ContractError, ContractInterface, Parameters, RelatedContracts, State, StateDelta,
     StateSummary, UpdateData, UpdateModification, ValidateResult,
 };
-use plaza_core::board_state::activity::{ActivityDeltaV1, ActivityStateV1, ActivitySummaryV1};
-use plaza_core::board_state::ChatBoardParametersV1;
+use plaza_core::board_state::activity::{
+    ActivityDeltaV1, ActivityParametersV1, ActivityStateV1, ActivitySummaryV1,
+};
 
 #[allow(dead_code)]
 struct ActivityContract;
@@ -22,7 +23,7 @@ impl ContractInterface for ActivityContract {
         state: State<'static>,
         _related: RelatedContracts<'static>,
     ) -> Result<ValidateResult, ContractError> {
-        let _owner = from_reader::<ChatBoardParametersV1, &[u8]>(parameters.as_ref())
+        let params = from_reader::<ActivityParametersV1, &[u8]>(parameters.as_ref())
             .map_err(|error| ContractError::Deser(error.to_string()))?;
         if state.as_ref().is_empty() {
             return Ok(ValidateResult::Valid);
@@ -30,7 +31,7 @@ impl ContractInterface for ActivityContract {
         let activity = from_reader::<ActivityStateV1, &[u8]>(state.as_ref())
             .map_err(|error| ContractError::Deser(error.to_string()))?;
         activity
-            .verify()
+            .verify(&params)
             .map_err(|error| ContractError::InvalidUpdateWithInfo {
                 reason: format!("activity state does not verify: {error}"),
             })?;
@@ -42,7 +43,7 @@ impl ContractInterface for ActivityContract {
         state: State<'static>,
         data: Vec<UpdateData<'static>>,
     ) -> Result<UpdateModification<'static>, ContractError> {
-        let _owner = from_reader::<ChatBoardParametersV1, &[u8]>(parameters.as_ref())
+        let params = from_reader::<ActivityParametersV1, &[u8]>(parameters.as_ref())
             .map_err(|error| ContractError::Deser(error.to_string()))?;
         let mut activity = if state.as_ref().is_empty() {
             ActivityStateV1::default()
@@ -62,9 +63,12 @@ impl ContractInterface for ActivityContract {
                     let next = from_reader::<ActivityStateV1, &[u8]>(bytes.as_ref())
                         .map_err(|error| ContractError::Deser(error.to_string()))?;
                     activity
-                        .apply_delta(&ActivityDeltaV1 {
-                            entries: next.entries,
-                        })
+                        .apply_delta(
+                            &params,
+                            &ActivityDeltaV1 {
+                                entries: next.entries,
+                            },
+                        )
                         .map_err(|error| ContractError::InvalidUpdateWithInfo {
                             reason: format!("activity state does not verify: {error}"),
                         })?;
@@ -75,11 +79,39 @@ impl ContractInterface for ActivityContract {
                     }
                     let delta = from_reader::<ActivityDeltaV1, &[u8]>(bytes.as_ref())
                         .map_err(|error| ContractError::Deser(error.to_string()))?;
-                    activity.apply_delta(&delta).map_err(|error| {
+                    activity.apply_delta(&params, &delta).map_err(|error| {
                         ContractError::InvalidUpdateWithInfo {
                             reason: format!("activity delta does not verify: {error}"),
                         }
                     })?;
+                }
+                UpdateData::StateAndDelta {
+                    state: state_bytes,
+                    delta: delta_bytes,
+                } => {
+                    if !state_bytes.as_ref().is_empty() {
+                        let next = from_reader::<ActivityStateV1, &[u8]>(state_bytes.as_ref())
+                            .map_err(|error| ContractError::Deser(error.to_string()))?;
+                        activity
+                            .apply_delta(
+                                &params,
+                                &ActivityDeltaV1 {
+                                    entries: next.entries,
+                                },
+                            )
+                            .map_err(|error| ContractError::InvalidUpdateWithInfo {
+                                reason: format!("activity state does not verify: {error}"),
+                            })?;
+                    }
+                    if !delta_bytes.as_ref().is_empty() {
+                        let delta = from_reader::<ActivityDeltaV1, &[u8]>(delta_bytes.as_ref())
+                            .map_err(|error| ContractError::Deser(error.to_string()))?;
+                        activity.apply_delta(&params, &delta).map_err(|error| {
+                            ContractError::InvalidUpdateWithInfo {
+                                reason: format!("activity delta does not verify: {error}"),
+                            }
+                        })?;
+                    }
                 }
                 _ => {}
             }
@@ -137,7 +169,7 @@ impl ContractInterface for ActivityContract {
 
 #[no_mangle]
 pub extern "C" fn plaza_activity_contract_revision() -> u32 {
-    2
+    3
 }
 
 #[cfg(test)]
@@ -177,14 +209,16 @@ mod tests {
                 signer: Some(MemberId::from(&key.verifying_key())),
                 signer_key: Some(key.verifying_key()),
             },
+            proof: None,
         }
     }
 
     #[test]
     fn summarize_and_get_state_delta_round_trip() {
         let key = SigningKey::from_bytes(&[3u8; 32]);
-        let params = Parameters::from(cbor!(&ChatBoardParametersV1 {
+        let params = Parameters::from(cbor!(&ActivityParametersV1 {
             owner: key.verifying_key(),
+            section: Some(MessageId::from_bytes([9u8; 32])),
         }));
 
         let peer_a = ActivityContract::update_state(

@@ -8,11 +8,14 @@
 //! shows an entry.
 
 use crate::board_state::member::MemberId;
+use crate::board_state::member_shards::{verify_member_proof, verify_moderation_proof_standalone};
+use crate::board_state::sections::SectionId;
 use crate::board_state::topics::{
     AuthorizedTopicReportResolutionV1, AuthorizedTopicReportV1, TopicReportKey,
     MAX_TOPIC_REPORT_BYTES,
 };
 use crate::util::verify_struct;
+use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
@@ -20,6 +23,17 @@ use std::collections::{BTreeMap, HashSet};
 /// the cap is reached; the resolutions that point at them go with them.
 pub const MAX_REPORT_FEED: usize = 500;
 pub const MAX_REPORT_FEED_RESOLUTIONS: usize = 500;
+
+/// Contract parameters for a board or per-section moderation feed.
+/// `section: None` addresses the board-wide feed (flat `TopicIndex`);
+/// `section: Some(id)` addresses one section's moderation queue on
+/// `SectionedTopicIndex` boards.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct ModerationParametersV1 {
+    pub owner: VerifyingKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<SectionId>,
+}
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 pub struct ReportFeedStateV1 {
@@ -63,7 +77,10 @@ fn resolution_key(entry: &AuthorizedTopicReportResolutionV1) -> TopicReportKey {
     )
 }
 
-fn verify_report(entry: &AuthorizedTopicReportV1) -> Result<(), String> {
+fn verify_report(
+    entry: &AuthorizedTopicReportV1,
+    params: &ModerationParametersV1,
+) -> Result<(), String> {
     if entry.report.generation == 0 {
         return Err("report generation must be positive".to_string());
     }
@@ -73,10 +90,26 @@ fn verify_report(entry: &AuthorizedTopicReportV1) -> Result<(), String> {
     if entry.report.body.declared_len() > MAX_TOPIC_REPORT_BYTES {
         return Err("report body is too large".to_string());
     }
-    Ok(())
+    let key = entry
+        .signer_key
+        .ok_or("report has no signer key")?;
+    if MemberId::from(&key) != entry.report.reporter {
+        return Err("report signer key does not match reporter id".to_string());
+    }
+    verify_struct(&entry.report, &entry.signature, &key)
+        .map_err(|error| format!("invalid report signature: {error}"))?;
+    verify_member_proof(
+        &params.owner,
+        &entry.report.reporter,
+        &key,
+        entry.proof.as_deref(),
+    )
 }
 
-fn verify_resolution(entry: &AuthorizedTopicReportResolutionV1) -> Result<(), String> {
+fn verify_resolution(
+    entry: &AuthorizedTopicReportResolutionV1,
+    params: &ModerationParametersV1,
+) -> Result<(), String> {
     let value = &entry.resolution;
     if value.generation == 0 {
         return Err("resolution generation must be positive".to_string());
@@ -91,7 +124,15 @@ fn verify_resolution(entry: &AuthorizedTopicReportResolutionV1) -> Result<(), St
         return Err("resolution signer key does not match its id".to_string());
     }
     verify_struct(value, &entry.signature, &key)
-        .map_err(|error| format!("invalid resolution signature: {error}"))
+        .map_err(|error| format!("invalid resolution signature: {error}"))?;
+    verify_moderation_proof_standalone(
+        &params.owner,
+        &value.resolved_by,
+        &key,
+        entry.authority.as_deref(),
+        &entry.ownership_transfers,
+        &entry.transfer_admins,
+    )
 }
 
 fn upsert_report(list: &mut Vec<AuthorizedTopicReportV1>, entry: &AuthorizedTopicReportV1) {
@@ -129,7 +170,7 @@ fn upsert_resolution(
 }
 
 impl ReportFeedStateV1 {
-    pub fn verify(&self) -> Result<(), String> {
+    pub fn verify(&self, params: &ModerationParametersV1) -> Result<(), String> {
         if self.reports.len() > MAX_REPORT_FEED {
             return Err("too many reports".to_string());
         }
@@ -138,14 +179,14 @@ impl ReportFeedStateV1 {
         }
         let mut reports = HashSet::new();
         for entry in &self.reports {
-            verify_report(entry)?;
+            verify_report(entry, params)?;
             if !reports.insert(report_key(entry)) {
                 return Err("duplicate report".to_string());
             }
         }
         let mut resolutions = HashSet::new();
         for entry in &self.resolutions {
-            verify_resolution(entry)?;
+            verify_resolution(entry, params)?;
             if !resolutions.insert(resolution_key(entry)) {
                 return Err("duplicate report resolution".to_string());
             }
@@ -159,14 +200,18 @@ impl ReportFeedStateV1 {
     /// Upsert reports first, so a delta can carry a report and its resolution
     /// together. Enforces caps atomically so a rejected delta leaves `self`
     /// unchanged and callers do not need to re-verify existing entries.
-    pub fn apply_delta(&mut self, delta: &ReportFeedDeltaV1) -> Result<(), String> {
+    pub fn apply_delta(
+        &mut self,
+        params: &ModerationParametersV1,
+        delta: &ReportFeedDeltaV1,
+    ) -> Result<(), String> {
         let mut next = self.clone();
         for entry in &delta.reports {
-            verify_report(entry)?;
+            verify_report(entry, params)?;
             upsert_report(&mut next.reports, entry);
         }
         for entry in &delta.resolutions {
-            verify_resolution(entry)?;
+            verify_resolution(entry, params)?;
             if !next
                 .reports
                 .iter()
@@ -259,13 +304,42 @@ impl ReportFeedStateV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board_state::member::{AuthorizedMember, Member};
+    use crate::board_state::member_shards::{MemberProofV1, MemberShardEntryV1};
+    use crate::board_state::privacy::SealedBytes;
     use crate::board_state::reports::ReportReason;
     use crate::board_state::topics::{TopicReportResolutionV1, TopicReportV1};
-    use crate::board_state::privacy::SealedBytes;
     use crate::util::sign_struct;
     use ed25519_dalek::SigningKey;
 
+    fn member_proof(owner: &SigningKey, member_sk: &SigningKey) -> Option<Box<MemberProofV1>> {
+        if member_sk.verifying_key() == owner.verifying_key() {
+            return None;
+        }
+        let owner_id = MemberId::from(&owner.verifying_key());
+        Some(Box::new(MemberProofV1 {
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
+            membership: Some(Box::new(MemberShardEntryV1 {
+                member: AuthorizedMember::new(
+                    Member {
+                        owner_member_id: owner_id,
+                        invited_by: owner_id,
+                        member_vk: member_sk.verifying_key(),
+                        join_proof: None,
+                    },
+                    owner,
+                ),
+                invite_chain: Vec::new(),
+                invite_token: None,
+                ownership_transfers: Vec::new(),
+                transfer_admins: Vec::new(),
+            })),
+        }))
+    }
+
     fn report(
+        owner: &SigningKey,
         topic: [u8; 32],
         reporter: &SigningKey,
         generation: u64,
@@ -282,6 +356,8 @@ mod tests {
         AuthorizedTopicReportV1 {
             signature: sign_struct(&value, reporter),
             report: value,
+            signer_key: Some(reporter.verifying_key()),
+            proof: member_proof(owner, reporter),
         }
     }
 
@@ -304,6 +380,8 @@ mod tests {
             resolution: value,
             signer_key: Some(resolver.verifying_key()),
             authority: None,
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
         }
     }
 
@@ -311,31 +389,44 @@ mod tests {
     fn a_report_and_its_resolution_upsert_by_generation() {
         let reporter = SigningKey::from_bytes(&[1u8; 32]);
         let resolver = SigningKey::from_bytes(&[2u8; 32]);
+        let params = ModerationParametersV1 {
+            owner: resolver.verifying_key(),
+            section: None,
+        };
         let mut state = ReportFeedStateV1::default();
         state
-            .apply_delta(&ReportFeedDeltaV1 {
-                reports: vec![report([7u8; 32], &reporter, 1)],
-                resolutions: Vec::new(),
-            })
+            .apply_delta(
+                &params,
+                &ReportFeedDeltaV1 {
+                    reports: vec![report(&resolver, [7u8; 32], &reporter, 1)],
+                    resolutions: Vec::new(),
+                },
+            )
             .unwrap();
         state
-            .apply_delta(&ReportFeedDeltaV1 {
-                reports: vec![report([7u8; 32], &reporter, 2)],
-                resolutions: vec![resolution([7u8; 32], &reporter, &resolver, 1)],
-            })
+            .apply_delta(
+                &params,
+                &ReportFeedDeltaV1 {
+                    reports: vec![report(&resolver, [7u8; 32], &reporter, 2)],
+                    resolutions: vec![resolution([7u8; 32], &reporter, &resolver, 1)],
+                },
+            )
             .unwrap();
         assert_eq!(state.reports.len(), 1);
         assert_eq!(state.reports[0].report.generation, 2);
         assert_eq!(state.resolutions.len(), 1);
         assert_eq!(state.resolutions[0].resolution.generation, 1);
-        state.verify().unwrap();
+        state.verify(&params).unwrap();
 
         // A stale resolution does not replace a newer one.
         state
-            .apply_delta(&ReportFeedDeltaV1 {
-                reports: Vec::new(),
-                resolutions: vec![resolution([7u8; 32], &reporter, &resolver, 1)],
-            })
+            .apply_delta(
+                &params,
+                &ReportFeedDeltaV1 {
+                    reports: Vec::new(),
+                    resolutions: vec![resolution([7u8; 32], &reporter, &resolver, 1)],
+                },
+            )
             .unwrap();
         assert_eq!(state.resolutions[0].resolution.generation, 1);
     }
@@ -344,61 +435,143 @@ mod tests {
     fn a_resolution_needs_its_report() {
         let reporter = SigningKey::from_bytes(&[1u8; 32]);
         let resolver = SigningKey::from_bytes(&[2u8; 32]);
+        let params = ModerationParametersV1 {
+            owner: resolver.verifying_key(),
+            section: None,
+        };
         let mut state = ReportFeedStateV1::default();
         assert!(state
-            .apply_delta(&ReportFeedDeltaV1 {
-                reports: Vec::new(),
-                resolutions: vec![resolution([7u8; 32], &reporter, &resolver, 1)],
-            })
+            .apply_delta(
+                &params,
+                &ReportFeedDeltaV1 {
+                    reports: Vec::new(),
+                    resolutions: vec![resolution([7u8; 32], &reporter, &resolver, 1)],
+                },
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn unauthenticated_report_and_resolution_are_rejected() {
+        let owner = SigningKey::from_bytes(&[2u8; 32]);
+        let stranger = SigningKey::from_bytes(&[99u8; 32]);
+        let params = ModerationParametersV1 {
+            owner: owner.verifying_key(),
+            section: None,
+        };
+        let mut state = ReportFeedStateV1::default();
+        let value = TopicReportV1 {
+            topic_id: crate::board_state::message::MessageId::from_bytes([9u8; 32]),
+            post_id: None,
+            reporter: MemberId::from(&stranger.verifying_key()),
+            reason: ReportReason::Spam,
+            body: SealedBytes::public(b"Flood".to_vec()),
+            created_at: 1_000,
+            generation: 1,
+        };
+        let bogus_report = AuthorizedTopicReportV1 {
+            signature: sign_struct(&value, &stranger),
+            report: value,
+            signer_key: Some(stranger.verifying_key()),
+            proof: None,
+        };
+        assert!(state
+            .apply_delta(
+                &params,
+                &ReportFeedDeltaV1 {
+                    reports: vec![bogus_report],
+                    resolutions: Vec::new(),
+                },
+            )
+            .is_err());
+
+        // Legitimate owner report accepted, then unauthorized resolution rejected.
+        state
+            .apply_delta(
+                &params,
+                &ReportFeedDeltaV1 {
+                    reports: vec![report(&owner, [9u8; 32], &owner, 1)],
+                    resolutions: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert!(state
+            .apply_delta(
+                &params,
+                &ReportFeedDeltaV1 {
+                    reports: Vec::new(),
+                    resolutions: vec![resolution([9u8; 32], &owner, &stranger, 1)],
+                },
+            )
             .is_err());
     }
 
     #[test]
     fn the_caps_are_enforced() {
-        let reporter = SigningKey::from_bytes(&[1u8; 32]);
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let params = ModerationParametersV1 {
+            owner: owner.verifying_key(),
+            section: None,
+        };
         let mut state = ReportFeedStateV1::default();
         for index in 0..MAX_REPORT_FEED {
             let mut topic = [0u8; 32];
             topic[..8].copy_from_slice(&(index as u64).to_le_bytes());
             state
-                .apply_delta(&ReportFeedDeltaV1 {
-                    reports: vec![report(topic, &reporter, 1)],
-                    resolutions: Vec::new(),
-                })
+                .apply_delta(
+                    &params,
+                    &ReportFeedDeltaV1 {
+                        reports: vec![report(&owner, topic, &owner, 1)],
+                        resolutions: Vec::new(),
+                    },
+                )
                 .unwrap();
         }
         let mut overflow = [0u8; 32];
         overflow[..8].copy_from_slice(&(MAX_REPORT_FEED as u64).to_le_bytes());
         assert!(state
-            .apply_delta(&ReportFeedDeltaV1 {
-                reports: vec![report(overflow, &reporter, 1)],
-                resolutions: Vec::new(),
-            })
+            .apply_delta(
+                &params,
+                &ReportFeedDeltaV1 {
+                    reports: vec![report(&owner, overflow, &owner, 1)],
+                    resolutions: Vec::new(),
+                },
+            )
             .is_err());
         assert_eq!(state.reports.len(), MAX_REPORT_FEED);
 
-        state.reports.push(report(overflow, &reporter, 1));
-        assert!(state.verify().is_err());
+        state.reports.push(report(&owner, overflow, &owner, 1));
+        assert!(state.verify(&params).is_err());
     }
 
     #[test]
     fn summarize_and_delta_sync_incrementally() {
         let reporter = SigningKey::from_bytes(&[1u8; 32]);
         let resolver = SigningKey::from_bytes(&[2u8; 32]);
+        let params = ModerationParametersV1 {
+            owner: resolver.verifying_key(),
+            section: None,
+        };
         let mut peer_a = ReportFeedStateV1::default();
         peer_a
-            .apply_delta(&ReportFeedDeltaV1 {
-                reports: vec![report([1u8; 32], &reporter, 1)],
-                resolutions: Vec::new(),
-            })
+            .apply_delta(
+                &params,
+                &ReportFeedDeltaV1 {
+                    reports: vec![report(&resolver, [1u8; 32], &reporter, 1)],
+                    resolutions: Vec::new(),
+                },
+            )
             .unwrap();
 
         let mut peer_b = peer_a.clone();
         peer_b
-            .apply_delta(&ReportFeedDeltaV1 {
-                reports: vec![report([2u8; 32], &reporter, 1)],
-                resolutions: vec![resolution([1u8; 32], &reporter, &resolver, 1)],
-            })
+            .apply_delta(
+                &params,
+                &ReportFeedDeltaV1 {
+                    reports: vec![report(&resolver, [2u8; 32], &reporter, 1)],
+                    resolutions: vec![resolution([1u8; 32], &reporter, &resolver, 1)],
+                },
+            )
             .unwrap();
 
         let delta = peer_b
@@ -407,7 +580,7 @@ mod tests {
         assert_eq!(delta.reports.len(), 1);
         assert_eq!(delta.resolutions.len(), 1);
 
-        peer_a.apply_delta(&delta).unwrap();
+        peer_a.apply_delta(&params, &delta).unwrap();
         assert_eq!(peer_a, peer_b);
         assert!(peer_b.delta(&peer_a.summarize()).is_none());
     }

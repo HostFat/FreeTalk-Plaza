@@ -252,6 +252,8 @@ fn TopicSearchView() -> Element {
     let mut to_date = use_signal(String::new);
     let mut oldest_first = use_signal(|| false);
 
+    let mut loading_pages = use_signal(|| false);
+
     let board = use_memo(move || {
         let current = CURRENT_BOARD.read().owner_key?;
         BOARDS
@@ -261,24 +263,24 @@ fn TopicSearchView() -> Element {
             .cloned()
             .map(|board| board.with_merged_topics())
     });
-    // Search scans the whole index, so every page of every section is needed
-    // here even though the board list loads pages on demand.
+    // Search scans loaded topic manifests/pages without fetching every page or
+    // member/profile shard up front. Only when the user types an Author filter
+    // do we load profile shards to resolve nicknames across the board.
     use_effect(move || {
         let Some(owner) = CURRENT_BOARD.read().owner_key else {
             return;
         };
+        if author.read().trim().is_empty() {
+            return;
+        }
         spawn(async move {
-            let _ = crate::components::app::section_contract::load_all_section_pages_for_board(
-                owner,
-            )
-            .await;
-            crate::components::app::member_contract::load_all_member_shards(owner).await;
             crate::components::app::profile_contract::load_all_profile_shards(owner).await;
         });
     });
     let Some(board_data) = board.read().clone() else {
         return rsx! {};
     };
+    let owner = board_data.owner_vk;
 
     let mut sections: Vec<_> = board_data
         .board_state
@@ -363,7 +365,15 @@ fn TopicSearchView() -> Element {
                     .activity_for(&topic_id)
                     .map(|activity| activity.activity.last_activity)
                     .unwrap_or(entry.entry.created_at);
-                Some((topic_id, title, preview, author_name, last_at, section_name))
+                Some((
+                    topic_id,
+                    title,
+                    preview,
+                    author_name,
+                    last_at,
+                    section_name,
+                    entry.entry.author,
+                ))
             })
             .collect()
     };
@@ -374,6 +384,26 @@ fn TopicSearchView() -> Element {
     }
     hits.truncate(100);
 
+    // Lazily fetch member/profile shards only for authors of visible hits.
+    {
+        let hit_authors: Vec<MemberId> = hits.iter().map(|hit| hit.6).collect();
+        if !hit_authors.is_empty() {
+            crate::util::safe_spawn_local(async move {
+                crate::components::app::member_contract::load_member_shards_for(
+                    owner,
+                    hit_authors.iter().copied(),
+                )
+                .await;
+                crate::components::app::profile_contract::load_profile_shards_for(
+                    owner,
+                    hit_authors,
+                )
+                .await;
+            });
+        }
+    }
+
+    let has_more_pages = crate::components::app::section_contract::has_more_pages(owner);
     let board_id = bs58::encode(board_data.owner_vk.as_bytes()).into_string();
     let navigator = navigator();
 
@@ -450,8 +480,39 @@ fn TopicSearchView() -> Element {
                         }
                     }
 
-                    p { class: "text-[11px] text-text-muted mb-3",
-                        "Searches topic titles and previews. Open a topic to search its full text."
+                    div { class: "flex flex-wrap items-center gap-3 mb-3",
+                        p { class: "text-[11px] text-text-muted",
+                            "Searches loaded topic titles and previews. Open a topic to search its full text."
+                        }
+                        if has_more_pages {
+                            button {
+                                r#type: "button",
+                                disabled: *loading_pages.read(),
+                                class: "px-2.5 py-1 text-xs rounded-lg bg-surface border border-border text-accent hover:border-accent/50 disabled:opacity-50",
+                                onclick: move |_| {
+                                    loading_pages.set(true);
+                                    spawn(async move {
+                                        if let Some(section) = section_target {
+                                            let _ = crate::components::app::section_contract::load_section_pages(
+                                                owner, section,
+                                            )
+                                            .await;
+                                        } else {
+                                            let _ = crate::components::app::section_contract::load_next_pages(
+                                                owner, 4,
+                                            )
+                                            .await;
+                                        }
+                                        loading_pages.set(false);
+                                    });
+                                },
+                                if *loading_pages.read() {
+                                    "Loading older pages…"
+                                } else {
+                                    "Load older pages to expand search"
+                                }
+                            }
+                        }
                     }
 
                     if query.read().trim().is_empty() && author.read().trim().is_empty() {
@@ -461,7 +522,7 @@ fn TopicSearchView() -> Element {
                     } else {
                         p { class: "text-xs text-text-muted mb-2", "{hits.len()} result(s)" }
                         div { class: "space-y-2",
-                            for (topic_id, title, preview, author_name, last_at, section_name) in hits {
+                            for (topic_id, title, preview, author_name, last_at, section_name, _) in hits {
                                 {
                                     let topic = bs58::encode(topic_id.as_bytes()).into_string();
                                     let nav = navigator.clone();

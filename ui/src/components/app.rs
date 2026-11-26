@@ -449,7 +449,7 @@ pub fn App() -> Element {
         let Some(owner) = current.owner_key else {
             return;
         };
-        let (self_profile_id, self_member_id) = BOARDS
+        let (self_profile_id, self_member_id, sectioned) = BOARDS
             .read()
             .map
             .get(&owner)
@@ -458,14 +458,19 @@ pub fn App() -> Element {
                 let self_id = plaza_core::board_state::member::MemberId::from(&self_vk);
                 // Only non-owner members live in member shard buckets.
                 let member_id = (self_vk != board.current_owner_key()).then_some(self_id);
-                (Some(self_id), member_id)
+                let sectioned = board.board_state.mode
+                    == plaza_core::board_state::BoardModeV1::SectionedTopicIndex;
+                (Some(self_id), member_id, sectioned)
             })
-            .unwrap_or((None, None));
+            .unwrap_or((None, None, false));
         crate::util::safe_spawn_local(async move {
-            let _ = crate::components::app::activity_contract::load_activity(owner)
-                .await;
-            let _ = crate::components::app::moderation_contract::load_moderation(owner)
-                .await;
+            if !sectioned {
+                // Flat topic-index boards share one board-wide activity feed.
+                // Sectioned boards load per-section activity feeds below;
+                // moderation feeds load lazily when the moderation queue opens.
+                let _ = crate::components::app::activity_contract::load_activity(owner, None)
+                    .await;
+            }
             if let Some(profile_id) = self_profile_id {
                 let bucket =
                     plaza_core::board_state::profiles::profile_shard_bucket(&profile_id);
@@ -500,6 +505,11 @@ pub fn App() -> Element {
             crate::util::safe_spawn_local(async move {
                 let _ = crate::components::app::section_contract::load_section_board(
                     owner, section,
+                )
+                .await;
+                let _ = crate::components::app::activity_contract::load_activity(
+                    owner,
+                    Some(section),
                 )
                 .await;
             });

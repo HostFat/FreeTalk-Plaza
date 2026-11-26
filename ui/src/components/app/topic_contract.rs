@@ -967,6 +967,14 @@ pub async fn report_post(
         .map(|entry| entry.report.generation + 1)
         .max()
         .unwrap_or(1);
+    let section = if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
+        index.section_of(&topic_id).0
+    } else {
+        None
+    };
+    let signer_vk = board.self_sk.verifying_key();
+    let proof =
+        crate::components::app::member_contract::build_member_proof(owner, signer_vk).map(Box::new);
     let report = TopicReportV1 {
         topic_id,
         post_id,
@@ -979,8 +987,10 @@ pub async fn report_post(
     let authorized = AuthorizedTopicReportV1 {
         signature: plaza_core::util::sign_struct(&report, &board.self_sk),
         report,
+        signer_key: Some(signer_vk),
+        proof,
     };
-    crate::components::app::moderation_contract::record_report(owner, authorized).await
+    crate::components::app::moderation_contract::record_report(owner, section, authorized).await
 }
 
 
@@ -1004,7 +1014,12 @@ pub async fn resolve_report(
     let _ = report;
     let self_id = MemberId::from(&board.self_sk.verifying_key());
     let owner_id = board.current_owner_id();
-    let chain = index.section_of(&topic_id).1;
+    let (topic_section, chain) = index.section_of(&topic_id);
+    let section = if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
+        topic_section
+    } else {
+        None
+    };
     let (signer_sk, signer, authority) = if self_id != owner_id
         && board.can_moderate(&chain)
     {
@@ -1018,6 +1033,8 @@ pub async fn resolve_report(
     } else {
         return Err("only a moderator can resolve a report".to_string());
     };
+    let (ownership_transfers, transfer_admins) =
+        crate::components::app::member_contract::ownership_proof_for(&board);
     let generation = index
         .report_resolutions
         .iter()
@@ -1042,8 +1059,11 @@ pub async fn resolve_report(
         resolution,
         signer_key: Some(signer_sk.verifying_key()),
         authority: authority.clone().map(Box::new),
+        ownership_transfers,
+        transfer_admins,
     };
-    crate::components::app::moderation_contract::record_resolution(owner, authorized).await
+    crate::components::app::moderation_contract::record_resolution(owner, section, authorized)
+        .await
 }
 
 pub fn topic_reports(
@@ -1418,16 +1438,7 @@ pub async fn sync_topic_authority(
     let generated =
         authority_from_board(&board, board.is_current_owner(), &member_ids)?;
     let current_authority = conversation.state.authority();
-    let same_root = match (&current_authority.root, &generated.root) {
-        (Some(current), Some(next)) => {
-            current.root.content_hash == next.root.content_hash
-                && current.root.digest == next.root.digest
-        }
-        (None, None) => true,
-        _ => false,
-    };
-    let same_proofs = current_authority.member_proofs == generated.member_proofs;
-    if same_root && same_proofs {
+    if current_authority.merged_with(&generated) == *current_authority {
         return Ok(false);
     }
     match &conversation.state {
@@ -1455,88 +1466,48 @@ pub async fn sync_topic_authority(
     Ok(true)
 }
 
-async fn ensure_topic_part_loaded_for_sync(
-    owner: VerifyingKey,
-    topic_id: MessageId,
-    part: u32,
-) {
-    let key = topic_key_for(owner, topic_id, part);
-    let loaded = TOPIC_CACHE
-        .read()
-        .get(key.id())
-        .map(|conversation| conversation.state.is_loaded())
-        .unwrap_or(false);
-    if !loaded {
-        let _ = load_topic(owner, topic_id, part).await;
-        for _ in 0..30 {
-            let ready = TOPIC_CACHE
-                .read()
-                .get(key.id())
-                .map(|conversation| conversation.state.is_loaded())
-                .unwrap_or(false);
-            if ready {
-                break;
-            }
-            crate::util::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    }
-}
+/// Maximum number of already-loaded cached topic contracts proactively synced
+/// when board authority changes. Unloaded topics sync authority lazily when
+/// opened (`TopicView`) so bans and role changes stay O(1) instead of fanning
+/// out O(N) GET/UPDATEs across the entire board index.
+const MAX_PROACTIVE_AUTHORITY_SYNC_TOPICS: usize = 16;
 
-/// Push bans, suspensions, roles, admins, ownership and the policy to every
-/// topic in the board index. Each topic head (`part == 0`) and open active
-/// page (`part > 0`) receives the authority root and the proofs for its own
-/// participants/moderators; sealed historical pages are never touched.
+/// Push bans, suspensions, roles, admins, ownership and the policy to the
+/// bounded set of unsealed topic parts already cached in memory for `owner`.
+/// Topics not currently loaded in `TOPIC_CACHE` sync authority lazily when
+/// opened in `TopicView`, avoiding an O(topics) network storm on every ban or
+/// role change.
 pub async fn propagate_authority(owner: VerifyingKey) -> Result<(), String> {
     let board = board_for(owner)?;
     if !board.board_state.mode.is_topic_index() {
         return Ok(());
     }
-    if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
-        let sections: Vec<_> = board
-            .board_state
-            .sections
-            .sections
-            .iter()
-            .filter_map(|entry| entry.section.contract.map(|_| entry.section.id))
-            .collect();
-        for section in sections {
-            let _ = crate::components::app::section_contract::ensure_section_loaded(
-                owner, section,
+    let mut cached_targets: Vec<(i64, MessageId, u32)> = TOPIC_CACHE
+        .read()
+        .values()
+        .filter(|conversation| {
+            conversation.params.board_owner == owner
+                && conversation.state.is_loaded()
+                && !conversation.state.is_sealed()
+        })
+        .map(|conversation| {
+            (
+                conversation.last_used,
+                MessageId::from_bytes(conversation.params.topic_id),
+                conversation.params.part,
             )
-            .await;
-        }
-    }
-    let index = crate::components::app::section_contract::merged_index(
-        owner,
-        &board.board_state.topics,
-    );
-    let topics: Vec<(MessageId, u32)> = index
-        .entries
-        .iter()
-        .map(|entry| (entry.entry.topic_id, index.part_of(&entry.entry.topic_id)))
+        })
         .collect();
-    for (position, (topic_id, part)) in topics.into_iter().enumerate() {
-        ensure_topic_part_loaded_for_sync(owner, topic_id, 0).await;
-        if let Err(error) = sync_topic_authority(owner, topic_id, 0).await {
+    cached_targets.sort_by_key(|(last_used, _, _)| std::cmp::Reverse(*last_used));
+    cached_targets.truncate(MAX_PROACTIVE_AUTHORITY_SYNC_TOPICS);
+    for (_, topic_id, part) in cached_targets {
+        if let Err(error) = sync_topic_authority(owner, topic_id, part).await {
             dioxus::logger::tracing::warn!(
-                "authority propagation failed for topic {} head: {}",
+                "authority sync failed for cached topic {} part {}: {}",
                 topic_id,
+                part,
                 error
             );
-        }
-        if part > 0 {
-            ensure_topic_part_loaded_for_sync(owner, topic_id, part).await;
-            if let Err(error) = sync_topic_authority(owner, topic_id, part).await {
-                dioxus::logger::tracing::warn!(
-                    "authority propagation failed for topic {} part {}: {}",
-                    topic_id,
-                    part,
-                    error
-                );
-            }
-        }
-        if position % 50 == 49 {
-            crate::util::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
     Ok(())
@@ -1753,8 +1724,20 @@ async fn publish_prepared_reply(
         PreparedReplyDelta::Page(delta) => publish_topic_page_delta(contract_id, delta).await?,
     }
     if let Some(activity) = prepared.activity {
+        let section = board_for(owner).ok().and_then(|board| {
+            if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
+                let index = board.with_merged_topics().board_state.topics;
+                index
+                    .section_of(&prepared.topic_id)
+                    .0
+                    .or_else(|| section_for_topic(owner, prepared.topic_id).map(|(s, _)| s))
+            } else {
+                None
+            }
+        });
         if let Err(error) = crate::components::app::activity_contract::record_activity(
             owner,
+            section,
             prepared.topic_id,
             prepared.part,
             activity,
@@ -2173,34 +2156,40 @@ fn prepare_reply(
             return Err("the active identity is not a member of this board".to_string());
         }
     }
+    // When a participant joins a topic/page for the first time (e.g. a
+    // token-joined member whose role was created after the topic), bundle any
+    // newer board authority (role definitions, root/proofs) in the same delta
+    // so the reply verifies atomically without racing on-demand authority sync.
+    let bundled_authority = if !participants.is_empty() {
+        let mut member_ids: HashSet<MemberId> = conversation
+            .state
+            .participants()
+            .iter()
+            .map(|p| p.record.member_id)
+            .collect();
+        member_ids.insert(author);
+        authority_from_board(&board, board.is_current_owner(), &member_ids)
+            .ok()
+            .filter(|generated| {
+                conversation.state.authority().merged_with(generated)
+                    != *conversation.state.authority()
+            })
+    } else {
+        None
+    };
     let delta = match &conversation.state {
         TopicPartState::Head(_) => PreparedReplyDelta::Head(TopicDeltaV1 {
             posts: vec![authorized],
             participants,
+            authority: bundled_authority,
             ..Default::default()
         }),
-        TopicPartState::Page(page) => {
-            // If the page uses an authority root and the replying author does
-            // not yet have a proof on this page, attach an updated proof set
-            // so section ACL / ban checks have the author's status.
-            let authority = if !participants.is_empty() && page.authority.root.is_some() {
-                let mut member_ids: HashSet<MemberId> = page
-                    .participants
-                    .iter()
-                    .map(|p| p.record.member_id)
-                    .collect();
-                member_ids.insert(author);
-                authority_from_board(&board, board.is_current_owner(), &member_ids).ok()
-            } else {
-                None
-            };
-            PreparedReplyDelta::Page(TopicPageDeltaV1 {
-                posts: vec![authorized],
-                participants,
-                authority,
-                ..Default::default()
-            })
-        }
+        TopicPartState::Page(_) => PreparedReplyDelta::Page(TopicPageDeltaV1 {
+            posts: vec![authorized],
+            participants,
+            authority: bundled_authority,
+            ..Default::default()
+        }),
     };
 
     // Activity hint for the board list. If the board update fails the reply is
@@ -3425,8 +3414,17 @@ pub async fn approve_post(
             signer: Some(signer),
             signer_key: Some(signer_sk.verifying_key()),
         };
+        let section = if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
+            index
+                .section_of(&topic_id)
+                .0
+                .or_else(|| section_for_topic(owner, topic_id).map(|(s, _)| s))
+        } else {
+            None
+        };
         if let Err(error) = crate::components::app::activity_contract::record_activity(
             owner,
+            section,
             topic_id,
             part,
             authorized_activity,

@@ -11,6 +11,7 @@
 
 use crate::board_state::member::MemberId;
 use crate::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
+use crate::board_state::member_shards::{verify_member_proof, MemberProofV1};
 use crate::util::{sign_struct, verify_struct};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -57,13 +58,16 @@ impl ProfileShardParametersV1 {
     }
 }
 
-/// One nickname with the member key that signed it, so the contract can
-/// verify it without the board member list.
+/// One nickname with the member key that signed it plus a cryptographic proof
+/// of board membership (omitted only for the founding board owner), so the
+/// contract rejects unauthenticated spam without fetching the parent board.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct ProfileEntryV1 {
     pub info: MemberInfo,
     pub signer_key: VerifyingKey,
     pub signature: Signature,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<Box<MemberProofV1>>,
 }
 
 impl ProfileEntryV1 {
@@ -72,6 +76,7 @@ impl ProfileEntryV1 {
             signature: sign_struct(&info, member_key),
             info,
             signer_key: member_key.verifying_key(),
+            proof: None,
         }
     }
 
@@ -81,7 +86,18 @@ impl ProfileEntryV1 {
             info: info.member_info,
             signer_key,
             signature: info.signature,
+            proof: None,
         }
+    }
+
+    pub fn with_proof(mut self, proof: MemberProofV1) -> Self {
+        self.proof = Some(Box::new(proof));
+        self
+    }
+
+    pub fn with_optional_proof(mut self, proof: Option<MemberProofV1>) -> Self {
+        self.proof = proof.map(Box::new);
+        self
     }
 
     pub fn authorized(&self) -> AuthorizedMemberInfo {
@@ -112,7 +128,13 @@ impl ProfileEntryV1 {
             return Err("the nickname is too long".to_string());
         }
         verify_struct(&self.info, &self.signature, &self.signer_key)
-            .map_err(|error| format!("invalid profile signature: {error}"))
+            .map_err(|error| format!("invalid profile signature: {error}"))?;
+        verify_member_proof(
+            &params.owner,
+            &self.info.member_id,
+            &self.signer_key,
+            self.proof.as_deref(),
+        )
     }
 }
 
@@ -265,8 +287,12 @@ mod tests {
     use super::*;
     use crate::board_state::privacy::SealedBytes;
 
+    fn owner_sk() -> SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[99u8; 32])
+    }
+
     fn owner_vk() -> VerifyingKey {
-        ed25519_dalek::SigningKey::from_bytes(&[99u8; 32]).verifying_key()
+        owner_sk().verifying_key()
     }
 
     fn key_for_bucket(target_bucket: u16, start_seed: u64) -> (SigningKey, u64) {
@@ -284,12 +310,60 @@ mod tests {
     }
 
     fn entry_for_key(key: &SigningKey, version: u32, name: &str) -> ProfileEntryV1 {
+        let owner = owner_sk();
+        let owner_id = MemberId::from(&owner.verifying_key());
         let info = MemberInfo {
             member_id: MemberId::from(&key.verifying_key()),
             version,
             preferred_nickname: SealedBytes::public(name.as_bytes().to_vec()),
         };
-        ProfileEntryV1::new(info, key)
+        let member = crate::board_state::member::AuthorizedMember::new(
+            crate::board_state::member::Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk: key.verifying_key(),
+                join_proof: None,
+            },
+            &owner,
+        );
+        let proof = MemberProofV1 {
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
+            membership: Some(Box::new(
+                crate::board_state::member_shards::MemberShardEntryV1 {
+                    member,
+                    invite_chain: Vec::new(),
+                    invite_token: None,
+                    ownership_transfers: Vec::new(),
+                    transfer_admins: Vec::new(),
+                },
+            )),
+        };
+        ProfileEntryV1::new(info, key).with_proof(proof)
+    }
+
+    #[test]
+    fn unauthenticated_non_member_profile_is_rejected() {
+        let params = ProfileShardParametersV1 {
+            owner: owner_vk(),
+            bucket: 0,
+        };
+        let (stranger, _) = key_for_bucket(0, 1);
+        let info = MemberInfo {
+            member_id: MemberId::from(&stranger.verifying_key()),
+            version: 1,
+            preferred_nickname: SealedBytes::public(b"Spammer".to_vec()),
+        };
+        let unauthenticated = ProfileEntryV1::new(info, &stranger);
+        let mut state = ProfileStateV1::default();
+        assert!(state
+            .apply_delta(
+                &params,
+                &ProfileDeltaV1 {
+                    entries: vec![unauthenticated],
+                },
+            )
+            .is_err());
     }
 
     #[test]

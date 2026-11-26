@@ -1,8 +1,8 @@
 # Specifica del contratto `plaza-topic`
 
 Versione: 1 (implementata).
-Stato: fasi 0–4 completate; move e merge tra sezioni, pagine sezione compatte/sigillate (`SectionPageStateV1`), pagine topic append-only compatte/sigillate (`TopicPageStateV1`), profili shardati in 32 bucket (`plaza-profile-contract`), feed incrementali (`summarize_state`/`get_state_delta` su `profile`, `activity`, `moderation`, `member`), hardening degli shard membri (chiusura self-signed e verifica autorità delegata fino a `params.owner`) e successione d'emergenza `OwnershipV1` con quorum storico corretto (`AdminRevocation.appointed_at`) e timelock configurabile (`Configuration.succession_timelock_secs`) pubblicati nella build locale v737.
-L'activity recente vive in un contratto separato per board. Contratto board alla revisione 36 (`plaza_topic_contract_revision = 2`).
+Stato: fasi 0–4 completate; move e merge tra sezioni, pagine sezione compatte/sigillate (`SectionPageStateV1`), pagine topic append-only compatte/sigillate (`TopicPageStateV1`), profili shardati in 32 bucket (`plaza-profile-contract`), feed `activity` e `moderation` shardati per sezione (`ActivityParametersV1`/`ModerationParametersV1`), prove crittografiche `MemberProofV1` su `profile`/`activity`/`moderation`, supporto post-transfer/post-succession su `member-contract`, propagazione autorità `O(1)` bounded + lazy on-open/on-reply sync, viste Search/Notifications/Moderation lazy, e successione d'emergenza `OwnershipV1` con quorum storico corretto (`AdminRevocation.appointed_at`) e timelock configurabile (`Configuration.succession_timelock_secs`) pubblicati nella build locale v739.
+L'activity e la moderazione recenti vivono in contratti separati shardati per sezione (o per board su `TopicIndex`). Contratto board alla revisione 37 (`plaza_topic_contract_revision = 2`, `profile`/`activity`/`moderation` rev 3).
 Nessuna migrazione delle vecchie board.
 
 ## Stato dell'implementazione
@@ -13,16 +13,17 @@ Nessuna migrazione delle vecchie board.
   `State`/`Delta`/`StateAndDelta`, `summarize_state`, `get_state_delta`) con
   dispatch `part == 0` / `part > 0` e limite di 8 MiB.
 - `plaza-core`: `BoardModeV1`, `SectionsV1`, `TopicIndexV1`, `SectionPageStateV1`,
-  `MemberShardStateV1`, `ProfileStateV1` (32 bucket), `OwnershipV1` con
-  successione per quorum admin + timelock.
+  `MemberShardStateV1` + `MemberProofV1`, `ProfileStateV1` (32 bucket),
+  `ActivityParametersV1`/`ActivityStateV1`, `ModerationParametersV1`/`ReportFeedStateV1`,
+  `OwnershipV1` con successione per quorum admin + timelock.
 - Client `ui/src/components/app/topic_contract.rs`, `section_contract.rs`,
   `member_contract.rs`, `profile_contract.rs`, `activity_contract.rs`,
   `moderation_contract.rs`; UI `topic_index_view.rs`, `topic_view.rs`,
-  `ownership_view.rs`, ricerca, notifiche e code in Manage.
-- Test: 55 in `topic-core`, 325 in `plaza-core`, 111 in `plaza-ui`, 6 test
-  `ContractInterface` nei contratti secondari/sezione/topic, 16 scenari
-  real-node dei topic (16/16 passati su v737) e 29 test statici Playwright
-  Chromium (3 saltati).
+  `ownership_view.rs`, ricerca, notifiche e code in Manage (tutte lazy).
+- Test: 55 in `topic-core`, 329 (+ 14 `topic_index`) in `plaza-core`, 111 in
+  `plaza-ui`, 6 test `ContractInterface` nei contratti secondari/sezione/topic,
+  16 scenari real-node dei topic (16/16 passati su v739) e 29 test statici
+  Playwright Chromium (3 saltati).
 
 Funzioni disponibili: topic creati dall'owner e dai membri, topic privati,
 modifica di topic e risposte, flag owner (pin/close/announce/hide/approve),

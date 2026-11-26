@@ -10,7 +10,7 @@ use ed25519_dalek::SigningKey;
 use freenet_scaffold::ComposableState;
 use freenet_stdlib::prelude::ContractInstanceId;
 use plaza_core::board_state::activity::{
-    ActivityDeltaV1, ActivityEntryV1, ActivityStateV1, MAX_ACTIVITY_ENTRIES,
+    ActivityDeltaV1, ActivityEntryV1, ActivityParametersV1, ActivityStateV1, MAX_ACTIVITY_ENTRIES,
 };
 use plaza_core::board_state::authority::{
     AuthorizedAuthorityRootV1, AuthorityRootStateV1, AuthorityTreeV1,
@@ -19,8 +19,8 @@ use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configur
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
 use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
 use plaza_core::board_state::member_shards::{
-    member_shard_bucket, MemberShardDeltaV1, MemberShardEntryV1, MemberShardParametersV1,
-    MemberShardStateV1, MEMBER_SHARD_COUNT,
+    member_shard_bucket, MemberProofV1, MemberShardDeltaV1, MemberShardEntryV1,
+    MemberShardParametersV1, MemberShardStateV1, MEMBER_SHARD_COUNT,
 };
 use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::privacy::SealedBytes;
@@ -29,7 +29,7 @@ use plaza_core::board_state::profiles::{
     ProfileStateV1, PROFILE_SHARD_COUNT,
 };
 use plaza_core::board_state::report_feed::{
-    ReportFeedDeltaV1, ReportFeedStateV1, MAX_REPORT_FEED,
+    ModerationParametersV1, ReportFeedDeltaV1, ReportFeedStateV1, MAX_REPORT_FEED,
 };
 use plaza_core::board_state::reports::ReportReason;
 use plaza_core::board_state::section_pages::{
@@ -245,6 +245,8 @@ fn report(_section: MessageId, index: usize, members: usize) -> AuthorizedTopicR
     AuthorizedTopicReportV1 {
         signature: sign_struct(&value, &reporter),
         report: value,
+        signer_key: Some(reporter.verifying_key()),
+        proof: None,
     }
 }
 
@@ -288,7 +290,35 @@ fn serialized_len_value<T: serde::Serialize>(value: &T) -> usize {
     bytes.len()
 }
 
-fn activity_contract(members: usize) -> ActivityStateV1 {
+fn bench_member_proof(member_sk: &SigningKey) -> MemberProofV1 {
+    let owner_sk = owner();
+    let owner_id = MemberId::from(&owner_sk.verifying_key());
+    MemberProofV1 {
+        ownership_transfers: Vec::new(),
+        transfer_admins: Vec::new(),
+        membership: Some(Box::new(MemberShardEntryV1 {
+            member: AuthorizedMember::new(
+                Member {
+                    owner_member_id: owner_id,
+                    invited_by: owner_id,
+                    member_vk: member_sk.verifying_key(),
+                    join_proof: None,
+                },
+                &owner_sk,
+            ),
+            invite_chain: Vec::new(),
+            invite_token: None,
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
+        })),
+    }
+}
+
+fn activity_contract(members: usize, section: Option<MessageId>) -> ActivityStateV1 {
+    let act_params = ActivityParametersV1 {
+        owner: owner().verifying_key(),
+        section,
+    };
     let entries = (0..MAX_ACTIVITY_ENTRIES)
         .map(|index| {
             let author = member_key(index % members);
@@ -310,19 +340,24 @@ fn activity_contract(members: usize) -> ActivityStateV1 {
                     signer: Some(MemberId::from(&author.verifying_key())),
                     signer_key: Some(author.verifying_key()),
                 },
+                proof: Some(Box::new(bench_member_proof(&author))),
             }
         })
         .collect();
     let mut state = ActivityStateV1::default();
     state
-        .apply_delta(&ActivityDeltaV1 { entries })
+        .apply_delta(&act_params, &ActivityDeltaV1 { entries })
         .expect("the activity state verifies");
     state
 }
 
-fn moderation_feed() -> ReportFeedStateV1 {
+fn moderation_feed(section: Option<MessageId>) -> ReportFeedStateV1 {
     let owner_key = owner();
     let owner_id = MemberId::from(&owner_key.verifying_key());
+    let mod_params = ModerationParametersV1 {
+        owner: owner_key.verifying_key(),
+        section,
+    };
     let mut reports = Vec::new();
     let mut resolutions = Vec::new();
     for index in 0..MAX_REPORT_FEED {
@@ -339,6 +374,8 @@ fn moderation_feed() -> ReportFeedStateV1 {
         reports.push(AuthorizedTopicReportV1 {
             signature: sign_struct(&report, &owner_key),
             report,
+            signer_key: Some(owner_key.verifying_key()),
+            proof: None,
         });
         let resolution = TopicReportResolutionV1 {
             topic_id,
@@ -353,14 +390,19 @@ fn moderation_feed() -> ReportFeedStateV1 {
             resolution,
             signer_key: Some(owner_key.verifying_key()),
             authority: None,
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
         });
     }
     let mut state = ReportFeedStateV1::default();
     state
-        .apply_delta(&ReportFeedDeltaV1 {
-            reports,
-            resolutions,
-        })
+        .apply_delta(
+            &mod_params,
+            &ReportFeedDeltaV1 {
+                reports,
+                resolutions,
+            },
+        )
         .expect("the moderation feed verifies");
     state
 }
@@ -419,7 +461,7 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
 
     let pruned_mib = pruned_size as f64 / (1024.0 * 1024.0);
     let parent_kib = parent_size as f64 / 1024.0;
-    let activity = activity_contract(members);
+    let activity = activity_contract(members, Some(section_id));
     let activity_kib = serialized_len_value(&activity) as f64 / 1024.0;
     let activity_summary_kib = serialized_len_value(&activity.summarize()) as f64 / 1024.0;
     let mut activity_minus_one = activity.clone();
@@ -474,7 +516,7 @@ fn run(sections: usize, members: usize, topics: usize, subscribers: usize) {
         ..Default::default()
     };
     let new_topic_kib = serialized_len_value(&new_topic) as f64 / 1024.0;
-    let moderation = moderation_feed();
+    let moderation = moderation_feed(Some(section_id));
     let moderation_kib = serialized_len_value(&moderation) as f64 / 1024.0;
     let moderation_summary_kib = serialized_len_value(&moderation.summarize()) as f64 / 1024.0;
     let mut moderation_minus_one = moderation.clone();
@@ -750,10 +792,13 @@ fn profile_feed(members: usize) -> ProfileStateV1 {
     for index in 0..members {
         let key = member_key(index);
         let id = MemberId::from(&key.verifying_key());
-        state.entries.push(ProfileEntryV1::new(
-            MemberInfo::new_public(id, 1, format!("Member {index}")),
-            &key,
-        ));
+        state.entries.push(
+            ProfileEntryV1::new(
+                MemberInfo::new_public(id, 1, format!("Member {index}")),
+                &key,
+            )
+            .with_proof(bench_member_proof(&key)),
+        );
     }
     state
 }
@@ -850,7 +895,8 @@ fn membership_scenario(members: usize, sections: usize) {
         entries: vec![ProfileEntryV1::new(
             MemberInfo::new_public(rename_id, 2, "Renamed".to_string()),
             &rename_sk,
-        )],
+        )
+        .with_proof(bench_member_proof(&rename_sk))],
     };
     let mut target_profile_shard = profile_shards[rename_bucket as usize].clone();
     let before_summary = target_profile_shard.summarize();
@@ -875,6 +921,8 @@ fn membership_scenario(members: usize, sections: usize) {
             member: member.clone(),
             invite_chain: Vec::new(),
             invite_token: None,
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
         });
     }
     let shard0_params = MemberShardParametersV1 {
@@ -905,6 +953,8 @@ fn membership_scenario(members: usize, sections: usize) {
             member: extra_member,
             invite_chain: Vec::new(),
             invite_token: None,
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
         }],
     };
     let join_delta_kib = serialized_len_value(&join_delta) as f64 / 1024.0;

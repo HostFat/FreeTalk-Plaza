@@ -180,15 +180,16 @@ impl ContractInterface for ProfileContract {
 
 #[no_mangle]
 pub extern "C" fn plaza_profile_contract_revision() -> u32 {
-    2
+    3
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use plaza_core::board_state::member::MemberId;
+    use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
     use plaza_core::board_state::member_info::MemberInfo;
+    use plaza_core::board_state::member_shards::{MemberProofV1, MemberShardEntryV1};
     use plaza_core::board_state::privacy::SealedBytes;
     use plaza_core::board_state::profiles::{profile_shard_bucket, ProfileEntryV1};
 
@@ -212,9 +213,33 @@ mod tests {
         }
     }
 
+    fn proof_for(owner: &SigningKey, member_sk: &SigningKey) -> MemberProofV1 {
+        let owner_id = MemberId::from(&owner.verifying_key());
+        MemberProofV1 {
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
+            membership: Some(Box::new(MemberShardEntryV1 {
+                member: AuthorizedMember::new(
+                    Member {
+                        owner_member_id: owner_id,
+                        invited_by: owner_id,
+                        member_vk: member_sk.verifying_key(),
+                        join_proof: None,
+                    },
+                    owner,
+                ),
+                invite_chain: Vec::new(),
+                invite_token: None,
+                ownership_transfers: Vec::new(),
+                transfer_admins: Vec::new(),
+            })),
+        }
+    }
+
     #[test]
     fn summarize_and_get_state_delta_round_trip() {
-        let owner = SigningKey::from_bytes(&[1u8; 32]).verifying_key();
+        let owner_sk = SigningKey::from_bytes(&[1u8; 32]);
+        let owner = owner_sk.verifying_key();
         let params_val = ProfileShardParametersV1 { owner, bucket: 0 };
         let params = Parameters::from(cbor!(&params_val));
 
@@ -223,11 +248,13 @@ mod tests {
         let e1 = ProfileEntryV1::new(
             MemberInfo::new_public(MemberId::from(&k1.verifying_key()), 1, "Alice".into()),
             &k1,
-        );
+        )
+        .with_proof(proof_for(&owner_sk, &k1));
         let e2 = ProfileEntryV1::new(
             MemberInfo::new_public(MemberId::from(&k2.verifying_key()), 1, "Bob".into()),
             &k2,
-        );
+        )
+        .with_proof(proof_for(&owner_sk, &k2));
         let e1_v2 = ProfileEntryV1::new(
             MemberInfo {
                 member_id: MemberId::from(&k1.verifying_key()),
@@ -235,7 +262,8 @@ mod tests {
                 preferred_nickname: SealedBytes::public(b"Alice2".to_vec()),
             },
             &k1,
-        );
+        )
+        .with_proof(proof_for(&owner_sk, &k1));
 
         let peer_a = ProfileContract::update_state(
             params.clone(),

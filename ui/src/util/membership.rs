@@ -116,24 +116,10 @@ pub fn restore_self_membership() -> bool {
                 .await;
             });
         }
-        let invite_token = authorized_member
-            .member
-            .join_proof
-            .as_ref()
-            .and_then(|proof| {
-                board
-                    .board_state
-                    .invites
-                    .tokens
-                    .iter()
-                    .find(|token| token.token.id == proof.token_id)
-                    .cloned()
-            });
-        let entry = plaza_core::board_state::member_shards::MemberShardEntryV1 {
-            member: authorized_member,
-            invite_chain: board.invite_chain.clone(),
-            invite_token,
-        };
+        let entry = crate::components::app::member_contract::build_member_shard_entry(
+            &board,
+            authorized_member,
+        );
         crate::util::safe_spawn_local(async move {
             let _ = crate::components::app::member_contract::record_member(board_key, entry).await;
         });
@@ -197,24 +183,10 @@ pub fn restore_self_membership() -> bool {
         });
     }
     if let Some(authorized_member) = board.self_authorized_member.clone() {
-        let invite_token = authorized_member
-            .member
-            .join_proof
-            .as_ref()
-            .and_then(|proof| {
-                board
-                    .board_state
-                    .invites
-                    .tokens
-                    .iter()
-                    .find(|token| token.token.id == proof.token_id)
-                    .cloned()
-            });
-        let entry = plaza_core::board_state::member_shards::MemberShardEntryV1 {
-            member: authorized_member,
-            invite_chain: board.invite_chain.clone(),
-            invite_token,
-        };
+        let entry = crate::components::app::member_contract::build_member_shard_entry(
+            &board,
+            authorized_member,
+        );
         crate::util::safe_spawn_local(async move {
             let _ = crate::components::app::member_contract::record_member(board_key, entry).await;
         });

@@ -10,8 +10,13 @@
 //! - each shard entry is self-verifying (carrying its invite chain or invite
 //!   token) so the contract validates deltas without fetching the other shards.
 
+use crate::board_state::admin::AuthorizedAdmin;
 use crate::board_state::invites::{join_message, AuthorizedInviteToken};
 use crate::board_state::member::{AuthorizedMember, MemberId, MembersV1};
+use crate::board_state::ownership::{
+    AuthorizedOwnerTransfer, MAX_OWNER_TRANSFERS, MAX_SUCCESSION_VOTES,
+};
+use crate::board_state::rate_limit::system_time_ms;
 use crate::board_state::roles::AuthorityProof;
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::verify_struct;
@@ -67,15 +72,286 @@ impl MemberShardParametersV1 {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct MemberShardEntryV1 {
     pub member: AuthorizedMember,
-    /// Ancestor member records from `member.invited_by` up to the board owner
-    /// (or to a token-joined ancestor). Empty when invited directly by the
-    /// owner, joined via token, or self-registered as a former owner.
+    /// Ancestor member records from `member.invited_by` up to a board owner
+    /// (or to a token-joined ancestor). Empty when invited directly by an
+    /// owner or joined via token.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invite_chain: Vec<AuthorizedMember>,
     /// Invite token used when `member` (or the root of `invite_chain`) joined
     /// through an invite link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite_token: Option<AuthorizedInviteToken>,
+    /// Founding-to-current ownership transfer chain when the inviter or token
+    /// signer is a post-transfer owner (or an admin appointed by one). Empty
+    /// on boards that never transferred ownership.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ownership_transfers: Vec<AuthorizedOwnerTransfer>,
+    /// Admin appointment records needed to verify admin-quorum succession
+    /// transfers inside `ownership_transfers`. Empty for normal transfers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transfer_admins: Vec<AuthorizedAdmin>,
+}
+
+/// Self-contained cryptographic proof that a member belongs to `board_owner`,
+/// reusable across standalone per-board contracts (`profile`, `activity`,
+/// `moderation`) without fetching the parent board or member shards.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
+pub struct MemberProofV1 {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ownership_transfers: Vec<AuthorizedOwnerTransfer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transfer_admins: Vec<AuthorizedAdmin>,
+    /// Membership entry proving the member's invite chain or invite token.
+    /// `None` only when the subject is itself a verified owner in
+    /// `ownership_transfers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub membership: Option<Box<MemberShardEntryV1>>,
+}
+
+/// Verify an ownership transfer chain starting at `founding_owner` and return
+/// every valid owner key along the chain (including `founding_owner`).
+pub fn verify_ownership_chain(
+    founding_owner: &VerifyingKey,
+    transfers: &[AuthorizedOwnerTransfer],
+    transfer_admins: &[AuthorizedAdmin],
+) -> Result<Vec<VerifyingKey>, String> {
+    if transfers.len() > MAX_OWNER_TRANSFERS {
+        return Err("ownership transfer chain exceeds maximum length".to_string());
+    }
+    if transfer_admins.len() > MAX_SUCCESSION_VOTES {
+        return Err("too many transfer admin records in standalone proof".to_string());
+    }
+    let mut keys = vec![*founding_owner];
+    let mut from_key = *founding_owner;
+    let mut from_id = MemberId::from(&from_key);
+    let mut generation = 1u64;
+    let mut last_time = 0i64;
+
+    for entry in transfers {
+        let transfer = &entry.transfer;
+        if transfer.from != from_id {
+            return Err("standalone ownership transfer chain is broken".to_string());
+        }
+        if transfer.generation != generation {
+            return Err("standalone ownership transfer generation is not sequential".to_string());
+        }
+        let at = system_time_ms(transfer.transferred_at);
+        if at < last_time {
+            return Err("standalone ownership transfer time goes backwards".to_string());
+        }
+        if transfer.to == transfer.from {
+            return Err("owner cannot transfer board to itself".to_string());
+        }
+        if MemberId::from(&transfer.to_key) != transfer.to {
+            return Err("ownership transfer target key does not match id".to_string());
+        }
+
+        if entry.succession_approvals.is_empty() {
+            entry.verify_signature(&from_key)?;
+        } else {
+            if entry.succession_approvals.len() > MAX_SUCCESSION_VOTES {
+                return Err("too many succession approvals on transfer".to_string());
+            }
+            let admin_verified = |member_id: &MemberId| -> bool {
+                transfer_admins.iter().any(|admin| {
+                    admin.admin.id() == *member_id
+                        && system_time_ms(admin.admin.signed_at) <= at
+                        && keys.iter().any(|k| admin.verify_signature(k).is_ok())
+                })
+            };
+            if transfer.to != MemberId::from(founding_owner) && !admin_verified(&transfer.to) {
+                return Err(
+                    "succession transfer target lacks an owner-signed admin record".to_string(),
+                );
+            }
+            let mut voters = HashSet::new();
+            let mut valid_keys = Vec::new();
+            for approval in &entry.succession_approvals {
+                approval.verify_signature()?;
+                let vote = &approval.vote;
+                if vote.from != transfer.from
+                    || vote.to != transfer.to
+                    || vote.to_key != transfer.to_key
+                    || vote.generation != transfer.generation
+                {
+                    return Err("succession approval does not match transfer".to_string());
+                }
+                if system_time_ms(vote.signed_at) > at {
+                    return Err("succession approval is dated after the transfer".to_string());
+                }
+                if !voters.insert(vote.voter) {
+                    return Err("duplicate voter in succession approvals".to_string());
+                }
+                if !admin_verified(&vote.voter) {
+                    return Err(
+                        "succession voter lacks an owner-signed admin record".to_string(),
+                    );
+                }
+                valid_keys.push(vote.voter_key);
+            }
+            if voters.len() < 2 {
+                return Err("succession transfer requires at least 2 admin approvals".to_string());
+            }
+            if !valid_keys
+                .iter()
+                .any(|key| entry.verify_signature(key).is_ok())
+            {
+                return Err(
+                    "succession transfer must be signed by one of the approving admins".to_string(),
+                );
+            }
+        }
+
+        from_key = transfer.to_key;
+        from_id = transfer.to;
+        if !keys.contains(&from_key) {
+            keys.push(from_key);
+        }
+        generation += 1;
+        last_time = at;
+    }
+
+    Ok(keys)
+}
+
+/// Verify that `member_id` / `member_vk` is a valid member (or owner) of the
+/// board anchored at `board_owner`.
+pub fn verify_member_proof(
+    board_owner: &VerifyingKey,
+    member_id: &MemberId,
+    member_vk: &VerifyingKey,
+    proof: Option<&MemberProofV1>,
+) -> Result<(), String> {
+    if MemberId::from(member_vk) != *member_id {
+        return Err("member key does not match member id".to_string());
+    }
+    if member_vk == board_owner {
+        return Ok(());
+    }
+    let proof = proof.ok_or_else(|| "non-owner record requires a membership proof".to_string())?;
+    let owner_keys = verify_ownership_chain(
+        board_owner,
+        &proof.ownership_transfers,
+        &proof.transfer_admins,
+    )?;
+    if owner_keys.contains(member_vk) {
+        return Ok(());
+    }
+    let entry = proof
+        .membership
+        .as_deref()
+        .ok_or_else(|| "membership proof is missing its member record".to_string())?;
+    if entry.member.member.member_vk != *member_vk || entry.member.member.id() != *member_id {
+        return Err("membership proof does not match the signer".to_string());
+    }
+    entry.verify_against_owners(board_owner, &owner_keys)
+}
+
+/// Verify that `signer` / `signer_key` holds moderation/resolution authority
+/// (owner, admin, or role with `can_delete_posts` / `can_manage_trash`) on the
+/// board anchored at `board_owner`, without needing the parent board state.
+pub fn verify_moderation_proof_standalone(
+    board_owner: &VerifyingKey,
+    signer: &MemberId,
+    signer_key: &VerifyingKey,
+    proof: Option<&AuthorityProof>,
+    ownership_transfers: &[AuthorizedOwnerTransfer],
+    transfer_admins: &[AuthorizedAdmin],
+) -> Result<(), String> {
+    if MemberId::from(signer_key) != *signer {
+        return Err("moderation signer key does not match signer id".to_string());
+    }
+    let owner_keys = verify_ownership_chain(board_owner, ownership_transfers, transfer_admins)?;
+    if owner_keys.contains(signer_key) {
+        return Ok(());
+    }
+    if MemberShardEntryV1::verify_standalone_admin_authority(
+        &owner_keys,
+        signer,
+        proof,
+        MAX_SHARD_AUTHORITY_DEPTH,
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+    let proof = proof
+        .ok_or_else(|| "non-owner resolution requires a moderation authority proof".to_string())?;
+    let grant = proof
+        .grant
+        .as_ref()
+        .ok_or_else(|| "resolution authority proof has neither admin nor role grant".to_string())?;
+    if grant.role.role.deleted
+        || !(grant.role.role.can_delete_posts || grant.role.role.can_manage_trash)
+    {
+        return Err("resolution proof role does not grant report resolution".to_string());
+    }
+    if grant.assignment.assignment.role_id != grant.role.role.id
+        || grant.assignment.assignment.member_id != *signer
+        || grant.assignment.assignment.revoked
+    {
+        return Err("resolution proof assignment does not match signer or role".to_string());
+    }
+    let owner_id_set: HashMap<MemberId, VerifyingKey> = owner_keys
+        .iter()
+        .map(|k| (MemberId::from(k), *k))
+        .collect();
+    let role_signer = grant
+        .role
+        .signer
+        .unwrap_or_else(|| MemberId::from(board_owner));
+    let role_key = if let Some(key) = owner_id_set.get(&role_signer) {
+        *key
+    } else {
+        let key = grant
+            .role
+            .signer_key
+            .ok_or_else(|| "resolution role proof is missing signer key".to_string())?;
+        if MemberId::from(&key) != role_signer {
+            return Err("resolution role proof signer key mismatch".to_string());
+        }
+        key
+    };
+    verify_struct(&grant.role.role, &grant.role.signature, &role_key)
+        .map_err(|error| format!("invalid role signature in resolution proof: {error}"))?;
+    MemberShardEntryV1::verify_standalone_admin_authority(
+        &owner_keys,
+        &role_signer,
+        grant.role.authority.as_deref(),
+        MAX_SHARD_AUTHORITY_DEPTH - 1,
+    )?;
+
+    let assign_signer = grant
+        .assignment
+        .signer
+        .unwrap_or_else(|| MemberId::from(board_owner));
+    if assign_signer == *signer {
+        return Err("resolution role assignment proof cannot be self-granted".to_string());
+    }
+    let assign_key = if let Some(key) = owner_id_set.get(&assign_signer) {
+        *key
+    } else {
+        let key = grant
+            .assignment
+            .signer_key
+            .ok_or_else(|| "resolution assignment proof is missing signer key".to_string())?;
+        if MemberId::from(&key) != assign_signer {
+            return Err("resolution assignment proof signer key mismatch".to_string());
+        }
+        key
+    };
+    verify_struct(
+        &grant.assignment.assignment,
+        &grant.assignment.signature,
+        &assign_key,
+    )
+    .map_err(|error| format!("invalid assignment signature in resolution proof: {error}"))?;
+    MemberShardEntryV1::verify_standalone_manager_authority(
+        &owner_keys,
+        &assign_signer,
+        grant.assignment.authority.as_deref(),
+        MAX_SHARD_AUTHORITY_DEPTH - 1,
+    )
 }
 
 impl MemberShardEntryV1 {
@@ -85,7 +361,6 @@ impl MemberShardEntryV1 {
 
     pub fn verify(&self, params: &MemberShardParametersV1) -> Result<(), String> {
         params.verify()?;
-        let owner_id = params.owner_id();
         let member_id = self.member.member.id();
 
         if member_shard_bucket(&member_id) != params.bucket {
@@ -96,14 +371,34 @@ impl MemberShardEntryV1 {
                 params.bucket
             ));
         }
-        if self.member.member.owner_member_id != owner_id {
+        let owner_keys = verify_ownership_chain(
+            &params.owner,
+            &self.ownership_transfers,
+            &self.transfer_admins,
+        )?;
+        self.verify_against_owners(&params.owner, &owner_keys)
+    }
+
+    pub(crate) fn verify_against_owners(
+        &self,
+        founding_owner: &VerifyingKey,
+        owner_keys: &[VerifyingKey],
+    ) -> Result<(), String> {
+        let founding_owner_id = MemberId::from(founding_owner);
+        let member_id = self.member.member.id();
+        let owner_by_id: HashMap<MemberId, VerifyingKey> = owner_keys
+            .iter()
+            .map(|key| (MemberId::from(key), *key))
+            .collect();
+
+        if self.member.member.owner_member_id != founding_owner_id {
             return Err("member shard entry belongs to another board".to_string());
         }
         if self.invite_chain.len() > MAX_MEMBER_INVITE_CHAIN {
             return Err("member shard invite chain is too long".to_string());
         }
         for ancestor in &self.invite_chain {
-            if ancestor.member.owner_member_id != owner_id {
+            if ancestor.member.owner_member_id != founding_owner_id {
                 return Err("invite chain member belongs to another board".to_string());
             }
         }
@@ -113,7 +408,8 @@ impl MemberShardEntryV1 {
                 &self.member,
                 proof,
                 self.invite_token.as_ref(),
-                params,
+                founding_owner,
+                owner_keys,
             );
         }
 
@@ -125,14 +421,15 @@ impl MemberShardEntryV1 {
             return Err("self-signed non-token members are not accepted in member shards".to_string());
         }
 
-        if self.member.member.invited_by == owner_id {
+        if let Some(inviter_owner_key) = owner_by_id.get(&self.member.member.invited_by) {
             return self
                 .member
-                .verify_signature(&params.owner)
+                .verify_signature(inviter_owner_key)
                 .map_err(|error| format!("invalid owner-invited member signature: {error}"));
         }
 
-        // Multi-hop invite chain verified cryptographically up to owner or token.
+        // Multi-hop invite chain verified cryptographically up to any verified
+        // owner in the chain or a verified invite token.
         let chain_by_id: HashMap<MemberId, &AuthorizedMember> = self
             .invite_chain
             .iter()
@@ -151,12 +448,13 @@ impl MemberShardEntryV1 {
                     current,
                     proof,
                     self.invite_token.as_ref(),
-                    params,
+                    founding_owner,
+                    owner_keys,
                 );
             }
-            if current.member.invited_by == owner_id {
+            if let Some(inviter_owner_key) = owner_by_id.get(&current.member.invited_by) {
                 return current
-                    .verify_signature(&params.owner)
+                    .verify_signature(inviter_owner_key)
                     .map_err(|error| format!("invalid invite chain owner signature: {error}"));
             }
             if current.member.invited_by == current_id {
@@ -181,14 +479,13 @@ impl MemberShardEntryV1 {
         Err("member shard invite chain exceeds maximum depth".to_string())
     }
 
-    fn verify_standalone_admin_authority(
-        owner: &VerifyingKey,
+    pub(crate) fn verify_standalone_admin_authority(
+        owner_keys: &[VerifyingKey],
         signer: &MemberId,
         proof: Option<&AuthorityProof>,
         depth: u8,
     ) -> Result<(), String> {
-        let owner_id = MemberId::from(owner);
-        if *signer == owner_id {
+        if owner_keys.iter().any(|k| MemberId::from(k) == *signer) {
             return Ok(());
         }
         if depth == 0 {
@@ -197,27 +494,25 @@ impl MemberShardEntryV1 {
         let proof = proof
             .ok_or_else(|| "non-owner invite token in member shard requires an authority proof".to_string())?;
         if let Some(admin) = &proof.admin {
-            if admin.admin.id() == *signer {
-                admin
-                    .verify_signature(owner)
-                    .map_err(|error| format!("invalid admin authority proof in member shard: {error}"))?;
+            if admin.admin.id() == *signer
+                && owner_keys.iter().any(|k| admin.verify_signature(k).is_ok())
+            {
                 return Ok(());
             }
         }
         Err("member shard signer lacks a valid owner-signed admin proof".to_string())
     }
 
-    fn verify_standalone_manager_authority(
-        owner: &VerifyingKey,
+    pub(crate) fn verify_standalone_manager_authority(
+        owner_keys: &[VerifyingKey],
         signer: &MemberId,
         proof: Option<&AuthorityProof>,
         depth: u8,
     ) -> Result<(), String> {
-        let owner_id = MemberId::from(owner);
-        if *signer == owner_id {
+        if owner_keys.iter().any(|k| MemberId::from(k) == *signer) {
             return Ok(());
         }
-        if Self::verify_standalone_admin_authority(owner, signer, proof, depth).is_ok() {
+        if Self::verify_standalone_admin_authority(owner_keys, signer, proof, depth).is_ok() {
             return Ok(());
         }
         if depth == 0 {
@@ -239,9 +534,16 @@ impl MemberShardEntryV1 {
             return Err("member shard proof assignment does not match signer or role".to_string());
         }
 
-        let role_signer = grant.role.signer.unwrap_or(owner_id);
-        let role_key = if role_signer == owner_id {
-            *owner
+        let owner_by_id: HashMap<MemberId, VerifyingKey> = owner_keys
+            .iter()
+            .map(|key| (MemberId::from(key), *key))
+            .collect();
+        let founding_owner = owner_keys[0];
+        let founding_owner_id = MemberId::from(&founding_owner);
+
+        let role_signer = grant.role.signer.unwrap_or(founding_owner_id);
+        let role_key = if let Some(key) = owner_by_id.get(&role_signer) {
+            *key
         } else {
             let key = grant
                 .role
@@ -255,18 +557,18 @@ impl MemberShardEntryV1 {
         verify_struct(&grant.role.role, &grant.role.signature, &role_key)
             .map_err(|error| format!("invalid role signature in member shard proof: {error}"))?;
         Self::verify_standalone_admin_authority(
-            owner,
+            owner_keys,
             &role_signer,
             grant.role.authority.as_deref(),
             depth - 1,
         )?;
 
-        let assign_signer = grant.assignment.signer.unwrap_or(owner_id);
+        let assign_signer = grant.assignment.signer.unwrap_or(founding_owner_id);
         if assign_signer == *signer {
             return Err("member shard role assignment proof cannot be self-granted".to_string());
         }
-        let assign_key = if assign_signer == owner_id {
-            *owner
+        let assign_key = if let Some(key) = owner_by_id.get(&assign_signer) {
+            *key
         } else {
             let key = grant
                 .assignment
@@ -284,7 +586,7 @@ impl MemberShardEntryV1 {
         )
         .map_err(|error| format!("invalid role assignment signature in member shard proof: {error}"))?;
         Self::verify_standalone_manager_authority(
-            owner,
+            owner_keys,
             &assign_signer,
             grant.assignment.authority.as_deref(),
             depth - 1,
@@ -295,7 +597,8 @@ impl MemberShardEntryV1 {
         member: &AuthorizedMember,
         proof: &crate::board_state::invites::JoinProof,
         invite_token: Option<&AuthorizedInviteToken>,
-        params: &MemberShardParametersV1,
+        founding_owner: &VerifyingKey,
+        owner_keys: &[VerifyingKey],
     ) -> Result<(), String> {
         if member.member.invited_by != member.member.id() {
             return Err("a token-joined member must be self-signed".to_string());
@@ -312,10 +615,16 @@ impl MemberShardEntryV1 {
         if token.token.deleted {
             return Err("invite token is deleted".to_string());
         }
-        let owner_id = params.owner_id();
+        let owner_by_id: HashMap<MemberId, VerifyingKey> = owner_keys
+            .iter()
+            .map(|key| (MemberId::from(key), *key))
+            .collect();
+        let founding_owner_id = MemberId::from(founding_owner);
         let (signer_id, signer_key) = match (token.signer, token.signer_key) {
-            (None, _) => (owner_id, params.owner),
-            (Some(signer), _) if signer == owner_id => (owner_id, params.owner),
+            (None, _) => (founding_owner_id, *founding_owner),
+            (Some(signer), _) if owner_by_id.contains_key(&signer) => {
+                (signer, owner_by_id[&signer])
+            }
             (Some(signer), Some(key)) if MemberId::from(&key) == signer => (signer, key),
             _ => {
                 return Err("invite token signer key is missing or mismatched".to_string());
@@ -323,9 +632,9 @@ impl MemberShardEntryV1 {
         };
         verify_struct(&token.token, &token.signature, &signer_key)
             .map_err(|error| format!("invalid invite token signature: {error}"))?;
-        if signer_id != owner_id {
+        if !owner_by_id.contains_key(&signer_id) {
             Self::verify_standalone_manager_authority(
-                &params.owner,
+                owner_keys,
                 &signer_id,
                 token.authority.as_deref(),
                 MAX_SHARD_AUTHORITY_DEPTH,
@@ -334,7 +643,7 @@ impl MemberShardEntryV1 {
 
         proof.verify(
             &token.token.verifying_key,
-            &join_message(&params.owner, &member.member.member_vk),
+            &join_message(founding_owner, &member.member.member_vk),
         )
     }
 }
@@ -550,6 +859,8 @@ mod tests {
             member,
             invite_chain: Vec::new(),
             invite_token: None,
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
         };
 
         let mut state = MemberShardStateV1::default();
@@ -585,6 +896,8 @@ mod tests {
             member,
             invite_chain: Vec::new(),
             invite_token: None,
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
         };
         let mut state = MemberShardStateV1::default();
         assert!(state
@@ -616,6 +929,8 @@ mod tests {
             member: bob_member,
             invite_chain: vec![alice_member],
             invite_token: None,
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
         };
         let mut state = MemberShardStateV1::default();
         state
@@ -671,6 +986,8 @@ mod tests {
             member: bob_member,
             invite_chain: Vec::new(),
             invite_token: Some(token.clone()),
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
         };
         let mut state = MemberShardStateV1::default();
         state
@@ -738,6 +1055,8 @@ mod tests {
                     member,
                     invite_chain: Vec::new(),
                     invite_token: None,
+                    ownership_transfers: Vec::new(),
+                    transfer_admins: Vec::new(),
                 });
                 if bucket_entries.len() == 2 {
                     break;
@@ -801,6 +1120,8 @@ mod tests {
             member: bogus,
             invite_chain: Vec::new(),
             invite_token: None,
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
         };
         let mut state = MemberShardStateV1::default();
         assert!(state
@@ -857,6 +1178,8 @@ mod tests {
             member: bob_member,
             invite_chain: Vec::new(),
             invite_token: Some(forged_token),
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
         };
         let mut state = MemberShardStateV1::default();
         assert!(state
@@ -933,6 +1256,8 @@ mod tests {
             member: bob_member,
             invite_chain: Vec::new(),
             invite_token: Some(admin_token),
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
         };
         let bob_params = MemberShardParametersV1 {
             owner: owner.verifying_key(),
@@ -1019,6 +1344,8 @@ mod tests {
             member: carol_member,
             invite_chain: Vec::new(),
             invite_token: Some(mgr_token),
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
         };
         let carol_params = MemberShardParametersV1 {
             owner: owner.verifying_key(),
@@ -1027,5 +1354,150 @@ mod tests {
         carol_entry
             .verify(&carol_params)
             .expect("role-manager token verifies");
+    }
+
+    #[test]
+    fn post_transfer_and_post_succession_owners_can_admit_shard_members() {
+        use crate::board_state::admin::{Admin, AuthorizedAdmin};
+        use crate::board_state::ownership::{
+            AuthorizedOwnerTransfer, AuthorizedSuccessionVoteV1, OutgoingOwnerAction,
+            OwnerTransferV1, SuccessionVoteV1,
+        };
+
+        let founding = key(1);
+        let admin1 = key(2);
+        let admin2 = key(3);
+        let successor = key(4);
+        let new_member = key(5);
+        let founding_id = MemberId::from(&founding.verifying_key());
+        let admin1_id = MemberId::from(&admin1.verifying_key());
+        let admin2_id = MemberId::from(&admin2.verifying_key());
+        let successor_id = MemberId::from(&successor.verifying_key());
+        let new_member_id = MemberId::from(&new_member.verifying_key());
+
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100);
+        let t1 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(200);
+        let t2 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(300);
+
+        // 1) Direct owner transfer founding -> admin1; admin1 invites new_member.
+        let direct_transfer = AuthorizedOwnerTransfer::new(
+            OwnerTransferV1 {
+                from: founding_id,
+                to: admin1_id,
+                to_key: admin1.verifying_key(),
+                generation: 1,
+                transferred_at: t1,
+                outgoing: OutgoingOwnerAction::KeepAdmin,
+            },
+            &founding,
+        );
+        let invited_by_new_owner = AuthorizedMember::new(
+            Member {
+                owner_member_id: founding_id,
+                invited_by: admin1_id,
+                member_vk: new_member.verifying_key(),
+                join_proof: None,
+            },
+            &admin1,
+        );
+        let params = MemberShardParametersV1 {
+            owner: founding.verifying_key(),
+            bucket: member_shard_bucket(&new_member_id),
+        };
+        let entry = MemberShardEntryV1 {
+            member: invited_by_new_owner,
+            invite_chain: Vec::new(),
+            invite_token: None,
+            ownership_transfers: vec![direct_transfer.clone()],
+            transfer_admins: Vec::new(),
+        };
+        entry
+            .verify(&params)
+            .expect("member invited by post-transfer owner verifies");
+
+        // 2) Emergency succession admin1 -> successor backed by admin2 + successor
+        // appointed by admin1; successor then admits new_member.
+        let admin2_rec = AuthorizedAdmin::new(
+            Admin {
+                member_id: admin2_id,
+                generation: 1,
+                signed_at: t1,
+            },
+            &admin1,
+        );
+        let succ_rec = AuthorizedAdmin::new(
+            Admin {
+                member_id: successor_id,
+                generation: 1,
+                signed_at: t1,
+            },
+            &admin1,
+        );
+        let vote1 = AuthorizedSuccessionVoteV1::new(
+            SuccessionVoteV1 {
+                from: admin1_id,
+                to: successor_id,
+                to_key: successor.verifying_key(),
+                generation: 2,
+                voter: admin2_id,
+                voter_key: admin2.verifying_key(),
+                signed_at: t1 + std::time::Duration::from_secs(10),
+            },
+            &admin2,
+        );
+        let vote2 = AuthorizedSuccessionVoteV1::new(
+            SuccessionVoteV1 {
+                from: admin1_id,
+                to: successor_id,
+                to_key: successor.verifying_key(),
+                generation: 2,
+                voter: successor_id,
+                voter_key: successor.verifying_key(),
+                signed_at: t1 + std::time::Duration::from_secs(10),
+            },
+            &successor,
+        );
+        let succession_transfer = AuthorizedOwnerTransfer::new_by_succession(
+            OwnerTransferV1 {
+                from: admin1_id,
+                to: successor_id,
+                to_key: successor.verifying_key(),
+                generation: 2,
+                transferred_at: t2,
+                outgoing: OutgoingOwnerAction::Member,
+            },
+            vec![vote1, vote2],
+            &successor,
+        );
+        let invited_by_successor = AuthorizedMember::new(
+            Member {
+                owner_member_id: founding_id,
+                invited_by: successor_id,
+                member_vk: new_member.verifying_key(),
+                join_proof: None,
+            },
+            &successor,
+        );
+        let entry_succ = MemberShardEntryV1 {
+            member: invited_by_successor.clone(),
+            invite_chain: Vec::new(),
+            invite_token: None,
+            ownership_transfers: vec![direct_transfer.clone(), succession_transfer.clone()],
+            transfer_admins: vec![admin2_rec, succ_rec],
+        };
+        entry_succ
+            .verify(&params)
+            .expect("member invited by post-succession owner verifies");
+
+        // Missing admin records on succession transfer must fail.
+        let bad_entry = MemberShardEntryV1 {
+            member: invited_by_successor,
+            invite_chain: Vec::new(),
+            invite_token: None,
+            ownership_transfers: vec![direct_transfer, succession_transfer],
+            transfer_admins: Vec::new(),
+        };
+        assert!(bad_entry.verify(&params).is_err());
+        let _ = t0;
     }
 }

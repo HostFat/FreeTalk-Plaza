@@ -309,7 +309,8 @@ pub async fn record_member_info(
     info: AuthorizedMemberInfo,
     signer_key: VerifyingKey,
 ) -> Result<(), String> {
-    let entry = ProfileEntryV1::from_authorized(info, signer_key);
+    let proof = crate::components::app::member_contract::build_member_proof(owner, signer_key);
+    let entry = ProfileEntryV1::from_authorized(info, signer_key).with_optional_proof(proof);
     let bucket = profile_shard_bucket(&entry.member_id());
     let params = ProfileShardParametersV1 { owner, bucket };
     entry.verify(&params)?;

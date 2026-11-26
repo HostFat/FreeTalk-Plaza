@@ -90,10 +90,13 @@ la propria fetta di topic. Un aggiornamento tocca una pagina, non tutte.
 - Caricamento pigro: all'apertura il client carica il manifest (pagina 0) di
   ogni sezione; le pagine extra arrivano on demand con il pulsante "Load older
   topics" (4 GET per clic). `merged_index` unisce solo le pagine caricate.
-  Ricerca, notifiche e moderazione chiamano `load_all_section_pages_for_board`
-  perché leggono l'indice intero; se un topic vive in una pagina non caricata,
-  `locate_section_page` carica le pagine della sua sezione prima di scrivere
-  flag o report. `load_section_page` evita GET duplicati mentre uno è in volo.
+  Anche Ricerca, Notifiche e Moderazione non scaricano più tutte le pagine né
+  tutti i 64 shard membri/profili al mount: caricano i soli shard degli
+  autori/reporter visibili (`load_*_shards_for`), offrono pulsanti espliciti
+  per caricare pagine più vecchie in Ricerca e Notifiche, e in Moderazione
+  caricano pagine extra solo per le sezioni i cui report puntano a topic non
+  presenti nei manifest. `load_section_page` evita GET duplicati mentre uno è
+  in volo.
 - Persistenza: il delegate conserva sempre i manifest, più al massimo 24
   pagine extra e 4 MiB, ordinate per `last_used`; le pagine sfrattate vengono
   ricaricate dal nodo. Il route `/test-clear-section-pages` svuota la cache
@@ -126,6 +129,35 @@ la propria fetta di topic. Un aggiornamento tocca una pagina, non tutte.
   `MemberShardEntryV1::verify` rifiuta record self-signed senza token e verifica
   crittograficamente `token.authority` fino a `params.owner` per i token
   delegati da admin o role-manager.
+- **Scaling pack #1–#4 (rev 37, v739)**:
+  - **Propagazione autorità `O(1)`**: `propagate_authority` non scarica più tutti
+    i topic dell'indice; sincronizza al massimo `16` topic non sigillati già
+    presenti in `TOPIC_CACHE`. I topic non caricati sincronizzano l'autorità on
+    demand all'apertura in `TopicView` (con diff completo `merged_with`), in
+    modo reattivo al cambio di `authority_hash` mentre il topic è aperto, e
+    atomicamente in `prepare_reply` per il primo post di un nuovo partecipante
+    (es. token-join su ruolo creato dopo il topic). `TopicView` sovrappone anche
+    i ban live della board per visibilità immediata.
+  - **Activity e Moderazione shardati per sezione**: `plaza-activity-contract`
+    e `plaza-moderation-contract` (rev 3) usano parametri
+    `ActivityParametersV1 { owner, section }` e
+    `ModerationParametersV1 { owner, section }` (`None` su `TopicIndex`,
+    `Some(section)` su `SectionedTopicIndex`), gestiscono `StateAndDelta`,
+    caricano `GET`-only con cooldown 10 s e creano on demand alla prima
+    scrittura via `Put` additivo. `moderation` viene caricata solo quando si
+    apre `ModerationView`.
+  - **Hardening anti-DoS (`MemberProofV1`) e post-transfer/succession**:
+    `ProfileEntryV1`, `ActivityEntryV1` e `AuthorizedTopicReportV1` (con
+    `signer_key` + firma reporter) richiedono un `MemberProofV1` verificato
+    dal contratto (salvo owner fondatore); `AuthorizedTopicReportResolutionV1`
+    richiede una prova di autorità di moderazione verificata on-contract
+    (`verify_moderation_proof_standalone`); `MemberShardEntryV1` porta
+    `ownership_transfers` + `transfer_admins` così owner e admin post-transfer
+    e post-successione possono ammettere membri nei bucket shardati.
+  - Re-key: `CONTRACT_REVISION = 37`; i 7 contratti (`plaza`, `topic`, `section`,
+    `activity`, `moderation`, `profile`, `member`) sono stati ricompilati e
+    ri-chiavati (delegate invariati). Board, topic e feed esistenti vanno
+    ricreati.
 - Limiti attuali: l'aggiunta di una pagina resta una singola scrittura sul
   manifest (solo l'owner può creare/sigillare pagine). Se l'aggiornamento del
   manifest fallisce, la pagina resta orfana: non viene caricata e l'owner può

@@ -12,11 +12,13 @@ use freenet_stdlib::prelude::{
     ContractCode, ContractContainer, ContractInstanceId, ContractKey, ContractWasmAPIVersion,
     Parameters, UpdateData, WrappedContract, WrappedState,
 };
+use plaza_core::board_state::admin::AuthorizedAdmin;
 use plaza_core::board_state::member::{AuthorizedMember, MemberId, MembersV1};
 use plaza_core::board_state::member_shards::{
-    member_shard_bucket, merge_into_members, MemberShardDeltaV1, MemberShardEntryV1,
+    member_shard_bucket, merge_into_members, MemberProofV1, MemberShardDeltaV1, MemberShardEntryV1,
     MemberShardParametersV1, MemberShardStateV1, MEMBER_SHARD_COUNT,
 };
+use plaza_core::board_state::ownership::AuthorizedOwnerTransfer;
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -325,6 +327,123 @@ pub fn records_for_parent_board(
     }
     records.push(entry.member);
     records
+}
+
+/// Collect the board's ownership transfer chain plus any admin records needed
+/// to verify admin-quorum succession transfers inside standalone contracts.
+pub fn ownership_proof_for(
+    board: &crate::board_data::BoardData,
+) -> (Vec<AuthorizedOwnerTransfer>, Vec<AuthorizedAdmin>) {
+    let transfers = board.board_state.ownership.transfers.clone();
+    if transfers.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let has_succession = transfers
+        .iter()
+        .any(|transfer| !transfer.succession_approvals.is_empty());
+    let transfer_admins = if has_succession {
+        board.board_state.admin.admins.clone()
+    } else {
+        Vec::new()
+    };
+    (transfers, transfer_admins)
+}
+
+/// Build a self-verifying `MemberShardEntryV1` from `board` for `member`,
+/// including invite chain, invite token, and any ownership transfer proof.
+pub fn build_member_shard_entry(
+    board: &crate::board_data::BoardData,
+    member: AuthorizedMember,
+) -> MemberShardEntryV1 {
+    let (ownership_transfers, transfer_admins) = ownership_proof_for(board);
+    let invite_token = member.member.join_proof.as_ref().and_then(|proof| {
+        board
+            .board_state
+            .invites
+            .tokens
+            .iter()
+            .find(|token| token.token.id == proof.token_id)
+            .cloned()
+    });
+    let invite_chain = if member.member.join_proof.is_some() {
+        Vec::new()
+    } else if board
+        .self_authorized_member
+        .as_ref()
+        .is_some_and(|self_m| self_m.member.id() == member.member.id())
+        && !board.invite_chain.is_empty()
+    {
+        board.invite_chain.clone()
+    } else {
+        board
+            .board_state
+            .members
+            .get_invite_chain(&member, &ChatBoardParametersV1 { owner: board.owner_vk })
+            .unwrap_or_default()
+    };
+    MemberShardEntryV1 {
+        member,
+        invite_chain,
+        invite_token,
+        ownership_transfers,
+        transfer_admins,
+    }
+}
+
+/// Build a standalone `MemberProofV1` for `signer_vk` on board `owner`.
+/// Returns `None` for the founding board owner (who needs no proof).
+pub fn build_member_proof(owner: VerifyingKey, signer_vk: VerifyingKey) -> Option<MemberProofV1> {
+    if signer_vk == owner {
+        return None;
+    }
+    let signer_id = MemberId::from(&signer_vk);
+    let board = crate::components::app::BOARDS
+        .read()
+        .map
+        .get(&owner)
+        .cloned()?;
+    let (ownership_transfers, transfer_admins) = ownership_proof_for(&board);
+    if ownership_transfers
+        .iter()
+        .any(|transfer| transfer.transfer.to_key == signer_vk)
+    {
+        return Some(MemberProofV1 {
+            ownership_transfers,
+            transfer_admins,
+            membership: None,
+        });
+    }
+    let entry = find_member_entry(owner, signer_id)
+        .map(|mut existing| {
+            if existing.ownership_transfers.is_empty() && !ownership_transfers.is_empty() {
+                existing.ownership_transfers = ownership_transfers.clone();
+                existing.transfer_admins = transfer_admins.clone();
+            }
+            existing
+        })
+        .or_else(|| {
+            board
+                .self_authorized_member
+                .as_ref()
+                .filter(|member| member.member.member_vk == signer_vk)
+                .cloned()
+                .map(|member| build_member_shard_entry(&board, member))
+        })
+        .or_else(|| {
+            board
+                .board_state
+                .members
+                .members
+                .iter()
+                .find(|member| member.member.member_vk == signer_vk)
+                .cloned()
+                .map(|member| build_member_shard_entry(&board, member))
+        })?;
+    Some(MemberProofV1 {
+        ownership_transfers,
+        transfer_admins,
+        membership: Some(Box::new(entry)),
+    })
 }
 
 /// Whether `member_id` is already present in its local member shard and
