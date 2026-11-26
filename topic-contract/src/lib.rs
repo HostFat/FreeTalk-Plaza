@@ -12,7 +12,7 @@ use ciborium::ser::into_writer;
 use freenet_stdlib::prelude::*;
 use plaza_topic_core::{
     decode_delta, decode_page_delta, decode_page_state, decode_page_summary, decode_params,
-    decode_state, decode_summary, encode, TopicPageStateV1, TopicPageSummaryV1,
+    decode_state, decode_summary, encode, TopicActionKind, TopicPageStateV1, TopicPageSummaryV1,
     TopicStateSummaryV1, TopicStateV1, MAX_TOPIC_PAGE_BYTES, MAX_TOPIC_STATE_BYTES,
 };
 
@@ -75,18 +75,23 @@ impl ContractInterface for Contract {
     ) -> Result<UpdateModification<'static>, ContractError> {
         let params = decode_params(parameters.as_ref()).map_err(ContractError::Deser)?;
         if params.part > 0 {
-            let mut current = if state.as_ref().is_empty() {
-                TopicPageStateV1::default()
-            } else {
+            let mut initialized = !state.as_ref().is_empty();
+            let mut current = if initialized {
                 decode_page_state(state.as_ref()).map_err(ContractError::Deser)?
+            } else {
+                TopicPageStateV1::default()
             };
             let mut full_verify = false;
             for update in data {
                 match update {
                     UpdateData::State(new_state) => {
+                        if new_state.as_ref().is_empty() {
+                            continue;
+                        }
                         let incoming =
                             decode_page_state(new_state.as_ref()).map_err(ContractError::Deser)?;
                         current.merge(&params, &incoming).map_err(contract_error)?;
+                        initialized = true;
                         full_verify = true;
                     }
                     UpdateData::Delta(delta) => {
@@ -95,9 +100,13 @@ impl ContractInterface for Contract {
                         }
                         let delta =
                             decode_page_delta(delta.as_ref()).map_err(ContractError::Deser)?;
+                        if !initialized || delta.header.is_some() {
+                            full_verify = true;
+                        }
                         current
                             .apply_delta_incremental(&params, &delta)
                             .map_err(contract_error)?;
+                        initialized = true;
                     }
                     UpdateData::StateAndDelta {
                         state: state_bytes,
@@ -107,14 +116,19 @@ impl ContractInterface for Contract {
                             let incoming = decode_page_state(state_bytes.as_ref())
                                 .map_err(ContractError::Deser)?;
                             current.merge(&params, &incoming).map_err(contract_error)?;
+                            initialized = true;
                             full_verify = true;
                         }
                         if !delta_bytes.as_ref().is_empty() {
                             let delta = decode_page_delta(delta_bytes.as_ref())
                                 .map_err(ContractError::Deser)?;
+                            if !initialized || delta.header.is_some() {
+                                full_verify = true;
+                            }
                             current
                                 .apply_delta_incremental(&params, &delta)
                                 .map_err(contract_error)?;
+                            initialized = true;
                         }
                     }
                     UpdateData::RelatedState { .. } => {}
@@ -128,19 +142,24 @@ impl ContractInterface for Contract {
             return Ok(UpdateModification::valid(bytes.into()));
         }
 
-        let mut current = if state.as_ref().is_empty() {
-            TopicStateV1::default()
-        } else {
+        let mut initialized = !state.as_ref().is_empty();
+        let mut current = if initialized {
             decode_state(state.as_ref()).map_err(ContractError::Deser)?
+        } else {
+            TopicStateV1::default()
         };
 
         let mut full_verify = false;
         for update in data {
             match update {
                 UpdateData::State(new_state) => {
+                    if new_state.as_ref().is_empty() {
+                        continue;
+                    }
                     let incoming =
                         decode_state(new_state.as_ref()).map_err(ContractError::Deser)?;
                     current.merge(&params, &incoming).map_err(contract_error)?;
+                    initialized = true;
                     full_verify = true;
                 }
                 UpdateData::Delta(delta) => {
@@ -148,9 +167,19 @@ impl ContractInterface for Contract {
                         continue;
                     }
                     let delta = decode_delta(delta.as_ref()).map_err(ContractError::Deser)?;
+                    if !initialized
+                        || delta.header.is_some()
+                        || delta
+                            .actions
+                            .iter()
+                            .any(|a| a.action.kind == TopicActionKind::Move)
+                    {
+                        full_verify = true;
+                    }
                     current
                         .apply_delta_incremental(&params, &delta)
                         .map_err(contract_error)?;
+                    initialized = true;
                 }
                 UpdateData::StateAndDelta {
                     state: state_bytes,
@@ -160,14 +189,25 @@ impl ContractInterface for Contract {
                         let incoming =
                             decode_state(state_bytes.as_ref()).map_err(ContractError::Deser)?;
                         current.merge(&params, &incoming).map_err(contract_error)?;
+                        initialized = true;
                         full_verify = true;
                     }
                     if !delta_bytes.as_ref().is_empty() {
                         let delta =
                             decode_delta(delta_bytes.as_ref()).map_err(ContractError::Deser)?;
+                        if !initialized
+                            || delta.header.is_some()
+                            || delta
+                                .actions
+                                .iter()
+                                .any(|a| a.action.kind == TopicActionKind::Move)
+                        {
+                            full_verify = true;
+                        }
                         current
                             .apply_delta_incremental(&params, &delta)
                             .map_err(contract_error)?;
+                        initialized = true;
                     }
                 }
                 UpdateData::RelatedState { .. } => {}
@@ -211,6 +251,9 @@ impl ContractInterface for Contract {
         state: State<'static>,
         summary: StateSummary<'static>,
     ) -> Result<StateDelta<'static>, ContractError> {
+        if state.as_ref().is_empty() {
+            return Ok(StateDelta::from(Vec::new()));
+        }
         let params = decode_params(parameters.as_ref()).map_err(ContractError::Deser)?;
         if params.part > 0 {
             let page = decode_page_state(state.as_ref()).map_err(ContractError::Deser)?;

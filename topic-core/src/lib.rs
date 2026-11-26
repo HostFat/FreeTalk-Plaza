@@ -57,6 +57,7 @@ pub const MAX_POST_BYTES: usize = 16 * 1024;
 pub const MAX_PARTS: u32 = 64;
 pub const MAX_TITLE_BYTES: usize = 512;
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
+pub const MAX_REACTION_PAYLOAD_BYTES: usize = 1024;
 pub const MAX_IMAGES_PER_POST: usize = 4;
 pub const MAX_ACTIONS: usize = 2_000;
 pub const MAX_APPROVALS: usize = 2_000;
@@ -346,13 +347,21 @@ pub struct TopicAuthorityV1 {
 
 impl TopicAuthorityV1 {
     pub fn effective_policy(&self) -> TopicPolicyV1 {
-        if let Some(source) = &self.source_configuration {
-            return policy_from_configuration(&source.configuration);
+        match (&self.source_configuration, &self.policy) {
+            (Some(source), Some(policy)) => {
+                let from_config = policy_from_configuration(&source.configuration);
+                let config_rank = (from_config.updated_at, from_config.generation);
+                let policy_rank = (policy.policy.updated_at, policy.policy.generation);
+                if policy_rank >= config_rank {
+                    policy.policy.clone()
+                } else {
+                    from_config
+                }
+            }
+            (Some(source), None) => policy_from_configuration(&source.configuration),
+            (None, Some(policy)) => policy.policy.clone(),
+            (None, None) => TopicPolicyV1::default(),
         }
-        self.policy
-            .as_ref()
-            .map(|policy| policy.policy.clone())
-            .unwrap_or_default()
     }
 
     pub fn policy(&self) -> TopicPolicyV1 {
@@ -809,6 +818,7 @@ impl TopicStateV1 {
 
         self.verify_authority(&view, &board_params)?;
         self.verify_section(&view, &board_params, params)?;
+        self.verify_header_author(&view, &board_params, params)?;
         self.verify_trust(&view, &board_params)?;
         if let Some(seal) = &self.posts_seal {
             self.verify_posts_seal(seal, &view, &board_params, params)?;
@@ -818,6 +828,36 @@ impl TopicStateV1 {
         self.verify_actions(&view, &board_params)?;
         self.verify_approvals(&view, &board_params)?;
 
+        Ok(())
+    }
+
+    fn verify_header_author(
+        &self,
+        view: &ChatBoardStateV1,
+        board_params: &ChatBoardParametersV1,
+        params: &TopicParamsV1,
+    ) -> Result<(), String> {
+        let Some(header) = &self.header else {
+            return Ok(());
+        };
+        let author = header.header.author;
+        let at_ms = header.header.created_at;
+        let owner_at = self
+            .authority
+            .ownership
+            .owner_at(board_params, system_time_from_ms(at_ms));
+        if author == params.owner_id() || author == owner_at {
+            return Ok(());
+        }
+        if self.is_banned(author, at_ms) {
+            return Err("a banned member cannot create a topic".to_string());
+        }
+        if self.is_suspended(author, at_ms) {
+            return Err("a suspended member cannot create a topic".to_string());
+        }
+        if !self.section_allows(author, view, board_params, params) {
+            return Err("the topic author cannot write in this section".to_string());
+        }
         Ok(())
     }
 
@@ -834,8 +874,23 @@ impl TopicStateV1 {
         if self.generation.next_part.is_some() && self.generation.closed_at.is_none() {
             return Err("a continued topic must be closed".to_string());
         }
-        if self.generation.next_part.is_some_and(|part| part != params.part + 1) {
+        if self
+            .generation
+            .next_part
+            .is_some_and(|part| part != params.part + 1 || part > MAX_PARTS)
+        {
             return Err("the next topic part is invalid".to_string());
+        }
+        if self.generation.closed_at.is_some() && self.posts_seal.is_none() {
+            let at_capacity = self.posts.len() >= DEFAULT_TOPIC_PAGE_SIZE
+                || encode(self)
+                    .map(|bytes| bytes.len() >= MAX_TOPIC_STATE_BYTES * 3 / 4)
+                    .unwrap_or(false);
+            if !at_capacity {
+                return Err(
+                    "an unsealed topic cannot be closed before reaching capacity".to_string(),
+                );
+            }
         }
         if params.part == 0 && self.generation.previous_hash.is_some() {
             return Err("the first topic part cannot have a previous hash".to_string());
@@ -909,7 +964,11 @@ impl TopicStateV1 {
         let board_params = params.board_parameters();
         let view = self.board_view(params);
 
-        if delta.section.is_some() {
+        let has_move = delta
+            .actions
+            .iter()
+            .any(|entry| entry.action.kind == TopicActionKind::Move);
+        if delta.section.is_some() || has_move {
             self.verify_section(&view, &board_params, params)?;
         }
         if delta.authority.is_some() {
@@ -917,6 +976,9 @@ impl TopicStateV1 {
         }
         if !delta.participants.is_empty() {
             self.verify_participants(params, &board_params)?;
+        }
+        if delta.header.is_some() {
+            self.verify_header_author(&view, &board_params, params)?;
         }
         if !delta.trust.is_empty() {
             self.verify_trust(&view, &board_params)?;
@@ -1016,7 +1078,6 @@ impl TopicStateV1 {
         view: &ChatBoardStateV1,
         board_params: &ChatBoardParametersV1,
     ) -> Result<(), String> {
-        let mut latest: BTreeMap<MemberId, u64> = BTreeMap::new();
         for entry in &self.trust {
             if !self
                 .participants
@@ -1042,10 +1103,6 @@ impl TopicStateV1 {
                 entry.authority.as_deref(),
                 system_time_from_ms(entry.trust.created_at),
             )?;
-            let slot = latest.entry(entry.trust.member_id).or_insert(0);
-            if entry.trust.generation > *slot {
-                *slot = entry.trust.generation;
-            }
         }
         Ok(())
     }
@@ -1112,10 +1169,23 @@ impl TopicStateV1 {
         if self.is_suspended(post.author, post.created_at) {
             return Err("a suspended member cannot post".to_string());
         }
-        if policy.read_only
-            && !view.admin.admins.iter().any(|admin| admin.admin.id() == post.author)
-        {
+        let is_admin = view
+            .admin
+            .admins
+            .iter()
+            .any(|admin| admin.admin.id() == post.author);
+        if policy.read_only && !is_admin {
             return Err("the topic is read-only".to_string());
+        }
+        if self.is_closed() && !is_admin {
+            if let Some(header) = &self.header {
+                if let Some(close) = self.latest_action(header.header.id(), TopicActionKind::Close)
+                {
+                    if post.created_at >= close.action.created_at {
+                        return Err("the topic is closed".to_string());
+                    }
+                }
+            }
         }
         if !self.section_allows(post.author, view, board_params, params) {
             return Err("the author cannot write in this section".to_string());
@@ -1161,6 +1231,14 @@ impl TopicStateV1 {
             action.kind,
             TopicActionKind::React | TopicActionKind::Unreact | TopicActionKind::Vote
         ) {
+            if action.payload.declared_len() > MAX_REACTION_PAYLOAD_BYTES {
+                return Err("reaction or vote payload is too large".to_string());
+            }
+            if matches!(action.kind, TopicActionKind::React | TopicActionKind::Unreact)
+                && !self.authority.policy().reactions_enabled
+            {
+                return Err("reactions are disabled by the topic policy".to_string());
+            }
             let is_member = signer == board_params.owner_id()
                 || self
                     .participants
@@ -1185,6 +1263,12 @@ impl TopicStateV1 {
                 TopicActionKind::Edit | TopicActionKind::Delete | TopicActionKind::EditPoll
             )
         {
+            if signer != board_params.owner_id()
+                && (self.is_banned(signer, action.created_at)
+                    || self.is_suspended(signer, action.created_at))
+            {
+                return Err("a banned or suspended member cannot modify posts".to_string());
+            }
             return Ok(());
         }
 
@@ -1346,8 +1430,11 @@ impl TopicStateV1 {
         params: &TopicParamsV1,
         delta: &TopicDeltaV1,
     ) -> Result<(), String> {
-        self.apply_delta_merge(params, delta)?;
-        self.verify(params)
+        let mut next = self.clone();
+        next.apply_delta_merge(params, delta)?;
+        next.verify(params)?;
+        *self = next;
+        Ok(())
     }
 
     /// Apply a delta and verify only its records plus the invariants they can
@@ -1358,8 +1445,11 @@ impl TopicStateV1 {
         params: &TopicParamsV1,
         delta: &TopicDeltaV1,
     ) -> Result<(), String> {
-        self.apply_delta_merge(params, delta)?;
-        self.verify_incremental(params, delta)
+        let mut next = self.clone();
+        next.apply_delta_merge(params, delta)?;
+        next.verify_incremental(params, delta)?;
+        *self = next;
+        Ok(())
     }
 
     pub fn merge(&mut self, params: &TopicParamsV1, other: &TopicStateV1) -> Result<(), String> {
@@ -1410,6 +1500,17 @@ impl TopicStateV1 {
         }
         for approval in &other.approvals {
             merge_approval(&mut self.approvals, approval);
+        }
+        if self.posts_seal.is_some() {
+            let header_id = self.header.as_ref().map(|h| h.header.id());
+            self.actions.retain(|entry| {
+                Some(entry.action.target) == header_id
+                    || self.posts.contains_key(&entry.action.target)
+            });
+            self.approvals.retain(|entry| {
+                Some(entry.approval.target) == header_id
+                    || self.posts.contains_key(&entry.approval.target)
+            });
         }
         self.generation = merge_generation(&self.generation, &other.generation);
         if let Some(seal) = &self.posts_seal {
@@ -1721,10 +1822,10 @@ impl TopicStateV1 {
         };
         let on = self
             .latest_action(target, kind_on)
-            .map(|entry| (entry.action.generation, entry.id()));
+            .map(|entry| (entry.action.generation, std::cmp::Reverse(entry.id())));
         let off = self
             .latest_action(target, kind_off)
-            .map(|entry| (entry.action.generation, entry.id()));
+            .map(|entry| (entry.action.generation, std::cmp::Reverse(entry.id())));
         match (on, off) {
             (Some(on), Some(off)) => on > off,
             (Some(_), None) => true,
@@ -1753,7 +1854,8 @@ impl TopicStateV1 {
         let restore = self.latest_action(target, TopicActionKind::Restore);
         match (hide, restore) {
             (Some(hide), Some(restore)) => {
-                (hide.action.generation, hide.id()) > (restore.action.generation, restore.id())
+                (hide.action.generation, std::cmp::Reverse(hide.id()))
+                    > (restore.action.generation, std::cmp::Reverse(restore.id()))
             }
             (Some(_), None) => true,
             _ => false,
@@ -1780,8 +1882,8 @@ impl TopicStateV1 {
         let restore = self.latest_action(target, TopicActionKind::Restore);
         match (delete, restore) {
             (Some(delete), Some(restore)) => {
-                (delete.action.generation, delete.id())
-                    > (restore.action.generation, restore.id())
+                (delete.action.generation, std::cmp::Reverse(delete.id()))
+                    > (restore.action.generation, std::cmp::Reverse(restore.id()))
             }
             (Some(_), None) => true,
             _ => false,
@@ -1889,6 +1991,7 @@ pub(crate) fn verify_participants_list(
 ) -> Result<(), String> {
     let mut ids = HashSet::new();
     let mut keys = HashSet::new();
+    let mut cached_view: Option<ChatBoardStateV1> = None;
     for participant in participants {
         let record = &participant.record;
         if record.member_id != MemberId::from(&record.member_vk) {
@@ -1908,6 +2011,7 @@ pub(crate) fn verify_participants_list(
         verify_participant_certificate(
             authority,
             participants,
+            &mut cached_view,
             &record.certificate,
             record.joined_at,
             params,
@@ -1920,6 +2024,7 @@ pub(crate) fn verify_participants_list(
 fn verify_participant_certificate(
     authority: &TopicAuthorityV1,
     participants: &[AuthorizedParticipantV1],
+    cached_view: &mut Option<ChatBoardStateV1>,
     certificate: &ParticipantCertificateV1,
     joined_at: i64,
     params: &TopicParamsV1,
@@ -1980,18 +2085,18 @@ fn verify_participant_certificate(
                 .map(system_time_ms)
                 .unwrap_or(joined_at),
         );
+        let view = cached_view.get_or_insert_with(|| build_board_view(authority, participants, params));
         if signer == owner_id {
             let token_owner_key = authority.ownership.owner_key_at(board_params, manager_at);
             token
                 .verify_signature(&token_owner_key)
                 .map_err(|error| format!("invalid invite token signature: {error}"))?;
         } else {
-            let view = build_board_view(authority, participants, params);
-            let key = resolve_signer_key(&view, board_params, &signer, token.signer_key.as_ref())?;
+            let key = resolve_signer_key(view, board_params, &signer, token.signer_key.as_ref())?;
             verify_struct(&token.token, &token.signature, &key)
                 .map_err(|error| format!("invalid invite token signature: {error}"))?;
         }
-        verify_token_manager_for(authority, participants, &signer, token, board_params, params, manager_at)?;
+        verify_token_manager_for(authority, view, &signer, token, board_params, manager_at)?;
         return Ok(());
     }
 
@@ -2034,18 +2139,16 @@ fn verify_participant_certificate(
 
 fn verify_token_manager_for(
     authority: &TopicAuthorityV1,
-    participants: &[AuthorizedParticipantV1],
+    view: &ChatBoardStateV1,
     signer: &MemberId,
     token: &AuthorizedInviteToken,
     board_params: &ChatBoardParametersV1,
-    params: &TopicParamsV1,
     at: SystemTime,
 ) -> Result<(), String> {
-    let view = build_board_view(authority, participants, params);
     if *signer == authority.ownership.owner_at(board_params, at) {
         return Ok(());
     }
-    if verify_owner_or_admin(&view, board_params, signer, token.authority.as_deref(), at).is_ok() {
+    if verify_owner_or_admin(view, board_params, signer, token.authority.as_deref(), at).is_ok() {
         return Ok(());
     }
     if view.roles.can_manage_access(signer) {
@@ -2061,14 +2164,14 @@ fn verify_token_manager_for(
             {
                 let role_signer = grant.role.signer_id(board_params);
                 let role_key = resolve_signer_key(
-                    &view,
+                    view,
                     board_params,
                     &role_signer,
                     grant.role.signer_key.as_ref(),
                 )?;
                 grant.role.verify_signature_with(&role_key)?;
                 verify_owner_or_admin(
-                    &view,
+                    view,
                     board_params,
                     &role_signer,
                     grant.role.authority.as_deref(),
@@ -2076,7 +2179,7 @@ fn verify_token_manager_for(
                 )?;
                 let assignment_signer = grant.assignment.signer_id(board_params);
                 let assignment_key = resolve_signer_key(
-                    &view,
+                    view,
                     board_params,
                     &assignment_signer,
                     grant.assignment.signer_key.as_ref(),
@@ -2088,7 +2191,7 @@ fn verify_token_manager_for(
                 )
                 .map_err(|error| format!("invalid role assignment signature: {error}"))?;
                 if verify_owner_or_admin(
-                    &view,
+                    view,
                     board_params,
                     &assignment_signer,
                     grant.assignment.authority.as_deref(),
@@ -2180,7 +2283,9 @@ pub(crate) fn verify_authority_records(
         proof_revocations.verify(view, board_params)?;
         proof_suspensions.verify(view, board_params)?;
     }
-    let owner_id = view.ownership.current_owner(board_params);
+    if authority.source_configuration.is_none() && authority.policy.is_none() {
+        return Err("the topic has no policy".to_string());
+    }
     if let Some(source) = &authority.source_configuration {
         let at_ms = system_time_ms(source.configuration.updated_at);
         let owner_key = authority
@@ -2189,14 +2294,13 @@ pub(crate) fn verify_authority_records(
         source
             .verify_signature(&owner_key)
             .map_err(|error| format!("invalid source configuration signature: {error}"))?;
-    } else if let Some(policy) = &authority.policy {
+    }
+    if let Some(policy) = &authority.policy {
         let at_ms = policy.policy.updated_at;
         let owner_key = authority
             .ownership
             .owner_key_at(board_params, system_time_from_ms(at_ms));
-        policy.verify(&owner_key, owner_id)?;
-    } else {
-        return Err("the topic has no policy".to_string());
+        policy.verify(&owner_key, MemberId::from(&owner_key))?;
     }
     Ok(())
 }
@@ -2273,16 +2377,17 @@ pub(crate) fn check_posts_rate_limit(
     if policy.max_posts_per_window == 0 || policy.rate_window_ms == 0 {
         return Ok(());
     }
-    let window = policy.rate_window_ms as i64;
+    let window = policy.rate_window_ms.min(i64::MAX as u64) as i64;
     let limit = policy.max_posts_per_window as usize;
     for post in incoming {
         let author = post.post.author;
         let at = post.post.created_at;
+        let floor = at.saturating_sub(window);
         let mut count = 0usize;
         for existing in posts.values() {
             if existing.post.author == author
                 && existing.post.created_at <= at
-                && existing.post.created_at >= at - window
+                && existing.post.created_at >= floor
             {
                 count += 1;
             }
@@ -2316,21 +2421,26 @@ pub(crate) fn verify_owner_or_admin(
     proof: Option<&AuthorityProof>,
     at: SystemTime,
 ) -> Result<(), String> {
+    if view.ownership.is_deactivated_at(signer, at) {
+        return Err("signer key was deactivated before this action".to_string());
+    }
     if *signer == view.ownership.owner_at(board_params, at) {
         return Ok(());
     }
     let at_ms = system_time_ms(at);
-    if view
-        .admin
-        .admins
-        .iter()
-        .any(|admin| {
-            admin.admin.id() == *signer && system_time_ms(admin.admin.signed_at) <= at_ms
+    let revoked_at = |min_gen: u64| {
+        view.admin.revoked.iter().any(|revocation| {
+            revocation.id() == *signer
+                && revocation.revocation.generation >= min_gen
+                && (revocation.revocation.signed_at == SystemTime::UNIX_EPOCH
+                    || system_time_ms(revocation.revocation.signed_at) <= at_ms)
         })
-        && !view.admin.revoked.iter().any(|revocation| {
-            revocation.id() == *signer && system_time_ms(revocation.revocation.signed_at) <= at_ms
-        })
-    {
+    };
+    if view.admin.admins.iter().any(|admin| {
+        admin.admin.id() == *signer
+            && system_time_ms(admin.admin.signed_at) <= at_ms
+            && !revoked_at(admin.admin.generation)
+    }) {
         return Ok(());
     }
     if let Some(proof) = proof {
@@ -2340,11 +2450,9 @@ pub(crate) fn verify_owner_or_admin(
                 .owner_key_at(board_params, admin.admin.signed_at);
             admin.verify_signature(&owner_key)?;
             if admin.admin.id() == *signer
-                && !view
-                    .admin
-                    .revoked
-                    .iter()
-                    .any(|revocation| revocation.id() == *signer)
+                && (admin.admin.signed_at == SystemTime::UNIX_EPOCH
+                    || system_time_ms(admin.admin.signed_at) <= at_ms)
+                && !revoked_at(admin.admin.generation)
             {
                 return Ok(());
             }
@@ -2720,8 +2828,7 @@ pub(crate) fn merge_generation(
 
 pub(crate) fn value_hash<T: Serialize>(value: &T) -> [u8; 32] {
     let mut bytes = Vec::new();
-    ciborium::ser::into_writer(value, &mut bytes)
-        .expect("topic value serialization should not fail");
+    let _ = ciborium::ser::into_writer(value, &mut bytes);
     *blake3::hash(&bytes).as_bytes()
 }
 
