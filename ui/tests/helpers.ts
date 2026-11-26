@@ -20,15 +20,19 @@ export async function openBoard(page: Page, name: string) {
   await expect(page.getByText("Loading board…", { exact: true })).toHaveCount(0);
 }
 
-/** Open a section and its New Topic composer. */
+/** Open a board, select a section card, and ensure the New topic composer is ready. */
 export async function openSectionComposer(
   page: Page,
   board: string,
   section: string,
 ) {
   await openBoard(page, board);
-  await page.getByRole("heading", { name: section, exact: true }).click();
-  const newTopic = page.getByRole("button", { name: /New Topic/ }).first();
-  await expect(newTopic).toBeVisible({ timeout: 10_000 });
-  await newTopic.click();
+  const sectionCard = page
+    .getByRole("button", { name: new RegExp(`^${section}\\b`) })
+    .first();
+  await expect(sectionCard).toBeVisible({ timeout: 10_000 });
+  await sectionCard.click();
+  await expect(page.locator("#topic-body-input")).toBeVisible({
+    timeout: 10_000,
+  });
 }

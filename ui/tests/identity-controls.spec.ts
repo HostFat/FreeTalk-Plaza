@@ -15,8 +15,9 @@ test.describe("owner controls follow the visible profile", () => {
       return;
     }
     await expect(page.getByRole("button", { name: /Manage/ })).toBeVisible();
-    await expect(page.getByRole("button", { name: /\+ Group/ })).toBeVisible();
-    await expect(page.getByRole("button", { name: /\+ Section/ })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Create section", exact: true }),
+    ).toBeVisible();
   });
 
   test("a member profile does not inherit owner controls", async ({ page }) => {
@@ -24,8 +25,9 @@ test.describe("owner controls follow the visible profile", () => {
 
     await expect(page.getByTitle("Board Owner")).toHaveCount(0);
     await expect(page.getByRole("button", { name: /Manage/ })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /\+ Group/ })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /\+ Section/ })).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Create section", exact: true }),
+    ).toHaveCount(0);
   });
 
   test("a retained owner key on a member profile stays hidden", async ({
@@ -35,7 +37,8 @@ test.describe("owner controls follow the visible profile", () => {
 
     await expect(page.getByTitle("Board Owner")).toHaveCount(0);
     await expect(page.getByRole("button", { name: /Manage/ })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /\+ Group/ })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /\+ Section/ })).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Create section", exact: true }),
+    ).toHaveCount(0);
   });
 });

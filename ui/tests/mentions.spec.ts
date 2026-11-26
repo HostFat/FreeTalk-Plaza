@@ -7,7 +7,7 @@ test.describe("mentions", () => {
   }) => {
     await openSectionComposer(page, "Team Chat Board", "General");
 
-    const textarea = page.locator("#message-input");
+    const textarea = page.locator("#topic-body-input");
     await textarea.fill("@");
     await expect(
       page.locator(".mention-autocomplete .mention-option").first(),
@@ -16,7 +16,7 @@ test.describe("mentions", () => {
     await textarea.press("Enter");
 
     await expect(textarea).toHaveValue(/\]\(mention:/);
-    await expect(page.getByPlaceholder("Add a title...")).toBeVisible();
+    await expect(page.getByPlaceholder("Title", { exact: true })).toBeVisible();
   });
 
   test("autocomplete inserts a chip and clicking it opens the member", async ({
@@ -24,7 +24,7 @@ test.describe("mentions", () => {
   }) => {
     await openSectionComposer(page, "Team Chat Board", "General");
 
-    const textarea = page.locator("#message-input");
+    const textarea = page.locator("#topic-body-input");
     await textarea.fill("@");
 
     const options = page.locator(".mention-autocomplete .mention-option");
@@ -34,14 +34,10 @@ test.describe("mentions", () => {
     await options.first().click();
 
     await expect(textarea).toHaveValue(/\]\(mention:/);
-    await page.getByPlaceholder("Add a title...").fill("Mention test");
+    await page.getByPlaceholder("Title", { exact: true }).fill("Mention test");
     await textarea.press("End");
     await textarea.type(" hello");
-    await page.getByRole("button", { name: /Send Topic/ }).click();
-
-    const title = page.getByText("Mention test", { exact: true }).first();
-    await expect(title).toBeVisible({ timeout: 10_000 });
-    await title.click();
+    await page.getByRole("button", { name: "Create topic", exact: true }).click();
 
     const chip = page.locator(".plaza-mention").first();
     await expect(chip).toBeVisible({ timeout: 10_000 });

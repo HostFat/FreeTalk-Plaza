@@ -89,6 +89,15 @@ pub fn TopicIndexView(board_id: String) -> Element {
         .iter()
         .filter(|entry| !board_data.board_state.topics.is_hidden(&entry.entry.topic_id))
         .filter(|entry| {
+            topic_contract::topic_head(board_data.owner_vk, entry.entry.topic_id)
+                .and_then(|head| {
+                    head.header
+                        .as_ref()
+                        .map(|h| !head.is_deleted(h.header.id()))
+                })
+                .unwrap_or(true)
+        })
+        .filter(|entry| {
             board_data
                 .board_state
                 .topics

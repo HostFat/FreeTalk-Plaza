@@ -7,56 +7,105 @@ use crate::{
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
 use freenet_stdlib::prelude::{ContractCode, ContractKey, Parameters};
-use lipsum::lipsum;
-use plaza_core::board_state::ChatBoardParametersV1;
-use plaza_core::{
-    board_state::{
-        configuration::*,
-        content::{
-            ActionContentV1, CategoryContentV1, ModerationActionV1, ACTION_CONTENT_VERSION,
-            CATEGORY_CONTENT_VERSION, CONTENT_TYPE_CATEGORY, CONTENT_TYPE_MODERATION_ACTION,
-        },
-        member::*,
-        member_info::*,
-        message::*,
-        privacy::{BoardDisplayMetadata, PrivacyMode, SealedBytes},
-    },
-    ChatBoardStateV1,
+use plaza_core::board_state::configuration::*;
+use plaza_core::board_state::member::*;
+use plaza_core::board_state::member_info::*;
+use plaza_core::board_state::message::MessageId;
+use plaza_core::board_state::privacy::{BoardDisplayMetadata, PrivacyMode, SealedBytes};
+use plaza_core::board_state::rate_limit::system_time_ms;
+use plaza_core::board_state::sections::{AuthorizedSectionV1, SectionId, SectionV1};
+use plaza_core::board_state::topics::{
+    AuthorizedTopicActivityV1, AuthorizedTopicEntryV1, TopicActivityV1, TopicEntryV1,
+    TOPIC_PROTOCOL_VERSION,
+};
+use plaza_core::board_state::{BoardModeV1, ChatBoardParametersV1};
+use plaza_core::ChatBoardStateV1;
+use plaza_topic_core::{
+    AuthorizedParticipantV1, AuthorizedSectionSnapshotV1, AuthorizedTopicActionV1,
+    AuthorizedTopicHeaderV1, AuthorizedTopicPolicyV1, AuthorizedTopicPostV1,
+    ParticipantCertificateV1, ParticipantRecordV1, SectionSnapshotV1, TopicActionKind,
+    TopicActionV1, TopicAuthorityV1, TopicGenerationV1, TopicHeaderV1, TopicParamsV1,
+    TopicPolicyV1, TopicPostContentV1, TopicPostV1, TopicStateV1,
 };
 use rand::rngs::OsRng;
+use rand::RngCore;
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+struct SeededData {
+    sections: Vec<(VerifyingKey, SectionId, ChatBoardStateV1)>,
+    topics: Vec<(VerifyingKey, MessageId, TopicStateV1)>,
+}
+
+static EXAMPLE_SEEDS: Mutex<Option<SeededData>> = Mutex::new(None);
+
+/// Drain pre-built section manifests and topic heads into the Dioxus global
+/// caches (`SECTION_BOARDS` and `TOPIC_CACHE`). Safe to call once on app mount.
+#[cfg(target_arch = "wasm32")]
+pub fn seed_example_caches() {
+    use dioxus::prelude::ReadableExt;
+    // Ensure `BOARDS` lazy initializer (`create_example_boards`) has run.
+    let _ = crate::components::app::BOARDS.read();
+    let seeded = EXAMPLE_SEEDS.lock().unwrap().take();
+    let Some(seeded) = seeded else {
+        return;
+    };
+    for (owner, section_id, manifest) in seeded.sections {
+        crate::components::app::section_contract::seed_section_manifest(
+            owner,
+            section_id,
+            manifest,
+        );
+    }
+    for (owner, topic_id, state) in seeded.topics {
+        crate::components::app::topic_contract::seed_topic_head(owner, topic_id, state);
+    }
+}
 
 pub fn create_example_boards() -> Boards {
     let mut map = HashMap::new();
+    let mut all_sections = Vec::new();
+    let mut all_topics = Vec::new();
 
     // Board where you're just an observer (not a member)
-    let board1 = create_board(&"Public Discussion Board".to_string(), SelfIs::Observer);
+    let board1 = create_board("Public Discussion Board", SelfIs::Observer);
+    all_sections.extend(board1.sections);
+    all_topics.extend(board1.topics);
     map.insert(board1.owner_vk, board1.board_data);
 
-    // Board where you're a member
-    let board2 = create_board(&"Team Chat Board".to_string(), SelfIs::Member);
+    // Board where you're a member (used by autoscroll, editing, invite-interceptor,
+    // mentions, poll, section-policy, notifications, client-features)
+    let board2 = create_board("Team Chat Board", SelfIs::Member);
+    all_sections.extend(board2.sections);
+    all_topics.extend(board2.topics);
     map.insert(board2.owner_vk, board2.board_data);
 
-    // Board where you're the owner
-    let board3 = create_board(&"Your Private Board".to_string(), SelfIs::Owner);
+    // Board where you're the owner (used by identity-controls, reactions,
+    // reaction-owners, touch-actions, device-drawer, mail-bridge)
+    let board3 = create_board("Your Private Board", SelfIs::Owner);
+    all_sections.extend(board3.sections);
+    all_topics.extend(board3.topics);
     map.insert(board3.owner_vk, board3.board_data);
 
     // A member profile on a device that also holds the owner key. This is the
     // case where `is_current_owner()` is true but the visible profile is not
     // the owner: the crown and Manage must stay hidden.
-    let board4 = create_board(
-        &"Owner Key, Member Profile".to_string(),
-        SelfIs::MemberWithOwnerKey,
-    );
+    let board4 = create_board("Owner Key, Member Profile", SelfIs::MemberWithOwnerKey);
+    all_sections.extend(board4.sections);
+    all_topics.extend(board4.topics);
     map.insert(board4.owner_vk, board4.board_data);
 
     // A private board whose key is unavailable: the gate must show the
     // recovery screen instead of an endless loading spinner.
-    let mut board5 = create_board(&"Missing Key Board".to_string(), SelfIs::Owner);
+    let mut board5 = create_board("Missing Key Board", SelfIs::Owner);
     let signing_key = board5.board_data.self_sk.clone();
-    board5.board_data.board_state.configuration.configuration.privacy_mode =
-        PrivacyMode::Private;
+    board5
+        .board_data
+        .board_state
+        .configuration
+        .configuration
+        .privacy_mode = PrivacyMode::Private;
     board5.board_data.board_state.configuration = AuthorizedConfigurationV1::new(
         board5
             .board_data
@@ -69,11 +118,16 @@ pub fn create_example_boards() -> Boards {
     board5.board_data.secrets.clear();
     board5.board_data.current_secret_version = None;
     board5.board_data.owner_sk = None;
+    all_sections.extend(board5.sections);
+    all_topics.extend(board5.topics);
     map.insert(board5.owner_vk, board5.board_data);
 
-    // The drawer needs a stored profile to manage identities and the Mail
-    // address. Fixture boards carry keys, not profiles, so derive one per
-    // posting key; the owner key gets its own entry.
+    *EXAMPLE_SEEDS.lock().unwrap() = Some(SeededData {
+        sections: all_sections,
+        topics: all_topics,
+    });
+
+    // Derive stored profiles so the device drawer can manage identities & Mail.
     let mut profiles: Vec<IdentityProfile> = Vec::new();
     for board in map.values() {
         let self_vk = board.self_sk.verifying_key();
@@ -120,9 +174,9 @@ pub fn create_example_boards() -> Boards {
         current_board_key: None,
         profiles,
         removed: Vec::new(),
-    board_order: Vec::new(),
-    archived: Vec::new(),
-    client_features: crate::board_data::ClientFeatures::default(),
+        board_order: Vec::new(),
+        archived: Vec::new(),
+        client_features: crate::board_data::ClientFeatures::default(),
         migrated_boards: Vec::new(),
         blocked_image_hashes: Vec::new(),
         auto_renew_images: false,
@@ -134,6 +188,8 @@ pub fn create_example_boards() -> Boards {
 struct CreatedBoard {
     owner_vk: VerifyingKey,
     board_data: BoardData,
+    sections: Vec<(VerifyingKey, SectionId, ChatBoardStateV1)>,
+    topics: Vec<(VerifyingKey, MessageId, TopicStateV1)>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -144,41 +200,312 @@ enum SelfIs {
     MemberWithOwnerKey,
 }
 
-// Function to create a board with an owner and members, self_is determines whether
-// the user of the UI is the owner, a member, or an observer (not an owner or member)
-fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
-    let mut csprng = OsRng;
+fn new_section(
+    owner_vk: VerifyingKey,
+    owner_sk: &SigningKey,
+    name: &str,
+    description: Option<&str>,
+    color: &str,
+    auto_moderated_topics: Option<bool>,
+    now: SystemTime,
+) -> AuthorizedSectionV1 {
+    let mut id_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut id_bytes);
+    let id = MessageId::from_bytes(id_bytes);
+    let contract = Some(
+        *crate::components::app::section_contract::section_key(owner_vk, id).id(),
+    );
+    let section = SectionV1 {
+        id,
+        parent: None,
+        name: name.to_string(),
+        description: description.map(|s| s.to_string()),
+        icon: None,
+        color: color.to_string(),
+        allowed_roles: Vec::new(),
+        sealed_name: None,
+        hidden: false,
+        is_group: false,
+        images_allowed: true,
+        auto_moderated_topics,
+        generation: 1,
+        deleted: false,
+        contract,
+        signed_at: now,
+    };
+    AuthorizedSectionV1::new(section, owner_sk, None)
+}
 
-    // Create self - the user actually using the app
+fn section_manifest(
+    parent: &ChatBoardStateV1,
+    section: &AuthorizedSectionV1,
+    entries: Vec<AuthorizedTopicEntryV1>,
+    activity: Vec<AuthorizedTopicActivityV1>,
+) -> ChatBoardStateV1 {
+    let mut child = ChatBoardStateV1::default();
+    child.mode = BoardModeV1::SectionedTopicIndex;
+    child.configuration = parent.configuration.clone();
+    child.ownership = parent.ownership.clone();
+    child.admin = parent.admin.clone();
+    child.members = parent.members.clone();
+    child.sections = parent.sections.chain_only(&section.section.id);
+    child.topics.entries = entries;
+    child.topics.activity = activity;
+    child
+}
+
+struct SeededTopic {
+    topic_id: MessageId,
+    entry: AuthorizedTopicEntryV1,
+    activity: Option<AuthorizedTopicActivityV1>,
+    state: TopicStateV1,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_seeded_topic(
+    owner_vk: VerifyingKey,
+    owner_sk: &SigningKey,
+    board_config: &Configuration,
+    section: &AuthorizedSectionV1,
+    author_sk: &SigningKey,
+    participants: Vec<AuthorizedParticipantV1>,
+    title: &str,
+    body: &str,
+    created_at: i64,
+    replies: Vec<(&SigningKey, &str, i64)>,
+    header_reactions: Vec<(&SigningKey, &str, i64)>,
+) -> SeededTopic {
+    let mut topic_id_bytes = [0u8; 32];
+    let mut nonce = [0u8; 16];
+    OsRng.fill_bytes(&mut topic_id_bytes);
+    OsRng.fill_bytes(&mut nonce);
+    let topic_id = MessageId::from_bytes(topic_id_bytes);
+    let author_vk = author_sk.verifying_key();
+    let author = MemberId::from(&author_vk);
+    let section_id = section.section.id;
+
+    let sealed_title = SealedBytes::public(title.as_bytes().to_vec());
+    let sealed_body = SealedBytes::public(body.as_bytes().to_vec());
+    let header = TopicHeaderV1 {
+        topic_id: topic_id_bytes,
+        author,
+        author_key: author_vk,
+        section: Some(section_id),
+        section_chain: vec![section_id],
+        title: sealed_title.clone(),
+        body: sealed_body,
+        auto_moderated: false,
+        created_at,
+        nonce,
+    };
+    let header_id = header.id();
+    let header_hash = header.hash();
+    let authorized_header = AuthorizedTopicHeaderV1::new(header, author_sk);
+
+    let snapshot = SectionSnapshotV1 {
+        section: section_id,
+        parent: section.section.parent,
+        chain: vec![section_id],
+        allowed_roles: section.section.allowed_roles.clone(),
+        sealed_name: section.section.sealed_name.clone(),
+        hidden: section.section.hidden,
+        images_allowed: section.section.images_allowed,
+        auto_moderated_topics: section.section.auto_moderated_topics,
+        generation: section.section.generation,
+        signed_at: system_time_ms(section.section.signed_at),
+    };
+    let authorized_snapshot = AuthorizedSectionSnapshotV1::new(snapshot, owner_sk, None);
+
+    let policy = TopicPolicyV1 {
+        read_only: board_config.read_only,
+        approval_required: board_config.approval_required,
+        rate_window_ms: board_config.rate_window_ms,
+        max_posts_per_window: board_config.max_posts_per_window,
+        images_allowed: true,
+        auto_moderated_topics: board_config.auto_moderated_topics,
+        reactions_enabled: board_config.reactions_enabled,
+        max_post_size: board_config.max_message_size,
+        generation: (board_config.configuration_version as u64).max(1),
+        updated_at: system_time_ms(board_config.updated_at),
+    };
+    let authority = TopicAuthorityV1 {
+        policy: Some(AuthorizedTopicPolicyV1::new(policy, owner_sk)),
+        ..Default::default()
+    };
+
+    let mut posts = std::collections::BTreeMap::new();
+    let mut last_activity = created_at;
+    let mut last_post_id: Option<MessageId> = None;
+    let mut last_reply_signer = author_sk;
+    for (reply_sk, reply_text, reply_at) in replies {
+        let mut reply_nonce = [0u8; 16];
+        OsRng.fill_bytes(&mut reply_nonce);
+        let reply_author = MemberId::from(&reply_sk.verifying_key());
+        let encoded_content = plaza_topic_core::encode(&TopicPostContentV1::Text(
+            reply_text.to_string(),
+        ))
+        .expect("encode topic post content");
+        let post = TopicPostV1 {
+            author: reply_author,
+            parent: None,
+            content: SealedBytes::public(encoded_content),
+            images: Vec::new(),
+            created_at: reply_at,
+            nonce: reply_nonce,
+        };
+        let authorized_post = AuthorizedTopicPostV1::new(post, reply_sk);
+        let post_id = authorized_post.id();
+        posts.insert(post_id, authorized_post);
+        if reply_at >= last_activity {
+            last_activity = reply_at;
+            last_post_id = Some(post_id);
+            last_reply_signer = reply_sk;
+        }
+    }
+
+    let mut actions = Vec::new();
+    let mut react_gen: HashMap<MemberId, u64> = HashMap::new();
+    for (react_sk, emoji, react_at) in header_reactions {
+        let react_vk = react_sk.verifying_key();
+        let signer = MemberId::from(&react_vk);
+        let generation = {
+            let entry = react_gen.entry(signer).or_insert(0);
+            *entry += 1;
+            *entry
+        };
+        let action = TopicActionV1 {
+            kind: TopicActionKind::React,
+            target: header_id,
+            payload: SealedBytes::public(emoji.as_bytes().to_vec()),
+            generation,
+            created_at: react_at,
+            signer,
+        };
+        let signature = plaza_core::util::sign_struct(&action, react_sk);
+        actions.push(AuthorizedTopicActionV1 {
+            action,
+            signer_key: Some(react_vk),
+            authority: None,
+            signature,
+        });
+    }
+
+    let reply_count = posts.len() as u32;
+    let state = TopicStateV1 {
+        header: Some(authorized_header),
+        section: Some(authorized_snapshot),
+        authority,
+        participants,
+        trust: Vec::new(),
+        posts,
+        actions,
+        approvals: Vec::new(),
+        generation: TopicGenerationV1::new(0),
+        ..Default::default()
+    };
+
+    let params = TopicParamsV1::new(owner_vk, topic_id_bytes, 0);
+    if let Err(err) = state.verify(&params) {
+        panic!("Seeded topic '{title}' failed to verify: {err}");
+    }
+
+    let preview: String = body.chars().take(200).collect();
+    let entry = TopicEntryV1 {
+        topic_id,
+        part: 0,
+        protocol_version: TOPIC_PROTOCOL_VERSION,
+        author,
+        section: Some(section_id),
+        section_chain: vec![section_id],
+        title: sealed_title,
+        preview: SealedBytes::public(preview.into_bytes()),
+        header_hash,
+        created_at,
+        generation: 1,
+    };
+    let authorized_entry = AuthorizedTopicEntryV1::new(entry, author_sk);
+
+    let activity = if reply_count > 0 {
+        let act = TopicActivityV1 {
+            topic_id,
+            last_post_id,
+            last_activity,
+            reply_count,
+            pending_approvals: 0,
+            generation: 1,
+        };
+        let signer_vk = last_reply_signer.verifying_key();
+        Some(AuthorizedTopicActivityV1 {
+            signature: plaza_core::util::sign_struct(&act, last_reply_signer),
+            activity: act,
+            signer: Some(MemberId::from(&signer_vk)),
+            signer_key: Some(signer_vk),
+        })
+    } else {
+        None
+    };
+
+    SeededTopic {
+        topic_id,
+        entry: authorized_entry,
+        activity,
+        state,
+    }
+}
+
+fn make_participant(
+    member: &AuthorizedMember,
+    member_sk: &SigningKey,
+    joined_at: i64,
+) -> AuthorizedParticipantV1 {
+    let record = ParticipantRecordV1 {
+        member_id: member.member.id(),
+        member_vk: member.member.member_vk,
+        certificate: ParticipantCertificateV1 {
+            member: member.clone(),
+            chain: Vec::new(),
+            token: None,
+            join_proof: None,
+        },
+        joined_at,
+    };
+    AuthorizedParticipantV1::new(record, member_sk)
+}
+
+fn create_board(board_name: &str, self_is: SelfIs) -> CreatedBoard {
+    let mut csprng = OsRng;
+    let now = crate::util::get_current_system_time();
+    let now_ms = system_time_ms(now);
+
     let self_sk = SigningKey::generate(&mut csprng);
     let self_vk = self_sk.verifying_key();
-    let self_id = self_vk.into();
+    let self_id = MemberId::from(&self_vk);
 
-    // Create owner of the board
+    let generated_owner_sk = SigningKey::generate(&mut csprng);
     let owner_sk = if self_is == SelfIs::Owner {
         &self_sk
     } else {
-        &SigningKey::generate(&mut csprng)
+        &generated_owner_sk
     };
     let owner_vk = owner_sk.verifying_key();
     let owner_id = MemberId::from(&owner_vk);
 
     let mut board_state = ChatBoardStateV1::default();
+    board_state.mode = BoardModeV1::SectionedTopicIndex;
 
-    // Set configuration
     let mut config = Configuration::default();
     config.display = BoardDisplayMetadata {
-        name: SealedBytes::public(board_name.clone().into_bytes()),
+        name: SealedBytes::public(board_name.as_bytes().to_vec()),
         description: None,
     };
     config.owner_member_id = owner_id;
-    board_state.configuration = AuthorizedConfigurationV1::new(config, owner_sk);
+    config.updated_at = now;
+    board_state.configuration = AuthorizedConfigurationV1::new(config.clone(), owner_sk);
 
-    // Initialize member lists
     let mut members = MembersV1::default();
     let mut member_info = MemberInfoV1::default();
 
-    // Always add owner to member_info
+    // Owner nickname
     member_info
         .member_info
         .push(AuthorizedMemberInfo::new_with_member_key(
@@ -192,18 +519,18 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
             owner_sk,
         ));
 
-    // If self is a member but not the owner, add self
-    if matches!(self_is, SelfIs::Member | SelfIs::MemberWithOwnerKey) {
-        members.members.push(AuthorizedMember::new(
+    // Self as member when not owner
+    let self_authorized_member = if matches!(self_is, SelfIs::Member | SelfIs::MemberWithOwnerKey) {
+        let auth = AuthorizedMember::new(
             Member {
                 owner_member_id: owner_id,
                 invited_by: owner_id,
-                member_vk: self_vk.clone(),
+                member_vk: self_vk,
                 join_proof: None,
             },
             owner_sk,
-        ));
-
+        );
+        members.members.push(auth.clone());
         member_info
             .member_info
             .push(AuthorizedMemberInfo::new_with_member_key(
@@ -216,15 +543,15 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
                 },
                 &self_sk,
             ));
-    }
+        Some(auth)
+    } else {
+        None
+    };
 
-    // Always add another member to ensure the board has at least one member
+    // Always add another member so mentions, member lists, and reactions have peers
     let other_member_sk = SigningKey::generate(&mut csprng);
     let other_member_vk = other_member_sk.verifying_key();
     let other_member_id = MemberId::from(&other_member_vk);
-
-    // In boards where self is owner, other member should be invited by self
-    // In other boards, other member should be invited by owner
     let inviter_id = if self_is == SelfIs::Owner {
         self_id
     } else {
@@ -235,8 +562,7 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
     } else {
         owner_sk
     };
-
-    members.members.push(AuthorizedMember::new(
+    let other_authorized_member = AuthorizedMember::new(
         Member {
             owner_member_id: owner_id,
             invited_by: inviter_id,
@@ -244,8 +570,8 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
             join_proof: None,
         },
         inviter_sk,
-    ));
-
+    );
+    members.members.push(other_authorized_member.clone());
     member_info
         .member_info
         .push(AuthorizedMemberInfo::new_with_member_key(
@@ -259,470 +585,239 @@ fn create_board(board_name: &String, self_is: SelfIs) -> CreatedBoard {
             &other_member_sk,
         ));
 
-    // Add members to the board
-    board_state.members = members.clone();
-    board_state.member_info = member_info.clone();
+    board_state.members = members;
+    board_state.member_info = member_info;
 
-    // Create a map of member IDs to their signing keys for message creation
-    let mut member_keys = HashMap::new();
-    if matches!(self_is, SelfIs::Member | SelfIs::MemberWithOwnerKey) {
-        member_keys.insert(self_id, self_sk.clone());
-    }
-    member_keys.insert(other_member_id, other_member_sk);
-
-    // Add example messages
-    add_example_messages(
-        &mut board_state,
-        &owner_id,
+    // Sections
+    let general = new_section(
+        owner_vk,
         owner_sk,
-        &member_keys,
-        board_name == "Team Chat Board",
+        "General",
+        Some("General discussion"),
+        "#6366f1",
+        None,
+        now,
     );
+    board_state.sections.sections.push(general.clone());
 
-    let verification_result = board_state.verify(
-        &board_state,
-        &ChatBoardParametersV1 {
-            owner: owner_vk.clone(),
-        },
-    );
-    if !verification_result.is_ok() {
-        panic!(
-            "Failed to verify board state: {:?}",
-            verification_result.err()
+    let no_auto = if board_name == "Team Chat Board" {
+        let sec = new_section(
+            owner_vk,
+            owner_sk,
+            "NoAuto",
+            Some("Auto-moderated topics disabled"),
+            "#f59e0b",
+            Some(false),
+            now,
         );
+        board_state.sections.sections.push(sec.clone());
+        Some(sec)
+    } else {
+        None
+    };
+
+    // Build participants list for seeded topics
+    let mut base_participants = Vec::new();
+    if let Some(ref self_member) = self_authorized_member {
+        base_participants.push(make_participant(self_member, &self_sk, now_ms - 100_000));
+    }
+    base_participants.push(make_participant(
+        &other_authorized_member,
+        &other_member_sk,
+        now_ms - 90_000,
+    ));
+
+    let mut general_entries = Vec::new();
+    let mut general_activity = Vec::new();
+    let mut seeded_topics = Vec::new();
+
+    if board_name == "Team Chat Board" {
+        // 1. Autoscroll topic with 25 replies so #message-scroll overflows & pins to bottom
+        let autoscroll_replies: Vec<(&SigningKey, String, i64)> = (1..=25)
+            .map(|i| {
+                let sk = if i % 2 == 0 { &self_sk } else { &other_member_sk };
+                (
+                    sk,
+                    format!("Autoscroll reply #{i} with enough content to fill the scroll view cleanly."),
+                    now_ms - 60_000 + (i as i64) * 1_000,
+                )
+            })
+            .collect();
+        let autoscroll_refs: Vec<(&SigningKey, &str, i64)> = autoscroll_replies
+            .iter()
+            .map(|(sk, txt, ts)| (*sk, txt.as_str(), *ts))
+            .collect();
+        let t_auto = build_seeded_topic(
+            owner_vk,
+            owner_sk,
+            &config,
+            &general,
+            &self_sk,
+            base_participants.clone(),
+            "Autoscroll topic",
+            "Long discussion to verify opening pinned to the latest reply.",
+            now_ms - 70_000,
+            autoscroll_refs,
+            Vec::new(),
+        );
+        general_entries.push(t_auto.entry);
+        if let Some(act) = t_auto.activity {
+            general_activity.push(act);
+        }
+        seeded_topics.push((owner_vk, t_auto.topic_id, t_auto.state));
+
+        // 2. Invite link topic for invite-interceptor.spec.ts
+        let t_invite = build_seeded_topic(
+            owner_vk,
+            owner_sk,
+            &config,
+            &general,
+            &other_member_sk,
+            base_participants.clone(),
+            "Invite link",
+            "Click here to test the interceptor: [Join the board](/#/join/not-a-valid-token)",
+            now_ms - 50_000,
+            Vec::new(),
+            Vec::new(),
+        );
+        general_entries.push(t_invite.entry);
+        if let Some(act) = t_invite.activity {
+            general_activity.push(act);
+        }
+        seeded_topics.push((owner_vk, t_invite.topic_id, t_invite.state));
+    } else if board_name == "Your Private Board" {
+        // Reaction topic with 👍 from both owner (You) and other member + 1 reply
+        let t_react = build_seeded_topic(
+            owner_vk,
+            owner_sk,
+            &config,
+            &general,
+            &self_sk,
+            base_participants.clone(),
+            "Reaction topic",
+            "Hover or click the reaction count below to inspect reactors.",
+            now_ms - 40_000,
+            vec![(&self_sk, "First reply in reaction topic.", now_ms - 30_000)],
+            vec![
+                (&self_sk, "👍", now_ms - 25_000),
+                (&other_member_sk, "👍", now_ms - 20_000),
+            ],
+        );
+        general_entries.push(t_react.entry);
+        if let Some(act) = t_react.activity {
+            general_activity.push(act);
+        }
+        seeded_topics.push((owner_vk, t_react.topic_id, t_react.state));
+    } else {
+        // Welcome topic on remaining fixture boards
+        let t_welcome = build_seeded_topic(
+            owner_vk,
+            owner_sk,
+            &config,
+            &general,
+            owner_sk,
+            base_participants.clone(),
+            "Welcome",
+            "Welcome to this FreeTalk Plaza discussion board.",
+            now_ms - 30_000,
+            vec![(&other_member_sk, "Glad to be here!", now_ms - 20_000)],
+            Vec::new(),
+        );
+        general_entries.push(t_welcome.entry);
+        if let Some(act) = t_welcome.activity {
+            general_activity.push(act);
+        }
+        seeded_topics.push((owner_vk, t_welcome.topic_id, t_welcome.state));
     }
 
-    // Generate contract key for the board
+    let mut seeded_sections = Vec::new();
+    let general_manifest =
+        section_manifest(&board_state, &general, general_entries, general_activity);
+    let board_params = ChatBoardParametersV1 { owner: owner_vk };
+    if let Err(err) = general_manifest.verify_with_section(&board_params, Some(general.section.id))
+    {
+        panic!("General section manifest for '{board_name}' failed to verify: {err}");
+    }
+    seeded_sections.push((owner_vk, general.section.id, general_manifest));
+
+    if let Some(ref sec) = no_auto {
+        let manifest = section_manifest(&board_state, sec, Vec::new(), Vec::new());
+        if let Err(err) = manifest.verify_with_section(&board_params, Some(sec.section.id)) {
+            panic!("NoAuto section manifest failed to verify: {err}");
+        }
+        seeded_sections.push((owner_vk, sec.section.id, manifest));
+    }
+
+    if let Err(err) = board_state.verify(&board_state, &board_params) {
+        panic!("Failed to verify board state '{board_name}': {err}");
+    }
+
     let parameters = ChatBoardParametersV1 { owner: owner_vk };
     let params_bytes = to_cbor_vec(&parameters);
     let contract_code = ContractCode::from(BOARD_CONTRACT_WASM);
-    // Use the full ContractKey constructor that includes the code hash
     let contract_key =
         ContractKey::from_params_and_code(Parameters::from(params_bytes), &contract_code);
 
+    let mut board_data = BoardData {
+        owner_vk,
+        board_state,
+        self_sk: self_sk.clone(),
+        owner_sk: if self_is == SelfIs::MemberWithOwnerKey {
+            Some(owner_sk.clone())
+        } else {
+            None
+        },
+        owner_profile_id: if self_is == SelfIs::MemberWithOwnerKey {
+            Some("owner-profile".to_string())
+        } else {
+            None
+        },
+        profile_id: if self_is == SelfIs::MemberWithOwnerKey {
+            Some("member-profile".to_string())
+        } else {
+            None
+        },
+        contract_key,
+        last_read_message_id: None,
+        secrets: HashMap::new(),
+        current_secret_version: None,
+        last_secret_rotation: None,
+        key_migrated_to_delegate: true,
+        self_authorized_member,
+        invite_chain: vec![],
+        self_member_info: None,
+        category_secrets: HashMap::new(),
+        old_category_secrets: HashMap::new(),
+        trash_secret: None,
+        trash_secrets: HashMap::new(),
+        collapsed_groups: Vec::new(),
+        last_visit: 0,
+        read_categories: HashMap::new(),
+        topic_read: HashMap::new(),
+        topic_drafts: HashMap::new(),
+        draft: None,
+        drafts: Vec::new(),
+        trash_retention_days: 0,
+        pending_uploads: Vec::new(),
+        pending_send: None,
+        subscribed_categories: Vec::new(),
+        notification_mode: crate::board_data::NotificationMode::All,
+        mail_visibility: Default::default(),
+        nickname_requests: Vec::new(),
+        spectator: false,
+    };
+    board_data.refresh_authority_root();
+
     CreatedBoard {
         owner_vk,
-        board_data: BoardData {
-            owner_vk: owner_vk.clone(),
-            board_state,
-            self_sk: self_sk.clone(),
-            owner_sk: if self_is == SelfIs::MemberWithOwnerKey {
-                Some(owner_sk.clone())
-            } else {
-                None
-            },
-            owner_profile_id: if self_is == SelfIs::MemberWithOwnerKey {
-                Some("owner-profile".to_string())
-            } else {
-                None
-            },
-            profile_id: if self_is == SelfIs::MemberWithOwnerKey {
-                Some("member-profile".to_string())
-            } else {
-                None
-            },
-            contract_key,
-            last_read_message_id: None,
-            secrets: std::collections::HashMap::new(),
-            current_secret_version: None,
-            last_secret_rotation: None,
-            key_migrated_to_delegate: true, // Example data doesn't need migration
-            self_authorized_member: None,
-            invite_chain: vec![],
-            self_member_info: None,
-            category_secrets: std::collections::HashMap::new(),
-            old_category_secrets: std::collections::HashMap::new(),
-            trash_secret: None,
-            trash_secrets: std::collections::HashMap::new(),
-            collapsed_groups: Vec::new(),
-            last_visit: 0,
-            read_categories: std::collections::HashMap::new(),
-            draft: None,
-            drafts: Vec::new(),
-            trash_retention_days: 0,
-            pending_uploads: Vec::new(),
-            pending_send: None,
-            subscribed_categories: Vec::new(),
-            notification_mode: crate::board_data::NotificationMode::All,
-            mail_visibility: crate::util::mail::MailVisibility::Hidden,
-            nickname_requests: Vec::new(),
-            spectator: false,
-            topic_read: std::collections::HashMap::new(),
-            topic_drafts: std::collections::HashMap::new(),
-        },
+        board_data,
+        sections: seeded_sections,
+        topics: seeded_topics,
     }
 }
 
-fn add_example_messages(
-    board_state: &mut ChatBoardStateV1,
-    owner_id: &MemberId,
-    owner_key: &SigningKey,
-    member_keys: &HashMap<MemberId, SigningKey>,
-    with_sections: bool,
-) {
-    // Use a timestamp 24 hours ago as base time for messages
-    let now = crate::util::get_current_system_time()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    let base_time = now - (24 * 60 * 60 * 1000); // 24 hours ago in milliseconds
-
-    let mut messages = MessagesV1::default();
-    let mut current_time_ms = base_time;
-
-    // A board with two sections for the Playwright composer tests: General
-    // inherits the board policy (on), NoAuto overrides it to off.
-    if with_sections {
-        for (name, policy, age_ms) in [
-            ("General", None, 2 * 60 * 60 * 1000),
-            ("NoAuto", Some(false), 60 * 60 * 1000),
-        ] {
-            let mut category =
-                CategoryContentV1::new(name.to_string(), None, "#6366f1".to_string());
-            category.auto_moderated_topics = policy;
-            let message = AuthorizedMessageV1::new(
-                MessageV1 {
-                    images: Vec::new(),
-                    board_owner: *owner_id,
-                    author: *owner_id,
-                    time: get_time_from_millis(base_time.saturating_sub(age_ms)),
-                    content: BoardMessageBody::public_raw(
-                        CONTENT_TYPE_CATEGORY,
-                        CATEGORY_CONTENT_VERSION,
-                        category.encode(),
-                    ),
-                    reply_to: None,
-                    topic_id: None,
-                    topic_public_key: None,
-                    topic_proof: None,
-                    section_id: None,
-                    section_auto_moderated: None,
-                    auto_moderated: false,
-                },
-                owner_key,
-            );
-            messages.messages.push(message);
-        }
-    }
-
-    // Verify owner exists in member_info but NOT in members list
-    if !board_state
-        .member_info
-        .member_info
-        .iter()
-        .any(|m| m.member_info.member_id == *owner_id)
-    {
-        panic!("Owner ID not found in member_info: {}", owner_id);
-    }
-    if board_state
-        .members
-        .members
-        .iter()
-        .any(|m| m.member.id() == *owner_id)
-    {
-        panic!(
-            "Owner ID found in members list when it should not be: {}",
-            owner_id
-        );
-    }
-
-    // Verify that all member_keys are valid and members exist
-    for (member_id, signing_key) in member_keys.iter() {
-        if MemberId::from(&signing_key.verifying_key()) != *member_id {
-            panic!("Member ID does not match signing key");
-        }
-
-        // Verify they exist in members list (unless they're the owner)
-        if *member_id != *owner_id
-            && !board_state
-                .members
-                .members
-                .iter()
-                .any(|m| m.member.id() == *member_id)
-        {
-            panic!("Member ID not found in members list: {}", member_id);
-        }
-    }
-
-    // Create a vec of possible authors (owner + members)
-    let authors: Vec<(MemberId, &SigningKey)> = member_keys
-        .iter()
-        .map(|(id, key)| (*id, key))
-        .chain(std::iter::once((*owner_id, owner_key)))
-        .collect();
-
-    let message_count = 6;
-
-    for _ in 0..message_count {
-        // Pick a random author
-        let author_idx = rand::random::<usize>() % authors.len();
-        let (author_id, signing_key) = authors[author_idx];
-
-        // Generate message with random length (15-35 words)
-        let word_count = rand::random::<u8>() % 21 + 15;
-        let body = lipsum(word_count as usize);
-        // Threads need a title; keep it short and derived from the body so the
-        // fixture posts read like real ones.
-        let title: String = body
-            .split_whitespace()
-            .take(4)
-            .collect::<Vec<_>>()
-            .join(" ");
-        let msg = AuthorizedMessageV1::new(
-            MessageV1 {
-                images: Vec::new(),
-                board_owner: *owner_id,
-                author: author_id,
-                time: get_time_from_millis(current_time_ms),
-                content: BoardMessageBody::public(title, body),
-                reply_to: None,
-                topic_id: None,
-                topic_public_key: None,
-                topic_proof: None,
-                section_id: None,
-                section_auto_moderated: None,
-                auto_moderated: false,
-            },
-            signing_key,
-        );
-
-        messages.messages.push(msg);
-
-        // Add a more natural time gap between messages (30 sec to 15 min)
-        current_time_ms += (rand::random::<u64>() % 870 + 30) * 1000;
-    }
-
-    // Add reactions to messages from OTHER members (not owner)
-    // Rule: One reaction per user per message
-    // In "Your Private Board" the owner IS self, so this shows self reacting to others
-    let non_owner_ids: Vec<MessageId> = messages
-        .messages
-        .iter()
-        .filter(|m| m.message.author != *owner_id)
-        .map(|m| m.id())
-        .collect();
-
-    // Get a non-owner member ID for multi-user reaction demo
-    let other_member_id = member_keys.keys().find(|id| *id != owner_id).cloned();
-
-    if non_owner_ids.len() >= 1 {
-        // First non-owner message: owner reacts with thumbs up, other member with
-        // heart. These are signed action messages, not fixture-only state, so a
-        // real toggle or a rebuilt actions_state keeps them.
-        let msg_id = non_owner_ids[0].clone();
-        push_example_reaction(
-            &mut messages,
-            owner_id,
-            msg_id.clone(),
-            *owner_id,
-            owner_key,
-            "👍",
-            current_time_ms,
-        );
-        if let Some(other_id) = other_member_id {
-            if let Some(key) = member_keys.get(&other_id) {
-                push_example_reaction(
-                    &mut messages,
-                    owner_id,
-                    msg_id,
-                    other_id,
-                    key,
-                    "❤️",
-                    current_time_ms + 1000,
-                );
-            }
-        }
-    }
-
-    if non_owner_ids.len() >= 2 {
-        // Second non-owner message: owner reacts with celebration
-        let msg_id = non_owner_ids[1].clone();
-        let mut reactions = HashMap::new();
-        reactions.insert("🎉".to_string(), vec![*owner_id]);
-        messages.actions_state.reactions.insert(msg_id, reactions);
-    }
-
-    // A stable topic for the Playwright reaction test. The other rules above
-    // react to whichever message happened to be first; this title does not
-    // depend on the generated lipsum order.
-    if let Some(other_id) = other_member_id {
-        if let Some(key) = member_keys.get(&other_id) {
-            let message = AuthorizedMessageV1::new(
-                MessageV1 {
-                    images: Vec::new(),
-                    board_owner: *owner_id,
-                    author: other_id,
-                    time: get_time_from_millis(current_time_ms + 5_000),
-                    content: BoardMessageBody::public(
-                        "Reaction topic".to_string(),
-                        "This topic carries signed reactions for the Playwright test."
-                            .to_string(),
-                    ),
-                    reply_to: None,
-                    topic_id: None,
-                    topic_public_key: None,
-                    topic_proof: None,
-                    section_id: None,
-                    section_auto_moderated: None,
-                    auto_moderated: false,
-                },
-                key,
-            );
-            let target = message.id();
-            messages.messages.push(message);
-            push_example_reaction(
-                &mut messages,
-                owner_id,
-                target.clone(),
-                *owner_id,
-                owner_key,
-                "👍",
-                current_time_ms + 6_000,
-            );
-            push_example_reaction(
-                &mut messages,
-                owner_id,
-                target,
-                other_id,
-                key,
-                "❤️",
-                current_time_ms + 7_000,
-            );
-        }
-    }
-
-    if with_sections {
-        let owner_message = |title: &str, body: String, time_ms: u64, reply_to: Option<MessageId>| {
-            AuthorizedMessageV1::new(
-                MessageV1 {
-                    images: Vec::new(),
-                    board_owner: *owner_id,
-                    author: *owner_id,
-                    time: get_time_from_millis(time_ms),
-                    content: BoardMessageBody::public(title.to_string(), body),
-                    reply_to,
-                    topic_id: None,
-                    topic_public_key: None,
-                    topic_proof: None,
-                    section_id: None,
-                    section_auto_moderated: None,
-                    auto_moderated: false,
-                },
-                owner_key,
-            )
-        };
-
-        let invite = owner_message(
-            "Invite link",
-            "[Join the board](#/join/not-a-valid-token)".to_string(),
-            current_time_ms + 8_000,
-            None,
-        );
-        messages.messages.push(invite);
-
-        let autoscroll = owner_message(
-            "Autoscroll topic",
-            "Start of a long thread used by the autoscroll test.".to_string(),
-            current_time_ms + 9_000,
-            None,
-        );
-        let autoscroll_id = autoscroll.id();
-        messages.messages.push(autoscroll);
-        if let Some(other_id) = other_member_id {
-            if let Some(key) = member_keys.get(&other_id) {
-                for index in 0..24 {
-                    messages.messages.push(AuthorizedMessageV1::new(
-                        MessageV1 {
-                            images: Vec::new(),
-                            board_owner: *owner_id,
-                            author: other_id,
-                            time: get_time_from_millis(
-                                current_time_ms + 10_000 + index * 100,
-                            ),
-                            content: BoardMessageBody::public(
-                                String::new(),
-                                format!("Autoscroll reply {}", index + 1),
-                            ),
-                            reply_to: Some(autoscroll_id.clone()),
-                            topic_id: None,
-                            topic_public_key: None,
-                            topic_proof: None,
-                            section_id: None,
-                            section_auto_moderated: None,
-                            auto_moderated: false,
-                        },
-                        key,
-                    ));
-                }
-            }
-        }
-    }
-
-    // Turn the signed action messages into the computed view the UI reads.
-    let admins: std::collections::HashSet<MemberId> = board_state
-        .admin
-        .admins
-        .iter()
-        .map(|admin| admin.admin.id())
-        .collect();
-    let members: std::collections::HashSet<MemberId> = board_state
-        .members
-        .members
-        .iter()
-        .map(|member| member.member.id())
-        .collect();
-    messages.rebuild_actions_state_with_permissions(
-        &HashMap::new(),
-        Some(*owner_id),
-        Some(&admins),
-        None,
-        true,
-        Some(&members),
-    );
-
-    board_state.recent_messages = messages;
-}
-
-fn push_example_reaction(
-    messages: &mut MessagesV1,
-    owner_id: &MemberId,
-    target: MessageId,
-    author_id: MemberId,
-    signing_key: &SigningKey,
-    emoji: &str,
-    time_ms: u64,
-) {
-    let action = ActionContentV1::reaction(target.clone(), emoji.to_string());
-    let envelope = ModerationActionV1::new(
-        action.action_type,
-        action.target,
-        SealedBytes::public(action.encode()),
-    );
-    messages.messages.push(AuthorizedMessageV1::new(
-        MessageV1 {
-            images: Vec::new(),
-            board_owner: *owner_id,
-            author: author_id,
-            time: get_time_from_millis(time_ms),
-            content: BoardMessageBody::public_raw(
-                CONTENT_TYPE_MODERATION_ACTION,
-                ACTION_CONTENT_VERSION,
-                envelope.encode(),
-            ),
-            reply_to: None,
-            topic_id: None,
-            topic_public_key: None,
-            topic_proof: None,
-            section_id: None,
-            section_auto_moderated: None,
-            auto_moderated: false,
-        },
-        signing_key,
-    ));
-}
-
+#[allow(dead_code)]
 fn get_time_from_millis(ms: u64) -> SystemTime {
-    // Use WASM-compatible time function
     crate::util::get_current_system_time()
         - Duration::from_millis(
             crate::util::get_current_system_time()
@@ -733,7 +828,6 @@ fn get_time_from_millis(ms: u64) -> SystemTime {
         )
 }
 
-// Test function to create the example data
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,21 +836,12 @@ mod tests {
     fn test_create_example_boards() {
         let boards = create_example_boards();
         assert_eq!(boards.map.len(), 5);
-        assert!(
-            boards
-                .map
-                .values()
-                .any(|board| !board.board_state.recent_messages.actions_state.reactions.is_empty()),
-            "the fixture must carry at least one signed reaction"
-        );
 
         for (owner_vk, board_data) in boards.map.iter() {
-            // Verify the board state
+            assert_eq!(board_data.board_state.mode, BoardModeV1::SectionedTopicIndex);
             let verification_result = board_data.board_state.verify(
                 &board_data.board_state,
-                &ChatBoardParametersV1 {
-                    owner: owner_vk.clone(),
-                },
+                &ChatBoardParametersV1 { owner: *owner_vk },
             );
             assert!(
                 verification_result.is_ok(),
@@ -764,8 +849,6 @@ mod tests {
                 bs58::encode(owner_vk.as_bytes()).into_string(),
                 verification_result.err()
             );
-
-            // Verify board has at least basic configuration
             assert!(
                 board_data
                     .board_state
@@ -776,12 +859,21 @@ mod tests {
                     .declared_len()
                     > 0
             );
-
-            // Verify members list exists
             assert!(!board_data.board_state.members.members.is_empty());
-
-            // Verify member info exists
             assert!(!board_data.board_state.member_info.member_info.is_empty());
+            assert!(!board_data.board_state.sections.sections.is_empty());
         }
+
+        let seeded = EXAMPLE_SEEDS.lock().unwrap();
+        let seeded = seeded.as_ref().expect("seeded data populated");
+        assert!(
+            seeded.topics.iter().any(|(_, _, state)| {
+                state
+                    .actions
+                    .iter()
+                    .any(|a| a.action.kind == TopicActionKind::React)
+            }),
+            "the fixture must carry at least one signed topic reaction"
+        );
     }
 }

@@ -339,6 +339,25 @@ pub fn topic_head(owner: VerifyingKey, topic_id: MessageId) -> Option<TopicState
     })
 }
 
+/// Seed a pre-built topic head into `TOPIC_CACHE` for the static `example-data` build.
+#[cfg(feature = "example-data")]
+pub fn seed_topic_head(owner: VerifyingKey, topic_id: MessageId, state: TopicStateV1) {
+    let key = topic_key_for(owner, topic_id, 0);
+    let contract_id = *key.id();
+    TOPIC_CACHE.with_mut(|topics| {
+        topics.insert(
+            contract_id,
+            TopicConversation {
+                key,
+                params: TopicParamsV1::new(owner, *topic_id.as_bytes(), 0),
+                state: TopicPartState::Head(state),
+                synced: true,
+                last_used: system_time_ms(get_current_system_time()),
+            },
+        );
+    });
+}
+
 /// Ensure a topic part is in the cache and fetch its state. Safe to call on
 /// every render; a loaded state is not fetched again.
 pub async fn load_topic(
@@ -1483,6 +1502,13 @@ pub async fn sync_topic_authority(
     topic_id: MessageId,
     part: u32,
 ) -> Result<bool, String> {
+    #[cfg(feature = "no-sync")]
+    {
+        let _ = (owner, topic_id, part);
+        return Ok(false);
+    }
+    #[cfg(not(feature = "no-sync"))]
+    {
     let board = board_for(owner)?;
     let conversation = conversation_for(owner, topic_id, part)?;
     if !conversation.state.is_loaded() {
@@ -1548,6 +1574,7 @@ pub async fn sync_topic_authority(
         }
     }
     Ok(true)
+    }
 }
 
 /// Maximum number of already-loaded cached topic contracts proactively synced
@@ -2574,11 +2601,26 @@ async fn send_topic_delta_bytes(
     TOPIC_CACHE.with_mut(|topics| {
         if let Some(conversation) = topics.get_mut(&contract_id) {
             conversation.state = next_state;
-            conversation.synced = false;
+            #[cfg(feature = "no-sync")]
+            {
+                conversation.synced = true;
+            }
+            #[cfg(not(feature = "no-sync"))]
+            {
+                conversation.synced = false;
+            }
             conversation.last_used = system_time_ms(get_current_system_time());
         }
     });
 
+    #[cfg(feature = "no-sync")]
+    {
+        let _ = (key, bytes);
+        return Ok(());
+    }
+
+    #[cfg(not(feature = "no-sync"))]
+    {
     let retry_key = key;
     let retry_bytes = bytes.clone();
     match send_contract_request(ContractRequest::Update {
@@ -2603,6 +2645,7 @@ async fn send_topic_delta_bytes(
             // The delta is already applied locally; the outbox will retry it.
             Ok(())
         }
+    }
     }
 }
 
@@ -2748,6 +2791,17 @@ pub fn start_topic_outbox() {
 /// `subscribe: true` PUT starts streaming back (`GetResponse`); the node does
 /// not always send both.
 async fn wait_topic_synced(contract_id: ContractInstanceId) -> Result<(), String> {
+    #[cfg(feature = "no-sync")]
+    {
+        TOPIC_CACHE.with_mut(|topics| {
+            if let Some(conversation) = topics.get_mut(&contract_id) {
+                conversation.synced = true;
+            }
+        });
+        return Ok(());
+    }
+    #[cfg(not(feature = "no-sync"))]
+    {
     for _ in 0..150 {
         if TOPIC_CACHE
             .read()
@@ -2760,6 +2814,7 @@ async fn wait_topic_synced(contract_id: ContractInstanceId) -> Result<(), String
         crate::util::sleep(std::time::Duration::from_millis(200)).await;
     }
     Err("the node did not confirm the topic contract".to_string())
+    }
 }
 
 fn mark_synced(key: &ContractKey) {
@@ -3608,8 +3663,16 @@ pub async fn approve_post(
 
 
 async fn send_contract_request(request: ContractRequest<'static>) -> Result<(), String> {
-    let client_request = ClientRequest::ContractOp(request);
-    crate::components::app::send_client_request(client_request)
-        .await
-        .map_err(|error| format!("send topic contract request: {error}"))
+    #[cfg(feature = "no-sync")]
+    {
+        let _ = request;
+        return Ok(());
+    }
+    #[cfg(not(feature = "no-sync"))]
+    {
+        let client_request = ClientRequest::ContractOp(request);
+        crate::components::app::send_client_request(client_request)
+            .await
+            .map_err(|error| format!("send topic contract request: {error}"))
+    }
 }
