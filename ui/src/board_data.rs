@@ -210,16 +210,27 @@ impl NotificationMode {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+fn default_topic_boards() -> bool {
+    true
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ClientFeatures {
     /// Append the short member id in the member list.
     #[serde(default)]
     pub show_member_ids: bool,
-    /// New boards use section-sharded topic contracts. Enabled by the
-    /// `?topics=1` / `?sections=1` developer flag until the topic UI reaches
-    /// parity.
-    #[serde(default)]
+    /// New boards use section-sharded topic contracts. Defaults to `true`.
+    #[serde(default = "default_topic_boards")]
     pub topic_boards: bool,
+}
+
+impl Default for ClientFeatures {
+    fn default() -> Self {
+        Self {
+            show_member_ids: false,
+            topic_boards: true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]

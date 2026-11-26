@@ -1,15 +1,41 @@
 //! One discussion backed by a `plaza-topic` contract.
 
+use crate::board_data::PendingUpload;
 use crate::components::app::topic_contract;
 use crate::components::app::{Route, BOARDS, CURRENT_BOARD};
+use crate::components::conversation::emoji_picker::EmojiPicker;
+use crate::components::conversation::image_attachment::ImageAttachment;
+use crate::util::image_processing::{prepare_image, ImageMode};
+use crate::util::mentions::{MentionAutocomplete, MentionDirectory};
 use dioxus::prelude::*;
 use plaza_core::board_state::content::PollContentV1;
+use plaza_core::board_state::images::ImageRef;
+use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::reports::ReportReason;
 use plaza_core::board_state::topics::TopicFlagKind;
-use plaza_topic_core::TopicPostContentV1;
+use plaza_topic_core::{TopicPostContentV1, MAX_IMAGES_PER_POST};
+use std::collections::{BTreeMap, HashMap};
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::spawn_local;
 
 const REACTIONS: [&str; 5] = ["👍", "❤️", "😂", "🎉", "🤔"];
+const TOPIC_REPLY_INPUT_ID: &str = "topic-reply-input";
+const TOPIC_IMAGE_INPUT_ID: &str = "topic-image-file-input";
+
+#[derive(Clone, Debug, PartialEq)]
+enum TopicAttachmentState {
+    Uploading,
+    Ready(ImageRef),
+    Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TopicAttachment {
+    id: String,
+    name: String,
+    state: TopicAttachmentState,
+}
 
 #[component]
 pub fn TopicView(board_id: String, topic_id: String) -> Element {
@@ -68,11 +94,14 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     let edit_reply = use_signal(String::new);
     let mut poll_mode = use_signal(|| false);
     let mut poll_question = use_signal(String::new);
-    let mut poll_option_1 = use_signal(String::new);
-    let mut poll_option_2 = use_signal(String::new);
+    let mut poll_options = use_signal(|| vec![String::new(), String::new()]);
+    let mut poll_multiselect = use_signal(|| false);
     let mut poll_busy = use_signal(|| false);
     let mut move_target = use_signal(|| None::<MessageId>);
     let mut merge_target = use_signal(|| None::<MessageId>);
+    let mut attachments = use_signal(Vec::<TopicAttachment>::new);
+    let next_attachment_id = use_signal(|| 0u64);
+    let mut mention_autocomplete = use_signal(|| None::<MentionAutocomplete>);
 
     use_effect(move || {
         let _ = BOARDS.read().map.len();
@@ -110,9 +139,7 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
             }
         });
         spawn(async {
-            let _ =
-                crate::components::app::chat_delegate::save_boards_to_delegate()
-                    .await;
+            let _ = crate::components::app::chat_delegate::save_boards_to_delegate().await;
         });
     });
 
@@ -233,7 +260,7 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     // participants present in this topic head, active page, and loaded earlier
     // parts.
     use_effect(move || {
-        let mut ids: Vec<plaza_core::board_state::member::MemberId> = Vec::new();
+        let mut ids: Vec<MemberId> = Vec::new();
         if let Some(head) = topic_contract::topic_head(owner, topic_id_value) {
             if let Some(header) = &head.header {
                 ids.push(header.header.author);
@@ -303,16 +330,14 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
         page_state
     };
 
-    let self_id = plaza_core::board_state::member::MemberId::from(
-        &board_data.self_sk.verifying_key(),
-    );
+    let self_id = MemberId::from(&board_data.self_sk.verifying_key());
     let (header_title, header_body) =
         topic_contract::effective_topic_content(&board_data, &head)
             .unwrap_or((header.header.title.clone(), header.header.body.clone()));
-    let title = topic_contract::read_text(&board_data, &header_title)
-        .unwrap_or_else(|| "Untitled".to_string());
-    let body = topic_contract::read_text(&board_data, &header_body)
-        .unwrap_or_default();
+    let title =
+        topic_contract::read_text(&board_data, &header_title).unwrap_or_else(|| "Untitled".to_string());
+    let body = topic_contract::read_text(&board_data, &header_body).unwrap_or_default();
+    let topic_edited = topic_contract::is_topic_edited(&head);
     let can_edit_topic = header.header.author == self_id;
     let author = board_data
         .display_nickname(header.header.author)
@@ -326,7 +351,7 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     let now_ms = plaza_core::board_state::rate_limit::system_time_ms(
         crate::util::get_current_system_time(),
     );
-    let is_banned_on_board = |member: plaza_core::board_state::member::MemberId| {
+    let is_banned_on_board = |member: MemberId| {
         board_data.board_state.bans.0.iter().any(|ban| {
             ban.ban.banned_user == member
                 && !board_data.board_state.ban_revocations.revoked(&ban.id())
@@ -347,6 +372,29 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     let merged_into = head.merged_into();
     let topic_for_flags = topic_id_value;
     let owner_for_flags = board_data.owner_vk;
+
+    let images_allowed = head
+        .section
+        .as_ref()
+        .map(|section| section.snapshot.images_allowed)
+        .unwrap_or(true)
+        && head.authority.policy().images_allowed
+        && board_data.may_write_content();
+    let reactions_enabled = state.authority().policy().reactions_enabled;
+    let head_reactions_enabled = head_part_state.authority().policy().reactions_enabled;
+
+    let mention_dir = MentionDirectory::from_board(&board_data);
+    let mention_context = mention_autocomplete.read().clone();
+    let mention_items = mention_context
+        .as_ref()
+        .map(|ctx| mention_dir.search(&ctx.query))
+        .unwrap_or_default();
+
+    let body_html = if body.trim().is_empty() {
+        String::new()
+    } else {
+        mention_dir.render_html(&body, Some(self_id))
+    };
 
     let mut posts: Vec<_> = state.posts().values().cloned().collect();
     posts.sort_by_key(|post| (post.post.created_at, *post.id().as_bytes()));
@@ -369,8 +417,22 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     let split_navigator = navigator.clone();
     let branch = board_id.clone();
 
+    let has_uploading = attachments
+        .read()
+        .iter()
+        .any(|att| matches!(att.state, TopicAttachmentState::Uploading));
+    let has_ready_images = attachments
+        .read()
+        .iter()
+        .any(|att| matches!(att.state, TopicAttachmentState::Ready(_)));
+
+    let head_reactions = topic_contract::reactions_for(&board_data, &head_part_state, header.header.id());
+    let head_reactor_names = reactor_names_map(&board_data, &head_reactions);
+
     rsx! {
-        div { class: "max-w-3xl mx-auto px-4 py-6 flex flex-col gap-5",
+        div {
+            id: "message-scroll",
+            class: "max-w-3xl mx-auto px-4 py-6 flex flex-col gap-5",
             if let Some(message) = error.read().as_ref() {
                 p { class: "text-sm text-red-400", "{message}" }
             }
@@ -394,6 +456,9 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                 }
                 if hidden {
                     span { class: "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-red-500/20 text-red-300", "Hidden" }
+                }
+                if header.header.auto_moderated {
+                    span { class: "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300", "Auto-moderated" }
                 }
             }
 
@@ -434,7 +499,19 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
 
             article { class: "bg-surface border border-border rounded-xl p-5",
                 h1 { class: "text-2xl font-semibold text-text", "{title}" }
-                p { class: "mt-1 text-xs text-text-muted", "{author}" }
+                div { class: "mt-1 flex items-center gap-2 text-xs text-text-muted flex-wrap",
+                    span { "{author}" }
+                    if header.header.created_at > 0 {
+                        span { "·" }
+                        span {
+                            title: "{format_full_time(header.header.created_at)}",
+                            "{format_time(header.header.created_at)}"
+                        }
+                    }
+                    if topic_edited {
+                        span { class: "italic", "· edited" }
+                    }
+                }
                 if let Some(section) = effective_section.as_ref() {
                     if let Some(name) = topic_contract::section_name(&board_data, &section.section) {
                         span {
@@ -508,8 +585,11 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                         }
                     }
                 }
-                if !body.trim().is_empty() {
-                    p { class: "mt-4 whitespace-pre-wrap text-text", "{body}" }
+                if !body_html.is_empty() {
+                    div {
+                        class: "mt-4 prose-message text-text",
+                        dangerous_inner_html: "{body_html}",
+                    }
                 }
                 if deleted {
                     p { class: "mt-3 text-sm text-red-400", "This topic was deleted." }
@@ -575,15 +655,16 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                         }
                     }
                 }
-                {reaction_bar(
-                    &board_data,
-                    &head_part_state,
-                    topic_id_value,
-                    0,
-                    header.header.id(),
-                    board_data.owner_vk,
+                ReactionBar {
+                    reactions: head_reactions,
+                    member_names: head_reactor_names,
+                    reactions_enabled: head_reactions_enabled,
+                    owner: board_data.owner_vk,
+                    topic_id: topic_id_value,
+                    part: 0,
+                    target: header.header.id(),
                     self_id,
-                )}
+                }
                 if is_owner {
                     div { class: "mt-3 flex flex-wrap items-center gap-2",
                         select {
@@ -745,23 +826,46 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                                                 &previous_state,
                                                 post.id(),
                                             );
-                                            let text = sealed_content
-                                                .as_ref()
-                                                .and_then(|sealed| {
-                                                    topic_contract::read_post_content(&board_data, sealed)
-                                                })
-                                                .and_then(|content| match content {
-                                                    TopicPostContentV1::Text(text) => Some(text),
-                                                    _ => None,
-                                                })
-                                                .unwrap_or_else(|| "[poll]".to_string());
+                                            let decoded = sealed_content.as_ref().and_then(|sealed| {
+                                                topic_contract::read_post_content(&board_data, sealed)
+                                            });
+                                            let html = match &decoded {
+                                                Some(TopicPostContentV1::Text(text)) if !text.trim().is_empty() => {
+                                                    mention_dir.render_html(text, Some(self_id))
+                                                }
+                                                Some(TopicPostContentV1::Poll(poll)) => {
+                                                    format!("<p>[Poll: {}]</p>", poll.title)
+                                                }
+                                                _ => String::new(),
+                                            };
+                                            let post_images = post.post.images.clone();
                                             rsx! {
                                                 div { class: "bg-panel border border-border rounded-lg px-3 py-2",
                                                     div { class: "flex items-center gap-2",
                                                         span { class: "text-sm font-medium text-text", "{author}" }
-                                                        span { class: "text-[11px] text-text-muted", "{format_time(post.post.created_at)}" }
+                                                        span {
+                                                            class: "text-[11px] text-text-muted",
+                                                            title: "{format_full_time(post.post.created_at)}",
+                                                            "{format_time(post.post.created_at)}"
+                                                        }
                                                     }
-                                                    p { class: "mt-1 whitespace-pre-wrap text-text", "{text}" }
+                                                    if !html.is_empty() {
+                                                        div {
+                                                            class: "mt-1 prose-message text-text",
+                                                            dangerous_inner_html: "{html}",
+                                                        }
+                                                    }
+                                                    if !post_images.is_empty() {
+                                                        div { class: "mt-2 flex flex-wrap gap-2",
+                                                            for (img_idx, img) in post_images.iter().enumerate() {
+                                                                ImageAttachment {
+                                                                    key: "prev-img-{img_idx}",
+                                                                    image: img.clone(),
+                                                                    gallery: post_images.clone(),
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -796,11 +900,18 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                                 Some(TopicPostContentV1::Text(text)) => text.clone(),
                                 _ => String::new(),
                             };
+                            let content_html = if content.trim().is_empty() {
+                                String::new()
+                            } else {
+                                mention_dir.render_html(&content, Some(self_id))
+                            };
                             let poll = match &decoded {
                                 Some(TopicPostContentV1::Poll(poll)) => Some(poll.clone()),
                                 _ => None,
                             };
                             let has_poll = poll.is_some();
+                            let post_edited = topic_contract::is_post_edited(&state, id);
+                            let post_images = post_value.images.clone();
                             let can_delete = post_value.author == self_id || is_owner;
                             let can_edit = post_value.author == self_id || is_owner;
                             let pending = !state.post_is_visible(&post, head.is_trusted(post_value.author));
@@ -820,13 +931,22 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                             let content_for_edit = content.clone();
                             let navigator = split_navigator.clone();
                             let split_board = board_id.clone();
+                            let post_reactions = topic_contract::reactions_for(&board_for_reply, &state, id);
+                            let post_reactor_names = reactor_names_map(&board_for_reply, &post_reactions);
                             rsx! {
                                 div {
                                     key: "{id}",
                                     class: "bg-panel border border-border rounded-lg px-4 py-3",
-                                    div { class: "flex items-center gap-2",
+                                    div { class: "flex items-center gap-2 flex-wrap",
                                         span { class: "text-sm font-medium text-text", "{author}" }
-                                        span { class: "text-[11px] text-text-muted", "{format_time(post_value.created_at)}" }
+                                        span {
+                                            class: "text-[11px] text-text-muted",
+                                            title: "{format_full_time(post_value.created_at)}",
+                                            "{format_time(post_value.created_at)}"
+                                        }
+                                        if post_edited {
+                                            span { class: "text-[11px] text-text-muted italic", "· edited" }
+                                        }
                                         if pending {
                                             span { class: "text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300", "Pending approval" }
                                         }
@@ -880,7 +1000,7 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                                                 "Reject"
                                             }
                                         }
-                                        if can_edit {
+                                        if can_edit && !has_poll {
                                             button {
                                                 r#type: "button",
                                                 class: "text-xs text-accent hover:underline mr-2",
@@ -990,30 +1110,46 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                                             "Report"
                                         }
                                     }
-                                    if !content.trim().is_empty() {
-                                        p { class: "mt-2 whitespace-pre-wrap text-text", "{content}" }
+                                    if !content_html.is_empty() {
+                                        div {
+                                            class: "mt-2 prose-message text-text",
+                                            dangerous_inner_html: "{content_html}",
+                                        }
+                                    }
+                                    if !post_images.is_empty() {
+                                        div { class: "mt-2 flex flex-wrap gap-2",
+                                            for (img_idx, img) in post_images.iter().enumerate() {
+                                                ImageAttachment {
+                                                    key: "post-img-{img_idx}",
+                                                    image: img.clone(),
+                                                    gallery: post_images.clone(),
+                                                }
+                                            }
+                                        }
                                     }
                                     if let Some(poll) = poll {
-                                        {poll_block(
-                                            &board_for_reply,
-                                            &state,
-                                            topic_id_value,
-                                            part,
-                                            id,
+                                        PollBlock {
                                             poll,
-                                            board_for_reply.owner_vk,
+                                            counts: topic_contract::poll_votes(&board_for_reply, &state, id),
+                                            owner: board_for_reply.owner_vk,
+                                            topic_id: topic_id_value,
+                                            part,
+                                            poll_id: id,
                                             self_id,
-                                        )}
+                                            can_edit,
+                                            edited: post_edited,
+                                        }
                                     }
-                                    {reaction_bar(
-                                        &board_for_reply,
-                                        &state,
-                                        topic_id_value,
+                                    ReactionBar {
+                                        reactions: post_reactions,
+                                        member_names: post_reactor_names,
+                                        reactions_enabled,
+                                        owner: board_for_reply.owner_vk,
+                                        topic_id: topic_id_value,
                                         part,
-                                        id,
-                                        board_for_reply.owner_vk,
+                                        target: id,
                                         self_id,
-                                    )}
+                                    }
                                     if *editing_post.read() == Some(id) {
                                         div { class: "mt-3 flex flex-col gap-2",
                                             textarea {
@@ -1080,15 +1216,42 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
 
             if !closed && !banned && !suspended && merged_into.is_none() {
                 div { class: "bg-surface border border-border rounded-xl p-4 flex flex-col gap-3",
-                    div { class: "flex items-center gap-2",
+                    div { class: "flex items-center gap-2 flex-wrap",
                         button {
                             r#type: "button",
-                            class: "px-2.5 py-1 rounded-lg border border-border text-xs text-text hover:bg-surface",
+                            class: "px-2.5 py-1 rounded-lg border border-border text-xs text-text hover:bg-panel",
                             onclick: move |_| {
                                 let next = !*poll_mode.read();
                                 poll_mode.set(next);
                             },
                             "Poll"
+                        }
+                        if images_allowed && !*poll_mode.read() {
+                            input {
+                                id: "{TOPIC_IMAGE_INPUT_ID}",
+                                r#type: "file",
+                                accept: "image/*",
+                                multiple: true,
+                                class: "hidden",
+                                onchange: move |_| {
+                                    if let Some(files) = selected_topic_files() {
+                                        attach_topic_files(
+                                            files,
+                                            owner,
+                                            effective_section_id,
+                                            attachments,
+                                            next_attachment_id,
+                                        );
+                                    }
+                                },
+                            }
+                            button {
+                                r#type: "button",
+                                class: "px-2.5 py-1 rounded-lg border border-border text-xs text-text hover:bg-panel disabled:opacity-50",
+                                disabled: attachments.read().len() >= MAX_IMAGES_PER_POST,
+                                onclick: move |_| open_topic_image_picker(),
+                                "Attach image"
+                            }
                         }
                     }
                     if *poll_mode.read() {
@@ -1099,17 +1262,60 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                                 value: "{poll_question}",
                                 oninput: move |event| poll_question.set(event.value()),
                             }
-                            input {
-                                class: "w-full px-3 py-2 bg-panel border border-border rounded-lg text-text",
-                                placeholder: "Option 1",
-                                value: "{poll_option_1}",
-                                oninput: move |event| poll_option_1.set(event.value()),
+                            for (index, option) in poll_options.read().iter().enumerate() {
+                                div {
+                                    key: "poll-opt-{index}",
+                                    class: "flex items-center gap-2",
+                                    input {
+                                        class: "flex-1 px-3 py-2 bg-panel border border-border rounded-lg text-text",
+                                        placeholder: "Option {index + 1}",
+                                        value: "{option}",
+                                        oninput: move |event| {
+                                            let value = event.value();
+                                            poll_options.with_mut(|list| {
+                                                if let Some(slot) = list.get_mut(index) {
+                                                    *slot = value;
+                                                }
+                                            });
+                                        },
+                                    }
+                                    if poll_options.read().len() > 2 {
+                                        button {
+                                            r#type: "button",
+                                            class: "px-2 py-1 text-xs text-text-muted hover:text-red-400",
+                                            onclick: move |_| {
+                                                poll_options.with_mut(|list| {
+                                                    if list.len() > 2 && index < list.len() {
+                                                        list.remove(index);
+                                                    }
+                                                });
+                                            },
+                                            "×"
+                                        }
+                                    }
+                                }
                             }
-                            input {
-                                class: "w-full px-3 py-2 bg-panel border border-border rounded-lg text-text",
-                                placeholder: "Option 2",
-                                value: "{poll_option_2}",
-                                oninput: move |event| poll_option_2.set(event.value()),
+                            div { class: "flex items-center justify-between gap-2 flex-wrap",
+                                button {
+                                    r#type: "button",
+                                    class: "text-xs text-accent hover:underline",
+                                    onclick: move |_| {
+                                        poll_options.with_mut(|list| {
+                                            if list.len() < 10 {
+                                                list.push(String::new());
+                                            }
+                                        });
+                                    },
+                                    "+ Add option"
+                                }
+                                label { class: "flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: *poll_multiselect.read(),
+                                        onchange: move |event| poll_multiselect.set(event.checked()),
+                                    }
+                                    "Allow multiple choices"
+                                }
                             }
                             div { class: "flex justify-end gap-2",
                                 button {
@@ -1127,10 +1333,8 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                                             return;
                                         }
                                         let question = poll_question.read().clone();
-                                        let options = vec![
-                                            poll_option_1.read().clone(),
-                                            poll_option_2.read().clone(),
-                                        ];
+                                        let options = poll_options.read().clone();
+                                        let multiselect = *poll_multiselect.read();
                                         let owner = owner;
                                         poll_busy.set(true);
                                         error.set(None);
@@ -1141,14 +1345,14 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                                                 part,
                                                 question,
                                                 options,
-                                                false,
+                                                multiselect,
                                             )
                                             .await
                                             {
                                                 Ok(()) => {
                                                     poll_question.set(String::new());
-                                                    poll_option_1.set(String::new());
-                                                    poll_option_2.set(String::new());
+                                                    poll_options.set(vec![String::new(), String::new()]);
+                                                    poll_multiselect.set(false);
                                                     poll_mode.set(false);
                                                 }
                                                 Err(message) => error.set(Some(message)),
@@ -1161,22 +1365,161 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                             }
                         }
                     } else {
-                        textarea {
-                            class: "w-full min-h-24 px-3 py-2 bg-panel border border-border rounded-lg text-text",
-                            placeholder: "Write a reply…",
-                            value: "{reply}",
-                            oninput: move |event| {
-                                let value = event.value();
-                                reply.set(value.clone());
-                                BOARDS.with_mut(|boards| {
-                                    if let Some(board) = boards.map.get_mut(&owner) {
-                                        board.set_topic_draft(topic_id_value, &value);
+                        if !attachments.read().is_empty() {
+                            div { class: "flex flex-wrap gap-2",
+                                for att in attachments.read().iter() {
+                                    {
+                                        let att_id = att.id.clone();
+                                        let status_label = match &att.state {
+                                            TopicAttachmentState::Uploading => "Uploading…".to_string(),
+                                            TopicAttachmentState::Ready(_) => "Ready".to_string(),
+                                            TopicAttachmentState::Failed(msg) => format!("Failed: {msg}"),
+                                        };
+                                        let chip_class = match &att.state {
+                                            TopicAttachmentState::Failed(_) => {
+                                                "flex items-center gap-2 px-2.5 py-1 rounded-lg border border-red-500/40 bg-red-500/10 text-xs text-red-300"
+                                            }
+                                            _ => {
+                                                "flex items-center gap-2 px-2.5 py-1 rounded-lg border border-border bg-panel text-xs text-text"
+                                            }
+                                        };
+                                        rsx! {
+                                            div {
+                                                key: "{att_id}",
+                                                class: "{chip_class}",
+                                                span { class: "truncate max-w-44", "{att.name}" }
+                                                span { class: "text-[11px] text-text-muted", "{status_label}" }
+                                                button {
+                                                    r#type: "button",
+                                                    class: "text-text-muted hover:text-red-400",
+                                                    onclick: move |_| {
+                                                        attachments.with_mut(|list| {
+                                                            list.retain(|item| item.id != att_id);
+                                                        });
+                                                    },
+                                                    "×"
+                                                }
+                                            }
+                                        }
                                     }
-                                });
-                                spawn(async {
-                                    let _ = crate::components::app::chat_delegate::save_boards_to_delegate().await;
-                                });
-                            },
+                                }
+                            }
+                        }
+                        div { class: "relative",
+                            textarea {
+                                id: "{TOPIC_REPLY_INPUT_ID}",
+                                class: "w-full min-h-24 px-3 py-2 bg-panel border border-border rounded-lg text-text",
+                                placeholder: "Write a reply…",
+                                value: "{reply}",
+                                oninput: move |event| {
+                                    let value = event.value();
+                                    reply.set(value.clone());
+                                    refresh_topic_reply_mentions(mention_autocomplete);
+                                    BOARDS.with_mut(|boards| {
+                                        if let Some(board) = boards.map.get_mut(&owner) {
+                                            board.set_topic_draft(topic_id_value, &value);
+                                        }
+                                    });
+                                    spawn(async {
+                                        let _ = crate::components::app::chat_delegate::save_boards_to_delegate().await;
+                                    });
+                                },
+                                onclick: move |_| refresh_topic_reply_mentions(mention_autocomplete),
+                                onkeyup: move |event| {
+                                    if !matches!(
+                                        event.key(),
+                                        Key::ArrowDown | Key::ArrowUp | Key::Enter | Key::Tab | Key::Escape
+                                    ) {
+                                        refresh_topic_reply_mentions(mention_autocomplete);
+                                    }
+                                },
+                                onkeydown: {
+                                    let items = mention_items.clone();
+                                    move |event: KeyboardEvent| {
+                                        let current_ctx = mention_autocomplete.read().clone();
+                                        if let Some(ctx) = current_ctx {
+                                            if !items.is_empty() {
+                                                match event.key() {
+                                                    Key::ArrowDown => {
+                                                        event.prevent_default();
+                                                        let mut next = ctx;
+                                                        next.selected = (next.selected + 1) % items.len();
+                                                        mention_autocomplete.set(Some(next));
+                                                        return;
+                                                    }
+                                                    Key::ArrowUp => {
+                                                        event.prevent_default();
+                                                        let mut next = ctx;
+                                                        next.selected = if next.selected == 0 {
+                                                            items.len() - 1
+                                                        } else {
+                                                            next.selected - 1
+                                                        };
+                                                        mention_autocomplete.set(Some(next));
+                                                        return;
+                                                    }
+                                                    Key::Enter | Key::Tab => {
+                                                        if let Some(member) = items.get(ctx.selected) {
+                                                            event.prevent_default();
+                                                            let value = crate::util::mentions::replace_context(
+                                                                TOPIC_REPLY_INPUT_ID,
+                                                                &ctx,
+                                                                member,
+                                                            );
+                                                            reply.set(value);
+                                                            mention_autocomplete.set(None);
+                                                            return;
+                                                        }
+                                                    }
+                                                    Key::Escape => {
+                                                        event.prevent_default();
+                                                        mention_autocomplete.set(None);
+                                                        return;
+                                                    }
+                                                    _ => {}
+                                                }
+                                            } else if event.key() == Key::Escape {
+                                                mention_autocomplete.set(None);
+                                            }
+                                        }
+                                    }
+                                },
+                            }
+                            if let Some(context) = mention_context.clone() {
+                                if !mention_items.is_empty() {
+                                    div {
+                                        class: "mention-autocomplete absolute left-0 right-0 top-full z-50 mt-1 max-h-64 overflow-y-auto rounded-lg border border-border bg-panel shadow-xl",
+                                        for (index, member) in mention_items.iter().enumerate() {
+                                            button {
+                                                r#type: "button",
+                                                class: if index == context.selected {
+                                                    "mention-option flex w-full items-center px-3 py-2 text-left text-sm bg-accent text-white"
+                                                } else {
+                                                    "mention-option flex w-full items-center px-3 py-2 text-left text-sm text-text hover:bg-surface-hover"
+                                                },
+                                                onmousedown: move |evt| evt.prevent_default(),
+                                                onclick: {
+                                                    let member = member.clone();
+                                                    let context = context.clone();
+                                                    move |_| {
+                                                        let value = crate::util::mentions::replace_context(
+                                                            TOPIC_REPLY_INPUT_ID,
+                                                            &context,
+                                                            &member,
+                                                        );
+                                                        reply.set(value);
+                                                        mention_autocomplete.set(None);
+                                                    }
+                                                },
+                                                "@{member.name}"
+                                            }
+                                        }
+                                        div { class: "px-3 py-1.5 text-[10px] text-text-muted border-t border-border",
+                                            "↑↓ select · Enter insert · Esc close"
+                                        }
+                                    }
+                                }
+                            }
                         }
                         if let Some(message) = error.read().as_ref() {
                             p { class: "text-sm text-red-400", "{message}" }
@@ -1184,7 +1527,9 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                         div { class: "flex justify-end",
                             button {
                                 r#type: "button",
-                                disabled: *busy.read() || reply.read().trim().is_empty(),
+                                disabled: *busy.read()
+                                    || has_uploading
+                                    || (reply.read().trim().is_empty() && !has_ready_images),
                                 class: "px-4 py-2 rounded-lg bg-accent hover:bg-accent-hover disabled:opacity-50 text-white text-sm",
                                 onclick: move |_| {
                                     if *busy.read() {
@@ -1193,27 +1538,37 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                                     busy.set(true);
                                     error.set(None);
                                     let text = reply_text.read().clone();
+                                    let ready_images: Vec<ImageRef> = attachments
+                                        .read()
+                                        .iter()
+                                        .filter_map(|att| match &att.state {
+                                            TopicAttachmentState::Ready(img) => Some(img.clone()),
+                                            _ => None,
+                                        })
+                                        .collect();
                                     let owner = owner;
                                     spawn(async move {
-                                        match topic_contract::send_reply(
+                                        match topic_contract::send_reply_with_images(
                                             owner,
                                             topic_for_reply,
                                             part,
                                             text,
+                                            ready_images,
                                         )
                                         .await
                                         {
                                             Ok(()) => {
-                                            reply.set(String::new());
-                                            BOARDS.with_mut(|boards| {
-                                                if let Some(board) = boards.map.get_mut(&owner) {
-                                                    board.set_topic_draft(topic_id_value, "");
-                                                }
-                                            });
-                                            spawn(async {
-                                                let _ = crate::components::app::chat_delegate::save_boards_to_delegate().await;
-                                            });
-                                        }
+                                                reply.set(String::new());
+                                                attachments.set(Vec::new());
+                                                BOARDS.with_mut(|boards| {
+                                                    if let Some(board) = boards.map.get_mut(&owner) {
+                                                        board.set_topic_draft(topic_id_value, "");
+                                                    }
+                                                });
+                                                spawn(async {
+                                                    let _ = crate::components::app::chat_delegate::save_boards_to_delegate().await;
+                                                });
+                                            }
                                             Err(message) => error.set(Some(message)),
                                         }
                                         busy.set(false);
@@ -1229,7 +1584,146 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     }
 }
 
-fn short_id(id: plaza_core::board_state::member::MemberId) -> String {
+fn refresh_topic_reply_mentions(mut mention_autocomplete: Signal<Option<MentionAutocomplete>>) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let next = crate::util::mentions::textarea_context(TOPIC_REPLY_INPUT_ID);
+        mention_autocomplete.set(next);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = &mut mention_autocomplete;
+    }
+}
+
+fn open_topic_image_picker() {
+    if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+        if let Some(element) = document.get_element_by_id(TOPIC_IMAGE_INPUT_ID) {
+            if let Ok(input) = element.dyn_into::<web_sys::HtmlInputElement>() {
+                input.click();
+            }
+        }
+    }
+}
+
+fn selected_topic_files() -> Option<Vec<web_sys::File>> {
+    let document = web_sys::window()?.document()?;
+    let input = document
+        .get_element_by_id(TOPIC_IMAGE_INPUT_ID)?
+        .dyn_into::<web_sys::HtmlInputElement>()
+        .ok()?;
+    let files = input.files()?;
+    let list: Vec<web_sys::File> = (0..files.length())
+        .filter_map(|index| files.get(index))
+        .collect();
+    input.set_value("");
+    Some(list)
+}
+
+fn attach_topic_files(
+    files: Vec<web_sys::File>,
+    owner: ed25519_dalek::VerifyingKey,
+    section_id: Option<MessageId>,
+    mut attachments: Signal<Vec<TopicAttachment>>,
+    mut next_id: Signal<u64>,
+) {
+    let Some(board_data) = BOARDS.read().map.get(&owner).cloned() else {
+        return;
+    };
+    let secret = board_data.image_upload_secret(section_id.as_ref(), None);
+    let now = crate::util::get_current_system_time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
+
+    for file in files {
+        if attachments.read().len() >= MAX_IMAGES_PER_POST {
+            break;
+        }
+        let counter = *next_id.peek();
+        let id = format!("topic-{now}-{counter}");
+        next_id.set(counter + 1);
+        let name = file.name();
+        attachments.with_mut(|list| {
+            list.push(TopicAttachment {
+                id: id.clone(),
+                name: name.clone(),
+                state: TopicAttachmentState::Uploading,
+            });
+        });
+        let board_for_upload = board_data.clone();
+        spawn_local(async move {
+            match prepare_image(&file, ImageMode::StripMetadata).await {
+                Ok(prepared) => {
+                    let record = PendingUpload {
+                        id: id.clone(),
+                        name: name.clone(),
+                        alt: name.clone(),
+                        nsfw: false,
+                        mime: prepared.mime,
+                        width: prepared.width,
+                        height: prepared.height,
+                        animated: prepared.animated,
+                        bytes: prepared.bytes,
+                        secret,
+                        image: None,
+                    };
+                    let result = crate::util::uploads::upload_pending(
+                        &board_for_upload,
+                        &record,
+                        None,
+                    )
+                    .await;
+                    match result {
+                        Ok((image, copy)) => {
+                            if let Some(copy) = copy {
+                                crate::util::owned_images::record(&image, copy);
+                            }
+                            attachments.with_mut(|list| {
+                                if let Some(slot) = list.iter_mut().find(|item| item.id == id) {
+                                    slot.state = TopicAttachmentState::Ready(image);
+                                }
+                            });
+                        }
+                        Err(err) => {
+                            attachments.with_mut(|list| {
+                                if let Some(slot) = list.iter_mut().find(|item| item.id == id) {
+                                    slot.state = TopicAttachmentState::Failed(err);
+                                }
+                            });
+                        }
+                    }
+                }
+                Err(err) => {
+                    attachments.with_mut(|list| {
+                        if let Some(slot) = list.iter_mut().find(|item| item.id == id) {
+                            slot.state = TopicAttachmentState::Failed(err);
+                        }
+                    });
+                }
+            }
+        });
+    }
+}
+
+fn reactor_names_map(
+    board: &crate::board_data::BoardData,
+    reactions: &BTreeMap<String, Vec<MemberId>>,
+) -> HashMap<MemberId, String> {
+    let mut names = HashMap::new();
+    for members in reactions.values() {
+        for member in members {
+            names.entry(*member).or_insert_with(|| {
+                board
+                    .display_nickname(*member)
+                    .unwrap_or_else(|| short_id(*member))
+            });
+        }
+    }
+    names
+}
+
+fn short_id(id: MemberId) -> String {
     id.to_string().chars().take(8).collect()
 }
 
@@ -1241,39 +1735,81 @@ fn format_time(ms: i64) -> String {
     if ms <= 0 {
         return String::new();
     }
-    format!("{}", ms / 1000)
+    crate::util::format_utc_as_local_time(ms)
 }
 
-fn reaction_bar(
-    board: &crate::board_data::BoardData,
-    state: &topic_contract::TopicPartState,
+fn format_full_time(ms: i64) -> String {
+    if ms <= 0 {
+        return String::new();
+    }
+    crate::util::format_utc_as_full_datetime(ms)
+}
+
+#[component]
+fn ReactionBar(
+    reactions: BTreeMap<String, Vec<MemberId>>,
+    member_names: HashMap<MemberId, String>,
+    reactions_enabled: bool,
+    owner: ed25519_dalek::VerifyingKey,
     topic_id: MessageId,
     part: u32,
     target: MessageId,
-    owner: ed25519_dalek::VerifyingKey,
-    self_id: plaza_core::board_state::member::MemberId,
+    self_id: MemberId,
 ) -> Element {
-    if !state.authority().policy().reactions_enabled {
+    let mut open_owners = use_signal(|| None::<String>);
+    let mut open_picker = use_signal(|| false);
+
+    if !reactions_enabled {
         return rsx! {};
     }
-    let reactions = topic_contract::reactions_for(board, state, target);
+
+    let mut ordered_emojis: Vec<String> = REACTIONS.iter().map(|e| (*e).to_string()).collect();
+    for emoji in reactions.keys() {
+        if !ordered_emojis.contains(emoji) {
+            ordered_emojis.push(emoji.clone());
+        }
+    }
+
     rsx! {
-        div { class: "mt-2 flex items-center gap-1.5 flex-wrap",
-            for emoji in REACTIONS {
+        div { class: "relative mt-2 flex items-center gap-1.5 flex-wrap",
+            for emoji in ordered_emojis {
                 {
-                    let members = reactions.get(emoji).cloned().unwrap_or_default();
+                    let members = reactions.get(&emoji).cloned().unwrap_or_default();
                     let count = members.len();
                     let mine = members.contains(&self_id);
-                    let value = emoji.to_string();
-                    let class = if mine {
-                        "px-2 py-0.5 rounded-full border border-accent/60 bg-accent/15 text-xs text-accent"
+                    let value = emoji.clone();
+                    let names: Vec<String> = members
+                        .iter()
+                        .map(|m| {
+                            if *m == self_id {
+                                "You".to_string()
+                            } else {
+                                member_names
+                                    .get(m)
+                                    .cloned()
+                                    .unwrap_or_else(|| short_id(*m))
+                            }
+                        })
+                        .collect();
+                    let tooltip = if count == 0 {
+                        format!("React with {emoji}")
+                    } else if mine {
+                        format!("{} (click to remove)", names.join(", "))
                     } else {
-                        "px-2 py-0.5 rounded-full border border-border bg-surface text-xs text-text-muted hover:border-accent/50"
+                        format!("{} (click to add)", names.join(", "))
                     };
+                    let class = if mine {
+                        "reaction-chip relative inline-flex items-center px-2 py-0.5 rounded-full border border-accent/60 bg-accent/15 text-xs text-accent cursor-pointer"
+                    } else {
+                        "reaction-chip relative inline-flex items-center px-2 py-0.5 rounded-full border border-border bg-surface text-xs text-text-muted hover:border-accent/50 cursor-pointer"
+                    };
+                    let emoji_for_owners = emoji.clone();
                     rsx! {
                         button {
+                            key: "{emoji}",
                             r#type: "button",
                             class: "{class}",
+                            title: "{tooltip}",
                             onclick: move |_| {
                                 let value = value.clone();
                                 spawn(async move {
@@ -1290,8 +1826,87 @@ fn reaction_bar(
                             },
                             "{emoji}"
                             if count > 0 {
-                                span { class: "ml-1", "{count}" }
+                                span {
+                                    class: "reaction-count ml-1 px-0.5 hover:underline",
+                                    title: "Show who reacted",
+                                    aria_label: "Show who reacted",
+                                    onclick: move |event| {
+                                        event.stop_propagation();
+                                        open_owners.set(Some(emoji_for_owners.clone()));
+                                    },
+                                    "{count}"
+                                }
+                                span { class: "reaction-tooltip", "{tooltip}" }
                             }
+                        }
+                    }
+                }
+            }
+            div { class: "relative",
+                button {
+                    r#type: "button",
+                    class: "px-2 py-0.5 rounded-full border border-border bg-surface text-xs text-text-muted hover:border-accent/50",
+                    title: "Add reaction",
+                    onclick: move |event| {
+                        event.stop_propagation();
+                        let next = !*open_picker.read();
+                        open_picker.set(next);
+                    },
+                    "+"
+                }
+                if *open_picker.read() {
+                    div { class: "absolute left-0 bottom-full mb-1 z-50",
+                        EmojiPicker {
+                            on_select: {
+                                let reactions_for_picker = reactions.clone();
+                                move |emoji: String| {
+                                    let mine = reactions_for_picker
+                                        .get(&emoji)
+                                        .is_some_and(|members| members.contains(&self_id));
+                                    spawn(async move {
+                                        let _ = topic_contract::toggle_reaction(
+                                            owner,
+                                            topic_id,
+                                            part,
+                                            target,
+                                            emoji,
+                                            !mine,
+                                        )
+                                        .await;
+                                    });
+                                }
+                            },
+                            on_close: move |_| open_picker.set(false),
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(emoji) = open_owners() {
+            if let Some(reactors) = reactions.get(&emoji) {
+                div {
+                    class: "fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4",
+                    onclick: move |_| open_owners.set(None),
+                    div {
+                        class: "reaction-owners-popover w-full max-w-xs rounded-xl border border-border bg-panel p-4 shadow-xl",
+                        onclick: move |event| event.stop_propagation(),
+                        div { class: "mb-2 text-lg font-semibold text-text", "{emoji} reactions" }
+                        div { class: "space-y-1",
+                            for reactor in reactors {
+                                div { class: "text-sm text-text",
+                                    if *reactor == self_id {
+                                        "You"
+                                    } else {
+                                        {member_names.get(reactor).cloned().unwrap_or_else(|| short_id(*reactor))}
+                                    }
+                                }
+                            }
+                        }
+                        button {
+                            r#type: "button",
+                            class: "mt-3 w-full rounded-lg bg-surface px-3 py-1.5 text-sm text-text hover:bg-surface-hover",
+                            onclick: move |_| open_owners.set(None),
+                            "Close"
                         }
                     }
                 }
@@ -1300,65 +1915,236 @@ fn reaction_bar(
     }
 }
 
-fn poll_block(
-    board: &crate::board_data::BoardData,
-    state: &topic_contract::TopicPartState,
+#[component]
+fn PollBlock(
+    poll: PollContentV1,
+    counts: Vec<Vec<MemberId>>,
+    owner: ed25519_dalek::VerifyingKey,
     topic_id: MessageId,
     part: u32,
     poll_id: MessageId,
-    poll: PollContentV1,
-    owner: ed25519_dalek::VerifyingKey,
-    _self_id: plaza_core::board_state::member::MemberId,
+    self_id: MemberId,
+    can_edit: bool,
+    edited: bool,
 ) -> Element {
-    let counts = topic_contract::poll_votes(board, state, poll_id);
+    let mut editing = use_signal(|| false);
+    let mut edit_question = use_signal(String::new);
+    let mut edit_options = use_signal(Vec::<String>::new);
+    let mut edit_busy = use_signal(|| false);
+    let mut edit_error = use_signal(|| None::<String>);
+
     let total: usize = counts.iter().map(|members| members.len()).sum();
     let now = plaza_core::board_state::rate_limit::system_time_ms(
         crate::util::get_current_system_time(),
     );
     let closed = poll.closes_at.is_some_and(|closes| closes <= now);
+    let my_votes: Vec<u16> = counts
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, members)| members.contains(&self_id).then_some(idx as u16))
+        .collect();
+
     rsx! {
         div { class: "mt-2 rounded-lg border border-border bg-surface p-3",
-            p { class: "text-sm font-medium text-text", "{poll.title}" }
-            if !poll.description.trim().is_empty() {
-                p { class: "mt-1 text-xs text-text-muted", "{poll.description}" }
-            }
-            div { class: "mt-2 flex flex-col gap-1.5",
-                for (index, option) in poll.options.iter().enumerate() {
-                    {
-                        let count = counts
-                            .get(index)
-                            .map(|members| members.len())
-                            .unwrap_or(0);
-                        let owner = owner;
-                        let option = option.clone();
-                        let index = index as u16;
-                        rsx! {
-                            button {
-                                r#type: "button",
-                                class: "flex items-center justify-between gap-3 px-3 py-1.5 rounded-lg border border-border text-sm text-text hover:bg-panel disabled:opacity-60",
-                                disabled: closed,
-                                onclick: move |_| {
+            if *editing.read() {
+                div { class: "flex flex-col gap-2",
+                    input {
+                        class: "w-full px-3 py-1.5 bg-panel border border-border rounded-lg text-sm text-text",
+                        placeholder: "Poll question",
+                        value: "{edit_question}",
+                        oninput: move |event| edit_question.set(event.value()),
+                    }
+                    for (index, opt) in edit_options.read().iter().enumerate() {
+                        div {
+                            key: "edit-poll-opt-{index}",
+                            class: "flex items-center gap-2",
+                            input {
+                                class: "flex-1 px-3 py-1.5 bg-panel border border-border rounded-lg text-sm text-text",
+                                placeholder: "Option {index + 1}",
+                                value: "{opt}",
+                                oninput: move |event| {
+                                    let val = event.value();
+                                    edit_options.with_mut(|list| {
+                                        if let Some(slot) = list.get_mut(index) {
+                                            *slot = val;
+                                        }
+                                    });
+                                },
+                            }
+                            if edit_options.read().len() > 2 {
+                                button {
+                                    r#type: "button",
+                                    class: "px-2 py-1 text-xs text-text-muted hover:text-red-400",
+                                    onclick: move |_| {
+                                        edit_options.with_mut(|list| {
+                                            if list.len() > 2 && index < list.len() {
+                                                list.remove(index);
+                                            }
+                                        });
+                                    },
+                                    "×"
+                                }
+                            }
+                        }
+                    }
+                    button {
+                        r#type: "button",
+                        class: "self-start text-xs text-accent hover:underline",
+                        onclick: move |_| {
+                            edit_options.with_mut(|list| {
+                                if list.len() < 10 {
+                                    list.push(String::new());
+                                }
+                            });
+                        },
+                        "+ Add option"
+                    }
+                    if let Some(msg) = edit_error.read().as_ref() {
+                        p { class: "text-xs text-red-400", "{msg}" }
+                    }
+                    div { class: "flex justify-end gap-2",
+                        button {
+                            r#type: "button",
+                            class: "px-3 py-1 rounded-lg border border-border text-xs text-text",
+                            onclick: move |_| editing.set(false),
+                            "Cancel"
+                        }
+                        button {
+                            r#type: "button",
+                            class: "px-3 py-1 rounded-lg bg-accent text-white text-xs disabled:opacity-50",
+                            disabled: *edit_busy.read(),
+                            onclick: {
+                                let base_poll = poll.clone();
+                                move |_| {
+                                    if *edit_busy.read() {
+                                        return;
+                                    }
+                                    edit_busy.set(true);
+                                    edit_error.set(None);
+                                    let mut updated = base_poll.clone();
+                                    updated.title = edit_question.read().clone();
+                                    updated.options = edit_options.read().clone();
                                     spawn(async move {
-                                        let _ = topic_contract::vote(
+                                        match topic_contract::edit_poll(
                                             owner,
                                             topic_id,
                                             part,
                                             poll_id,
-                                            vec![index],
+                                            updated,
                                         )
-                                        .await;
+                                        .await
+                                        {
+                                            Ok(()) => editing.set(false),
+                                            Err(msg) => edit_error.set(Some(msg)),
+                                        }
+                                        edit_busy.set(false);
                                     });
-                                },
-                                span { "{option}" }
-                                span { class: "text-xs text-text-muted", "{count}" }
+                                }
+                            },
+                            if *edit_busy.read() { "Saving…" } else { "Save poll" }
+                        }
+                    }
+                }
+            } else {
+                div { class: "flex items-start justify-between gap-2",
+                    p { class: "text-sm font-medium text-text", "{poll.title}" }
+                    if can_edit {
+                        button {
+                            r#type: "button",
+                            class: "text-xs text-accent hover:underline shrink-0",
+                            onclick: {
+                                let q = poll.title.clone();
+                                let opts = poll.options.clone();
+                                move |_| {
+                                    edit_question.set(q.clone());
+                                    edit_options.set(opts.clone());
+                                    edit_error.set(None);
+                                    editing.set(true);
+                                }
+                            },
+                            "Edit poll"
+                        }
+                    }
+                }
+                if !poll.description.trim().is_empty() {
+                    p { class: "mt-1 text-xs text-text-muted", "{poll.description}" }
+                }
+                div { class: "mt-2 flex flex-col gap-1.5",
+                    for (index, option) in poll.options.iter().enumerate() {
+                        {
+                            let count = counts
+                                .get(index)
+                                .map(|members| members.len())
+                                .unwrap_or(0);
+                            let pct = if total > 0 {
+                                (count * 100) / total
+                            } else {
+                                0
+                            };
+                            let idx = index as u16;
+                            let is_selected = my_votes.contains(&idx);
+                            let next_choices = if poll.multiselect {
+                                let mut next = my_votes.clone();
+                                if let Some(pos) = next.iter().position(|&v| v == idx) {
+                                    next.remove(pos);
+                                } else {
+                                    next.push(idx);
+                                    next.sort_unstable();
+                                }
+                                next
+                            } else {
+                                vec![idx]
+                            };
+                            let option = option.clone();
+                            let btn_class = if is_selected {
+                                "relative overflow-hidden flex items-center justify-between gap-3 px-3 py-1.5 rounded-lg border border-accent bg-accent/10 text-sm text-text hover:bg-panel disabled:opacity-60"
+                            } else {
+                                "relative overflow-hidden flex items-center justify-between gap-3 px-3 py-1.5 rounded-lg border border-border text-sm text-text hover:bg-panel disabled:opacity-60"
+                            };
+                            rsx! {
+                                button {
+                                    key: "poll-choice-{index}",
+                                    r#type: "button",
+                                    class: "{btn_class}",
+                                    disabled: closed,
+                                    onclick: move |_| {
+                                        let choices = next_choices.clone();
+                                        spawn(async move {
+                                            let _ = topic_contract::vote(
+                                                owner,
+                                                topic_id,
+                                                part,
+                                                poll_id,
+                                                choices,
+                                            )
+                                            .await;
+                                        });
+                                    },
+                                    if total > 0 {
+                                        div {
+                                            class: "absolute inset-y-0 left-0 bg-accent/15 pointer-events-none",
+                                            style: "width: {pct}%;",
+                                        }
+                                    }
+                                    span { class: "relative z-10", "{option}" }
+                                    span { class: "relative z-10 text-xs text-text-muted",
+                                        if total > 0 {
+                                            "{count} ({pct}%)"
+                                        } else {
+                                            "{count}"
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
-            }
-            p { class: "mt-2 text-[11px] text-text-muted",
-                "{total} votes"
-                if closed { " · closed" }
+                p { class: "mt-2 text-[11px] text-text-muted",
+                    "{total} votes"
+                    if poll.multiselect { " · multiple choice" }
+                    if closed { " · closed" }
+                    if edited { " · edited" }
+                }
             }
         }
     }
