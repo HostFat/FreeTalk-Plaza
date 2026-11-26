@@ -155,7 +155,7 @@ fn indexed_board() -> ChatBoardStateV1 {
             },
             &owner,
         ),
-        mode: BoardModeV1::TopicIndex,
+        mode: BoardModeV1::SectionedTopicIndex,
         ..Default::default()
     };
     state.members.members.push(AuthorizedMember::new(
@@ -182,7 +182,7 @@ fn indexed_board() -> ChatBoardStateV1 {
 fn the_index_board_verifies() {
     let state = indexed_board();
     state.verify(&state, &params()).unwrap();
-    assert_eq!(state.mode, BoardModeV1::TopicIndex);
+    assert_eq!(state.mode, BoardModeV1::SectionedTopicIndex);
     assert_eq!(state.topics.entries.len(), 1);
     assert_eq!(state.sections.sections.len(), 1);
     assert!(state.topics.is_pinned(&MessageId::from_bytes([7u8; 32])));
@@ -334,7 +334,7 @@ fn scale_board(topics: usize, members: usize, reports: usize) -> ChatBoardStateV
             },
             &owner,
         ),
-        mode: BoardModeV1::TopicIndex,
+        mode: BoardModeV1::SectionedTopicIndex,
         ..Default::default()
     };
     state.sections.sections.push(AuthorizedSectionV1::new(

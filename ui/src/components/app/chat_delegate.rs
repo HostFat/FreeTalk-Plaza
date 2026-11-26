@@ -263,8 +263,7 @@ pub async fn set_up_chat_delegate() -> Result<(), String> {
             // that response.
             fire_skip_legacy_request().await;
 
-            // Also try to migrate from legacy delegate (fire and forget)
-            // TODO: Remove this after 2026-03-01
+            // Also try to migrate from any older delegate generation (fire and forget)
             wasm_bindgen_futures::spawn_local(async {
                 futures_timer::Delay::new(std::time::Duration::from_millis(2000)).await;
                 fire_legacy_migration_request().await;

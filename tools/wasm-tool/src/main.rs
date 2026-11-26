@@ -21,6 +21,10 @@ const REGISTRY: &str = "legacy_delegates.toml";
 const COMMITTED_DM_WASM: &str = "ui/public/contracts/plaza_dm_delegate.wasm";
 const DM_REGISTRY: &str = "legacy_dm_delegates.toml";
 
+/// Binaryen `wasm-opt` major version pinned to match `flake.lock`.
+/// A different binaryen version changes output bytes and re-keys every WASM.
+const EXPECTED_WASM_OPT_VERSION: &str = "125";
+
 /// Each delegate whose key must survive a rebuild has its own registry.
 /// The board delegate and the DM delegate are checked the same way.
 const TRACKED_DELEGATES: &[(&str, &str)] = &[
@@ -161,10 +165,7 @@ const WASM_TARGETS: &[WasmTarget] = &[
     WasmTarget {
         package: "plaza-contract",
         wasm_file: "plaza_contract.wasm",
-        destinations: &[
-            "ui/public/contracts/plaza_contract.wasm",
-            "cli/contracts/plaza_contract.wasm",
-        ],
+        destinations: &["ui/public/contracts/plaza_contract.wasm"],
         watch_paths: &["plaza-contract", "common"],
     },
     WasmTarget {
@@ -360,6 +361,8 @@ fn cmd_sync(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
+    verify_wasm_opt_version()?;
+
     let mut cargo_args: Vec<&str> = vec![
         "build",
         "--locked",
@@ -397,6 +400,7 @@ fn cmd_sync(args: &[String]) -> Result<(), String> {
     let probes = path_probes(&root);
     for target in &selected {
         let src = out.join(target.wasm_file);
+        optimize_wasm(&src)?;
         refuse_machine_paths(&src, &probes)?;
         for dst in target.destinations {
             let dst = root.join(dst);
@@ -611,6 +615,58 @@ fn refuse_machine_paths(path: &Path, probes: &[String]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn verify_wasm_opt_version() -> Result<(), String> {
+    let out = Command::new("wasm-opt")
+        .arg("--version")
+        .output()
+        .map_err(|e| {
+            format!(
+                "cannot run `wasm-opt --version`: {e}. Install binaryen version \
+                 {EXPECTED_WASM_OPT_VERSION} (matching flake.lock) so WASM bytes stay reproducible."
+            )
+        })?;
+    if !out.status.success() {
+        return Err("`wasm-opt --version` failed".into());
+    }
+    let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let expected = format!("wasm-opt version {EXPECTED_WASM_OPT_VERSION}");
+    if !version.starts_with(&expected) {
+        return Err(format!(
+            "REFUSING: expected `{expected}` (matching flake.lock), found `{version}`. \
+             A different binaryen version re-keys every WASM."
+        ));
+    }
+    println!("{version}");
+    Ok(())
+}
+
+fn optimize_wasm(path: &Path) -> Result<(), String> {
+    let tmp = path.with_extension("wasm.opt");
+    let status = Command::new("wasm-opt")
+        .args([
+            "-Oz",
+            "--strip-debug",
+            "--strip-producers",
+            "--enable-bulk-memory",
+            "--enable-sign-ext",
+            "--enable-mutable-globals",
+            "--enable-nontrapping-float-to-int",
+            "--enable-multivalue",
+            "--enable-reference-types",
+        ])
+        .arg(path)
+        .arg("-o")
+        .arg(&tmp)
+        .status()
+        .map_err(|e| format!("cannot run wasm-opt on {}: {e}", path.display()))?;
+    if !status.success() {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("wasm-opt failed on {}", path.display()));
+    }
+    fs::rename(&tmp, path)
+        .map_err(|e| format!("cannot replace {} with optimized wasm: {e}", path.display()))
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {

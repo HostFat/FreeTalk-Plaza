@@ -11,7 +11,7 @@
 # When updating this pin:
 #   1. Run `cargo make add-migration` BEFORE changing the pin, so the old
 #      delegate key is recorded in legacy_delegates.toml
-#   2. Rebuild and commit the WASMs in ui/public/contracts and cli/contracts
+#   2. Rebuild and commit the WASMs in ui/public/contracts
 #   3. Commit the new legacy_delegates.toml entry in the same change
 channel = "1.94.0"
 components = ["rustfmt", "clippy"]

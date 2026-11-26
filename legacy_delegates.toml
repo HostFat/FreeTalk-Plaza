@@ -2,10 +2,8 @@
 #
 # Single source of truth for every board-delegate generation that may still
 # hold a user's boards. A delegate's address is BLAKE3(BLAKE3(wasm) || params).
-# Pre-launch generations were dropped: nobody has boards stored under them.
-# This entry is the day-1 baseline. The next WASM change must keep this
-# code_hash in the file. The UI skips the entry whose key matches the
-# delegate in this build, so the baseline is not probed as a legacy store.
+# The UI skips the entry whose key matches the delegate in this build, so the
+# current baseline is not probed as a legacy store.
 #
 # Fields:
 #   code_hash    = BLAKE3 hash of the raw delegate WASM bytes (hex)
@@ -18,15 +16,15 @@
 # To rebuild WASMs:  cargo make sync-wasm
 
 [[entry]]
-version = "V1"
-description = "Day-1 baseline after dropping pre-launch board-delegate generations"
-date = "2026-11-26"
-delegate_key = "453407ffa1983a456d76da65c2a2af81664c71a931846912f845bc0f6584bffe"
-code_hash = "9109c04d26b65e0affeade2f132ffd87bd2396b14903819fb70cd7298ab0463b"
-
-[[entry]]
 version = "V2"
 description = "Reproducible path-remapped board delegate baseline"
 date = "2026-11-26"
 delegate_key = "f2e08cd9c188d3f3019b07d00d78e369374dd87592be1ff2aa7ce27b5da85107"
 code_hash = "ba951edab317f5709156c51d87397d0a1b8db7c981873ca61c0bffe53bd39724"
+
+[[entry]]
+version = "V3"
+description = "wasm-opt 125 -Oz optimized board delegate baseline"
+date = "2026-11-26"
+delegate_key = "a917912c876deef1635c621e45513641c3580b44ad4a3f532e89c5efb97c84a2"
+code_hash = "e83e4d7dd30861781678f9e1ddf562c860c7b9bbd49584917cc1953f16fc9b30"

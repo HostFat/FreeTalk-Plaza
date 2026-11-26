@@ -150,27 +150,25 @@ pub async fn load_moderation(
     .map_err(|error| format!("get moderation contract: {error}"))
 }
 
-/// Load the moderation feed(s) for a board: the single board-wide feed on flat
-/// `TopicIndex` boards, or one feed per active section on `SectionedTopicIndex`
-/// boards. Called on demand by the moderation view.
+/// Load the moderation feeds for a `SectionedTopicIndex` board (one feed per
+/// active section). Called on demand by the moderation view.
 pub async fn load_moderation_for_board(owner: VerifyingKey) {
     let targets: Vec<Option<SectionId>> = {
         let boards = crate::components::app::BOARDS.read();
         let Some(board) = boards.map.get(&owner) else {
             return;
         };
-        if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
-            board
-                .board_state
-                .sections
-                .sections
-                .iter()
-                .filter(|entry| !entry.section.deleted && entry.section.contract.is_some())
-                .map(|entry| Some(entry.section.id))
-                .collect()
-        } else {
-            vec![None]
+        if board.board_state.mode != BoardModeV1::SectionedTopicIndex {
+            return;
         }
+        board
+            .board_state
+            .sections
+            .sections
+            .iter()
+            .filter(|entry| !entry.section.deleted && entry.section.contract.is_some())
+            .map(|entry| Some(entry.section.id))
+            .collect()
     };
     for section in targets {
         let _ = load_moderation(owner, section).await;

@@ -1,17 +1,11 @@
 # Legacy DM Delegate Registry
 #
 # Same rule as legacy_delegates.toml, for plaza_dm_delegate.wasm. A re-key
-# without this file would drop DM identities and conversation keys. There is
-# no earlier generation to import: this is the day-1 baseline, and the next
-# WASM change must keep this code_hash. The UI skips the entry whose key
-# matches the delegate in this build.
-
-[[entry]]
-version = "V1"
-description = "Day-1 baseline for the DM delegate"
-date = "2026-11-26"
-delegate_key = "526ae2309de3fb0ea8e5fc7d74da5e5f17ce8cf4157640a088cea0ef3bbb8615"
-code_hash = "68019b8633f669e3c8ee6c6ff600749b185c2ebdbac6c480b6c650fe3a5e702a"
+# without this file would drop DM identities and conversation keys. The UI
+# skips the entry whose key matches the delegate in this build.
+#
+# To add an entry:   cargo make add-dm-migration
+# To validate:       cargo make check-migration
 
 [[entry]]
 version = "V2"
@@ -19,3 +13,10 @@ description = "Reproducible path-remapped DM delegate baseline"
 date = "2026-11-26"
 delegate_key = "60cfcb324558a3bf3eed87b03ff8b44e68465c2f04860452e7395d134eaddccd"
 code_hash = "d12e4683b47eb95a29e60b67aedb3f74589d75c4933e7a1ce12d35371679f510"
+
+[[entry]]
+version = "V3"
+description = "wasm-opt 125 -Oz optimized DM delegate baseline"
+date = "2026-11-26"
+delegate_key = "4ec28cf0629fb04d914a981c44eec8331df9d37c78c59fc4aadbda1d1b264192"
+code_hash = "62f7d8d1adab653d9448f305ca678b0b18753beac20159d14420195ecda9a14f"

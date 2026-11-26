@@ -6,14 +6,6 @@ license = "LGPL-3.0"
 
 [dependencies]
 ciborium.workspace = true
-ed25519-dalek.workspace = true
-# Optional: cleaner ed25519 implementation for WASM
-ed25519-compact = { workspace = true, optional = true }
-# Dependencies for pure ed25519 verification
-curve25519-dalek.workspace = true
-sha2.workspace = true
-rand.workspace = true
-getrandom.workspace = true
 freenet-stdlib.workspace = true
 freenet-scaffold.workspace = true
 plaza-core.workspace = true
@@ -26,11 +18,11 @@ default = ["freenet-main-contract"]
 contract = ["freenet-stdlib/contract"]
 freenet-main-contract = []
 trace = ["freenet-stdlib/trace"]
-# Use ed25519-compact for WASM builds to avoid getrandom contamination
-wasm-crypto = ["ed25519-compact"]
 
 [dev-dependencies]
 anyhow = "1.0"
+ed25519-dalek.workspace = true
+rand.workspace = true
 # Current node release. Must match the freenet-stdlib line in the workspace,
 # otherwise the test binary links two stdlib copies and fails on duplicate
 # `__frnt_set_id` symbols.

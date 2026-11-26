@@ -4,7 +4,7 @@ default_to_workspace = false
 
 [env]
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
-CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["common", "plaza-contract", "plaza-delegate", "ui", "cli"]
+CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["common", "plaza-contract", "plaza-delegate", "ui"]
 CONTRACT_TARGET = "wasm32-unknown-unknown"
 CONTRACT_NAME = "plaza_contract"
 DELEGATE_NAME = "plaza_delegate"
@@ -33,69 +33,6 @@ cwd = "./ui"
 description = "Build the board contract WASM"
 command = "cargo"
 args = ["build", "--locked", "--profile", "${BUILD_PROFILE}", "--target", "${CONTRACT_TARGET}", "-p", "plaza-contract", "--target-dir", "target"]
-
-[tasks.sync-cli-wasm]
-description = "Sync board contract WASM to CLI package for crates.io publishing"
-dependencies = ["build-plaza-contract"]
-script = '''
-#!/bin/bash
-set -e
-
-# Source and destination paths
-SOURCE_WASM="ui/public/contracts/plaza_contract.wasm"
-DEST_WASM="cli/contracts/plaza_contract.wasm"
-
-# Check if source exists
-if [ ! -f "$SOURCE_WASM" ]; then
-    echo "Error: Source WASM not found at $SOURCE_WASM"
-    echo "Please run 'cargo make build-plaza-contract' first"
-    exit 1
-fi
-
-# Create destination directory if it doesn't exist
-mkdir -p cli/contracts
-
-# Copy the WASM file
-cp "$SOURCE_WASM" "$DEST_WASM"
-echo "✓ Synced plaza_contract.wasm to CLI package"
-
-# Check if the files differ (useful for CI)
-if ! cmp -s "$SOURCE_WASM" "$DEST_WASM"; then
-    echo "Warning: WASM files were out of sync!"
-    exit 1
-fi
-'''
-
-[tasks.publish-cli-dry-run]
-description = "Test publishing River CLI to crates.io (dry run)"
-dependencies = ["sync-cli-wasm"]
-command = "cargo"
-args = ["publish", "--dry-run", "--allow-dirty"]
-cwd = "./cli"
-
-[tasks.publish-cli]
-description = "Publish River CLI to crates.io"
-dependencies = ["sync-cli-wasm"]
-script = '''
-#!/bin/bash
-set -e
-
-echo "⚠️  About to publish River CLI to crates.io!"
-echo "Have you:"
-echo "  1. Updated the version in cli/Cargo.toml?"
-echo "  2. Committed all changes?"
-echo "  3. Created a git tag?"
-echo ""
-read -p "Continue? (y/N) " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Aborted."
-    exit 1
-fi
-
-cd cli
-cargo publish
-'''
 
 [tasks.build-chat-delegate]
 description = "Build the chat delegate WASM"

@@ -766,15 +766,7 @@ fn change_mail_visibility(
 
 #[component]
 fn MailTab(profile_id: String) -> Element {
-    let (
-        local_address,
-        legacy_address,
-        board_key,
-        board_name,
-        is_private,
-        visibility,
-        published,
-    ) = {
+    let (local_address, board_key, board_name, is_private, visibility, published) = {
         let boards = BOARDS.read();
         let profile = boards
             .profiles
@@ -787,20 +779,8 @@ fn MailTab(profile_id: String) -> Element {
         let published = board
             .zip(member)
             .and_then(|(board, member)| board.mail_address_for(member));
-        // If the state has no record yet, offer the address from the old
-        // append-only action as a one-time migration.
-        let legacy = board.zip(member).and_then(|(board, member)| {
-            if board.mail_address_for(member).is_none() {
-                board.legacy_mail_address_for(member)
-            } else {
-                None
-            }
-        });
         (
-            profile
-                .and_then(|profile| profile.mail_address)
-                .or_else(|| legacy.clone()),
-            legacy,
+            profile.and_then(|profile| profile.mail_address),
             current,
             board.map(board_display_name).unwrap_or_default(),
             board.map(|board| board.is_private()).unwrap_or(false),
@@ -864,11 +844,6 @@ fn MailTab(profile_id: String) -> Element {
                     placeholder: "name@address",
                     value: "{address}",
                     oninput: move |event| address.set(event.value()),
-                }
-                if let Some(legacy) = legacy_address {
-                    p { class: "text-[11px] text-amber-300",
-                        "Found {legacy} in the previous format. Press Save to publish it in the new state."
-                    }
                 }
                 if let Some(message) = error.read().as_ref() {
                     p { class: "text-xs text-red-400", "{message}" }

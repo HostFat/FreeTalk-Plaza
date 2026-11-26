@@ -68,10 +68,7 @@ pub fn TopicIndexView(board_id: String) -> Element {
             div { class: "max-w-4xl mx-auto px-4 py-8 text-text-muted", "Loading board…" }
         };
     };
-    if !matches!(
-        board_data.board_state.mode,
-        BoardModeV1::TopicIndex | BoardModeV1::SectionedTopicIndex
-    ) {
+    if board_data.board_state.mode != BoardModeV1::SectionedTopicIndex {
         return rsx! {
             div { class: "max-w-4xl mx-auto px-4 py-8 text-text-muted",
                 "This board uses the legacy message layout."
@@ -104,12 +101,7 @@ pub fn TopicIndexView(board_id: String) -> Element {
         .filter(|entry| !entry.section.deleted)
         .cloned()
         .collect();
-    let sectioned = board_data.board_state.mode == BoardModeV1::SectionedTopicIndex;
-    let default_section = if is_owner || sectioned {
-        sections.first().map(|entry| entry.section.id)
-    } else {
-        None
-    };
+    let default_section = sections.first().map(|entry| entry.section.id);
     let selected_section = section_choice.read().unwrap_or(default_section);
     let selected_value = selected_section
         .map(|id| bs58::encode(id.as_bytes()).into_string())
@@ -202,54 +194,49 @@ pub fn TopicIndexView(board_id: String) -> Element {
 
             div { class: "bg-surface border border-border rounded-xl p-4 flex flex-col gap-3",
                 h2 { class: "text-sm font-semibold text-text", "New topic" }
-                if is_owner || sectioned {
-                    select {
-                        class: "w-full px-3 py-2 bg-panel border border-border rounded-lg text-text",
-                        value: "{selected_value}",
-                        onchange: move |event| {
-                            let value = event.value();
-                            let parsed = if value.is_empty() {
-                                None
-                            } else {
-                                bs58::decode(&value)
-                                    .into_vec()
-                                    .ok()
-                                    .and_then(|bytes| bytes.try_into().ok())
-                                    .map(MessageId::from_bytes)
-                            };
-                            section_choice.set(Some(parsed));
-                        },
-                        if !sectioned {
-                            option { value: "", "Board root" }
-                        }
-                        for section in sections.iter() {
-                            {
-                                let id = section.section.id;
-                                let value = bs58::encode(id.as_bytes()).into_string();
-                                let label = topic_contract::section_name(&board_data, &id)
-                                    .unwrap_or_else(|| "Section".to_string());
-                                rsx! {
-                                    option {
-                                        value: "{value}",
-                                        "data-contract": section
-                                            .section
-                                            .contract
-                                            .map(|id| id.to_string())
-                                            .unwrap_or_default(),
-                                        "data-pages": crate::components::app::section_contract::pages_for(
-                                            board_data.owner_vk,
-                                            id,
-                                        )
-                                        .len()
-                                        .to_string(),
-                                        "data-page-size": crate::components::app::section_contract::page_size_for(
-                                            board_data.owner_vk,
-                                            id,
-                                        )
-                                        .map(|size| size.to_string())
+                select {
+                    class: "w-full px-3 py-2 bg-panel border border-border rounded-lg text-text",
+                    value: "{selected_value}",
+                    onchange: move |event| {
+                        let value = event.value();
+                        let parsed = if value.is_empty() {
+                            None
+                        } else {
+                            bs58::decode(&value)
+                                .into_vec()
+                                .ok()
+                                .and_then(|bytes| bytes.try_into().ok())
+                                .map(MessageId::from_bytes)
+                        };
+                        section_choice.set(Some(parsed));
+                    },
+                    for section in sections.iter() {
+                        {
+                            let id = section.section.id;
+                            let value = bs58::encode(id.as_bytes()).into_string();
+                            let label = topic_contract::section_name(&board_data, &id)
+                                .unwrap_or_else(|| "Section".to_string());
+                            rsx! {
+                                option {
+                                    value: "{value}",
+                                    "data-contract": section
+                                        .section
+                                        .contract
+                                        .map(|id| id.to_string())
                                         .unwrap_or_default(),
-                                        "{label}"
-                                    }
+                                    "data-pages": crate::components::app::section_contract::pages_for(
+                                        board_data.owner_vk,
+                                        id,
+                                    )
+                                    .len()
+                                    .to_string(),
+                                    "data-page-size": crate::components::app::section_contract::page_size_for(
+                                        board_data.owner_vk,
+                                        id,
+                                    )
+                                    .map(|size| size.to_string())
+                                    .unwrap_or_default(),
+                                    "{label}"
                                 }
                             }
                         }
