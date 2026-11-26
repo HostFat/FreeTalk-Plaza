@@ -66,13 +66,24 @@ impl SealedBytes {
         matches!(self, Self::Private { .. })
     }
 
-    /// Get the declared length in bytes for validation
+    /// Standard AEAD authentication tag overhead (AES-256-GCM / XChaCha20-Poly1305).
+    pub const AEAD_TAG_LEN: usize = 16;
+
+    /// Get the effective length in bytes for validation.
+    ///
+    /// For `Private` values, takes the maximum of `declared_len_bytes` and
+    /// `ciphertext.len().saturating_sub(AEAD_TAG_LEN)` so an attacker cannot
+    /// smuggle a multi-megabyte ciphertext past size caps by claiming
+    /// `declared_len_bytes: 0`.
     pub fn declared_len(&self) -> usize {
         match self {
             Self::Public { value } => value.len(),
             Self::Private {
-                declared_len_bytes, ..
-            } => *declared_len_bytes as usize,
+                ciphertext,
+                declared_len_bytes,
+                ..
+            } => (*declared_len_bytes as usize)
+                .max(ciphertext.len().saturating_sub(Self::AEAD_TAG_LEN)),
         }
     }
 

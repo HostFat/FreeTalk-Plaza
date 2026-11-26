@@ -78,6 +78,8 @@ fn join(
         joined_at: now,
         devices: vec![AuthorizedDmDevice::new(device, invitee_identity)],
         left_at: None,
+        conversation_id: fixture.state.meta.conversation_id,
+        join_token: None,
     };
     let mut used = invite.clone();
     used.mark_used(identity, now, &fixture.creator_identity);

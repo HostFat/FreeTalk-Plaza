@@ -26,7 +26,7 @@ pub const MAX_REPORTS_PER_WINDOW: usize = 60;
 /// epoch clamp to 0; the value only orders records from the same signer.
 pub fn system_time_ms(time: std::time::SystemTime) -> i64 {
     time.duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
 }
 
@@ -42,14 +42,14 @@ pub fn system_time_from_ms(ms: i64) -> std::time::SystemTime {
 /// Whether `times` contains more than `limit` records inside a window of
 /// `window_ms`. The window is half-open: `[t, t + window_ms)`.
 pub fn exceeds_window(times: &[i64], window_ms: i64, limit: usize) -> bool {
-    if limit == 0 || times.len() <= limit {
+    if limit == 0 || window_ms <= 0 || times.len() <= limit {
         return false;
     }
     let mut sorted = times.to_vec();
     sorted.sort_unstable();
     let mut start = 0;
     for end in 0..sorted.len() {
-        while sorted[end] - sorted[start] >= window_ms {
+        while start < end && sorted[end].saturating_sub(sorted[start]) >= window_ms {
             start += 1;
         }
         if end - start + 1 > limit {
@@ -65,11 +65,11 @@ pub fn exceeding_member(
     window_ms: i64,
     limit: usize,
 ) -> Option<MemberId> {
-    if limit == 0 {
+    if limit == 0 || window_ms <= 0 {
         return None;
     }
-    let mut by_member: std::collections::HashMap<MemberId, Vec<i64>> =
-        std::collections::HashMap::new();
+    let mut by_member: std::collections::BTreeMap<MemberId, Vec<i64>> =
+        std::collections::BTreeMap::new();
     for (member, time) in records {
         by_member.entry(member).or_default().push(time);
     }

@@ -1,25 +1,29 @@
 use super::*;
 
-/// Helper function to create a unique secret key for an origin's data
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// Helper function to create a unique, collision-free secret key for an origin's data.
 pub(crate) fn create_origin_key(origin: &Origin, key: &ChatDelegateKey) -> Vec<u8> {
     format!(
         "{}{}{}",
         origin.to_b58(),
-        ORIGIN_KEY_SEPARATOR,
-        String::from_utf8_lossy(key.as_bytes())
+        DATA_KEY_TAG,
+        hex_encode(key.as_bytes())
     )
     .into_bytes()
 }
 
-/// Helper function to create an index key for an origin
+/// Helper function to create an index key for an origin, disjoint from data keys.
 pub(crate) fn create_index_key(origin: &Origin) -> Vec<u8> {
-    format!(
-        "{}{}{}",
-        origin.to_b58(),
-        ORIGIN_KEY_SEPARATOR,
-        KEY_INDEX_SUFFIX
-    )
-    .into_bytes()
+    format!("{}{}", origin.to_b58(), INDEX_KEY_TAG).into_bytes()
 }
 
 /// Helper function to create an app response

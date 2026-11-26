@@ -238,6 +238,9 @@ impl BlobStateV1 {
             let Some(proof) = self.retirement.as_ref() else {
                 return Err("Retired blob has no retirement proof".to_string());
             };
+            if !self.mime.is_empty() && !ALLOWED_MIME_TYPES.contains(&self.mime.as_str()) {
+                return Err(format!("Retired blob mime type not allowed: {}", self.mime));
+            }
             if !self.data.is_empty() || !self.chunks.is_empty() {
                 return Err("Retired blob still carries content".to_string());
             }
@@ -397,7 +400,9 @@ impl BlobStateV1 {
 }
 
 /// Merge an update into the current state. Retirement wins and is final: a
-/// retired blob can never come back with content.
+/// retired blob can never come back with content. Ties (both retired or both
+/// live with differing metadata) are broken deterministically so merging is
+/// commutative across peers.
 pub fn merge_states(
     current: &BlobStateV1,
     incoming: &BlobStateV1,
@@ -405,15 +410,28 @@ pub fn merge_states(
 ) -> Result<BlobStateV1, String> {
     current.validate(parameters)?;
     incoming.validate(parameters)?;
-    if current.retired {
-        return Ok(current.clone());
+    match (current.retired, incoming.retired) {
+        (true, false) => Ok(current.clone()),
+        (false, true) => Ok(incoming.clone()),
+        _ => {
+            if current == incoming {
+                return Ok(current.clone());
+            }
+            let current_hash = canonical_blob_hash(current);
+            let incoming_hash = canonical_blob_hash(incoming);
+            if incoming_hash < current_hash {
+                Ok(incoming.clone())
+            } else {
+                Ok(current.clone())
+            }
+        }
     }
-    if incoming.retired {
-        return Ok(incoming.clone());
-    }
-    // Both live: the hash in the parameters fixes the content, so keep the
-    // state we already have.
-    Ok(current.clone())
+}
+
+fn canonical_blob_hash(state: &BlobStateV1) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    let _ = ciborium::ser::into_writer(state, &mut bytes);
+    sha256(&bytes)
 }
 
 #[cfg(test)]

@@ -388,11 +388,12 @@ impl PqSecretsV1 {
         self.keys.sort_by_key(|entry| {
             (
                 entry.key.member_id.0 .0,
-                entry.key.version,
+                std::cmp::Reverse(entry.key.version),
                 entry.signer_id(parameters).0 .0,
             )
         });
         self.keys.dedup_by_key(|entry| entry.key.member_id);
+        self.keys.sort_by_key(|entry| entry.key.member_id.0 .0);
 
         // A set is one signed blob, so a secret for a departed member cannot
         // be trimmed without breaking the signature. `verify_set` rejects the
@@ -414,11 +415,12 @@ impl PqSecretsV1 {
         self.sets.sort_by_key(|entry| {
             (
                 entry.set.scope.clone(),
-                entry.set.version,
-                entry.signer_id(parameters).0 .0,
+                std::cmp::Reverse(entry.set.version),
+                std::cmp::Reverse(set_digest(entry)),
             )
         });
         self.sets.dedup_by_key(|entry| entry.set.scope.clone());
+        self.sets.sort_by_key(|entry| entry.set.scope.clone());
     }
 }
 
@@ -559,6 +561,8 @@ impl ComposableState for PqSecretsV1 {
                 }
             }
         }
+        candidate.keys.sort_by_key(|entry| entry.key.member_id.0 .0);
+        candidate.sets.sort_by_key(|entry| entry.set.scope.clone());
         *self = candidate;
         Ok(())
     }

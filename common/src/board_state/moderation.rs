@@ -458,6 +458,34 @@ fn verify_scope_chain(state: &ChatBoardStateV1, chain: &[MessageId]) -> Result<(
     Ok(())
 }
 
+/// Bind a signer-supplied `claimed` scope chain to the target's actual category
+/// chain in `routes` so a scoped moderator cannot spoof a different section.
+pub(crate) fn resolved_scope_chain(
+    state: &ChatBoardStateV1,
+    routes: &BTreeMap<MessageId, RouteState>,
+    target: &MessageId,
+    claimed: &[MessageId],
+) -> Result<Vec<MessageId>, String> {
+    verify_scope_chain(state, claimed)?;
+    let actual = category_chain(routes, target);
+    if claimed.is_empty() {
+        return Ok(actual);
+    }
+    if actual.is_empty() || !claimed.starts_with(&actual) {
+        return Err("Claimed scope chain does not match target category".to_string());
+    }
+    if claimed.len() > actual.len() {
+        let chain_complete = actual
+            .last()
+            .and_then(|id| routes.get(id))
+            .is_some_and(|route| route.parent_category_id.is_none());
+        if chain_complete || claimed[actual.len()..].iter().any(|id| routes.contains_key(id)) {
+            return Err("Claimed scope chain contains unauthorized sections".to_string());
+        }
+    }
+    Ok(claimed.to_vec())
+}
+
 fn thread_descendants(state: &ChatBoardStateV1, topic: &MessageId) -> Vec<MessageId> {
     let mut children: BTreeMap<MessageId, Vec<MessageId>> = BTreeMap::new();
     for route in &state.moderation.routes {
@@ -693,8 +721,7 @@ fn verify_feature_flag(
         return Err("Feature flags apply to posts".to_string());
     }
 
-    let chain = flag.scope_chain.clone();
-    verify_scope_chain(state, &chain)?;
+    let chain = resolved_scope_chain(state, routes, &flag.target, &flag.scope_chain)?;
     let proof = entry.authority.as_deref();
     let at = crate::board_state::rate_limit::system_time_from_ms(flag.created_at);
     match flag.kind {
@@ -760,8 +787,12 @@ fn verify_feature_flag(
                     }
                     current = route_parent(routes, &id);
                 }
-                let destination_chain = flag.destination_scope_chain.clone();
-                verify_scope_chain(state, &destination_chain)?;
+                let destination_chain = resolved_scope_chain(
+                    state,
+                    routes,
+                    &destination,
+                    &flag.destination_scope_chain,
+                )?;
                 verify_moderation_authority(
                     state,
                     parameters,
@@ -886,10 +917,18 @@ fn verify_move(
                 }
                 current = route_parent(routes, &id);
             }
-            let from = entry.change.scope_chain.clone();
-            let to = entry.change.new_scope_chain.clone();
-            verify_scope_chain(state, &from)?;
-            verify_scope_chain(state, &to)?;
+            let from = resolved_scope_chain(
+                state,
+                routes,
+                &entry.change.target,
+                &entry.change.scope_chain,
+            )?;
+            let to = resolved_scope_chain(
+                state,
+                routes,
+                &parent_id,
+                &entry.change.new_scope_chain,
+            )?;
             verify_moderation_authority(
                 state,
                 parameters,
@@ -912,8 +951,12 @@ fn verify_move(
             .map_err(|_| "Signer cannot move this post here".to_string())?;
         }
         None => {
-            let from = entry.change.scope_chain.clone();
-            verify_scope_chain(state, &from)?;
+            let from = resolved_scope_chain(
+                state,
+                routes,
+                &entry.change.target,
+                &entry.change.scope_chain,
+            )?;
             verify_moderation_authority(
                 state,
                 parameters,
@@ -1008,16 +1051,16 @@ impl ModerationV1 {
         parameters: &ChatBoardParametersV1,
     ) -> Result<(), String> {
         let routes = route_map(&self.routes);
-        let flags = feature_flag_map(&self.feature_flags);
 
         for message in &state.recent_messages.messages {
             let message_id = message.id();
+            let message_time_ms =
+                crate::board_state::rate_limit::system_time_ms(message.message.time);
             if let Some(route) = routes.get(&message_id) {
                 if let Some(target) = route.reply_to {
-                    if flags
-                        .get(&(target, FeatureKind::Closed))
-                        .map(|flag| flag.value)
-                        .unwrap_or(false)
+                    if self
+                        .feature_flag_for(&target, FeatureKind::Closed)
+                        .is_some_and(|flag| flag.value && message_time_ms >= flag.created_at)
                     {
                         return Err("Cannot reply to a closed post".to_string());
                     }
@@ -1037,10 +1080,9 @@ impl ModerationV1 {
             let Some(action) = action else {
                 continue;
             };
-            if flags
-                .get(&(action.target, FeatureKind::Closed))
-                .map(|flag| flag.value)
-                .unwrap_or(false)
+            if self
+                .feature_flag_for(&action.target, FeatureKind::Closed)
+                .is_some_and(|flag| flag.value && message_time_ms >= flag.created_at)
             {
                 return Err("Cannot modify a closed post".to_string());
             }
@@ -1087,7 +1129,7 @@ impl ModerationV1 {
         self.routes.sort_by_key(|entry| {
             (
                 entry.route.message_id.0 .0,
-                entry.route.generation,
+                std::cmp::Reverse(entry.route.generation),
                 entry.signer_id(parameters).0 .0,
             )
         });
@@ -1103,7 +1145,7 @@ impl ModerationV1 {
             (
                 entry.flag.target.0 .0,
                 entry.flag.kind,
-                entry.flag.generation,
+                std::cmp::Reverse(entry.flag.generation),
                 entry.signer_id(parameters).0 .0,
             )
         });
@@ -1119,7 +1161,7 @@ impl ModerationV1 {
         self.moves.sort_by_key(|entry| {
             (
                 entry.change.target.0 .0,
-                entry.change.generation,
+                std::cmp::Reverse(entry.change.generation),
                 entry.signer_id(parameters).0 .0,
             )
         });
@@ -1132,9 +1174,16 @@ impl ModerationV1 {
             live.contains(&entry.change.topic)
                 && verify_thread_move(state, parameters, &routes, entry).is_ok()
         });
-        self.thread_moves
-            .sort_by_key(|entry| (entry.change.topic.0 .0, entry.change.generation));
+        self.thread_moves.sort_by_key(|entry| {
+            (
+                entry.change.topic.0 .0,
+                std::cmp::Reverse(entry.change.generation),
+                thread_digest(&entry.change),
+            )
+        });
         self.thread_moves.dedup_by_key(|entry| entry.change.topic);
+        self.thread_moves
+            .sort_by_key(|entry| entry.change.topic.0 .0);
     }
 }
 

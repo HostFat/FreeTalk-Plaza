@@ -426,7 +426,7 @@ impl SuspensionsV1 {
         self.suspensions.sort_by_key(|entry| {
             (
                 entry.suspension.target.0 .0,
-                entry.suspension.generation,
+                std::cmp::Reverse(entry.suspension.generation),
                 entry.signer_id(parameters).0 .0,
             )
         });

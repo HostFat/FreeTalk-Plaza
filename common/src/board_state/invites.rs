@@ -274,8 +274,8 @@ impl ComposableState for InviteTokensV1 {
                     .created_at
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                 let owner_then = parent_state.ownership.owner_at(parameters, at);
-                if signer != parameters.owner_id()
-                    && signer != owner_then
+                if signer != owner_then
+                    && !crate::board_state::roles::is_board_admin(parent_state, &signer)
                     && !parent_state.roles.can_manage_access(&signer)
                 {
                     return Err("Invite link signer cannot manage access".to_string());

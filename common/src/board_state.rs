@@ -301,7 +301,11 @@ impl ChatBoardStateV1 {
     }
 
     /// Verify every field except the records the authority root covers.
-    /// Callers must have checked `authority_root_matches` first.
+    /// Callers must have checked `authority_root_matches` first. Any collection
+    /// containing records outside the Merkle tree (unassigned roles, bans with
+    /// `target_member: None`, non-member revocations/suspensions, or duplicate
+    /// member_info) is verified in full so attackers cannot smuggle unsigned
+    /// records past the root.
     fn verify_without_authority_records(
         &self,
         parameters: &ChatBoardParametersV1,
@@ -310,7 +314,7 @@ impl ChatBoardStateV1 {
         self.admin.verify(self, parameters)?;
         self.ownership.verify(self, parameters)?;
         self.invites.verify(self, parameters)?;
-        self.verify_uncovered_member_info(parameters)?;
+        self.verify_uncovered_authority_records(parameters)?;
         self.category_secrets.verify(self, parameters)?;
         self.secrets.verify(self, parameters)?;
         self.recent_messages.verify(self, parameters)?;
@@ -332,10 +336,11 @@ impl ChatBoardStateV1 {
         Ok(())
     }
 
-    /// The authority root covers the nickname of every member and ban target.
-    /// Verify only the records outside that set (the owner and stale entries);
-    /// the root has already attested the rest.
-    fn verify_uncovered_member_info(
+    /// Verify any authority-related records not attested by the Merkle tree:
+    /// - member_info for owner, non-covered members, or duplicate entries
+    /// - unassigned roles or assignments targeting non-covered members
+    /// - bans, ban revocations, or suspensions targeting non-covered members
+    fn verify_uncovered_authority_records(
         &self,
         parameters: &ChatBoardParametersV1,
     ) -> Result<(), String> {
@@ -346,13 +351,76 @@ impl ChatBoardStateV1 {
                 covered.insert(target.member.id());
             }
         }
+
+        // Roles: AuthorityTree only hashes roles referenced by an assignment of
+        // a covered member. If any role is unassigned or any assignment targets
+        // an uncovered member, verify the whole RolesV1 collection.
+        let covered_role_ids: std::collections::HashSet<_> = self
+            .roles
+            .assignments
+            .iter()
+            .filter(|a| covered.contains(&a.assignment.member_id))
+            .map(|a| a.assignment.role_id)
+            .collect();
+        let has_uncovered_roles = self
+            .roles
+            .roles
+            .iter()
+            .any(|r| !covered_role_ids.contains(&r.role.id))
+            || self
+                .roles
+                .assignments
+                .iter()
+                .any(|a| !covered.contains(&a.assignment.member_id));
+        if has_uncovered_roles {
+            self.roles.verify(self, parameters)?;
+        }
+
+        // Bans, revocations, suspensions targeting uncovered IDs.
+        if self.bans.0.iter().any(|b| !covered.contains(&b.ban.banned_user)) {
+            self.bans.verify(self, parameters)?;
+        }
+        if self
+            .ban_revocations
+            .revocations
+            .iter()
+            .any(|r| !covered.contains(&r.revocation.banned_user))
+        {
+            self.ban_revocations.verify(self, parameters)?;
+        }
+        if self
+            .suspensions
+            .suspensions
+            .iter()
+            .any(|s| !covered.contains(&s.suspension.target))
+        {
+            self.suspensions.verify(self, parameters)?;
+        }
+
+        // MemberInfo: AuthorityTree only hashes the max-version entry per
+        // covered member. Verify owner, uncovered members, and any duplicate
+        // entries for covered members.
+        let mut max_version_by_member: std::collections::HashMap<MemberId, u32> =
+            std::collections::HashMap::new();
+        for info in &self.member_info.member_info {
+            let id = info.member_info.member_id;
+            max_version_by_member
+                .entry(id)
+                .and_modify(|v| *v = (*v).max(info.member_info.version))
+                .or_insert(info.member_info.version);
+        }
+        let mut seen_covered_max = std::collections::HashSet::new();
         let uncovered: Vec<_> = self
             .member_info
             .member_info
             .iter()
             .filter(|info| {
                 let id = info.member_info.member_id;
-                id == parameters.owner_id() || !covered.contains(&id)
+                if id == parameters.owner_id() || !covered.contains(&id) {
+                    return true;
+                }
+                let is_max = max_version_by_member.get(&id) == Some(&info.member_info.version);
+                !(is_max && seen_covered_max.insert(id))
             })
             .cloned()
             .collect();
@@ -962,12 +1030,18 @@ impl ChatBoardStateV1 {
             .sort_by_key(|info| info.member_info.member_id);
 
         // The root is a commitment, not the authority itself. A member-driven
-        // delta or member cleanup can change the tree without a new owner
-        // signature; drop the stale root and let the owner sign a new one on
-        // the next sync. Topics then use the full authority lists.
+        // delta, member cleanup, or ownership transfer can invalidate it
+        // without a new owner signature; drop the stale root and let the
+        // current owner sign a new one on the next sync. Topics then use the
+        // full authority lists.
         if let Some(root) = &self.authority_root.0 {
+            let superseded_by_transfer = self.ownership.transfers.last().is_some_and(|t| {
+                root.root.epoch
+                    < crate::board_state::rate_limit::system_time_ms(t.transfer.transferred_at)
+            });
             let tree = crate::board_state::authority::AuthorityTreeV1::from_board(self);
-            if tree.root(root.root.epoch).digest != root.root.digest
+            if superseded_by_transfer
+                || tree.root(root.root.epoch).digest != root.root.digest
                 || tree.content_hash() != root.root.content_hash
             {
                 self.authority_root.0 = None;
@@ -981,27 +1055,15 @@ impl ChatBoardStateV1 {
     /// or deleted unreferenced invite tokens are pruned deterministically.
     pub const EXPIRED_RECORD_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 
-    /// Deterministic state-clock watermark derived strictly from signed
-    /// timestamps inside `self` (never wall clock).
+    /// Deterministic state-clock watermark derived strictly from owner-signed
+    /// timestamps inside `self` (never wall clock, and never moderator-signed
+    /// timestamps that could be inflated to prematurely purge records).
     pub fn deterministic_watermark_ms(&self) -> i64 {
         let mut max_ms = crate::board_state::rate_limit::system_time_ms(
             self.configuration.configuration.updated_at,
         );
         if let Some(root) = &self.authority_root.0 {
             max_ms = max_ms.max(root.root.epoch);
-        }
-        for section in &self.sections.sections {
-            max_ms = max_ms.max(crate::board_state::rate_limit::system_time_ms(
-                section.section.signed_at,
-            ));
-        }
-        for suspension in &self.suspensions.suspensions {
-            max_ms = max_ms.max(suspension.suspension.created_at);
-        }
-        for token in &self.invites.tokens {
-            if let Some(created_at) = token.token.created_at {
-                max_ms = max_ms.max(crate::board_state::rate_limit::system_time_ms(created_at));
-            }
         }
         for transfer in &self.ownership.transfers {
             max_ms = max_ms.max(crate::board_state::rate_limit::system_time_ms(
@@ -1058,9 +1120,6 @@ impl ChatBoardStateV1 {
             let Some(max) = token.token.max_uses else {
                 continue;
             };
-            if token.token.deleted {
-                continue;
-            }
             let mut joined: Vec<MemberId> = self
                 .members
                 .members

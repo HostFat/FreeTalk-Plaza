@@ -169,7 +169,7 @@ impl ContractInterface for ActivityContract {
 
 #[no_mangle]
 pub extern "C" fn plaza_activity_contract_revision() -> u32 {
-    3
+    plaza_core::CONTRACT_REVISION
 }
 
 #[cfg(test)]

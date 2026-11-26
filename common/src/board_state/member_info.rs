@@ -25,8 +25,17 @@ impl MemberInfoV1 {
     ) -> Result<(), String> {
         let members_by_id = parent_state.members.members_by_member_id();
         let owner_id = parameters.owner_id();
+        let max_nickname_size = parent_state.configuration.configuration.max_nickname_size;
 
         for member_info in records {
+            if member_info.member_info.preferred_nickname.declared_len() > max_nickname_size {
+                return Err(format!(
+                    "Nickname declared length {} exceeds max_nickname_size {}",
+                    member_info.member_info.preferred_nickname.declared_len(),
+                    max_nickname_size
+                ));
+            }
+
             let member_id = member_info.member_info.member_id;
 
             if member_id == owner_id {
@@ -57,6 +66,15 @@ impl ComposableState for MemberInfoV1 {
         parent_state: &Self::ParentState,
         parameters: &Self::Parameters,
     ) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::with_capacity(self.member_info.len());
+        for info in &self.member_info {
+            if !seen.insert(info.member_info.member_id) {
+                return Err(format!(
+                    "Duplicate MemberInfo for member {:?}",
+                    info.member_info.member_id
+                ));
+            }
+        }
         self.verify_records(parent_state, parameters, &self.member_info)
     }
 

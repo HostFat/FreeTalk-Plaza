@@ -27,7 +27,7 @@ use crate::{
     AuthorizedParticipantV1, AuthorizedTopicActionV1, AuthorizedTopicApprovalV1,
     AuthorizedTopicPostV1, AuthorizedTrustV1, SectionId, TopicActionKind, TopicAuthorityV1,
     TopicGenerationV1, TopicParamsV1, MAX_BODY_BYTES, MAX_IMAGES_PER_POST, MAX_PARTS,
-    MAX_POSTS, MAX_POST_BYTES, PROTOCOL_VERSION,
+    MAX_POSTS, MAX_POST_BYTES, MAX_REACTION_PAYLOAD_BYTES, PROTOCOL_VERSION,
 };
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use freenet_scaffold::ComposableState;
@@ -546,9 +546,20 @@ impl TopicPageStateV1 {
         if self
             .generation
             .next_part
-            .is_some_and(|part| part != params.part + 1)
+            .is_some_and(|part| part != params.part + 1 || part > MAX_PARTS)
         {
             return Err("the next topic page part is invalid".to_string());
+        }
+        if self.generation.closed_at.is_some() && self.seal.is_none() {
+            let at_capacity = self.posts.len() >= header.header.max_posts as usize
+                || encode(self)
+                    .map(|bytes| bytes.len() >= MAX_TOPIC_PAGE_BYTES * 3 / 4)
+                    .unwrap_or(false);
+            if !at_capacity {
+                return Err(
+                    "an unsealed topic page cannot be closed before reaching capacity".to_string(),
+                );
+            }
         }
         if self.generation.previous_hash != Some(header.header.previous_hash) {
             return Err("page generation previous_hash does not match page header".to_string());
@@ -856,6 +867,14 @@ impl TopicPageStateV1 {
             action.kind,
             TopicActionKind::React | TopicActionKind::Unreact | TopicActionKind::Vote
         ) {
+            if action.payload.declared_len() > MAX_REACTION_PAYLOAD_BYTES {
+                return Err("reaction or vote payload is too large".to_string());
+            }
+            if matches!(action.kind, TopicActionKind::React | TopicActionKind::Unreact)
+                && !self.authority.policy().reactions_enabled
+            {
+                return Err("reactions are disabled by the topic policy".to_string());
+            }
             let is_member = signer == board_params.owner_id()
                 || self
                     .participants
@@ -878,6 +897,12 @@ impl TopicPageStateV1 {
                 TopicActionKind::Edit | TopicActionKind::Delete | TopicActionKind::EditPoll
             )
         {
+            if signer != board_params.owner_id()
+                && (is_member_banned(&self.authority, signer, action.created_at)
+                    || is_member_suspended(&self.authority, signer, action.created_at))
+            {
+                return Err("a banned or suspended member cannot modify posts".to_string());
+            }
             return Ok(());
         }
 
@@ -1171,8 +1196,11 @@ impl TopicPageStateV1 {
         params: &TopicParamsV1,
         delta: &TopicPageDeltaV1,
     ) -> Result<(), String> {
-        let _ = self.apply_delta_merge(params, delta)?;
-        self.verify(params)
+        let mut next = self.clone();
+        let _ = next.apply_delta_merge(params, delta)?;
+        next.verify(params)?;
+        *self = next;
+        Ok(())
     }
 
     pub fn apply_delta_incremental(
@@ -1180,8 +1208,11 @@ impl TopicPageStateV1 {
         params: &TopicParamsV1,
         delta: &TopicPageDeltaV1,
     ) -> Result<(), String> {
-        let just_sealed = self.apply_delta_merge(params, delta)?;
-        self.verify_incremental(params, delta, just_sealed)
+        let mut next = self.clone();
+        let just_sealed = next.apply_delta_merge(params, delta)?;
+        next.verify_incremental(params, delta, just_sealed)?;
+        *self = next;
+        Ok(())
     }
 
     pub fn merge(
@@ -1231,6 +1262,7 @@ impl TopicPageStateV1 {
             self.authority.ownership = merged_ownership;
             self.authority.admins = merged_admins;
             self.generation = merged_gen;
+            merged_post_seal.retain(|action| self.posts.contains_key(&action.action.target));
             self.post_seal_actions = merged_post_seal;
             self.compact_for_seal();
             self.normalize();
@@ -1471,8 +1503,8 @@ impl TopicPageStateV1 {
         let restore = self.latest_action(target, TopicActionKind::Restore);
         match (delete, restore) {
             (Some(delete), Some(restore)) => {
-                (delete.action.generation, delete.id())
-                    > (restore.action.generation, restore.id())
+                (delete.action.generation, std::cmp::Reverse(delete.id()))
+                    > (restore.action.generation, std::cmp::Reverse(restore.id()))
             }
             (Some(_), None) => true,
             _ => false,

@@ -971,8 +971,13 @@ impl SectionPageStateV1 {
                     board.members.verify(&board, &board_params)?;
                     board.ownership.verify(&board, &board_params)?;
                 }
-                header.verify(params, &next.ownership)?;
-                incoming_seal.verify(params, &next.ownership, &next.entries)?;
+                header.verify_with_admins(params, &next.ownership, &next.admin)?;
+                incoming_seal.verify_with_admins(
+                    params,
+                    &next.ownership,
+                    &next.admin,
+                    &next.entries,
+                )?;
                 next.seal = Some(incoming_seal.clone());
             }
             // Apply any edits included alongside or on top of the seal.
@@ -986,8 +991,15 @@ impl SectionPageStateV1 {
         }
 
         if next.seal.is_some() {
-            // Already sealed: reject any entry mutations that are not already
-            // present in the sealed entries.
+            // Already sealed: verify any incoming ownership/admin updates and
+            // reject any entry mutations not already present in the sealed entries.
+            if ownership_or_admin_changed {
+                let board = next.verification_board();
+                board.admin.verify(&board, &board_params)?;
+                if !next.ownership.transfers.is_empty() {
+                    board.ownership.verify(&board, &board_params)?;
+                }
+            }
             for entry in &delta.entries {
                 let already_exact = next.entries.iter().any(|e| e == entry);
                 if !already_exact {
@@ -1010,9 +1022,25 @@ impl SectionPageStateV1 {
 
         let mut new_invites = Vec::new();
         for token in &delta.invites {
-            if !next.invites.iter().any(|t| t.token.id == token.token.id) {
-                next.invites.push(token.clone());
-                new_invites.push(token.clone());
+            match next
+                .invites
+                .iter_mut()
+                .find(|t| t.token.id == token.token.id)
+            {
+                Some(existing) => {
+                    if token.token.generation > existing.token.generation
+                        || (token.token.generation == existing.token.generation
+                            && token.token.deleted
+                            && !existing.token.deleted)
+                    {
+                        *existing = token.clone();
+                        new_invites.push(token.clone());
+                    }
+                }
+                None => {
+                    next.invites.push(token.clone());
+                    new_invites.push(token.clone());
+                }
             }
         }
         let mut roles_changed = false;
@@ -1079,7 +1107,7 @@ impl SectionPageStateV1 {
             if !next.ownership.transfers.is_empty() {
                 board.ownership.verify(&board, &board_params)?;
             }
-            header.verify(params, &next.ownership)?;
+            header.verify_with_admins(params, &next.ownership, &next.admin)?;
         }
         if roles_changed || ownership_or_admin_changed {
             board.roles.verify(&board, &board_params)?;

@@ -227,7 +227,18 @@ impl ComposableState for TopicPageListV1 {
         delta: &Option<Self::Delta>,
     ) -> Result<(), String> {
         if let Some(list) = delta {
-            self.0 = Some(list.clone());
+            list.verify_against(parent_state, parameters)?;
+            let take = match &self.0 {
+                None => true,
+                Some(current) => {
+                    list.data.updated_at > current.data.updated_at
+                        || (list.data.updated_at == current.data.updated_at
+                            && list.signature.to_bytes() < current.signature.to_bytes())
+                }
+            };
+            if take {
+                self.0 = Some(list.clone());
+            }
         }
         self.verify(parent_state, parameters)
     }

@@ -7,7 +7,7 @@
 
 use crate::{
     AuthorizedDmMessage, AuthorizedSealedDmKey, DmContractId, DmDevice, DmDeviceId, DmIdentityId,
-    DmMessageId, SealedDmKey,
+    DmMessageId,
 };
 use ed25519_dalek::Signature;
 use serde::{Deserialize, Serialize};
@@ -91,6 +91,8 @@ pub enum DmDelegateRequestMsg {
         identity: DmIdentityId,
         device_id: DmDeviceId,
         conversation_id: [u8; 32],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        join_token: Option<[u8; 32]>,
         created_at: i64,
     },
     StoreConversationKey {
@@ -156,12 +158,12 @@ pub enum DmDelegateRequestMsg {
         nonce: [u8; 24],
         sealed_at: i64,
     },
-    /// Decrypt a sealed key with a local device and store it in the index.
+    /// Verify and decrypt a signed sealed key with a local device and store it in the index.
     OpenConversationKey {
         identity: DmIdentityId,
         device_id: DmDeviceId,
         contract_key: DmContractId,
-        record: SealedDmKey,
+        record: AuthorizedSealedDmKey,
     },
     /// Encrypt a message with the stored conversation key and sign it with
     /// the device key. The caller supplies the AEAD nonce.
@@ -207,7 +209,7 @@ pub struct DmConversationInfo {
     pub draft: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DmDeviceBackup {
     pub device: DmDevice,
     pub label: String,
@@ -216,7 +218,19 @@ pub struct DmDeviceBackup {
     pub kem_seed: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+impl std::fmt::Debug for DmDeviceBackup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DmDeviceBackup")
+            .field("device", &self.device)
+            .field("label", &self.label)
+            .field("signing_seed", &"<redacted>")
+            .field("x25519_seed", &"<redacted>")
+            .field("kem_seed", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DmKeyBackup {
     pub contract_key: DmContractId,
     pub key_version: u32,
@@ -224,13 +238,36 @@ pub struct DmKeyBackup {
     pub created_at: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+impl std::fmt::Debug for DmKeyBackup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DmKeyBackup")
+            .field("contract_key", &self.contract_key)
+            .field("key_version", &self.key_version)
+            .field("key", &"<redacted>")
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DmIdentityBackup {
     pub identity_seed: [u8; 32],
     pub devices: Vec<DmDeviceBackup>,
     pub conversations: Vec<DmConversationInfo>,
     pub keys: Vec<DmKeyBackup>,
     pub blocked: Vec<DmIdentityId>,
+}
+
+impl std::fmt::Debug for DmIdentityBackup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DmIdentityBackup")
+            .field("identity_seed", &"<redacted>")
+            .field("devices", &self.devices.len())
+            .field("conversations", &self.conversations.len())
+            .field("keys", &self.keys.len())
+            .field("blocked", &self.blocked.len())
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
