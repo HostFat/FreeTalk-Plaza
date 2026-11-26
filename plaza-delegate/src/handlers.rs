@@ -149,6 +149,20 @@ pub(crate) fn handle_application_message(
 // Key-Value Storage Handlers
 // ============================================================================
 
+const MAX_KEY_BYTES: usize = 1024;
+const MAX_VALUE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_INDEX_KEYS: usize = 4_096;
+const MAX_SIGN_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
+
+fn wipe_bytes(buf: &mut [u8]) {
+    for byte in buf.iter_mut() {
+        unsafe {
+            core::ptr::write_volatile(byte, 0);
+        }
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Handle a store request - stores value and updates the index
 fn handle_store_request(
     ctx: &mut DelegateCtx,
@@ -156,9 +170,42 @@ fn handle_store_request(
     key: ChatDelegateKey,
     value: Vec<u8>,
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
+    if key.as_bytes().is_empty() || key.as_bytes().len() > MAX_KEY_BYTES {
+        let response = ChatDelegateResponseMsg::StoreResponse {
+            key,
+            result: Err(format!(
+                "Key length must be between 1 and {MAX_KEY_BYTES} bytes"
+            )),
+            value_size: 0,
+        };
+        return Ok(vec![create_app_response(&response)?]);
+    }
+    if value.len() > MAX_VALUE_BYTES {
+        let response = ChatDelegateResponseMsg::StoreResponse {
+            key,
+            result: Err(format!(
+                "Value exceeds maximum size of {MAX_VALUE_BYTES} bytes"
+            )),
+            value_size: 0,
+        };
+        return Ok(vec![create_app_response(&response)?]);
+    }
+
     // Create a unique key for this origin's data
     let secret_key = create_origin_key(origin, &key);
     let index_key = create_index_key(origin);
+
+    // Load index first so decode corruption or cap violation fails before writing.
+    let mut key_index = get_key_index(ctx, &index_key)?;
+    let is_new_key = !key_index.keys.contains(&key);
+    if is_new_key && key_index.keys.len() >= MAX_INDEX_KEYS {
+        let response = ChatDelegateResponseMsg::StoreResponse {
+            key,
+            result: Err(format!("Key index cap of {MAX_INDEX_KEYS} reached")),
+            value_size: 0,
+        };
+        return Ok(vec![create_app_response(&response)?]);
+    }
 
     // Store the value directly via host function
     // Note: In WASM, set_secret returns true on success. In non-WASM tests, it always returns false.
@@ -177,8 +224,7 @@ fn handle_store_request(
     ));
 
     // Update the key index
-    let mut key_index = get_key_index(ctx, &index_key);
-    if !key_index.keys.contains(&key) {
+    if is_new_key {
         key_index.keys.push(key.clone());
         set_key_index(ctx, &index_key, &key_index)?;
         logging::info(&format!(
@@ -203,6 +249,11 @@ fn handle_get_request(
     origin: &Origin,
     key: ChatDelegateKey,
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
+    if key.as_bytes().is_empty() || key.as_bytes().len() > MAX_KEY_BYTES {
+        let response = ChatDelegateResponseMsg::GetResponse { key, value: None };
+        return Ok(vec![create_app_response(&response)?]);
+    }
+
     // Create a unique key for this origin's data
     let secret_key = create_origin_key(origin, &key);
 
@@ -225,6 +276,16 @@ fn handle_delete_request(
     origin: &Origin,
     key: ChatDelegateKey,
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
+    if key.as_bytes().is_empty() || key.as_bytes().len() > MAX_KEY_BYTES {
+        let response = ChatDelegateResponseMsg::DeleteResponse {
+            key,
+            result: Err(format!(
+                "Key length must be between 1 and {MAX_KEY_BYTES} bytes"
+            )),
+        };
+        return Ok(vec![create_app_response(&response)?]);
+    }
+
     // Create keys
     let secret_key = create_origin_key(origin, &key);
     let index_key = create_index_key(origin);
@@ -234,7 +295,7 @@ fn handle_delete_request(
     logging::info("Removed secret");
 
     // Update the key index
-    let mut key_index = get_key_index(ctx, &index_key);
+    let mut key_index = get_key_index(ctx, &index_key)?;
     key_index.keys.retain(|k| k != &key);
     set_key_index(ctx, &index_key, &key_index)?;
     logging::info(&format!(
@@ -259,7 +320,7 @@ fn handle_list_request(
     let index_key = create_index_key(origin);
 
     // Get the key index directly
-    let key_index = get_key_index(ctx, &index_key);
+    let key_index = get_key_index(ctx, &index_key)?;
     logging::info(&format!(
         "Returning list with {} keys",
         key_index.keys.len()
@@ -289,8 +350,8 @@ fn handle_list_request(
 // Keys are stored under: "signing_key:{origin_base58}:{board_key_base58}"
 //
 // This means:
-// - When River (contract A) stores a signing key, it's stored under A's origin
-// - When River requests a signature, it looks up using A's origin -> found
+// - When Plaza (contract A) stores a signing key, it's stored under A's origin
+// - When Plaza requests a signature, it looks up using A's origin -> found
 // - If malicious contract B requests a signature, it looks up using B's origin -> not found
 //
 // The private key never leaves the delegate. The UI only receives:
@@ -312,20 +373,32 @@ fn handle_store_signing_key(
     ctx: &mut DelegateCtx,
     origin: &Origin,
     board_key: BoardKey,
-    signing_key_bytes: [u8; 32],
+    mut signing_key_bytes: [u8; 32],
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
+    if signing_key_bytes == [0u8; 32] {
+        let response = ChatDelegateResponseMsg::StoreSigningKeyResponse {
+            board_key,
+            result: Err("Signing key cannot be all zeroes".to_string()),
+        };
+        return Ok(vec![create_app_response(&response)?]);
+    }
+
     let secret_key = create_signing_key_secret_key(origin, &board_key);
 
     // Store the signing key directly via host function
     // Note: In WASM, set_secret returns true on success. In non-WASM tests, it always returns false.
     #[cfg(target_family = "wasm")]
-    if !ctx.set_secret(&secret_key, &signing_key_bytes) {
+    let stored = ctx.set_secret(&secret_key, &signing_key_bytes);
+    #[cfg(not(target_family = "wasm"))]
+    let _ = ctx.set_secret(&secret_key, &signing_key_bytes);
+    wipe_bytes(&mut signing_key_bytes);
+
+    #[cfg(target_family = "wasm")]
+    if !stored {
         return Err(DelegateError::Other(
             "Failed to store signing key via host function".into(),
         ));
     }
-    #[cfg(not(target_family = "wasm"))]
-    let _ = ctx.set_secret(&secret_key, &signing_key_bytes);
 
     logging::info("Stored signing key for board");
 
@@ -347,14 +420,21 @@ fn handle_get_public_key(
     let secret_key = create_signing_key_secret_key(origin, &board_key);
 
     // Get the signing key directly via host function
-    let public_key = ctx.get_secret(&secret_key).and_then(|sk_bytes| {
-        if sk_bytes.len() == 32 {
-            let sk_array: [u8; 32] = sk_bytes.try_into().ok()?;
-            let signing_key = SigningKey::from_bytes(&sk_array);
-            Some(signing_key.verifying_key().to_bytes())
+    let public_key = ctx.get_secret(&secret_key).and_then(|mut sk_bytes| {
+        let pk = if sk_bytes.len() == 32 {
+            <[u8; 32]>::try_from(sk_bytes.as_slice())
+                .ok()
+                .map(|mut sk_array| {
+                    let signing_key = SigningKey::from_bytes(&sk_array);
+                    let vk = signing_key.verifying_key().to_bytes();
+                    wipe_bytes(&mut sk_array);
+                    vk
+                })
         } else {
             None
-        }
+        };
+        wipe_bytes(&mut sk_bytes);
+        pk
     });
 
     logging::info(&format!(
@@ -379,23 +459,36 @@ fn handle_sign_request(
     request_id: RequestId,
     data_to_sign: Vec<u8>,
 ) -> Result<Vec<OutboundDelegateMsg>, DelegateError> {
+    if data_to_sign.is_empty() || data_to_sign.len() > MAX_SIGN_PAYLOAD_BYTES {
+        let response = ChatDelegateResponseMsg::SignResponse {
+            board_key,
+            request_id,
+            signature: Err(format!(
+                "Sign payload length must be between 1 and {MAX_SIGN_PAYLOAD_BYTES} bytes"
+            )),
+        };
+        return Ok(vec![create_app_response(&response)?]);
+    }
+
     let secret_key = create_signing_key_secret_key(origin, &board_key);
 
     // Get the signing key and sign directly
     let signature: Result<Vec<u8>, String> = match ctx.get_secret(&secret_key) {
-        Some(sk_bytes) => {
-            if sk_bytes.len() == 32 {
-                // Safe: we just checked length is 32
-                let sk_array: [u8; 32] = sk_bytes.try_into().expect("length verified");
-                let signing_key = SigningKey::from_bytes(&sk_array);
-                let sig = signing_key.sign(&data_to_sign);
-                Ok(sig.to_bytes().to_vec())
-            } else {
-                Err(format!(
+        Some(mut sk_bytes) => {
+            let res = match <[u8; 32]>::try_from(sk_bytes.as_slice()) {
+                Ok(mut sk_array) => {
+                    let signing_key = SigningKey::from_bytes(&sk_array);
+                    let sig = signing_key.sign(&data_to_sign);
+                    wipe_bytes(&mut sk_array);
+                    Ok(sig.to_bytes().to_vec())
+                }
+                Err(_) => Err(format!(
                     "Invalid signing key length: expected 32, got {}",
                     sk_bytes.len()
-                ))
-            }
+                )),
+            };
+            wipe_bytes(&mut sk_bytes);
+            res
         }
         None => Err("Signing key not found for this board".to_string()),
     };
@@ -419,11 +512,14 @@ fn handle_sign_request(
 // Helper Functions
 // ============================================================================
 
-/// Get the key index from secrets, or return empty if not found
-fn get_key_index(ctx: &mut DelegateCtx, index_key: &[u8]) -> KeyIndex {
-    ctx.get_secret(index_key)
-        .and_then(|data| ciborium::from_reader::<KeyIndex, _>(data.as_slice()).ok())
-        .unwrap_or_default()
+/// Get the key index from secrets, returning an error on corrupt CBOR instead
+/// of silently wiping the index.
+fn get_key_index(ctx: &mut DelegateCtx, index_key: &[u8]) -> Result<KeyIndex, DelegateError> {
+    match ctx.get_secret(index_key) {
+        None => Ok(KeyIndex::default()),
+        Some(data) => ciborium::from_reader::<KeyIndex, _>(data.as_slice())
+            .map_err(|e| DelegateError::Deser(format!("Corrupt key index: {e}"))),
+    }
 }
 
 /// Set the key index in secrets
