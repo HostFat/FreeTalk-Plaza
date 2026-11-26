@@ -3,6 +3,7 @@ name: Rust
 on:
   push:
     branches: [ "trunk" ]
+    tags: [ "v*" ]
     paths-ignore:
       - "docs/**"
       - "**.md"
@@ -15,6 +16,16 @@ on:
       - "**.md"
       - "LICENSE"
       - ".gitignore"
+  workflow_dispatch:
+    inputs:
+      full_release:
+        description: "Build full LTO release UI (--release) instead of release-fast"
+        type: boolean
+        default: true
+      full_browsers:
+        description: "Run the full Playwright browser matrix instead of Chromium only"
+        type: boolean
+        default: false
 
 # A newer push supersedes an older run on the same branch.
 concurrency:
@@ -25,8 +36,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  # Stage 1: build the contract/delegate WASMs and Tailwind CSS once, then fan
+  # out unit tests, UI bundle build and Playwright E2E in parallel.
+  wasms:
     runs-on: ubuntu-latest
 
     steps:
@@ -43,21 +55,24 @@ jobs:
         gc-max-store-size-linux: 2G
     - uses: Swatinem/rust-cache@v2
       with:
+        key: wasms
         cache-on-failure: true
+
     - name: Build contract and delegate WASMs into their committed locations
       run: nix develop --command cargo run --quiet --manifest-path tools/wasm-tool/Cargo.toml -- sync
     - name: Check the delegate registry
       run: |
         BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
-        nix develop --command cargo run --quiet --manifest-path tools/wasm-tool/Cargo.toml -- check --ci "$BASE" "${{ github.sha }}"
+        if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ]; then
+          nix develop --command cargo run --quiet --manifest-path tools/wasm-tool/Cargo.toml -- check --ci "$BASE" "${{ github.sha }}"
+        else
+          nix develop --command cargo run --quiet --manifest-path tools/wasm-tool/Cargo.toml -- check
+        fi
     - name: Prebuild tailwind
       run: |
-        nix develop --command npm --prefix ui install
+        nix develop --command npm --prefix ui install --no-audit --no-fund
         nix develop --command npm --prefix ui run build:css
-    - name: Run tests
-      run: nix develop --command cargo test --verbose
-    - name: Build UI with dioxus
-      run: nix develop --command dx build --package plaza-ui --release
+
     - name: Upload plaza_contract.wasm
       uses: actions/upload-artifact@v4
       with:
@@ -73,13 +88,6 @@ jobs:
       with:
         name: styles.css
         path: ui/assets/styles.css
-    - name: Upload UI dist
-      uses: actions/upload-artifact@v4
-      with:
-        name: plaza-ui
-        path: target/dx/plaza-ui/release/web/public
-    # E2E reuses the contract bundle and the WASMs under target/ instead of
-    # rebuilding them on a second runner.
     - name: Upload contract bundle
       uses: actions/upload-artifact@v4
       with:
@@ -95,3 +103,222 @@ jobs:
       with:
         name: styles
         path: ui/assets/styles.css
+
+  # Stage 2a (parallel): workspace unit tests with cargo-nextest.
+  test:
+    needs: wasms
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: cachix/install-nix-action@v31
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+    - uses: nix-community/cache-nix-action@v6
+      with:
+        primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+        restore-prefixes-first-match: nix-${{ runner.os }}-
+        gc-max-store-size-linux: 2G
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: test
+        cache-on-failure: true
+    - uses: taiki-e/install-action@nextest
+
+    - name: Download contract bundle
+      uses: actions/download-artifact@v4
+      with:
+        name: contracts
+        path: ui/public/contracts
+    - name: Download target WASMs
+      uses: actions/download-artifact@v4
+      with:
+        name: wasm-target
+        path: target/wasm32-unknown-unknown/release
+    - name: Download stylesheet
+      uses: actions/download-artifact@v4
+      with:
+        name: styles
+        path: ui/assets
+
+    - name: Run tests
+      run: nix develop --command cargo nextest run --workspace --no-fail-fast
+
+  # Stage 2b (parallel): UI WASM bundle.
+  # Regular pushes and PRs build with `release-fast` (no LTO, 16 codegen units)
+  # to save ~4-5 minutes; tags (`v*`) and release dispatches build full `--release`.
+  ui:
+    needs: wasms
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: cachix/install-nix-action@v31
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+    - uses: nix-community/cache-nix-action@v6
+      with:
+        primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+        restore-prefixes-first-match: nix-${{ runner.os }}-
+        gc-max-store-size-linux: 2G
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: ui-${{ startsWith(github.ref, 'refs/tags/') || inputs.full_release == true }}
+        cache-on-failure: true
+
+    - name: Download contract bundle
+      uses: actions/download-artifact@v4
+      with:
+        name: contracts
+        path: ui/public/contracts
+    - name: Download target WASMs
+      uses: actions/download-artifact@v4
+      with:
+        name: wasm-target
+        path: target/wasm32-unknown-unknown/release
+    - name: Download stylesheet
+      uses: actions/download-artifact@v4
+      with:
+        name: styles
+        path: ui/assets
+
+    - name: Build UI with dioxus
+      id: build-ui
+      run: |
+        if [[ "${{ github.ref }}" == refs/tags/* ]] || [[ "${{ inputs.full_release }}" == "true" ]]; then
+          echo "Building full release UI (--release)..."
+          nix develop --command dx build --package plaza-ui --release --debug-symbols false
+        else
+          echo "Building fast UI (--profile release-fast)..."
+          nix develop --command dx build --package plaza-ui --profile release-fast --debug-symbols false
+        fi
+        PUBLIC_DIR="$(find target/dx/plaza-ui -type d -name public -exec test -f '{}/index.html' ';' -print | head -n 1)"
+        if [ -z "$PUBLIC_DIR" ]; then
+          echo "Could not locate built public directory under target/dx/plaza-ui" >&2
+          exit 1
+        fi
+        echo "public_dir=$PUBLIC_DIR" >> "$GITHUB_OUTPUT"
+
+    - name: Upload UI dist
+      uses: actions/upload-artifact@v4
+      with:
+        name: plaza-ui
+        path: ${{ steps.build-ui.outputs.public_dir }}
+
+  # Stage 2c (parallel): Playwright static E2E suite.
+  # Runs as soon as `wasms` finishes instead of waiting for `test` and `ui`.
+  # Push runs install and execute Chromium only; PRs and full-matrix dispatches
+  # run Chromium, Firefox, WebKit and Mobile Chrome.
+  e2e:
+    needs: wasms
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: cachix/install-nix-action@v31
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+    - uses: nix-community/cache-nix-action@v6
+      with:
+        primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+        restore-prefixes-first-match: nix-${{ runner.os }}-
+        gc-max-store-size-linux: 2G
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: ui/tests/package-lock.json
+
+    - name: Decide browser matrix
+      id: matrix
+      run: |
+        if [ "${{ github.event_name }}" = "pull_request" ] || [ "${{ inputs.full_browsers }}" = "true" ]; then
+          echo "full=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "full=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Cache Playwright browsers
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ steps.matrix.outputs.full }}-${{ hashFiles('ui/tests/package-lock.json') }}
+        restore-keys: |
+          playwright-${{ runner.os }}-${{ steps.matrix.outputs.full }}-
+          playwright-${{ runner.os }}-
+
+    - name: Install test dependencies and browsers
+      working-directory: ui/tests
+      run: |
+        npm ci
+        if [ "${{ steps.matrix.outputs.full }}" = "true" ]; then
+          npx playwright install --with-deps chromium firefox webkit
+        else
+          npx playwright install --with-deps chromium
+        fi
+
+    - name: Cache the Dioxus build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: e2e-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}
+        restore-keys: e2e-${{ runner.os }}-
+
+    - name: Download contract bundle
+      uses: actions/download-artifact@v4
+      with:
+        name: contracts
+        path: ui/public/contracts
+    - name: Download target WASMs
+      uses: actions/download-artifact@v4
+      with:
+        name: wasm-target
+        path: target/wasm32-unknown-unknown/release
+    - name: Download stylesheet
+      uses: actions/download-artifact@v4
+      with:
+        name: styles
+        path: ui/assets
+
+    # Run the Node process outside Nix: WebKit crashes when it inherits the
+    # Nix dev shell's library paths. Only dx needs the shell.
+    - name: Create the dx wrapper
+      run: |
+        cat > "$RUNNER_TEMP/dx-nix" <<'EOF'
+        #!/usr/bin/env bash
+        exec nix develop "$GITHUB_WORKSPACE" --command dx "$@"
+        EOF
+        chmod +x "$RUNNER_TEMP/dx-nix"
+
+    - name: Run Playwright
+      working-directory: ui/tests
+      env:
+        CI: "true"
+        DX_BIN: ${{ runner.temp }}/dx-nix
+      run: |
+        if [ "${{ steps.matrix.outputs.full }}" = "true" ]; then
+          npx playwright test
+        else
+          npx playwright test --project=chromium
+        fi
+
+    - name: Upload Playwright report
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: playwright-report
+        path: |
+          ui/tests/playwright-report
+          ui/tests/test-results
+        retention-days: 7

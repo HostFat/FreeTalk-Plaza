@@ -1,20 +1,27 @@
 name: E2E
 
-# Run after the Rust workflow so the contract bundle, the target WASMs and the
-# stylesheet can be downloaded instead of rebuilt on a second runner.
+# Standalone manual E2E workflow (full browser matrix or Chromium-only).
+# Push and PR E2E now runs directly inside `.github/workflows/rust.yml` in
+# parallel with `test` and `ui` right after `wasms` completes.
 on:
-  workflow_run:
-    workflows: ["Rust"]
-    types: [completed]
   workflow_dispatch:
+    inputs:
+      project:
+        description: "Playwright project (empty = full browser matrix)"
+        type: choice
+        default: ""
+        options:
+          - ""
+          - chromium
+          - firefox
+          - webkit
+          - mobile-chrome
 
 permissions:
-  actions: read
   contents: read
 
-# A newer Rust completion supersedes the previous E2E on the same branch.
 concurrency:
-  group: e2e-${{ github.ref }}
+  group: e2e-manual-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -22,19 +29,16 @@ env:
 
 jobs:
   playwright:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
     - uses: actions/checkout@v4
-      with:
-        ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
-    # Nix supplies dx and the pinned Rust toolchain.
     - uses: cachix/install-nix-action@v31
       with:
         nix_path: nixpkgs=channel:nixos-unstable
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
     - uses: nix-community/cache-nix-action@v6
       with:
@@ -42,7 +46,6 @@ jobs:
         restore-prefixes-first-match: nix-${{ runner.os }}-
         gc-max-store-size-linux: 2G
 
-    # Playwright itself runs on the runner's Node.
     - uses: actions/setup-node@v4
       with:
         node-version: 22
@@ -53,16 +56,28 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/ms-playwright
-        key: playwright-${{ runner.os }}-${{ hashFiles('ui/tests/package-lock.json') }}
+        key: playwright-${{ runner.os }}-${{ inputs.project || 'all' }}-${{ hashFiles('ui/tests/package-lock.json') }}
         restore-keys: playwright-${{ runner.os }}-
 
     - name: Install test dependencies and browsers
       working-directory: ui/tests
       run: |
         npm ci
-        npx playwright install --with-deps chromium firefox webkit
+        case "${{ inputs.project }}" in
+          chromium|mobile-chrome)
+            npx playwright install --with-deps chromium
+            ;;
+          firefox)
+            npx playwright install --with-deps firefox
+            ;;
+          webkit)
+            npx playwright install --with-deps webkit
+            ;;
+          *)
+            npx playwright install --with-deps chromium firefox webkit
+            ;;
+        esac
 
-    # The example UI is still built here, but it reuses the dependency cache.
     - name: Cache the Dioxus build
       uses: actions/cache@v4
       with:
@@ -73,51 +88,11 @@ jobs:
         key: e2e-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}
         restore-keys: e2e-${{ runner.os }}-
 
-    - name: Download contract bundle
-      id: download-contracts
-      if: github.event_name == 'workflow_run'
-      continue-on-error: true
-      uses: actions/download-artifact@v4
-      with:
-        name: contracts
-        path: ui/public/contracts
-        run-id: ${{ github.event.workflow_run.id }}
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Download target WASMs
-      id: download-target
-      if: github.event_name == 'workflow_run'
-      continue-on-error: true
-      uses: actions/download-artifact@v4
-      with:
-        name: wasm-target
-        path: target/wasm32-unknown-unknown/release
-        run-id: ${{ github.event.workflow_run.id }}
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Download stylesheet
-      id: download-styles
-      if: github.event_name == 'workflow_run'
-      continue-on-error: true
-      uses: actions/download-artifact@v4
-      with:
-        name: styles
-        path: ui/assets
-        run-id: ${{ github.event.workflow_run.id }}
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-
-    # A manual run has no upstream artifacts. The same fallback covers a Rust
-    # run from before this workflow started uploading them.
-    - name: Build contracts and stylesheet when the artifacts are missing
-      if: >-
-        github.event_name == 'workflow_dispatch'
-        || steps.download-contracts.outcome != 'success'
-        || steps.download-target.outcome != 'success'
-        || steps.download-styles.outcome != 'success'
+    - name: Build contracts and stylesheet
       run: |
         nix develop --command cargo run --quiet --manifest-path tools/wasm-tool/Cargo.toml -- sync
-        npm --prefix ui ci
-        npm --prefix ui run build:css
+        nix develop --command npm --prefix ui install --no-audit --no-fund
+        nix develop --command npm --prefix ui run build:css
 
     # Run the Node process outside Nix: WebKit crashes when it inherits the
     # Nix dev shell's library paths. Only dx needs the shell.
@@ -135,10 +110,8 @@ jobs:
         CI: "true"
         DX_BIN: ${{ runner.temp }}/dx-nix
       run: |
-        # Push runs use the fast Chromium project; PRs and manual runs keep
-        # the full browser matrix.
-        if [ "${{ github.event_name }}" = "workflow_run" ] && [ "${{ github.event.workflow_run.event }}" = "push" ]; then
-          npx playwright test --project=chromium
+        if [ -n "${{ inputs.project }}" ]; then
+          npx playwright test --project="${{ inputs.project }}"
         else
           npx playwright test
         fi

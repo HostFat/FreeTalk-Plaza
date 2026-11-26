@@ -91,23 +91,30 @@ if (
   }
 }
 
-const build = spawnSync(
-  dx,
-  ["build", "--package", "plaza-ui", "--features", "example-data,no-sync"],
-  { stdio: "inherit" },
-);
-if (build.error) {
-  console.error(`Could not run ${dx}: ${build.error.message}`);
-  process.exit(1);
-}
-if (build.status !== 0) {
-  process.exit(build.status ?? 1);
-}
-
 const candidates = [
   path.resolve("..", "target", "dx", "plaza-ui", "debug", "web", "public"),
   path.resolve("..", "target", "dx", "plaza-ui", "release", "web", "public"),
 ];
+const existingBundle = candidates.find((candidate) =>
+  existsSync(path.join(candidate, "index.html")),
+);
+if (process.env.SKIP_DX_BUILD === "1" && existingBundle) {
+  console.log(`SKIP_DX_BUILD=1: reusing existing bundle at ${existingBundle}`);
+} else {
+  const build = spawnSync(
+    dx,
+    ["build", "--package", "plaza-ui", "--features", "example-data,no-sync"],
+    { stdio: "inherit" },
+  );
+  if (build.error) {
+    console.error(`Could not run ${dx}: ${build.error.message}`);
+    process.exit(1);
+  }
+  if (build.status !== 0) {
+    process.exit(build.status ?? 1);
+  }
+}
+
 const root = candidates.find((candidate) =>
   existsSync(path.join(candidate, "index.html")),
 );
