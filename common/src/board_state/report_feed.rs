@@ -254,6 +254,36 @@ impl ReportFeedStateV1 {
             upsert_resolution(&mut next.resolutions, entry);
         }
         if next.reports.len() > MAX_REPORT_FEED {
+            // Deterministically evict the oldest *resolved* reports first so
+            // active moderation keeps the feed usable without letting spam
+            // evict open reports.
+            let mut resolved_keys: Vec<(i64, TopicReportKey)> = next
+                .resolutions
+                .iter()
+                .map(|r| (r.resolution.created_at, resolution_key(r)))
+                .collect();
+            resolved_keys.sort_by_key(|(created_at, key)| {
+                (
+                    *created_at,
+                    *key.0.as_bytes(),
+                    key.1.map(|id| *id.as_bytes()),
+                    *key.2.as_bytes(),
+                )
+            });
+            let excess = next.reports.len() - MAX_REPORT_FEED;
+            let drop_keys: HashSet<TopicReportKey> = resolved_keys
+                .into_iter()
+                .take(excess)
+                .map(|(_, key)| key)
+                .collect();
+            if !drop_keys.is_empty() {
+                next.reports
+                    .retain(|entry| !drop_keys.contains(&report_key(entry)));
+                next.resolutions
+                    .retain(|entry| !drop_keys.contains(&resolution_key(entry)));
+            }
+        }
+        if next.reports.len() > MAX_REPORT_FEED {
             return Err("too many reports".to_string());
         }
         if next.resolutions.len() > MAX_REPORT_FEED_RESOLUTIONS {

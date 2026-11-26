@@ -136,8 +136,7 @@ fn update_compact_page(
                         .map_err(|e| ContractError::InvalidUpdateWithInfo { reason: e })?;
                 }
             }
-            UpdateData::RelatedState { .. } => {}
-            _ => unreachable!(),
+            _ => {}
         }
     }
 
@@ -249,20 +248,33 @@ impl ContractInterface for SectionContract {
         let board_params = ChatBoardParametersV1 {
             owner: section_params.owner,
         };
-        let mut chat_state = from_reader::<ChatBoardStateV1, &[u8]>(state.as_ref())
-            .map_err(|e| ContractError::Deser(e.to_string()))?;
+        let mut initialized = !state.as_ref().is_empty();
+        let mut chat_state = if initialized {
+            from_reader::<ChatBoardStateV1, &[u8]>(state.as_ref())
+                .map_err(|e| ContractError::Deser(e.to_string()))?
+        } else {
+            ChatBoardStateV1::default()
+        };
 
         let mut full_verify = false;
         for update in data {
             match update {
                 UpdateData::State(new_state) => {
+                    if new_state.as_ref().is_empty() {
+                        continue;
+                    }
                     let new_state = from_reader::<ChatBoardStateV1, &[u8]>(new_state.as_ref())
                         .map_err(|e| ContractError::Deser(e.to_string()))?;
-                    chat_state
-                        .merge(&chat_state.clone(), &board_params, &new_state)
-                        .map_err(|e| ContractError::InvalidUpdateWithInfo {
-                            reason: e.to_string(),
-                        })?;
+                    if !initialized {
+                        chat_state = new_state;
+                        initialized = true;
+                    } else {
+                        chat_state
+                            .merge(&chat_state.clone(), &board_params, &new_state)
+                            .map_err(|e| ContractError::InvalidUpdateWithInfo {
+                                reason: e.to_string(),
+                            })?;
+                    }
                     full_verify = true;
                 }
                 UpdateData::Delta(d) => {
@@ -271,7 +283,7 @@ impl ContractInterface for SectionContract {
                     }
                     let delta = from_reader::<ChatBoardStateV1Delta, &[u8]>(d.as_ref())
                         .map_err(|e| ContractError::Deser(e.to_string()))?;
-                    if delta.is_topics_only() {
+                    if initialized && delta.is_topics_only() {
                         if let Some(topic_delta) = delta.topics.as_ref() {
                             chat_state
                                 .apply_topics_delta(&board_params, topic_delta)
@@ -288,7 +300,7 @@ impl ContractInterface for SectionContract {
                             reason: format!("Section layout does not verify: {e}"),
                         })?;
                     } else {
-                        let delta_verify = delta.version.is_none();
+                        let delta_verify = initialized && delta.version.is_none();
                         chat_state
                             .apply_delta(
                                 &chat_state.clone(),
@@ -298,6 +310,7 @@ impl ContractInterface for SectionContract {
                             .map_err(|e| ContractError::InvalidUpdateWithInfo {
                                 reason: e.to_string(),
                             })?;
+                        initialized = true;
                         if delta_verify {
                             chat_state
                                 .verify_delta(&delta, &board_params)
@@ -321,11 +334,16 @@ impl ContractInterface for SectionContract {
                     if !state.as_ref().is_empty() {
                         let new_state = from_reader::<ChatBoardStateV1, &[u8]>(state.as_ref())
                             .map_err(|e| ContractError::Deser(e.to_string()))?;
-                        chat_state
-                            .merge(&chat_state.clone(), &board_params, &new_state)
-                            .map_err(|e| ContractError::InvalidUpdateWithInfo {
-                                reason: e.to_string(),
-                            })?;
+                        if !initialized {
+                            chat_state = new_state;
+                            initialized = true;
+                        } else {
+                            chat_state
+                                .merge(&chat_state.clone(), &board_params, &new_state)
+                                .map_err(|e| ContractError::InvalidUpdateWithInfo {
+                                    reason: e.to_string(),
+                                })?;
+                        }
                         full_verify = true;
                     }
                     if !delta.as_ref().is_empty() {
@@ -340,12 +358,16 @@ impl ContractInterface for SectionContract {
                             .map_err(|e| ContractError::InvalidUpdateWithInfo {
                                 reason: e.to_string(),
                             })?;
+                        initialized = true;
                         full_verify = true;
                     }
                 }
-                UpdateData::RelatedState { .. } => {}
-                _ => unreachable!(),
+                _ => {}
             }
+        }
+
+        if !initialized {
+            return Ok(UpdateModification::valid(Vec::new().into()));
         }
 
         if full_verify {
@@ -402,14 +424,22 @@ impl ContractInterface for SectionContract {
         if section_params.page > 0 {
             return delta_compact_page(state.as_ref(), summary.as_ref());
         }
+        if state.as_ref().is_empty() {
+            return Ok(StateDelta::from(vec![]));
+        }
 
         let chat_state = from_reader::<ChatBoardStateV1, &[u8]>(state.as_ref())
             .map_err(|e| ContractError::Deser(e.to_string()))?;
         let board_params = ChatBoardParametersV1 {
             owner: section_params.owner,
         };
-        let summary = from_reader::<ChatBoardStateV1Summary, &[u8]>(summary.as_ref())
-            .map_err(|e| ContractError::Deser(e.to_string()))?;
+        let summary = if summary.as_ref().is_empty() {
+            let empty = ChatBoardStateV1::default();
+            empty.summarize(&empty, &board_params)
+        } else {
+            from_reader::<ChatBoardStateV1Summary, &[u8]>(summary.as_ref())
+                .map_err(|e| ContractError::Deser(e.to_string()))?
+        };
         let delta = chat_state.delta(&chat_state, &board_params, &summary);
         match delta {
             Some(d) => {

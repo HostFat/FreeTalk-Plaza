@@ -274,8 +274,14 @@ impl SectionsV1 {
         let mut sections = std::mem::take(&mut self.sections);
         sections.retain(|entry| self.verify_entry(state, parameters, entry).is_ok());
         self.sections = sections;
-        self.sort();
+        self.sections.sort_by_key(|entry| {
+            (
+                entry.section.id.0 .0,
+                std::cmp::Reverse(entry.section.generation),
+            )
+        });
         self.sections.dedup_by_key(|entry| entry.section.id);
+        self.sort();
     }
 }
 

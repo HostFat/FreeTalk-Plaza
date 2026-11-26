@@ -480,6 +480,21 @@ impl TopicIndexV1 {
             return Err("topic pending approvals are out of range".to_string());
         }
         let signer = entry.signer.unwrap_or(parameters.owner_id());
+        let is_authorized_member = signer == parameters.owner_id()
+            || signer == state.ownership.current_owner(parameters)
+            || state
+                .admin
+                .admins
+                .iter()
+                .any(|admin| admin.admin.id() == signer)
+            || state
+                .members
+                .members
+                .iter()
+                .any(|member| member.member.id() == signer);
+        if !is_authorized_member {
+            return Err("topic activity signer is not a board member".to_string());
+        }
         let key = Self::member_key(state, parameters, signer, entry.signer_key)?;
         verify_struct(value, &entry.signature, &key)
             .map_err(|error| format!("invalid topic activity signature: {error}"))
@@ -719,6 +734,76 @@ impl TopicIndexV1 {
                 entry.resolution.generation,
             )
         });
+    }
+
+    /// Keep the highest-generation record per key (matching `apply_delta`
+    /// tie-breakers) and restore canonical sort order.
+    fn dedup_highest(&mut self) {
+        self.entries.sort_by_key(|entry| {
+            (
+                entry.entry.topic_id.0 .0,
+                std::cmp::Reverse(entry.entry.generation),
+                entry.digest(),
+            )
+        });
+        self.entries.dedup_by_key(|entry| entry.entry.topic_id);
+
+        self.activity.sort_by_key(|entry| {
+            (
+                entry.activity.topic_id.0 .0,
+                std::cmp::Reverse(entry.activity.generation),
+                entry.signature.to_bytes(),
+            )
+        });
+        self.activity.dedup_by_key(|entry| entry.activity.topic_id);
+
+        self.flags.sort_by_key(|entry| {
+            (
+                entry.flag.topic_id.0 .0,
+                entry.flag.kind,
+                std::cmp::Reverse(entry.flag.generation),
+                entry.flag.value,
+                entry.digest(),
+            )
+        });
+        self.flags
+            .dedup_by_key(|entry| (entry.flag.topic_id, entry.flag.kind));
+
+        self.reports.sort_by_key(|entry| {
+            (
+                entry.report.topic_id.0 .0,
+                entry.report.post_id.map(|id| id.0 .0),
+                entry.report.reporter.0 .0,
+                std::cmp::Reverse(entry.report.generation),
+                entry.signature.to_bytes(),
+            )
+        });
+        self.reports.dedup_by_key(|entry| {
+            (
+                entry.report.topic_id,
+                entry.report.post_id,
+                entry.report.reporter,
+            )
+        });
+
+        self.report_resolutions.sort_by_key(|entry| {
+            (
+                entry.resolution.topic_id.0 .0,
+                entry.resolution.post_id.map(|id| id.0 .0),
+                entry.resolution.reporter.0 .0,
+                std::cmp::Reverse(entry.resolution.generation),
+                entry.signature.to_bytes(),
+            )
+        });
+        self.report_resolutions.dedup_by_key(|entry| {
+            (
+                entry.resolution.topic_id,
+                entry.resolution.post_id,
+                entry.resolution.reporter,
+            )
+        });
+
+        self.sort();
     }
 }
 
@@ -978,6 +1063,9 @@ impl ComposableState for TopicIndexV1 {
                     .find(|existing| existing.entry.topic_id == entry.entry.topic_id)
                 {
                     Some(existing) => {
+                        if existing.entry.author != entry.entry.author {
+                            return Err("topic entry update cannot change author".to_string());
+                        }
                         let take = entry.entry.generation > existing.entry.generation
                             || (entry.entry.generation == existing.entry.generation
                                 && entry.digest() < existing.digest());
@@ -996,7 +1084,10 @@ impl ComposableState for TopicIndexV1 {
                     .find(|existing| existing.activity.topic_id == entry.activity.topic_id)
                 {
                     Some(existing) => {
-                        if entry.activity.generation > existing.activity.generation {
+                        let take = entry.activity.generation > existing.activity.generation
+                            || (entry.activity.generation == existing.activity.generation
+                                && entry.signature.to_bytes() < existing.signature.to_bytes());
+                        if take {
                             *existing = entry.clone();
                         }
                     }
@@ -1012,7 +1103,7 @@ impl ComposableState for TopicIndexV1 {
                     Some(existing) => {
                         let take = entry.flag.generation > existing.flag.generation
                             || (entry.flag.generation == existing.flag.generation
-                                && entry.flag.value == false
+                                && !entry.flag.value
                                 && existing.flag.value)
                             || (entry.flag.generation == existing.flag.generation
                                 && entry.flag.value == existing.flag.value
@@ -1032,7 +1123,10 @@ impl ComposableState for TopicIndexV1 {
                         && existing.report.reporter == entry.report.reporter
                 }) {
                     Some(existing) => {
-                        if entry.report.generation > existing.report.generation {
+                        let take = entry.report.generation > existing.report.generation
+                            || (entry.report.generation == existing.report.generation
+                                && entry.signature.to_bytes() < existing.signature.to_bytes());
+                        if take {
                             *existing = entry.clone();
                         }
                     }
@@ -1047,7 +1141,10 @@ impl ComposableState for TopicIndexV1 {
                         && existing.resolution.reporter == entry.resolution.reporter
                 }) {
                     Some(existing) => {
-                        if entry.resolution.generation > existing.resolution.generation {
+                        let take = entry.resolution.generation > existing.resolution.generation
+                            || (entry.resolution.generation == existing.resolution.generation
+                                && entry.signature.to_bytes() < existing.signature.to_bytes());
+                        if take {
                             *existing = entry.clone();
                         }
                     }
@@ -1055,25 +1152,7 @@ impl ComposableState for TopicIndexV1 {
                 }
             }
         }
-        self.sort();
-        self.entries.dedup_by_key(|entry| entry.entry.topic_id);
-        self.activity.dedup_by_key(|entry| entry.activity.topic_id);
-        self.flags
-            .dedup_by_key(|entry| (entry.flag.topic_id, entry.flag.kind));
-        self.reports.dedup_by_key(|entry| {
-            (
-                entry.report.topic_id,
-                entry.report.post_id,
-                entry.report.reporter,
-            )
-        });
-        self.report_resolutions.dedup_by_key(|entry| {
-            (
-                entry.resolution.topic_id,
-                entry.resolution.post_id,
-                entry.resolution.reporter,
-            )
-        });
+        self.dedup_highest();
         self.verify_limits()
     }
 }
@@ -1144,10 +1223,24 @@ impl TopicIndexV1 {
             .iter()
             .map(|entry| entry.entry.topic_id)
             .collect();
-        self.activity
-            .retain(|entry| live.contains(&entry.activity.topic_id));
-        self.flags
-            .retain(|entry| live.contains(&entry.flag.topic_id));
+        let mut activity = std::mem::take(&mut self.activity);
+        activity.retain(|entry| {
+            live.contains(&entry.activity.topic_id)
+                && self.verify_activity(state, parameters, entry).is_ok()
+        });
+        self.activity = activity;
+        let has_extra_pages = state.mode == crate::board_state::BoardModeV1::SectionedTopicIndex
+            && state
+                .topic_pages
+                .0
+                .as_ref()
+                .is_some_and(|list| !list.data.pages.is_empty());
+        let mut flags = std::mem::take(&mut self.flags);
+        flags.retain(|entry| {
+            (live.contains(&entry.flag.topic_id) || has_extra_pages)
+                && self.verify_flag(state, parameters, entry).is_ok()
+        });
+        self.flags = flags;
         let mut reports = std::mem::take(&mut self.reports);
         reports.retain(|entry| {
             live.contains(&entry.report.topic_id)
@@ -1165,25 +1258,7 @@ impl TopicIndexV1 {
                 && self.verify_report_resolution(state, parameters, entry).is_ok()
         });
         self.report_resolutions = resolutions;
-        self.sort();
-        self.entries.dedup_by_key(|entry| entry.entry.topic_id);
-        self.activity.dedup_by_key(|entry| entry.activity.topic_id);
-        self.flags
-            .dedup_by_key(|entry| (entry.flag.topic_id, entry.flag.kind));
-        self.reports.dedup_by_key(|entry| {
-            (
-                entry.report.topic_id,
-                entry.report.post_id,
-                entry.report.reporter,
-            )
-        });
-        self.report_resolutions.dedup_by_key(|entry| {
-            (
-                entry.resolution.topic_id,
-                entry.resolution.post_id,
-                entry.resolution.reporter,
-            )
-        });
+        self.dedup_highest();
     }
 
     pub fn section_chain_for(&self, sections: &SectionsV1, section: Option<SectionId>) -> Vec<SectionId> {

@@ -246,12 +246,13 @@ fn verify_resolution(
         .iter()
         .find(|report| report.id() == entry.resolution.report_id)
         .ok_or("Report resolution targets a missing report")?;
-    let chain = if entry.resolution.scope_chain.is_empty() {
-        let routes = state.moderation.routes_map();
-        category_chain(&routes, &report.report.target)
-    } else {
-        entry.resolution.scope_chain.clone()
-    };
+    let routes = state.moderation.routes_map();
+    let chain = crate::board_state::moderation::resolved_scope_chain(
+        state,
+        &routes,
+        &report.report.target,
+        &entry.resolution.scope_chain,
+    )?;
     verify_moderation_authority(
         state,
         parameters,
@@ -334,7 +335,7 @@ impl ReportsV1 {
         self.resolutions.sort_by_key(|entry| {
             (
                 entry.resolution.report_id.0 .0,
-                entry.resolution.generation,
+                std::cmp::Reverse(entry.resolution.generation),
                 entry.signer_id(parameters).0 .0,
             )
         });

@@ -28,7 +28,7 @@ pub const MAX_PROFILES_PER_SHARD: usize = 2_000;
 pub const MAX_PROFILE_NICKNAME_BYTES: usize = 4_096;
 /// Maximum allowed version jump in a single delta update to prevent
 /// `version = u32::MAX` exhaustion attacks on a member's own profile slot.
-pub const MAX_PROFILE_VERSION_JUMP: u32 = 16;
+pub const MAX_PROFILE_VERSION_JUMP: u32 = 1024;
 /// Absolute upper bound on profile versions.
 pub const MAX_PROFILE_VERSION: u32 = 1_000_000;
 

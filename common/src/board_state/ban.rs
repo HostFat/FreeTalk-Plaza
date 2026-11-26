@@ -355,7 +355,7 @@ impl BansV1 {
         invalid_bans: &mut HashMap<BanId, BanValidationError>,
     ) {
         let max_bans = parent_state.configuration.configuration.max_user_bans;
-        let extra_bans = self.0.len() as isize - max_bans as isize;
+        let extra_bans = self.0.len().saturating_sub(max_bans);
 
         if extra_bans > 0 {
             // Add oldest extra bans to invalid bans
@@ -371,7 +371,7 @@ impl BansV1 {
             });
             extra_bans_vec.reverse();
 
-            for ban in extra_bans_vec.iter().take(extra_bans as usize) {
+            for ban in extra_bans_vec.iter().take(extra_bans) {
                 invalid_bans.insert(ban.id(), BanValidationError::ExceededMaximumBans);
             }
         }
@@ -593,7 +593,7 @@ impl BansV1 {
         }
 
         let mut to_remove = self.0.len() - max_bans;
-        let mut kept = Vec::with_capacity(max_bans);
+        let mut kept = Vec::with_capacity(max_bans.min(self.0.len()));
         for ban in std::mem::take(&mut self.0) {
             if to_remove > 0 && ban.banned_by != owner_id {
                 to_remove -= 1;

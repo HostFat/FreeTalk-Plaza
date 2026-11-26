@@ -64,20 +64,33 @@ impl ContractInterface for Contract {
     ) -> Result<UpdateModification<'static>, freenet_stdlib::prelude::ContractError> {
         let parameters = from_reader::<ChatBoardParametersV1, &[u8]>(parameters.as_ref())
             .map_err(|e| ContractError::Deser(e.to_string()))?;
-        let mut chat_state = from_reader::<ChatBoardStateV1, &[u8]>(state.as_ref())
-            .map_err(|e| ContractError::Deser(e.to_string()))?;
+        let mut initialized = !state.as_ref().is_empty();
+        let mut chat_state = if initialized {
+            from_reader::<ChatBoardStateV1, &[u8]>(state.as_ref())
+                .map_err(|e| ContractError::Deser(e.to_string()))?
+        } else {
+            ChatBoardStateV1::default()
+        };
 
         let mut full_verify = false;
         for update in data {
             match update {
                 UpdateData::State(new_state) => {
+                    if new_state.as_ref().is_empty() {
+                        continue;
+                    }
                     let new_state = from_reader::<ChatBoardStateV1, &[u8]>(new_state.as_ref())
                         .map_err(|e| ContractError::Deser(e.to_string()))?;
-                    chat_state
-                        .merge(&chat_state.clone(), &parameters, &new_state)
-                        .map_err(|e| ContractError::InvalidUpdateWithInfo {
-                            reason: e.to_string(),
-                        })?;
+                    if !initialized {
+                        chat_state = new_state;
+                        initialized = true;
+                    } else {
+                        chat_state
+                            .merge(&chat_state.clone(), &parameters, &new_state)
+                            .map_err(|e| ContractError::InvalidUpdateWithInfo {
+                                reason: e.to_string(),
+                            })?;
+                    }
                     full_verify = true;
                 }
                 UpdateData::Delta(d) => {
@@ -86,7 +99,8 @@ impl ContractInterface for Contract {
                     }
                     let delta = from_reader::<ChatBoardStateV1Delta, &[u8]>(d.as_ref())
                         .map_err(|e| ContractError::Deser(e.to_string()))?;
-                    let topics_only = delta.is_topics_only()
+                    let topics_only = initialized
+                        && delta.is_topics_only()
                         && matches!(
                             chat_state.mode,
                             plaza_core::board_state::BoardModeV1::TopicIndex
@@ -100,15 +114,18 @@ impl ContractInterface for Contract {
                                 })?;
                         }
                     } else {
-                        let delta_verify = matches!(
-                            chat_state.mode,
-                            plaza_core::board_state::BoardModeV1::TopicIndex
-                        ) && delta.version.is_none();
+                        let delta_verify = initialized
+                            && matches!(
+                                chat_state.mode,
+                                plaza_core::board_state::BoardModeV1::TopicIndex
+                            )
+                            && delta.version.is_none();
                         chat_state
                             .apply_delta(&chat_state.clone(), &parameters, &Some(delta.clone()))
                             .map_err(|e| ContractError::InvalidUpdateWithInfo {
                                 reason: e.to_string(),
                             })?;
+                        initialized = true;
                         if delta_verify {
                             chat_state
                                 .verify_delta(&delta, &parameters)
@@ -120,14 +137,40 @@ impl ContractInterface for Contract {
                         }
                     }
                 }
-                UpdateData::RelatedState {
-                    related_to: _,
-                    state: _,
-                } => {
-                    // TODO: related board_state handling not needed for river
+                UpdateData::StateAndDelta { state, delta } => {
+                    if !state.as_ref().is_empty() {
+                        let new_state = from_reader::<ChatBoardStateV1, &[u8]>(state.as_ref())
+                            .map_err(|e| ContractError::Deser(e.to_string()))?;
+                        if !initialized {
+                            chat_state = new_state;
+                            initialized = true;
+                        } else {
+                            chat_state
+                                .merge(&chat_state.clone(), &parameters, &new_state)
+                                .map_err(|e| ContractError::InvalidUpdateWithInfo {
+                                    reason: e.to_string(),
+                                })?;
+                        }
+                        full_verify = true;
+                    }
+                    if !delta.as_ref().is_empty() {
+                        let delta = from_reader::<ChatBoardStateV1Delta, &[u8]>(delta.as_ref())
+                            .map_err(|e| ContractError::Deser(e.to_string()))?;
+                        chat_state
+                            .apply_delta(&chat_state.clone(), &parameters, &Some(delta))
+                            .map_err(|e| ContractError::InvalidUpdateWithInfo {
+                                reason: e.to_string(),
+                            })?;
+                        initialized = true;
+                        full_verify = true;
+                    }
                 }
-                _ => unreachable!(),
+                _ => {}
             }
+        }
+
+        if !initialized {
+            return Ok(UpdateModification::valid(Vec::new().into()));
         }
 
         // State merges and deltas that touch authority, members or messages
@@ -173,12 +216,20 @@ impl ContractInterface for Contract {
         state: State<'static>,
         summary: StateSummary<'static>,
     ) -> Result<StateDelta<'static>, freenet_stdlib::prelude::ContractError> {
+        if state.as_ref().is_empty() {
+            return Ok(StateDelta::from(vec![]));
+        }
         let chat_state = from_reader::<ChatBoardStateV1, &[u8]>(state.as_ref())
             .map_err(|e| ContractError::Deser(e.to_string()))?;
         let parameters = from_reader::<ChatBoardParametersV1, &[u8]>(parameters.as_ref())
             .map_err(|e| ContractError::Deser(e.to_string()))?;
-        let summary = from_reader::<ChatBoardStateV1Summary, &[u8]>(summary.as_ref())
-            .map_err(|e| ContractError::Deser(e.to_string()))?;
+        let summary = if summary.as_ref().is_empty() {
+            let empty = ChatBoardStateV1::default();
+            empty.summarize(&empty, &parameters)
+        } else {
+            from_reader::<ChatBoardStateV1Summary, &[u8]>(summary.as_ref())
+                .map_err(|e| ContractError::Deser(e.to_string()))?
+        };
         let delta = chat_state.delta(&chat_state, &parameters, &summary);
         match delta {
             Some(d) => {

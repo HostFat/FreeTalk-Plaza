@@ -284,6 +284,7 @@ fn verify_role_grant(
             current.role.id == grant.role.role.id
                 && current.role.deleted
                 && current.role.generation >= grant.role.role.generation
+                && current.role.signed_at != SystemTime::UNIX_EPOCH
                 && crate::board_state::rate_limit::system_time_ms(current.role.signed_at) <= at_ms
         }) {
             return Err("Role was deleted before this action".to_string());
@@ -293,6 +294,7 @@ fn verify_role_grant(
                 && current.assignment.member_id == *signer
                 && current.assignment.revoked
                 && current.assignment.generation >= grant.assignment.assignment.generation
+                && current.assignment.signed_at != SystemTime::UNIX_EPOCH
                 && crate::board_state::rate_limit::system_time_ms(current.assignment.signed_at)
                     <= at_ms
         }) {

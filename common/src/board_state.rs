@@ -1049,27 +1049,15 @@ impl ChatBoardStateV1 {
     /// or deleted unreferenced invite tokens are pruned deterministically.
     pub const EXPIRED_RECORD_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 
-    /// Deterministic state-clock watermark derived strictly from signed
-    /// timestamps inside `self` (never wall clock).
+    /// Deterministic state-clock watermark derived strictly from owner-signed
+    /// timestamps inside `self` (never wall clock, and never moderator-signed
+    /// timestamps that could be inflated to prematurely purge records).
     pub fn deterministic_watermark_ms(&self) -> i64 {
         let mut max_ms = crate::board_state::rate_limit::system_time_ms(
             self.configuration.configuration.updated_at,
         );
         if let Some(root) = &self.authority_root.0 {
             max_ms = max_ms.max(root.root.epoch);
-        }
-        for section in &self.sections.sections {
-            max_ms = max_ms.max(crate::board_state::rate_limit::system_time_ms(
-                section.section.signed_at,
-            ));
-        }
-        for suspension in &self.suspensions.suspensions {
-            max_ms = max_ms.max(suspension.suspension.created_at);
-        }
-        for token in &self.invites.tokens {
-            if let Some(created_at) = token.token.created_at {
-                max_ms = max_ms.max(crate::board_state::rate_limit::system_time_ms(created_at));
-            }
         }
         for transfer in &self.ownership.transfers {
             max_ms = max_ms.max(crate::board_state::rate_limit::system_time_ms(
@@ -1126,9 +1114,6 @@ impl ChatBoardStateV1 {
             let Some(max) = token.token.max_uses else {
                 continue;
             };
-            if token.token.deleted {
-                continue;
-            }
             let mut joined: Vec<MemberId> = self
                 .members
                 .members

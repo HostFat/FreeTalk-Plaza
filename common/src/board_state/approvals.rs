@@ -151,12 +151,13 @@ fn verify_approval(
     if approval.approval.scope.is_some() && approval.approval.scope != expected {
         return Err("Approval scope is not the target's section".to_string());
     }
-    let chain = if approval.approval.scope_chain.is_empty() {
-        let routes = state.moderation.routes_map();
-        category_chain(&routes, &approval.approval.target)
-    } else {
-        approval.approval.scope_chain.clone()
-    };
+    let routes = state.moderation.routes_map();
+    let chain = crate::board_state::moderation::resolved_scope_chain(
+        state,
+        &routes,
+        &approval.approval.target,
+        &approval.approval.scope_chain,
+    )?;
     verify_moderation_authority(
         state,
         parameters,
@@ -228,7 +229,7 @@ impl ApprovalsV1 {
         self.approvals.sort_by_key(|entry| {
             (
                 entry.approval.target.0 .0,
-                entry.approval.generation,
+                std::cmp::Reverse(entry.approval.generation),
                 entry.signer_id(parameters).0 .0,
             )
         });

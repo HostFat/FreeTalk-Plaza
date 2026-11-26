@@ -128,6 +128,19 @@ impl ComposableState for MembersV1 {
             for member in &delta.added {
                 if let Some(proof) = &member.member.join_proof {
                     Self::verify_token_join(member, proof, parent_state, parameters)?;
+                } else if member.member.invited_by == member.member.id() {
+                    if !parent_state.ownership.was_owner(&member.member.id()) {
+                        return Err("Self-invitation detected".to_string());
+                    }
+                    member
+                        .verify_signature(&member.member.member_vk)
+                        .map_err(|e| {
+                            format!(
+                                "Invalid self-registration signature for member {:?}: {}",
+                                member.member.id(),
+                                e
+                            )
+                        })?;
                 } else {
                     self.verify_member_invite_with_lookup(
                         member,

@@ -56,25 +56,28 @@ impl ContractInterface for Contract {
         };
 
         for update in data {
-            let incoming = match update {
-                UpdateData::State(new_state) => {
-                    from_reader::<BlobStateV1, &[u8]>(new_state.as_ref())
-                        .map_err(|e| ContractError::Deser(e.to_string()))?
+            let mut apply_incoming = |bytes: &[u8]| -> Result<(), ContractError> {
+                if bytes.is_empty() {
+                    return Ok(());
                 }
-                UpdateData::Delta(delta) => {
-                    if delta.as_ref().is_empty() {
-                        continue;
-                    }
-                    from_reader::<BlobStateV1, &[u8]>(delta.as_ref())
-                        .map_err(|e| ContractError::Deser(e.to_string()))?
-                }
-                _ => continue,
+                let incoming = from_reader::<BlobStateV1, &[u8]>(bytes)
+                    .map_err(|e| ContractError::Deser(e.to_string()))?;
+                current = Some(match current.take() {
+                    None => incoming,
+                    Some(existing) => merge_states(&existing, &incoming, &parameters)
+                        .map_err(|e| ContractError::InvalidUpdateWithInfo { reason: e })?,
+                });
+                Ok(())
             };
-            current = Some(match current {
-                None => incoming,
-                Some(existing) => merge_states(&existing, &incoming, &parameters)
-                    .map_err(|e| ContractError::InvalidUpdateWithInfo { reason: e })?,
-            });
+            match update {
+                UpdateData::State(new_state) => apply_incoming(new_state.as_ref())?,
+                UpdateData::Delta(delta) => apply_incoming(delta.as_ref())?,
+                UpdateData::StateAndDelta { state, delta } => {
+                    apply_incoming(state.as_ref())?;
+                    apply_incoming(delta.as_ref())?;
+                }
+                _ => {}
+            }
         }
 
         let Some(state) = current else {
@@ -113,6 +116,9 @@ impl ContractInterface for Contract {
         state: State<'static>,
         summary: StateSummary<'static>,
     ) -> Result<StateDelta<'static>, ContractError> {
+        if state.as_ref().is_empty() {
+            return Ok(StateDelta::from(Vec::new()));
+        }
         let parameters = from_reader::<BlobParametersV1, &[u8]>(parameters.as_ref())
             .map_err(|e| ContractError::Deser(e.to_string()))?;
         let state = from_reader::<BlobStateV1, &[u8]>(state.as_ref())
