@@ -110,8 +110,11 @@ impl DelegateInterface for DmDelegate {
                 .map_err(|error| DelegateError::Deser(format!("decode request: {error}")))?;
         let key = storage_key(&origin);
         let mut state = load_state(ctx, &key)?;
+        let prev_version = state.version;
         let response = state.apply(envelope.request);
-        save_state(ctx, &key, &state)?;
+        if state.version != prev_version {
+            save_state(ctx, &key, &state)?;
+        }
         Ok(vec![app_response(envelope.request_id, &response)?])
     }
 }
@@ -119,7 +122,7 @@ impl DelegateInterface for DmDelegate {
 /// Revision marker: a bump changes the delegate wasm and therefore its key.
 #[no_mangle]
 pub extern "C" fn plaza_dm_delegate_revision() -> u32 {
-    1
+    2
 }
 
 #[cfg(test)]

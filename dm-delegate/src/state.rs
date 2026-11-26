@@ -11,15 +11,31 @@ use ml_kem::kem::{Decapsulate, KeyExport};
 use ml_kem::{B32, DecapsulationKey, EncapsulationKey, MlKem768, Seed};
 use plaza_dm_core::delegate::*;
 use plaza_dm_core::{
-    AuthorizedDmDevice, AuthorizedDmMember, AuthorizedDmMessage, AuthorizedSealedDmKey,
-    DmContractId, DmDevice, DmDeviceId, DmIdentityId, DmInvite, DmMember, DmMembersV1, DmMessage,
-    DmMessageId, DmMetaV1, DmParamsV1, DmRole, DmStateDeltaV1, DmStateV1, SealedDmKey,
+    vk_from_bytes, AuthorizedDmDevice, AuthorizedDmMember, AuthorizedDmMessage,
+    AuthorizedSealedDmKey, DmContractId, DmDevice, DmDeviceId, DmIdentityId, DmInvite, DmMember,
+    DmMembersV1, DmMessage, DmMessageId, DmMetaV1, DmRole, DmStateV1, SealedDmKey,
     CONTENT_TYPE_ATTACHMENT, CONTENT_TYPE_SYSTEM, CONTENT_TYPE_TEXT,
-    KEY_SUITE_X25519_MLKEM768_XCHACHA20,
+    KEY_SUITE_X25519_MLKEM768_XCHACHA20, MAX_MESSAGE_BYTES,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{compiler_fence, Ordering};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+const MAX_DELEGATE_IDENTITIES: usize = 64;
+const MAX_DELEGATE_DEVICES: usize = 64;
+const MAX_DELEGATE_CONVERSATIONS: usize = 2_048;
+const MAX_DELEGATE_KEYS: usize = 4_096;
+const MAX_BACKUP_BYTES: usize = 4 * 1024 * 1024;
+
+fn wipe_bytes(buf: &mut [u8]) {
+    for byte in buf.iter_mut() {
+        unsafe {
+            core::ptr::write_volatile(byte, 0);
+        }
+    }
+    compiler_fence(Ordering::SeqCst);
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LocalDevice {
     pub device: DmDevice,
     pub label: String,
@@ -28,7 +44,27 @@ pub struct LocalDevice {
     pub kem_seed: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+impl std::fmt::Debug for LocalDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalDevice")
+            .field("device", &self.device)
+            .field("label", &self.label)
+            .field("signing_seed", &"<redacted>")
+            .field("x25519_seed", &"<redacted>")
+            .field("kem_seed", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for LocalDevice {
+    fn drop(&mut self) {
+        wipe_bytes(&mut self.signing_seed);
+        wipe_bytes(&mut self.x25519_seed);
+        wipe_bytes(&mut self.kem_seed);
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LocalKey {
     pub contract_key: DmContractId,
     pub key_version: u32,
@@ -36,13 +72,48 @@ pub struct LocalKey {
     pub created_at: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+impl std::fmt::Debug for LocalKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalKey")
+            .field("contract_key", &self.contract_key)
+            .field("key_version", &self.key_version)
+            .field("key", &"<redacted>")
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
+impl Drop for LocalKey {
+    fn drop(&mut self) {
+        wipe_bytes(&mut self.key);
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DmIdentityStateV1 {
     pub identity_seed: [u8; 32],
     pub devices: Vec<LocalDevice>,
     pub conversations: Vec<DmConversationInfo>,
     pub keys: Vec<LocalKey>,
     pub blocked: Vec<DmIdentityId>,
+}
+
+impl std::fmt::Debug for DmIdentityStateV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DmIdentityStateV1")
+            .field("identity_seed", &"<redacted>")
+            .field("devices", &self.devices.len())
+            .field("conversations", &self.conversations.len())
+            .field("keys", &self.keys.len())
+            .field("blocked", &self.blocked.len())
+            .finish()
+    }
+}
+
+impl Drop for DmIdentityStateV1 {
+    fn drop(&mut self) {
+        wipe_bytes(&mut self.identity_seed);
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -78,12 +149,21 @@ impl DmIdentityStateV1 {
         kem_seed: Vec<u8>,
         created_at: i64,
     ) -> DmDelegateResponseMsg {
+        if self.devices.len() >= MAX_DELEGATE_DEVICES {
+            return DmDelegateResponseMsg::error("device cap reached");
+        }
         if label.len() > 64 {
             return DmDelegateResponseMsg::error("device label is too long");
+        }
+        if signing_seed == [0u8; 32] || x25519_seed == [0u8; 32] {
+            return DmDelegateResponseMsg::error("device seeds must be non-zero");
         }
         let Ok(kem_seed_array) = <[u8; 64]>::try_from(kem_seed.as_slice()) else {
             return DmDelegateResponseMsg::error("ML-KEM seed must be 64 bytes");
         };
+        if kem_seed_array == [0u8; 64] {
+            return DmDelegateResponseMsg::error("ML-KEM seed must be non-zero");
+        }
         let signing = SigningKey::from_bytes(&signing_seed);
         let device_id = signing.verifying_key().to_bytes();
         if self
@@ -129,6 +209,9 @@ impl DmIdentityStateV1 {
         if local.device.revoked_at.is_none() {
             local.device.revoked_at = Some(revoked_at);
         }
+        wipe_bytes(&mut local.signing_seed);
+        wipe_bytes(&mut local.x25519_seed);
+        wipe_bytes(&mut local.kem_seed);
         DmDelegateResponseMsg::Ok
     }
 
@@ -180,6 +263,8 @@ impl DmIdentityStateV1 {
             joined_at: created_at,
             devices: vec![authorized_device],
             left_at: None,
+            conversation_id,
+            join_token: None,
         };
         let state = DmStateV1 {
             meta: DmMetaV1 {
@@ -219,6 +304,8 @@ impl DmIdentityStateV1 {
     fn create_join_member(
         &self,
         device_id: DmDeviceId,
+        conversation_id: [u8; 32],
+        join_token: Option<[u8; 32]>,
         created_at: i64,
     ) -> DmDelegateResponseMsg {
         let local = match self.active_device(&device_id) {
@@ -235,6 +322,8 @@ impl DmIdentityStateV1 {
             joined_at: created_at,
             devices: vec![authorized_device],
             left_at: None,
+            conversation_id,
+            join_token,
         };
         DmDelegateResponseMsg::JoinMemberCreated {
             member: AuthorizedDmMember::new(member, &identity_sk),
@@ -415,6 +504,11 @@ impl DmIdentityStateV1 {
         nonce: [u8; 24],
         sealed_at: i64,
     ) -> DmDelegateResponseMsg {
+        if ephemeral_seed == [0u8; 32] || kem_seed == [0u8; 32] || nonce == [0u8; 24] {
+            return DmDelegateResponseMsg::error(
+                "ephemeral seed, KEM seed, and nonce must be non-zero",
+            );
+        }
         let Some(key) = self.key_for(contract_key, key_version) else {
             return DmDelegateResponseMsg::error("conversation key not found");
         };
@@ -430,12 +524,21 @@ impl DmIdentityStateV1 {
         let ephemeral_public = x25519_dalek::PublicKey::from(&ephemeral);
         let recipient = x25519_dalek::PublicKey::from(target_x25519_pk);
         let x25519_shared = ephemeral.diffie_hellman(&recipient);
+        if !x25519_shared.was_contributory() {
+            return DmDelegateResponseMsg::error("non-contributory X25519 recipient key");
+        }
         let (kem_ciphertext, kem_shared) =
             ek.encapsulate_deterministic(&B32::from(kem_seed));
+        let ephemeral_pk_bytes = ephemeral_public.to_bytes();
+        let kem_ct_bytes = kem_ciphertext.as_slice();
         let sealed = match seal_key_bytes(
             &key,
             x25519_shared.as_bytes(),
             kem_shared.as_slice(),
+            &ephemeral_pk_bytes,
+            &target_x25519_pk,
+            kem_ct_bytes,
+            &contract_key,
             &sealed_key_aad(contract_key, key_version, target_member, target_device),
             &nonce,
         ) {
@@ -447,8 +550,8 @@ impl DmIdentityStateV1 {
             member: target_member,
             device: target_device,
             suite: KEY_SUITE_X25519_MLKEM768_XCHACHA20,
-            ephemeral_x25519_pk: ephemeral_public.to_bytes(),
-            kem_ciphertext: kem_ciphertext.as_slice().to_vec(),
+            ephemeral_x25519_pk: ephemeral_pk_bytes,
+            kem_ciphertext: kem_ct_bytes.to_vec(),
             ciphertext: sealed,
             nonce,
             sealed_at,
@@ -464,8 +567,16 @@ impl DmIdentityStateV1 {
         &mut self,
         device_id: DmDeviceId,
         contract_key: DmContractId,
-        record: &SealedDmKey,
+        authorized: &AuthorizedSealedDmKey,
     ) -> DmDelegateResponseMsg {
+        let sealer_vk = match vk_from_bytes(&authorized.signer) {
+            Ok(vk) => vk,
+            Err(error) => return DmDelegateResponseMsg::error(error),
+        };
+        if let Err(error) = authorized.verify(&sealer_vk) {
+            return DmDelegateResponseMsg::error(format!("invalid sealed key signature: {error}"));
+        }
+        let record = &authorized.record;
         if record.member != self.identity() || record.device != device_id {
             return DmDelegateResponseMsg::error("sealed key targets another device");
         }
@@ -487,10 +598,18 @@ impl DmIdentityStateV1 {
         let own = x25519_dalek::StaticSecret::from(device.x25519_seed);
         let ephemeral = x25519_dalek::PublicKey::from(record.ephemeral_x25519_pk);
         let x25519_shared = own.diffie_hellman(&ephemeral);
+        if !x25519_shared.was_contributory() {
+            return DmDelegateResponseMsg::error("non-contributory X25519 ephemeral key");
+        }
+        let own_x25519_pk = device.device.x25519_pk;
         let key = match open_key_bytes(
             &record.ciphertext,
             x25519_shared.as_bytes(),
             kem_shared.as_slice(),
+            &record.ephemeral_x25519_pk,
+            &own_x25519_pk,
+            &record.kem_ciphertext,
+            &contract_key,
             &sealed_key_aad(
                 contract_key,
                 record.key_version,
@@ -502,6 +621,9 @@ impl DmIdentityStateV1 {
             Ok(key) => key,
             Err(error) => return DmDelegateResponseMsg::error(error),
         };
+        if key == [0u8; 32] {
+            return DmDelegateResponseMsg::error("opened conversation key is empty");
+        }
         if let Some(existing) = self.key_for(contract_key, record.key_version) {
             if existing != key {
                 return DmDelegateResponseMsg::error(
@@ -509,12 +631,25 @@ impl DmIdentityStateV1 {
                 );
             }
         } else {
+            if self.keys.len() >= MAX_DELEGATE_KEYS {
+                return DmDelegateResponseMsg::error("conversation key cap reached");
+            }
             self.keys.push(LocalKey {
                 contract_key,
                 key_version: record.key_version,
                 key,
                 created_at: record.sealed_at,
             });
+        }
+        if let Some(conversation) = self
+            .conversations
+            .iter_mut()
+            .find(|c| c.contract_key == contract_key)
+        {
+            if !conversation.key_versions.contains(&record.key_version) {
+                conversation.key_versions.push(record.key_version);
+                conversation.key_versions.sort_unstable();
+            }
         }
         DmDelegateResponseMsg::ConversationKey {
             key: Some(key),
@@ -534,6 +669,12 @@ impl DmIdentityStateV1 {
         created_at: i64,
         nonce: [u8; 24],
     ) -> DmDelegateResponseMsg {
+        if nonce == [0u8; 24] {
+            return DmDelegateResponseMsg::error("message nonce must be non-zero");
+        }
+        if plaintext.len() > MAX_MESSAGE_BYTES {
+            return DmDelegateResponseMsg::error("message plaintext is too large");
+        }
         let Some(key) = self.key_for(contract_key, key_version) else {
             return DmDelegateResponseMsg::error("conversation key not found");
         };
@@ -584,6 +725,13 @@ impl DmIdentityStateV1 {
         contract_key: DmContractId,
         message: &AuthorizedDmMessage,
     ) -> DmDelegateResponseMsg {
+        let device_vk = match vk_from_bytes(&message.message.device) {
+            Ok(vk) => vk,
+            Err(error) => return DmDelegateResponseMsg::error(error),
+        };
+        if let Err(error) = message.verify(&device_vk) {
+            return DmDelegateResponseMsg::error(format!("invalid message signature: {error}"));
+        }
         let Some(key) = self.key_for(contract_key, message.message.key_version) else {
             return DmDelegateResponseMsg::error("conversation key not found");
         };
@@ -642,13 +790,51 @@ impl DmIdentityStateV1 {
         }
     }
 
-    fn merge_backup(&mut self, backup: DmIdentityBackup) {
+    fn merge_backup(&mut self, backup: DmIdentityBackup) -> Result<(), String> {
+        if backup.devices.len() > MAX_DELEGATE_DEVICES {
+            return Err("backup contains too many devices".to_string());
+        }
+        if backup.conversations.len() > MAX_DELEGATE_CONVERSATIONS {
+            return Err("backup contains too many conversations".to_string());
+        }
+        if backup.keys.len() > MAX_DELEGATE_KEYS {
+            return Err("backup contains too many keys".to_string());
+        }
         for device in backup.devices {
+            if device.label.len() > 64 {
+                return Err("backup device label is too long".to_string());
+            }
+            if device.device.device_id != device.device.signing_key {
+                return Err("backup device id does not match signing key".to_string());
+            }
+            if device.device.revoked_at.is_none() {
+                let derived_signing = SigningKey::from_bytes(&device.signing_seed)
+                    .verifying_key()
+                    .to_bytes();
+                if derived_signing != device.device.device_id {
+                    return Err("backup device signing seed does not match device_id".to_string());
+                }
+                let x25519_secret = x25519_dalek::StaticSecret::from(device.x25519_seed);
+                let derived_x25519 = x25519_dalek::PublicKey::from(&x25519_secret).to_bytes();
+                if derived_x25519 != device.device.x25519_pk {
+                    return Err("backup device X25519 seed does not match public key".to_string());
+                }
+                let kem_seed_arr = <[u8; 64]>::try_from(device.kem_seed.as_slice())
+                    .map_err(|_| "backup device ML-KEM seed must be 64 bytes".to_string())?;
+                if ml_kem_encapsulation_key(&kem_seed_arr) != device.device.kem_ek {
+                    return Err(
+                        "backup device ML-KEM seed does not match encapsulation key".to_string()
+                    );
+                }
+            }
             if !self
                 .devices
                 .iter()
                 .any(|local| local.device.device_id == device.device.device_id)
             {
+                if self.devices.len() >= MAX_DELEGATE_DEVICES {
+                    return Err("device cap reached during backup import".to_string());
+                }
                 self.devices.push(LocalDevice {
                     device: device.device,
                     label: device.label,
@@ -659,10 +845,22 @@ impl DmIdentityStateV1 {
             }
         }
         for key in backup.keys {
-            if !self.keys.iter().any(|existing| {
-                existing.contract_key == key.contract_key
-                    && existing.key_version == key.key_version
+            if key.key == [0u8; 32] {
+                return Err("backup contains an empty conversation key".to_string());
+            }
+            if let Some(existing) = self.keys.iter().find(|existing| {
+                existing.contract_key == key.contract_key && existing.key_version == key.key_version
             }) {
+                if existing.key != key.key {
+                    return Err(
+                        "backup contains a conflicting conversation key for an existing version"
+                            .to_string(),
+                    );
+                }
+            } else {
+                if self.keys.len() >= MAX_DELEGATE_KEYS {
+                    return Err("key cap reached during backup import".to_string());
+                }
                 self.keys.push(LocalKey {
                     contract_key: key.contract_key,
                     key_version: key.key_version,
@@ -681,6 +879,9 @@ impl DmIdentityStateV1 {
                     *existing = conversation;
                 }
             } else {
+                if self.conversations.len() >= MAX_DELEGATE_CONVERSATIONS {
+                    return Err("conversation cap reached during backup import".to_string());
+                }
                 self.conversations.push(conversation);
             }
         }
@@ -690,6 +891,7 @@ impl DmIdentityStateV1 {
             }
         }
         self.blocked.sort_unstable();
+        Ok(())
     }
 }
 
@@ -755,6 +957,9 @@ impl DmDelegateStateV1 {
                 DmDelegateResponseMsg::Ok
             }
             DmDelegateRequestMsg::InitIdentity { identity_seed } => {
+                if identity_seed == [0u8; 32] {
+                    return DmDelegateResponseMsg::error("DM identity seed must be non-zero");
+                }
                 let identity = identity_public(&identity_seed);
                 if let Some(existing) = self.identity(&identity) {
                     if existing.identity_seed != identity_seed {
@@ -763,6 +968,9 @@ impl DmDelegateStateV1 {
                         );
                     }
                 } else {
+                    if self.identities.len() >= MAX_DELEGATE_IDENTITIES {
+                        return DmDelegateResponseMsg::error("identity cap reached");
+                    }
                     self.identities.push(DmIdentityStateV1 {
                         identity_seed,
                         devices: Vec::new(),
@@ -860,13 +1068,14 @@ impl DmDelegateStateV1 {
             DmDelegateRequestMsg::CreateJoinMember {
                 identity,
                 device_id,
-                conversation_id: _,
+                conversation_id,
+                join_token,
                 created_at,
             } => {
                 let Some(state) = self.identity(&identity) else {
                     return DmDelegateResponseMsg::error("DM identity is not initialized");
                 };
-                state.create_join_member(device_id, created_at)
+                state.create_join_member(device_id, conversation_id, join_token, created_at)
             }
             DmDelegateRequestMsg::StoreConversationKey {
                 identity,
@@ -1080,6 +1289,9 @@ impl DmDelegateStateV1 {
                 DmDelegateResponseMsg::Backup { bytes }
             }
             DmDelegateRequestMsg::ImportBackup { bytes } => {
+                if bytes.len() > MAX_BACKUP_BYTES {
+                    return DmDelegateResponseMsg::error("backup payload is too large");
+                }
                 let backup: DmBackupV1 = match ciborium::de::from_reader(bytes.as_slice()) {
                     Ok(backup) => backup,
                     Err(error) => {
@@ -1089,11 +1301,27 @@ impl DmDelegateStateV1 {
                 if backup.version > DM_DELEGATE_STORAGE_VERSION {
                     return DmDelegateResponseMsg::error("backup comes from a newer version");
                 }
+                if backup.identities.len() > MAX_DELEGATE_IDENTITIES {
+                    return DmDelegateResponseMsg::error("backup contains too many identities");
+                }
+                let mut next = self.clone();
                 for identity in backup.identities {
+                    if identity.identity_seed == [0u8; 32] {
+                        return DmDelegateResponseMsg::error(
+                            "backup contains an empty identity seed",
+                        );
+                    }
                     let id = identity_public(&identity.identity_seed);
-                    if let Some(existing) = self.identity_mut(&id) {
-                        existing.merge_backup(identity);
+                    if let Some(existing) = next.identity_mut(&id) {
+                        if let Err(error) = existing.merge_backup(identity) {
+                            return DmDelegateResponseMsg::error(error);
+                        }
                     } else {
+                        if next.identities.len() >= MAX_DELEGATE_IDENTITIES {
+                            return DmDelegateResponseMsg::error(
+                                "identity cap reached during backup import",
+                            );
+                        }
                         let mut state = DmIdentityStateV1 {
                             identity_seed: identity.identity_seed,
                             devices: Vec::new(),
@@ -1101,11 +1329,14 @@ impl DmDelegateStateV1 {
                             keys: Vec::new(),
                             blocked: Vec::new(),
                         };
-                        state.merge_backup(identity);
-                        self.identities.push(state);
+                        if let Err(error) = state.merge_backup(identity) {
+                            return DmDelegateResponseMsg::error(error);
+                        }
+                        next.identities.push(state);
                     }
                 }
-                self.version = self.version.saturating_add(1);
+                next.version = next.version.saturating_add(1);
+                *self = next;
                 DmDelegateResponseMsg::Ok
             }
         }
@@ -1132,11 +1363,26 @@ fn ml_kem_encapsulation_key_from_bytes(
         .map_err(|_| "invalid ML-KEM encapsulation key".to_string())
 }
 
-fn derive_hybrid_key(x25519_shared: &[u8], kem_shared: &[u8]) -> [u8; 32] {
-    let mut combined = Vec::with_capacity(x25519_shared.len() + kem_shared.len());
+fn derive_hybrid_key(
+    x25519_shared: &[u8],
+    kem_shared: &[u8],
+    ephemeral_x25519_pk: &[u8; 32],
+    recipient_x25519_pk: &[u8; 32],
+    kem_ciphertext: &[u8],
+    contract_key: &DmContractId,
+) -> [u8; 32] {
+    let mut combined = Vec::with_capacity(
+        x25519_shared.len() + kem_shared.len() + 32 + 32 + kem_ciphertext.len() + 32,
+    );
     combined.extend_from_slice(x25519_shared);
     combined.extend_from_slice(kem_shared);
-    blake3::derive_key("plaza-dm-sealed-key-v1", &combined)
+    combined.extend_from_slice(ephemeral_x25519_pk);
+    combined.extend_from_slice(recipient_x25519_pk);
+    combined.extend_from_slice(kem_ciphertext);
+    combined.extend_from_slice(contract_key);
+    let derived = blake3::derive_key("plaza-dm-sealed-key-v2", &combined);
+    wipe_bytes(&mut combined);
+    derived
 }
 
 fn sealed_key_aad(
@@ -1179,15 +1425,27 @@ fn message_aad(
     aad
 }
 
+#[allow(clippy::too_many_arguments)]
 fn seal_key_bytes(
     key: &[u8; 32],
     x25519_shared: &[u8],
     kem_shared: &[u8],
+    ephemeral_x25519_pk: &[u8; 32],
+    recipient_x25519_pk: &[u8; 32],
+    kem_ciphertext: &[u8],
+    contract_key: &DmContractId,
     aad: &[u8],
     nonce: &[u8; 24],
 ) -> Result<Vec<u8>, String> {
-    let derived = derive_hybrid_key(x25519_shared, kem_shared);
-    XChaCha20Poly1305::new((&derived).into())
+    let mut derived = derive_hybrid_key(
+        x25519_shared,
+        kem_shared,
+        ephemeral_x25519_pk,
+        recipient_x25519_pk,
+        kem_ciphertext,
+        contract_key,
+    );
+    let result = XChaCha20Poly1305::new((&derived).into())
         .encrypt(
             XNonce::from_slice(nonce),
             Payload {
@@ -1195,18 +1453,32 @@ fn seal_key_bytes(
                 aad,
             },
         )
-        .map_err(|_| "could not seal the conversation key".to_string())
+        .map_err(|_| "could not seal the conversation key".to_string());
+    wipe_bytes(&mut derived);
+    result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_key_bytes(
     ciphertext: &[u8],
     x25519_shared: &[u8],
     kem_shared: &[u8],
+    ephemeral_x25519_pk: &[u8; 32],
+    recipient_x25519_pk: &[u8; 32],
+    kem_ciphertext: &[u8],
+    contract_key: &DmContractId,
     aad: &[u8],
     nonce: &[u8; 24],
 ) -> Result<[u8; 32], String> {
-    let derived = derive_hybrid_key(x25519_shared, kem_shared);
-    let plaintext = XChaCha20Poly1305::new((&derived).into())
+    let mut derived = derive_hybrid_key(
+        x25519_shared,
+        kem_shared,
+        ephemeral_x25519_pk,
+        recipient_x25519_pk,
+        kem_ciphertext,
+        contract_key,
+    );
+    let decrypted = XChaCha20Poly1305::new((&derived).into())
         .decrypt(
             XNonce::from_slice(nonce),
             Payload {
@@ -1214,10 +1486,14 @@ fn open_key_bytes(
                 aad,
             },
         )
-        .map_err(|_| "could not open the conversation key".to_string())?;
+        .map_err(|_| "could not open the conversation key".to_string());
+    wipe_bytes(&mut derived);
+    let mut plaintext = decrypted?;
     let key: [u8; 32] = plaintext
+        .as_slice()
         .try_into()
         .map_err(|_| "unexpected conversation key length".to_string())?;
+    wipe_bytes(&mut plaintext);
     Ok(key)
 }
 
@@ -1259,6 +1535,7 @@ fn decrypt_bytes(
 mod tests {
     use super::*;
     use ed25519_dalek::{Verifier, VerifyingKey};
+    use plaza_dm_core::{DmParamsV1, DmStateDeltaV1};
 
     #[test]
     fn two_delegates_join_seal_and_exchange_a_message() {
@@ -1281,6 +1558,28 @@ mod tests {
             other => panic!("conversation state missing: {other:?}"),
         };
         let params = DmParamsV1::default();
+        let invite_token = [88u8; 32];
+        let invite = match alice.apply(DmDelegateRequestMsg::CreateInvite {
+            identity: alice_id,
+            invite_id: [77u8; 32],
+            token: invite_token,
+            created_at: 1_000,
+            expires_at: 2_000,
+            bound_identity: None,
+        }) {
+            DmDelegateResponseMsg::InviteCreated { invite } => invite,
+            other => panic!("invite missing: {other:?}"),
+        };
+        contract
+            .apply_delta(
+                &params,
+                &DmStateDeltaV1 {
+                    invites: Some(vec![invite]),
+                    ..Default::default()
+                },
+            )
+            .expect("invite enters the contract");
+
         let response = alice.apply(DmDelegateRequestMsg::StoreConversationKey {
             identity: alice_id,
             contract_key: [1u8; 32],
@@ -1307,6 +1606,7 @@ mod tests {
             identity: bob_id,
             device_id: bob_device.device_id,
             conversation_id: [7u8; 32],
+            join_token: Some(invite_token),
             created_at: 1_100,
         }) {
             DmDelegateResponseMsg::JoinMemberCreated { member } => member,
@@ -1344,7 +1644,7 @@ mod tests {
             identity: bob_id,
             device_id: bob_device.device_id,
             contract_key: [1u8; 32],
-            record: sealed.record,
+            record: sealed,
         });
         let DmDelegateResponseMsg::ConversationKey { key, .. } = opened else {
             panic!("opened key missing: {opened:?}");
@@ -1439,7 +1739,7 @@ mod tests {
             identity: second,
             device_id: second_device.device_id,
             contract_key: [1u8; 32],
-            record: key.record,
+            record: key,
         });
         let DmDelegateResponseMsg::ConversationKey { key, key_version } = response else {
             panic!("opened key missing: {response:?}");
@@ -1513,8 +1813,8 @@ mod tests {
             panic!("sealed key missing");
         };
 
-        let mut tampered = key.record.clone();
-        tampered.ciphertext[0] ^= 0xff;
+        let mut tampered = key.clone();
+        tampered.record.ciphertext[0] ^= 0xff;
         let response = state.apply(DmDelegateRequestMsg::OpenConversationKey {
             identity: second,
             device_id: second_device.device_id,
@@ -1527,7 +1827,7 @@ mod tests {
             identity: first,
             device_id: first_device.device_id,
             contract_key: [1u8; 32],
-            record: key.record,
+            record: key,
         });
         assert!(matches!(response, DmDelegateResponseMsg::Error { .. }));
     }

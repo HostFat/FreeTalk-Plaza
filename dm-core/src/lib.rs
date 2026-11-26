@@ -17,12 +17,16 @@ pub const MAX_MEMBERS: usize = 2;
 pub const MAX_DEVICES_PER_MEMBER: usize = 8;
 pub const MAX_INVITES: usize = 8;
 pub const MAX_MESSAGES: usize = 500;
+pub const MAX_KEYS: usize = 256;
+pub const MAX_STATE_VERSION_JUMP: u32 = 1024;
 pub const MAX_MESSAGE_BYTES: usize = 8192;
 pub const MAX_KEY_CIPHERTEXT_BYTES: usize = 4096;
 pub const MAX_KEM_CIPHERTEXT_BYTES: usize = 2048;
 pub const MAX_KEM_EK_BYTES: usize = 2048;
 pub const MAX_STATE_BYTES: usize = 1_048_576;
 pub const MAX_NAME_BYTES: usize = 256;
+
+const DM_SIGN_DOMAIN: &[u8] = b"plaza-dm-sig-v2\0";
 
 pub const CONTENT_TYPE_TEXT: u16 = 1;
 pub const CONTENT_TYPE_SYSTEM: u16 = 2;
@@ -48,8 +52,8 @@ fn zero_signature() -> Signature {
 }
 
 fn sign_value<T: Serialize>(value: &T, signing_key: &SigningKey) -> Signature {
-    let mut bytes = Vec::new();
-    ciborium::ser::into_writer(value, &mut bytes).expect("serialization should not fail");
+    let mut bytes = DM_SIGN_DOMAIN.to_vec();
+    let _ = ciborium::ser::into_writer(value, &mut bytes);
     signing_key.sign(&bytes)
 }
 
@@ -58,7 +62,7 @@ fn verify_value<T: Serialize>(
     signature: &Signature,
     verifying_key: &VerifyingKey,
 ) -> Result<(), String> {
-    let mut bytes = Vec::new();
+    let mut bytes = DM_SIGN_DOMAIN.to_vec();
     ciborium::ser::into_writer(value, &mut bytes)
         .map_err(|error| format!("serialization failed: {error}"))?;
     verifying_key
@@ -190,6 +194,10 @@ pub struct DmMember {
     pub joined_at: i64,
     pub devices: Vec<AuthorizedDmDevice>,
     pub left_at: Option<i64>,
+    #[serde(default)]
+    pub conversation_id: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_token: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -549,6 +557,8 @@ impl DmStateV1 {
             joined_at: now,
             devices: vec![AuthorizedDmDevice::new(device, identity)],
             left_at: None,
+            conversation_id,
+            join_token: None,
         };
         Self {
             meta: DmMetaV1 {
@@ -634,6 +644,9 @@ impl DmStateV1 {
         if params.protocol_version != PROTOCOL_VERSION {
             return Err("unsupported protocol version".to_string());
         }
+        if self.meta.state_version == u32::MAX {
+            return Err("state version exhausted".to_string());
+        }
         if let Some(name) = &self.meta.name {
             if name.len() > MAX_NAME_BYTES {
                 return Err("conversation name is too large".to_string());
@@ -641,6 +654,7 @@ impl DmStateV1 {
         }
         self.verify_members()?;
         self.verify_invites()?;
+        self.verify_member_invites()?;
         self.verify_keys()?;
         self.verify_messages()?;
         self.verify_read()?;
@@ -660,6 +674,11 @@ impl DmStateV1 {
         for authorized in &self.members.members {
             authorized.verify()?;
             let member = &authorized.member;
+            if member.conversation_id != [0u8; 32]
+                && member.conversation_id != self.meta.conversation_id
+            {
+                return Err("member belongs to another conversation".to_string());
+            }
             if !identities.insert(member.identity) {
                 return Err("duplicate member identity".to_string());
             }
@@ -699,19 +718,70 @@ impl DmStateV1 {
                 .member(&invite.created_by)
                 .ok_or_else(|| "invite creator is not a member".to_string())?;
             invite.verify(&creator.identity)?;
-            if invite.used_at.is_some() && invite.used_by.is_none() {
-                return Err("used invite has no user".to_string());
+            if invite.used_at.is_some() != invite.used_by.is_some() {
+                return Err("used invite must specify both used_at and used_by".to_string());
+            }
+            if let Some(used_at) = invite.used_at {
+                if used_at < invite.created_at || used_at > invite.expires_at {
+                    return Err("invite use timestamp is outside its validity window".to_string());
+                }
             }
             if let Some(used_by) = invite.used_by {
                 if self.member(&used_by).is_none() {
                     return Err("invite was used by a non-member".to_string());
+                }
+                if let Some(bound) = invite.bound_identity {
+                    if bound != used_by {
+                        return Err("invite was used by a non-bound identity".to_string());
+                    }
                 }
             }
         }
         Ok(())
     }
 
+    /// Every non-creator member must be backed by a valid, unexpired invite
+    /// (either marked used by the creator or matched via the member's signed
+    /// `join_token` preimage).
+    fn verify_member_invites(&self) -> Result<(), String> {
+        let creator_id = self
+            .members
+            .members
+            .iter()
+            .find(|m| matches!(m.member.role, DmRole::Creator))
+            .map(|m| m.member.identity)
+            .ok_or_else(|| "conversation has no creator".to_string())?;
+        for authorized in &self.members.members {
+            let member = &authorized.member;
+            if matches!(member.role, DmRole::Creator) {
+                continue;
+            }
+            let has_valid_invite = self.invites.invites.iter().any(|invite| {
+                invite.created_by == creator_id
+                    && invite.created_at <= member.joined_at
+                    && member.joined_at <= invite.expires_at
+                    && invite
+                        .bound_identity
+                        .is_none_or(|bound| bound == member.identity)
+                    && invite
+                        .used_by
+                        .is_none_or(|used_by| used_by == member.identity)
+                    && (invite.used_by == Some(member.identity)
+                        || member
+                            .join_token
+                            .is_some_and(|token| token_hash(&token) == invite.token_hash))
+            });
+            if !has_valid_invite {
+                return Err("member join requires a valid unexpired invite".to_string());
+            }
+        }
+        Ok(())
+    }
+
     fn verify_keys(&self) -> Result<(), String> {
+        if self.keys.keys.len() > MAX_KEYS {
+            return Err("too many sealed keys".to_string());
+        }
         let mut seen = HashSet::new();
         for authorized in &self.keys.keys {
             let record = &authorized.record;
@@ -773,14 +843,21 @@ impl DmStateV1 {
     }
 
     fn verify_read(&self) -> Result<(), String> {
+        if self.read.entries.len() > MAX_MEMBERS * MAX_DEVICES_PER_MEMBER {
+            return Err("too many read entries".to_string());
+        }
         let messages: HashSet<_> = self
             .messages
             .messages
             .iter()
             .map(|message| message.message.id)
             .collect();
+        let mut seen = HashSet::new();
         for authorized in &self.read.entries {
             let entry = &authorized.entry;
+            if !seen.insert((entry.member, entry.device)) {
+                return Err("duplicate read entry".to_string());
+            }
             let vk = self.device_vk(&entry.member, &entry.device, entry.updated_at)?;
             authorized.verify(&vk)?;
             if entry.last_message != [0u8; 32] && !messages.contains(&entry.last_message) {
@@ -834,12 +911,33 @@ impl DmStateV1 {
         params: &DmParamsV1,
         delta: &DmStateDeltaV1,
     ) -> Result<(), String> {
+        let has_signed_payload = delta.members.as_ref().is_some_and(|v| !v.is_empty())
+            || delta.invites.as_ref().is_some_and(|v| !v.is_empty())
+            || delta.keys.as_ref().is_some_and(|v| !v.is_empty())
+            || delta.messages.as_ref().is_some_and(|v| !v.is_empty())
+            || delta.read.as_ref().is_some_and(|v| !v.is_empty())
+            || delta
+                .generation
+                .as_ref()
+                .is_some_and(|g| g.generation > 0 || g.signature != zero_signature());
+
         if let Some(meta) = &delta.meta {
+            if !has_signed_payload {
+                return Err("unsigned meta-only delta is not allowed".to_string());
+            }
             if meta.conversation_id != self.meta.conversation_id {
                 return Err("conversation id mismatch".to_string());
             }
+            if meta.created_at != self.meta.created_at {
+                return Err("conversation created_at is immutable".to_string());
+            }
             if meta.state_version <= self.meta.state_version {
                 return Err("state version must increase".to_string());
+            }
+            if meta.state_version == u32::MAX
+                || meta.state_version - self.meta.state_version > MAX_STATE_VERSION_JUMP
+            {
+                return Err("state version jump is too large".to_string());
             }
         }
 
@@ -847,7 +945,12 @@ impl DmStateV1 {
         if let Some(meta) = &delta.meta {
             next.meta = meta.clone();
         } else {
-            next.meta.state_version = next.meta.state_version.saturating_add(1);
+            next.meta.state_version = next
+                .meta
+                .state_version
+                .checked_add(1)
+                .filter(|v| *v < u32::MAX)
+                .ok_or_else(|| "state version overflow".to_string())?;
         }
         if let Some(members) = &delta.members {
             next.merge_members(members)?;
@@ -876,7 +979,13 @@ impl DmStateV1 {
         if other.meta.conversation_id != self.meta.conversation_id {
             return Err("conversation id mismatch".to_string());
         }
-        let version = self.meta.state_version.max(other.meta.state_version) + 1;
+        let version = self
+            .meta
+            .state_version
+            .max(other.meta.state_version)
+            .checked_add(1)
+            .filter(|v| *v < u32::MAX)
+            .ok_or_else(|| "state version overflow".to_string())?;
         let delta = other.full_delta(version);
         self.apply_delta(params, &delta)
     }
@@ -892,6 +1001,42 @@ impl DmStateV1 {
                 .find(|existing| existing.member.identity == identity)
             {
                 if authorized.member.version > existing.member.version {
+                    if authorized.member.role != existing.member.role {
+                        return Err("member role is immutable".to_string());
+                    }
+                    if authorized.member.joined_at != existing.member.joined_at {
+                        return Err("member joined_at is immutable".to_string());
+                    }
+                    if authorized.member.conversation_id != existing.member.conversation_id {
+                        return Err("member conversation_id is immutable".to_string());
+                    }
+                    if existing.member.left_at.is_some()
+                        && authorized.member.left_at != existing.member.left_at
+                    {
+                        return Err("member left_at cannot be cleared or modified".to_string());
+                    }
+                    for old_dev in &existing.member.devices {
+                        let Some(new_dev) = authorized
+                            .member
+                            .devices
+                            .iter()
+                            .find(|d| d.device.device_id == old_dev.device.device_id)
+                        else {
+                            return Err("member update cannot drop historical devices".to_string());
+                        };
+                        if new_dev.device.signing_key != old_dev.device.signing_key
+                            || new_dev.device.created_at != old_dev.device.created_at
+                        {
+                            return Err("existing device identity fields are immutable".to_string());
+                        }
+                        if old_dev.device.revoked_at.is_some()
+                            && new_dev.device.revoked_at != old_dev.device.revoked_at
+                        {
+                            return Err(
+                                "revoked device cannot be un-revoked or modified".to_string(),
+                            );
+                        }
+                    }
                     *existing = authorized.clone();
                 } else if authorized.member.version == existing.member.version
                     && authorized.member != existing.member
@@ -947,6 +1092,9 @@ impl DmStateV1 {
             }) {
                 continue;
             }
+            if self.keys.keys.len() >= MAX_KEYS {
+                return Err("too many sealed keys".to_string());
+            }
             self.keys.keys.push(authorized.clone());
         }
         self.keys
@@ -990,7 +1138,13 @@ impl DmStateV1 {
             if let Some(existing) = self.read.entries.iter_mut().find(|existing| {
                 existing.entry.member == entry.member && existing.entry.device == entry.device
             }) {
-                if entry.version > existing.entry.version {
+                let take = entry.version > existing.entry.version
+                    || (entry.version == existing.entry.version
+                        && (entry.updated_at > existing.entry.updated_at
+                            || (entry.updated_at == existing.entry.updated_at
+                                && authorized.signature.to_bytes()
+                                    < existing.signature.to_bytes())));
+                if take {
                     *existing = authorized.clone();
                 }
             } else {

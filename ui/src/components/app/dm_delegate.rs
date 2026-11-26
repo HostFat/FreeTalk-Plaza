@@ -19,8 +19,7 @@ use plaza_dm_core::delegate::{
     DmDelegateEnvelope, DmDelegateRequestMsg, DmDelegateResponseMsg,
 };
 use plaza_dm_core::{
-    AuthorizedDmMessage, AuthorizedSealedDmKey, DmDevice, DmIdentityId, SealedDmKey,
-    derive_identity_signing_key,
+    derive_identity_signing_key, AuthorizedDmMessage, AuthorizedSealedDmKey, DmDevice, DmIdentityId,
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -414,7 +413,7 @@ pub async fn open_conversation_key(
     identity: DmIdentityId,
     device_id: [u8; 32],
     contract_key: [u8; 32],
-    record: SealedDmKey,
+    record: AuthorizedSealedDmKey,
 ) -> Result<Option<[u8; 32]>, String> {
     match send_request(DmDelegateRequestMsg::OpenConversationKey {
         identity,

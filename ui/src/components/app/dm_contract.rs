@@ -547,6 +547,7 @@ pub async fn accept_invite(
         identity,
         device_id: device.device_id,
         conversation_id: state.meta.conversation_id,
+        join_token: Some(token),
         created_at: chrono::Utc::now().timestamp_millis(),
     })
     .await?

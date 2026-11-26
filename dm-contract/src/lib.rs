@@ -52,18 +52,27 @@ impl ContractInterface for Contract {
         data: Vec<UpdateData<'static>>,
     ) -> Result<UpdateModification<'static>, ContractError> {
         let params = decode_params(parameters.as_ref()).map_err(ContractError::Deser)?;
-        let mut current = if state.as_ref().is_empty() {
-            DmStateV1::default()
-        } else {
+        let mut initialized = !state.as_ref().is_empty();
+        let mut current = if initialized {
             decode_state(state.as_ref()).map_err(ContractError::Deser)?
+        } else {
+            DmStateV1::default()
         };
 
         for update in data {
             match update {
                 UpdateData::State(new_state) => {
+                    if new_state.as_ref().is_empty() {
+                        continue;
+                    }
                     let incoming =
                         decode_state(new_state.as_ref()).map_err(ContractError::Deser)?;
-                    current.merge(&params, &incoming).map_err(contract_error)?;
+                    if !initialized {
+                        current = incoming;
+                        initialized = true;
+                    } else {
+                        current.merge(&params, &incoming).map_err(contract_error)?;
+                    }
                 }
                 UpdateData::Delta(delta) => {
                     if delta.as_ref().is_empty() {
@@ -73,10 +82,38 @@ impl ContractInterface for Contract {
                     current
                         .apply_delta(&params, &delta)
                         .map_err(contract_error)?;
+                    initialized = true;
+                }
+                UpdateData::StateAndDelta {
+                    state: state_bytes,
+                    delta: delta_bytes,
+                } => {
+                    if !state_bytes.as_ref().is_empty() {
+                        let incoming =
+                            decode_state(state_bytes.as_ref()).map_err(ContractError::Deser)?;
+                        if !initialized {
+                            current = incoming;
+                            initialized = true;
+                        } else {
+                            current.merge(&params, &incoming).map_err(contract_error)?;
+                        }
+                    }
+                    if !delta_bytes.as_ref().is_empty() {
+                        let delta =
+                            decode_delta(delta_bytes.as_ref()).map_err(ContractError::Deser)?;
+                        current
+                            .apply_delta(&params, &delta)
+                            .map_err(contract_error)?;
+                        initialized = true;
+                    }
                 }
                 UpdateData::RelatedState { .. } => {}
                 _ => {}
             }
+        }
+
+        if !initialized {
+            return Ok(UpdateModification::valid(Vec::new().into()));
         }
 
         current.verify(&params).map_err(contract_error)?;
@@ -106,6 +143,9 @@ impl ContractInterface for Contract {
         summary: StateSummary<'static>,
     ) -> Result<StateDelta<'static>, ContractError> {
         let _params = decode_params(parameters.as_ref()).map_err(ContractError::Deser)?;
+        if state.as_ref().is_empty() {
+            return Ok(StateDelta::from(Vec::new()));
+        }
         let state = decode_state(state.as_ref()).map_err(ContractError::Deser)?;
         let summary = if summary.as_ref().is_empty() {
             DmStateSummaryV1::default()
@@ -128,5 +168,5 @@ impl ContractInterface for Contract {
 /// Revision marker: a bump changes the wasm hash and therefore the contract key.
 #[no_mangle]
 pub extern "C" fn plaza_dm_contract_revision() -> u32 {
-    1
+    2
 }
