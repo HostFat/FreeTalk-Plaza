@@ -408,6 +408,11 @@ pub struct AdminRevocation {
     /// member was still an admin from records made afterwards.
     #[serde(default = "epoch_system_time", skip_serializing_if = "is_epoch")]
     pub signed_at: SystemTime,
+    /// When the revoked admin was originally appointed. Carried on the
+    /// revocation so historical admin-quorum checks do not miscount an admin
+    /// who was both appointed and revoked strictly after an earlier transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appointed_at: Option<SystemTime>,
 }
 
 impl AdminRevocation {
@@ -436,10 +441,23 @@ impl AuthorizedAdminRevocation {
         signed_at: SystemTime,
         owner_sk: &SigningKey,
     ) -> Self {
+        Self::new_at_with_appointment(member_id, generation, signed_at, None, owner_sk)
+    }
+
+    /// Same as [`Self::new_at`], recording when the admin was appointed so
+    /// historical succession-quorum checks remain accurate even after removal.
+    pub fn new_at_with_appointment(
+        member_id: MemberId,
+        generation: u64,
+        signed_at: SystemTime,
+        appointed_at: Option<SystemTime>,
+        owner_sk: &SigningKey,
+    ) -> Self {
         let revocation = AdminRevocation {
             member_id,
             generation,
             signed_at,
+            appointed_at,
         };
         Self {
             signature: sign_struct(&revocation, owner_sk),

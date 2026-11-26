@@ -99,14 +99,16 @@ I membri sono ora shardati in 32 bucket deterministici (`plaza-member-contract`,
 
 | Membri | Board (senza nick) | Bucket 0 | Max bucket | Verify bucket 0 | Join delta |
 |---:|---:|---:|---:|---:|---:|
-| 1.000 | 340,7 KiB | 11,3 KiB (33 m.) | 14,8 KiB | 81,1 ms | 0,35 KiB (2,5 ms) |
-| 5.000 | 1.680,9 KiB | 60,0 KiB (175 m.) | 60,0 KiB | 381,8 ms | 0,36 KiB (2,6 ms) |
-| 10.000 | 3.356,1 KiB | 111,4 KiB (325 m.) | 118,0 KiB | 740,0 ms | 0,35 KiB (2,9–3,4 ms) |
+| 1.000 | 340,7 KiB | 11,3 KiB (33 m.) | 14,8 KiB | 69,2 ms | 0,35 KiB (2,3 ms) |
+| 5.000 | 1.680,9 KiB | 60,0 KiB (175 m.) | 60,0 KiB | 362,7 ms | 0,36 KiB (2,3 ms) |
+| 10.000 | 3.356,1 KiB | 111,4 KiB (325 m.) | 118,0 KiB | 660–683 ms | 0,35 KiB (2,6–2,9 ms) |
 
 A 10.000 membri (con 10 o 100 sezioni) ciascun bucket è ~30× più piccolo della
 lista monolitica, il bootstrap scarica solo il proprio bucket (`GET`-only) e
-ogni join è un delta da `0,35 KiB` verificato in ~3 ms senza scrivere sulla
-board madre né richiedere l'owner online.
+ogni join è un delta da `0,35 KiB` verificato in ~2,6–2,9 ms senza scrivere
+sulla board madre (su board `SectionedTopicIndex` i membri ordinari vivono solo
+negli shard membri/profili) né richiedere l'owner online. Ogni entry verifica
+la propria catena di inviti o `token.authority` fino a `params.owner`.
 
 Con 100 sezioni e 10.000 membri il costo dipende dai membri, non dalle
 sezioni.

@@ -665,7 +665,7 @@ pub async fn send_poll_vote(
 pub fn revoke_admin(member_id: MemberId) -> Result<(), String> {
     use crate::components::app::CURRENT_BOARD;
 
-    let (current_board, owner_sk, board_state_clone, generation) = {
+    let (current_board, owner_sk, board_state_clone, generation, appointed_at) = {
         let current_board_read = CURRENT_BOARD.read();
         let boards_read = BOARDS.read();
 
@@ -679,18 +679,28 @@ pub fn revoke_admin(member_id: MemberId) -> Result<(), String> {
             return Err("Only the board owner can remove an admin".to_string());
         }
 
+        let appointed_at = board_data
+            .board_state
+            .admin
+            .admins
+            .iter()
+            .find(|a| a.admin.id() == member_id)
+            .map(|a| a.admin.signed_at);
+
         (
             current_board,
             board_data.owner_key().clone(),
             board_data.board_state.clone(),
             board_data.board_state.admin.next_generation(&member_id),
+            appointed_at,
         )
     };
 
-    let revocation = AuthorizedAdminRevocation::new_at(
+    let revocation = AuthorizedAdminRevocation::new_at_with_appointment(
         member_id,
         generation,
         crate::util::get_current_system_time(),
+        appointed_at,
         &owner_sk,
     );
     let delta = ChatBoardStateV1Delta {

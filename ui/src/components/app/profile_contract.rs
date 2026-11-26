@@ -47,9 +47,6 @@ pub struct ProfileShardBoard {
 pub static PROFILE_SHARDS: GlobalSignal<HashMap<ContractInstanceId, ProfileShardBoard>> =
     Global::new(HashMap::new);
 
-static LOADED_ALL_BOARDS: std::sync::Mutex<Option<HashSet<VerifyingKey>>> =
-    std::sync::Mutex::new(None);
-
 pub fn profile_shard_key(owner: VerifyingKey, bucket: u16) -> ContractKey {
     let params = ProfileShardParametersV1 { owner, bucket };
     let parameters = Parameters::from(to_cbor_vec(&params));
@@ -133,16 +130,10 @@ pub async fn load_profile_shards_for(
     }
 }
 
-/// Lazily load all profile buckets of a board once per session (GET-only, no
-/// PUT of empty contracts), used by views that enumerate the full member list.
+/// Lazily load all profile buckets of a board (GET-only, no PUT of empty
+/// contracts), used by views that enumerate the full member list. Synced and
+/// recently attempted unsynced buckets are skipped by `load_profile_shard`.
 pub async fn load_all_profile_shards(owner: VerifyingKey) {
-    {
-        let mut guard = LOADED_ALL_BOARDS.lock().unwrap();
-        let set = guard.get_or_insert_with(HashSet::new);
-        if !set.insert(owner) {
-            return;
-        }
-    }
     for bucket in 0..PROFILE_SHARD_COUNT {
         let _ = load_profile_shard(owner, bucket).await;
     }
@@ -298,6 +289,8 @@ pub fn apply_to_member_info(
         if member_id != owner_id
             && member_id != current_owner_id
             && !members.contains(&member_id)
+            && crate::components::app::member_contract::find_member_entry(owner, member_id)
+                .is_none()
         {
             continue;
         }
@@ -322,6 +315,11 @@ pub async fn record_member_info(
     entry.verify(&params)?;
     let key = profile_shard_key(owner, bucket);
     let contract_id = *key.id();
+    let already_synced = PROFILE_SHARDS
+        .read()
+        .get(&contract_id)
+        .map(|board| board.synced)
+        .unwrap_or(false);
     let delta = ProfileDeltaV1 {
         entries: vec![entry],
     };
@@ -337,33 +335,31 @@ pub async fn record_member_info(
         let _ = board.state.apply_delta(&params, &delta);
         board.dirty = true;
     });
-    let update = send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
-        key,
-        data: UpdateData::Delta(to_cbor_vec(&delta).into()),
-    }))
-    .await;
-    if update.is_ok() {
-        return Ok(());
+    if already_synced {
+        send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
+            key,
+            data: UpdateData::Delta(to_cbor_vec(&delta).into()),
+        }))
+        .await
+        .map_err(|error| format!("send profile shard delta failed: {error}"))
+    } else {
+        // The shard contract has not been confirmed on the node yet (`load_*`
+        // is GET-only and never PUTs empty buckets). PUT creates the contract
+        // on first write and is merged additively by the contract if another
+        // peer already created it.
+        let state = PROFILE_SHARDS
+            .read()
+            .get(&contract_id)
+            .map(|board| board.state.clone())
+            .unwrap_or_default();
+        send_client_request(ClientRequest::ContractOp(ContractRequest::Put {
+            contract: profile_shard_contract(owner, bucket),
+            state: WrappedState::new(to_cbor_vec(&state)),
+            related_contracts: Default::default(),
+            subscribe: true,
+            blocking_subscribe: false,
+        }))
+        .await
+        .map_err(|error| format!("put profile shard failed: {error}"))
     }
-    // The shard may not exist yet on the network. A state PUT is merged
-    // additively by the contract.
-    let state = PROFILE_SHARDS
-        .read()
-        .get(&contract_id)
-        .map(|board| board.state.clone())
-        .unwrap_or_default();
-    send_client_request(ClientRequest::ContractOp(ContractRequest::Put {
-        contract: profile_shard_contract(owner, bucket),
-        state: WrappedState::new(to_cbor_vec(&state)),
-        related_contracts: Default::default(),
-        subscribe: true,
-        blocking_subscribe: false,
-    }))
-    .await
-    .map_err(|error| {
-        format!(
-            "send profile shard delta failed ({}), put failed: {error}",
-            update.err().map(|error| error.to_string()).unwrap_or_default()
-        )
-    })
 }

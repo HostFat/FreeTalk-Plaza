@@ -105,13 +105,17 @@ fn switch_state(profile: &crate::board_data::IdentityProfile) -> (bool, bool) {
     let vk = profile.signing_key.verifying_key();
     let is_current = board.self_sk.verifying_key() == vk;
     let is_owner = board.owner_vk == vk;
-    let is_member = board.board_state.members.members.iter().any(|member| {
-        member.member.member_vk == vk
-            && !board
-                .board_state
-                .ownership
-                .is_deactivated_now(&member.member.id())
-    });
+    let member_id = MemberId::from(&vk);
+    let not_deactivated = !board.board_state.ownership.is_deactivated_now(&member_id);
+    let is_member = not_deactivated
+        && (board
+            .board_state
+            .members
+            .members
+            .iter()
+            .any(|member| member.member.member_vk == vk)
+            || crate::components::app::member_contract::find_member_entry(current, member_id)
+                .is_some());
     ((is_owner || is_member) && !is_current, is_current)
 }
 

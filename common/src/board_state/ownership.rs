@@ -347,10 +347,18 @@ impl OwnershipV1 {
                 active.insert(id);
             }
         }
-        // An admin revoked strictly after `at` was still active at `at`.
+        // An admin revoked strictly after `at` was still active at `at`,
+        // unless its revocation records that it was also appointed after `at`.
         for rev in &state.admin.revoked {
             let id = rev.id();
             if id == current_owner || self.is_deactivated_at(&id, at) {
+                continue;
+            }
+            if rev
+                .revocation
+                .appointed_at
+                .is_some_and(|appointed| system_time_ms(appointed) > at_ms)
+            {
                 continue;
             }
             if system_time_ms(rev.revocation.signed_at) > at_ms {
@@ -469,7 +477,11 @@ impl OwnershipV1 {
                 let quorum = required_succession_quorum(active_admins.len()).ok_or_else(|| {
                     "Emergency succession requires at least two active admins".to_string()
                 })?;
+                let timelock_ms = (state.configuration.configuration.succession_timelock_secs
+                    as i64)
+                    .saturating_mul(1_000);
                 let mut voters = std::collections::HashSet::new();
+                let mut matured_voters = 0usize;
                 let mut valid_keys = Vec::new();
                 for approval in &entry.succession_approvals {
                     approval.verify_signature()?;
@@ -483,7 +495,8 @@ impl OwnershipV1 {
                             "Succession approval does not match the transfer target".to_string()
                         );
                     }
-                    if system_time_ms(vote.signed_at) > at {
+                    let vote_ms = system_time_ms(vote.signed_at);
+                    if vote_ms > at {
                         return Err(
                             "Succession approval is dated after the transfer".to_string()
                         );
@@ -504,6 +517,9 @@ impl OwnershipV1 {
                             "Succession voter key does not match the member".to_string()
                         );
                     }
+                    if at >= vote_ms.saturating_add(timelock_ms) {
+                        matured_voters += 1;
+                    }
                     valid_keys.push(vote.voter_key);
                 }
                 if voters.len() < quorum {
@@ -511,6 +527,12 @@ impl OwnershipV1 {
                         "Succession transfer lacks admin quorum: {} < {}",
                         voters.len(),
                         quorum
+                    ));
+                }
+                if timelock_ms > 0 && matured_voters < quorum {
+                    return Err(format!(
+                        "Succession timelock has not elapsed for enough admin votes: {} < {}",
+                        matured_voters, quorum
                     ));
                 }
                 if !valid_keys
@@ -542,10 +564,15 @@ impl OwnershipV1 {
             {
                 Some(admin) => Some(system_time_ms(admin.admin.signed_at)),
                 // A revocation recorded after the transfer removed the record,
-                // but the appointment still existed at the transfer time.
+                // but the appointment still existed at the transfer time (unless
+                // the revocation itself records a later appointment).
                 None if state.admin.revoked.iter().any(|revocation| {
                     revocation.id() == transfer.to
                         && system_time_ms(revocation.revocation.signed_at) > at
+                        && revocation
+                            .revocation
+                            .appointed_at
+                            .map_or(true, |appointed| system_time_ms(appointed) <= at)
                 }) => None,
                 // The founding owner is the board's root authority and needs
                 // no appointment of its own.
@@ -1220,6 +1247,7 @@ mod tests {
             member_id: fixture.admin_id,
             generation: fixture.state.admin.next_generation(&fixture.admin_id),
             signed_at: back_sign,
+            appointed_at: None,
         };
         let parent = fixture.state.clone();
         fixture
@@ -1354,6 +1382,7 @@ mod tests {
             member_id: fixture.admin_id,
             generation: fixture.state.admin.next_generation(&fixture.admin_id),
             signed_at: back_sign,
+            appointed_at: None,
         };
         let parent = fixture.state.clone();
         fixture
@@ -1962,6 +1991,7 @@ mod tests {
             member_id: fixture.admin_id,
             generation: fixture.state.admin.next_generation(&fixture.admin_id),
             signed_at: fixture.now + std::time::Duration::from_secs(5),
+            appointed_at: None,
         };
         let parent = fixture.state.clone();
         fixture
@@ -1984,6 +2014,214 @@ mod tests {
             fixture.state.ownership.succession_votes.is_empty(),
             "revoked admin vote must be dropped"
         );
+    }
+
+    #[test]
+    fn future_admin_appointed_and_revoked_after_succession_does_not_break_historical_quorum() {
+        let mut fixture = fixture();
+        let (admin2_sk, admin2_id) = add_admin(&mut fixture, 3);
+        // 2 admins => quorum is 2.
+        let transferred_at = fixture.now + std::time::Duration::from_secs(10);
+        let vote1 = succession_vote(
+            fixture.owner_id,
+            admin2_id,
+            admin2_sk.verifying_key(),
+            1,
+            &fixture.admin_sk,
+            fixture.now,
+        );
+        let vote2 = succession_vote(
+            fixture.owner_id,
+            admin2_id,
+            admin2_sk.verifying_key(),
+            1,
+            &admin2_sk,
+            fixture.now,
+        );
+        let transfer = AuthorizedOwnerTransfer::new_by_succession(
+            OwnerTransferV1 {
+                from: fixture.owner_id,
+                to: admin2_id,
+                to_key: admin2_sk.verifying_key(),
+                generation: 1,
+                transferred_at,
+                outgoing: OutgoingOwnerAction::Member,
+            },
+            vec![vote1, vote2],
+            &admin2_sk,
+        );
+        apply(
+            &mut fixture.state,
+            &fixture.parameters,
+            OwnershipDelta {
+                transfers: vec![transfer],
+                deactivations: Vec::new(),
+                succession_votes: Vec::new(),
+            },
+        );
+        assert_eq!(
+            fixture.state.ownership.current_owner(&fixture.parameters),
+            admin2_id
+        );
+
+        // Later, the new owner (admin2) appoints two new admins (admin3 & admin4)
+        // and subsequently revokes them with `appointed_at` populated.
+        // Without `appointed_at`, `active_admins_at(transferred_at)` would count
+        // 4 historical admins (quorum 3) and invalidate the earlier 2-of-2 transfer!
+        let appointed_later = transferred_at + std::time::Duration::from_secs(60);
+        let revoked_later = transferred_at + std::time::Duration::from_secs(120);
+        for seed in [11u8, 12u8] {
+            let sk = SigningKey::from_bytes(&[seed; 32]);
+            let id = MemberId::from(&sk.verifying_key());
+            let member = AuthorizedMember::new(
+                Member {
+                    owner_member_id: fixture.owner_id,
+                    invited_by: admin2_id,
+                    member_vk: sk.verifying_key(),
+                    join_proof: None,
+                },
+                &admin2_sk,
+            );
+            let admin = AuthorizedAdmin::new(
+                Admin {
+                    member_id: id,
+                    generation: 1,
+                    signed_at: appointed_later,
+                },
+                &admin2_sk,
+            );
+            let parent = fixture.state.clone();
+            fixture
+                .state
+                .apply_delta(
+                    &parent,
+                    &fixture.parameters,
+                    &Some(ChatBoardStateV1Delta {
+                        members: Some(MembersDelta::new(vec![member])),
+                        admin: Some(AdminsDelta::new(vec![admin])),
+                        ..Default::default()
+                    }),
+                )
+                .expect("new owner appoints later admin");
+
+            let revocation = AuthorizedAdminRevocation::new_at_with_appointment(
+                id,
+                fixture.state.admin.next_generation(&id),
+                revoked_later,
+                Some(appointed_later),
+                &admin2_sk,
+            );
+            let parent = fixture.state.clone();
+            fixture
+                .state
+                .apply_delta(
+                    &parent,
+                    &fixture.parameters,
+                    &Some(ChatBoardStateV1Delta {
+                        admin: Some(AdminsDelta::revocation(vec![revocation])),
+                        ..Default::default()
+                    }),
+                )
+                .expect("new owner revokes later admin");
+        }
+
+        fixture
+            .state
+            .verify(&fixture.state.clone(), &fixture.parameters)
+            .expect("historical 2-of-2 succession must still verify after later admins are revoked");
+    }
+
+    #[test]
+    fn succession_timelock_blocks_early_transfer_and_allows_after_grace_period() {
+        let mut fixture = fixture();
+        let (admin2_sk, admin2_id) = add_admin(&mut fixture, 3);
+
+        // Configure a 1-hour succession timelock.
+        let mut cfg = fixture.state.configuration.configuration.clone();
+        cfg.configuration_version += 1;
+        cfg.succession_timelock_secs = 3_600;
+        cfg.updated_at = fixture.now;
+        let parent = fixture.state.clone();
+        fixture
+            .state
+            .apply_delta(
+                &parent,
+                &fixture.parameters,
+                &Some(ChatBoardStateV1Delta {
+                    configuration: Some(AuthorizedConfigurationV1::new(cfg, &fixture.owner_sk)),
+                    ..Default::default()
+                }),
+            )
+            .expect("owner sets succession timelock");
+
+        let vote_time = fixture.now + std::time::Duration::from_secs(10);
+        let vote1 = succession_vote(
+            fixture.owner_id,
+            admin2_id,
+            admin2_sk.verifying_key(),
+            1,
+            &fixture.admin_sk,
+            vote_time,
+        );
+        let vote2 = succession_vote(
+            fixture.owner_id,
+            admin2_id,
+            admin2_sk.verifying_key(),
+            1,
+            &admin2_sk,
+            vote_time,
+        );
+
+        // Attempt to finalize after only 60 seconds: rejected.
+        let early_transfer = AuthorizedOwnerTransfer::new_by_succession(
+            OwnerTransferV1 {
+                from: fixture.owner_id,
+                to: admin2_id,
+                to_key: admin2_sk.verifying_key(),
+                generation: 1,
+                transferred_at: vote_time + std::time::Duration::from_secs(60),
+                outgoing: OutgoingOwnerAction::Member,
+            },
+            vec![vote1.clone(), vote2.clone()],
+            &admin2_sk,
+        );
+        let mut trial = fixture.state.ownership.clone();
+        trial.transfers.push(early_transfer);
+        let err = trial
+            .verify(&fixture.state, &fixture.parameters)
+            .expect_err("early succession must fail timelock");
+        assert!(err.contains("timelock"), "unexpected error: {err}");
+
+        // Finalize after the 1-hour grace period elapses: accepted.
+        let mature_transfer = AuthorizedOwnerTransfer::new_by_succession(
+            OwnerTransferV1 {
+                from: fixture.owner_id,
+                to: admin2_id,
+                to_key: admin2_sk.verifying_key(),
+                generation: 1,
+                transferred_at: vote_time + std::time::Duration::from_secs(3_600),
+                outgoing: OutgoingOwnerAction::Member,
+            },
+            vec![vote1, vote2],
+            &admin2_sk,
+        );
+        apply(
+            &mut fixture.state,
+            &fixture.parameters,
+            OwnershipDelta {
+                transfers: vec![mature_transfer],
+                deactivations: Vec::new(),
+                succession_votes: Vec::new(),
+            },
+        );
+        assert_eq!(
+            fixture.state.ownership.current_owner(&fixture.parameters),
+            admin2_id
+        );
+        fixture
+            .state
+            .verify(&fixture.state.clone(), &fixture.parameters)
+            .expect("matured succession verifies");
     }
 }
 

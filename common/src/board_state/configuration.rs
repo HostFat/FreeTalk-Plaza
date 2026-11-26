@@ -203,6 +203,7 @@ impl Default for Configuration {
             auto_moderated_topics: true,
             updated_at: std::time::SystemTime::UNIX_EPOCH,
             contact_mail: None,
+            succession_timelock_secs: 0,
         }
     }
 }
@@ -280,6 +281,13 @@ pub struct Configuration {
     /// older signed configurations keep verifying byte for byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact_mail: Option<SealedBytes>,
+
+    /// Minimum waiting period (seconds) that quorum succession votes must sit
+    /// on the board before an emergency ownership succession can be finalized.
+    /// Gives an active owner time to notice and revoke colluding admins.
+    /// Zero means immediate finalization once quorum is reached.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub succession_timelock_secs: u64,
 }
 
 /// Limits used when a configuration predates the fields (they decode as 0).

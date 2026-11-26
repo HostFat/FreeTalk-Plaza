@@ -37,12 +37,22 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
             let _ = win.location().set_hash(&path);
         }
     }
+    let mut tab_signal = use_signal(|| tab.clone());
+    if *tab_signal.peek() != tab {
+        tab_signal.set(tab.clone());
+    }
     use_effect(move || {
-        if let Some(owner) = CURRENT_BOARD.read().owner_key {
-            crate::util::safe_spawn_local(async move {
-                crate::components::app::member_contract::load_all_member_shards(owner).await;
-                crate::components::app::profile_contract::load_all_profile_shards(owner).await;
-            });
+        let current_tab = tab_signal.read();
+        if matches!(
+            current_tab.as_str(),
+            "" | "admins" | "bans" | "ownership" | "links"
+        ) {
+            if let Some(owner) = CURRENT_BOARD.read().owner_key {
+                crate::util::safe_spawn_local(async move {
+                    crate::components::app::member_contract::load_all_member_shards(owner).await;
+                    crate::components::app::profile_contract::load_all_profile_shards(owner).await;
+                });
+            }
         }
     });
 

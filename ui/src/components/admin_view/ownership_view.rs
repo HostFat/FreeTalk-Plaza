@@ -2,12 +2,14 @@ use dioxus::prelude::*;
 use plaza_core::board_state::admin::{
     Admin, AdminRevocation, AdminsDelta, AuthorizedAdmin, AuthorizedAdminRevocation,
 };
+use plaza_core::board_state::configuration::AuthorizedConfigurationV1;
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId, MembersDelta};
 use plaza_core::board_state::ownership::{
     required_succession_quorum, AuthorizedKeyDeactivation, AuthorizedOwnerTransfer,
     AuthorizedSuccessionVoteV1, KeyDeactivationV1, OutgoingOwnerAction, OwnerTransferV1,
     OwnershipDelta, SuccessionVoteV1,
 };
+use plaza_core::board_state::rate_limit::system_time_ms;
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1Delta};
 use plaza_core::util::sign_struct;
 use crate::util::get_current_system_time;
@@ -231,10 +233,18 @@ fn start_transfer(
             // the transfer invalid: the successor must still be an admin at
             // the transfer time. A handover to the outgoing identity itself
             // needs no revocation.
+            let appointed_at = ctx
+                .board_state
+                .admin
+                .admins
+                .iter()
+                .find(|admin| admin.admin.id() == outgoing_id)
+                .map(|admin| admin.admin.signed_at);
             let revocation = AdminRevocation {
                 member_id: outgoing_id,
                 generation: next_admin_generation,
                 signed_at,
+                appointed_at,
             };
             let authorized = AuthorizedAdminRevocation::with_signature(
                 revocation.clone(),
@@ -260,18 +270,19 @@ fn start_transfer(
                     && outgoing_is_admin
                 {
                     if let Some(fresh) = ActionContext::from_current_board() {
-                        if fresh
+                        if let Some(existing_admin) = fresh
                             .board_state
                             .admin
                             .admins
                             .iter()
-                            .any(|admin| admin.admin.id() == outgoing_id)
+                            .find(|admin| admin.admin.id() == outgoing_id)
                         {
-                            let revocation = AuthorizedAdminRevocation::new_at(
+                            let revocation = AuthorizedAdminRevocation::new_at_with_appointment(
                                 outgoing_id,
                                 fresh.board_state.admin.next_generation(&outgoing_id),
                                 get_current_system_time()
                                     + std::time::Duration::from_millis(2),
+                                Some(existing_admin.admin.signed_at),
                                 &fresh.owner_sk,
                             );
                             let _ = apply_state_delta(
@@ -305,9 +316,74 @@ fn start_transfer(
     });
 }
 
-/// Cast an admin vote for emergency succession. When this vote reaches the
-/// required strict-majority quorum (`>= 2` active admins), emit the succession
-/// transfer in the same delta so the successor becomes owner immediately.
+/// Save the owner-configured emergency succession timelock (grace period in seconds).
+fn save_succession_timelock(
+    timelock_secs: u64,
+    mut error: Signal<Option<String>>,
+    mut busy: Signal<bool>,
+    mut revision: Signal<u32>,
+) {
+    if *busy.peek() {
+        return;
+    }
+    busy.set(true);
+    error.set(None);
+    wasm_bindgen_futures::spawn_local(async move {
+        let Some(ctx) = ActionContext::from_current_board() else {
+            error.set(Some("The board context is not available".to_string()));
+            busy.set(false);
+            return;
+        };
+        let mut next_cfg = ctx.board_state.configuration.configuration.clone();
+        next_cfg.configuration_version += 1;
+        next_cfg.succession_timelock_secs = timelock_secs;
+        next_cfg.updated_at = get_current_system_time();
+        let delta = ChatBoardStateV1Delta {
+            configuration: Some(AuthorizedConfigurationV1::new(next_cfg, &ctx.owner_sk)),
+            ..Default::default()
+        };
+        match apply_state_delta(&ctx, delta) {
+            Ok(()) => {
+                error.set(None);
+                revision.set(revision() + 1);
+                crate::components::app::toasts::show("Succession grace period updated.");
+            }
+            Err(e) => {
+                crate::components::app::toasts::show_error(format!(
+                    "Could not update succession grace period: {e}"
+                ));
+                error.set(Some(format!("Could not update succession grace period: {e}")));
+            }
+        }
+        busy.set(false);
+    });
+}
+
+fn format_timelock(secs: u64) -> String {
+    if secs == 0 {
+        "None (immediate once quorum is reached)".to_string()
+    } else if secs % 86_400 == 0 {
+        let days = secs / 86_400;
+        if days == 1 {
+            "1 day".to_string()
+        } else {
+            format!("{days} days")
+        }
+    } else if secs % 3_600 == 0 {
+        let hours = secs / 3_600;
+        if hours == 1 {
+            "1 hour".to_string()
+        } else {
+            format!("{hours} hours")
+        }
+    } else {
+        format!("{secs} seconds")
+    }
+}
+
+/// Cast an admin vote for emergency succession. When enough votes have matured
+/// past `succession_timelock_secs` to reach the required strict-majority quorum
+/// (`>= 2` active admins), emit the succession transfer in the same delta.
 #[allow(clippy::too_many_arguments)]
 fn cast_succession_vote(
     target: MemberId,
@@ -374,18 +450,44 @@ fn cast_succession_vote(
 
         let generation = ctx.board_state.ownership.transfers.len() as u64 + 1;
         let now = get_current_system_time();
-        let my_vote = AuthorizedSuccessionVoteV1::new(
-            SuccessionVoteV1 {
-                from: owner_id,
-                to: target,
-                to_key: target_key,
-                generation,
-                voter: voter_id,
-                voter_key: voter_vk,
-                signed_at: now,
-            },
-            &voter_sk,
-        );
+        let transferred_at = now + Duration::from_millis(2);
+        let transfer_ms = system_time_ms(transferred_at);
+        let timelock_ms = (ctx
+            .board_state
+            .configuration
+            .configuration
+            .succession_timelock_secs as i64)
+            .saturating_mul(1_000);
+
+        let existing_own_vote = ctx
+            .board_state
+            .ownership
+            .succession_votes
+            .iter()
+            .find(|entry| {
+                entry.vote.generation == generation
+                    && entry.vote.from == owner_id
+                    && entry.vote.to == target
+                    && entry.vote.voter == voter_id
+            })
+            .cloned();
+
+        // Keep an already-recorded vote for the same target so its timelock
+        // age is preserved instead of resetting `signed_at` to `now`.
+        let my_vote = existing_own_vote.unwrap_or_else(|| {
+            AuthorizedSuccessionVoteV1::new(
+                SuccessionVoteV1 {
+                    from: owner_id,
+                    to: target,
+                    to_key: target_key,
+                    generation,
+                    voter: voter_id,
+                    voter_key: voter_vk,
+                    signed_at: now,
+                },
+                &voter_sk,
+            )
+        });
 
         let mut approvals: Vec<AuthorizedSuccessionVoteV1> = ctx
             .board_state
@@ -402,7 +504,13 @@ fn cast_succession_vote(
             .collect();
         approvals.push(my_vote.clone());
 
-        let finalized = approvals.len() >= quorum;
+        let matured_count = approvals
+            .iter()
+            .filter(|entry| {
+                transfer_ms >= system_time_ms(entry.vote.signed_at).saturating_add(timelock_ms)
+            })
+            .count();
+        let finalized = approvals.len() >= quorum && matured_count >= quorum;
         let transfers = if finalized {
             vec![AuthorizedOwnerTransfer::new_by_succession(
                 OwnerTransferV1 {
@@ -410,7 +518,7 @@ fn cast_succession_vote(
                     to: target,
                     to_key: target_key,
                     generation,
-                    transferred_at: now + Duration::from_millis(2),
+                    transferred_at,
                     outgoing: OutgoingOwnerAction::Member,
                 },
                 approvals,
@@ -436,6 +544,10 @@ fn cast_succession_vote(
                 if finalized {
                     crate::components::app::toasts::show(
                         "Quorum reached: ownership transferred to the successor. Syncing…",
+                    );
+                } else if timelock_ms > 0 {
+                    crate::components::app::toasts::show(
+                        "Succession vote recorded. Finalization unlocks after the grace period elapses.",
                     );
                 } else {
                     crate::components::app::toasts::show(
@@ -497,6 +609,13 @@ pub fn OwnershipView() -> Element {
     let is_active_admin = !is_owner && active_admins.contains(&self_id);
     let succession_quorum = required_succession_quorum(active_admins.len());
     let pending_votes = ctx.board_state.ownership.succession_votes.clone();
+    let timelock_secs = ctx
+        .board_state
+        .configuration
+        .configuration
+        .succession_timelock_secs;
+    let timelock_ms = (timelock_secs as i64).saturating_mul(1_000);
+    let now_ms = system_time_ms(get_current_system_time());
 
     let mut merged_members = ctx.board_state.members.clone();
     crate::components::app::member_contract::apply_to_members(
@@ -662,6 +781,40 @@ pub fn OwnershipView() -> Element {
                 }
             }
 
+            if is_owner {
+                div { class: "bg-surface rounded-lg p-4 space-y-3",
+                    h3 { class: "text-text font-medium", "Emergency succession grace period" }
+                    p { class: "text-text-muted text-xs",
+                        "Set a waiting period before an admin-quorum succession can be finalized. Gives you time to revoke compromised admins if they vote while you are still active. Current: {format_timelock(timelock_secs)}."
+                    }
+                    div { class: "flex flex-wrap gap-2",
+                        for (label, secs) in [
+                            ("None", 0u64),
+                            ("24 hours", 86_400u64),
+                            ("7 days", 604_800u64),
+                            ("30 days", 2_592_000u64),
+                        ] {
+                            {
+                                let active = timelock_secs == secs;
+                                rsx! {
+                                    button {
+                                        r#type: "button",
+                                        class: if active {
+                                            "px-3 py-1.5 bg-accent/20 border border-accent rounded-lg text-xs text-text font-medium"
+                                        } else {
+                                            "px-3 py-1.5 bg-background border border-border rounded-lg text-xs text-text-muted hover:text-text hover:bg-surface-hover disabled:opacity-50"
+                                        },
+                                        disabled: *busy.read() || active,
+                                        onclick: move |_| save_succession_timelock(secs, error, busy, revision),
+                                        "{label}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if is_active_admin || !pending_votes.is_empty() {
                 div { class: "bg-surface rounded-lg p-4 space-y-3",
                     h3 { class: "text-text font-medium", "Emergency succession (admin quorum)" }
@@ -670,7 +823,7 @@ pub fn OwnershipView() -> Element {
                     }
                     if let Some(quorum) = succession_quorum {
                         p { class: "text-text-muted text-xs",
-                            "Active admins: {active_admins.len()} — Votes required for quorum: {quorum}"
+                            "Active admins: {active_admins.len()} — Votes required for quorum: {quorum} — Grace period: {format_timelock(timelock_secs)}"
                         }
                     } else {
                         p { class: "text-amber-300 text-xs",
@@ -681,8 +834,28 @@ pub fn OwnershipView() -> Element {
                         div { class: "space-y-1 text-xs text-text-muted",
                             p { class: "text-text font-medium", "Pending succession votes:" }
                             for vote in pending_votes.iter() {
-                                p {
-                                    "{name_of(vote.vote.voter)} voted for {name_of(vote.vote.to)}"
+                                {
+                                    let matured = timelock_ms == 0
+                                        || now_ms
+                                            >= system_time_ms(vote.vote.signed_at)
+                                                .saturating_add(timelock_ms);
+                                    let status = if timelock_ms == 0 {
+                                        String::new()
+                                    } else if matured {
+                                        " (matured)".to_string()
+                                    } else {
+                                        let rem_secs = (system_time_ms(vote.vote.signed_at)
+                                            .saturating_add(timelock_ms)
+                                            .saturating_sub(now_ms)
+                                            / 1_000)
+                                            .max(1);
+                                        format!(" (unlocks in ~{}m)", (rem_secs + 59) / 60)
+                                    };
+                                    rsx! {
+                                        p {
+                                            "{name_of(vote.vote.voter)} voted for {name_of(vote.vote.to)}{status}"
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -702,14 +875,36 @@ pub fn OwnershipView() -> Element {
                                     {
                                         let target_admin = *admin_id;
                                         let target_name = name_of(target_admin);
-                                        let existing_for_target = pending_votes
+                                        let my_existing = pending_votes.iter().find(|entry| {
+                                            entry.vote.to == target_admin
+                                                && entry.vote.voter == self_id
+                                        });
+                                        let other_for_target: Vec<_> = pending_votes
                                             .iter()
                                             .filter(|entry| {
                                                 entry.vote.to == target_admin
                                                     && entry.vote.voter != self_id
                                             })
+                                            .collect();
+                                        let total_with_me = other_for_target.len() + 1;
+                                        let matured_other = other_for_target
+                                            .iter()
+                                            .filter(|entry| {
+                                                now_ms
+                                                    >= system_time_ms(entry.vote.signed_at)
+                                                        .saturating_add(timelock_ms)
+                                            })
                                             .count();
-                                        let will_finalize = existing_for_target + 1 >= quorum;
+                                        let my_matured = timelock_ms == 0
+                                            || my_existing.is_some_and(|entry| {
+                                                now_ms
+                                                    >= system_time_ms(entry.vote.signed_at)
+                                                        .saturating_add(timelock_ms)
+                                            });
+                                        let matured_total =
+                                            matured_other + usize::from(my_matured);
+                                        let will_finalize =
+                                            total_with_me >= quorum && matured_total >= quorum;
                                         let click_parameters = parameters.clone();
                                         rsx! {
                                             button {
@@ -726,10 +921,14 @@ pub fn OwnershipView() -> Element {
                                                     busy,
                                                     revision,
                                                 ),
-                                                if will_finalize {
-                                                    "Vote & finalize for {target_name} ({existing_for_target + 1}/{quorum})"
+                                                if will_finalize && my_existing.is_some() {
+                                                    "Finalize succession for {target_name} ({total_with_me}/{quorum})"
+                                                } else if will_finalize {
+                                                    "Vote & finalize for {target_name} ({total_with_me}/{quorum})"
+                                                } else if my_existing.is_some() {
+                                                    "Voted for {target_name} ({total_with_me}/{quorum})"
                                                 } else {
-                                                    "Vote for {target_name} ({existing_for_target}/{quorum})"
+                                                    "Vote for {target_name} ({other_for_target.len()}/{quorum})"
                                                 }
                                             }
                                         }

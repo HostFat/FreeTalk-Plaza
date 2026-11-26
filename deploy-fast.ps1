@@ -202,7 +202,12 @@ if (-not $SkipContractBuild) {
         'plaza_delegate.wasm' = @('plaza-delegate\src', 'common\src\chat_delegate.rs')
         'plaza_dm_delegate.wasm' = @('dm-delegate\src', 'dm-core\src')
         'plaza_dm_contract.wasm' = @('dm-contract\src', 'dm-core\src')
-        'plaza_topic_contract.wasm' = @('topic-contract\src', 'topic-core\src')
+        'plaza_topic_contract.wasm' = @('topic-contract\src', 'topic-core\src', 'common\src')
+        'plaza_section_contract.wasm' = @('section-contract\src', 'common\src')
+        'plaza_activity_contract.wasm' = @('activity-contract\src', 'common\src')
+        'plaza_moderation_contract.wasm' = @('moderation-contract\src', 'common\src')
+        'plaza_profile_contract.wasm' = @('profile-contract\src', 'common\src')
+        'plaza_member_contract.wasm' = @('member-contract\src', 'common\src')
         'plaza_blob.wasm' = @('plaza-blob-core\src', 'plaza-blob\src')
     }
     $wasmProfile = if ($Production) { 'release' } else { 'release-fast' }
@@ -212,6 +217,11 @@ if (-not $SkipContractBuild) {
         @{ File = 'plaza_dm_delegate.wasm'; Dest = 'plaza_dm_delegate.wasm'; Package = 'plaza-dm-delegate'; Profile = 'release' },
         @{ File = 'plaza_dm_contract.wasm'; Dest = 'plaza_dm_contract.wasm'; Package = 'plaza-dm-contract'; Profile = 'release' },
         @{ File = 'plaza_topic_contract.wasm'; Dest = 'plaza_topic_contract.wasm'; Package = 'plaza-topic-contract'; Profile = 'release' },
+        @{ File = 'plaza_section_contract.wasm'; Dest = 'plaza_section_contract.wasm'; Package = 'plaza-section-contract'; Profile = 'release' },
+        @{ File = 'plaza_activity_contract.wasm'; Dest = 'plaza_activity_contract.wasm'; Package = 'plaza-activity-contract'; Profile = 'release' },
+        @{ File = 'plaza_moderation_contract.wasm'; Dest = 'plaza_moderation_contract.wasm'; Package = 'plaza-moderation-contract'; Profile = 'release' },
+        @{ File = 'plaza_profile_contract.wasm'; Dest = 'plaza_profile_contract.wasm'; Package = 'plaza-profile-contract'; Profile = 'release' },
+        @{ File = 'plaza_member_contract.wasm'; Dest = 'plaza_member_contract.wasm'; Package = 'plaza-member-contract'; Profile = 'release' },
         @{ File = 'plaza_blob.wasm'; Dest = 'blob_contract.wasm'; Package = 'plaza-blob' }
     )
     foreach ($artifact in $wasmArtifacts) {

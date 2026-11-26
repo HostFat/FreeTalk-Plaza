@@ -96,6 +96,34 @@ impl ContractInterface for ProfileContract {
                         }
                     })?;
                 }
+                UpdateData::StateAndDelta {
+                    state: state_bytes,
+                    delta: delta_bytes,
+                } => {
+                    if !state_bytes.as_ref().is_empty() {
+                        let next = from_reader::<ProfileStateV1, &[u8]>(state_bytes.as_ref())
+                            .map_err(|error| ContractError::Deser(error.to_string()))?;
+                        profiles
+                            .apply_delta(
+                                &params,
+                                &ProfileDeltaV1 {
+                                    entries: next.entries,
+                                },
+                            )
+                            .map_err(|error| ContractError::InvalidUpdateWithInfo {
+                                reason: format!("profile state does not verify: {error}"),
+                            })?;
+                    }
+                    if !delta_bytes.as_ref().is_empty() {
+                        let delta = from_reader::<ProfileDeltaV1, &[u8]>(delta_bytes.as_ref())
+                            .map_err(|error| ContractError::Deser(error.to_string()))?;
+                        profiles.apply_delta(&params, &delta).map_err(|error| {
+                            ContractError::InvalidUpdateWithInfo {
+                                reason: format!("profile delta does not verify: {error}"),
+                            }
+                        })?;
+                    }
+                }
                 _ => {}
             }
         }

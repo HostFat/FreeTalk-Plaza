@@ -35,7 +35,7 @@ export default defineConfig({
     // so this URL is only reachable when the bundle is ready.
     url: "http://localhost:8082/",
     reuseExistingServer: !process.env.CI,
-    timeout: 300_000,
+    timeout: 600_000,
     stdout: "pipe",
     stderr: "pipe",
   },

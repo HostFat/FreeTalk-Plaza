@@ -711,6 +711,27 @@ fn collect_members_with_ancestors(
                     added.push(ancestor);
                 }
             }
+        } else if !by_id.contains_key(&id) {
+            let local = crate::components::app::BOARDS
+                .read()
+                .map
+                .get(&owner)
+                .and_then(|board| {
+                    board
+                        .self_authorized_member
+                        .as_ref()
+                        .filter(|member| member.member.id() == id)
+                        .map(|member| (member.clone(), board.invite_chain.clone()))
+                });
+            if let Some((member, chain)) = local {
+                added.push(member);
+                for ancestor in chain {
+                    let anc_id = ancestor.member.id();
+                    if anc_id != owner_id && !known.contains(&anc_id) && added_ids.insert(anc_id) {
+                        added.push(ancestor);
+                    }
+                }
+            }
         }
     }
     added

@@ -25,6 +25,13 @@ use crate::components::app::send_client_request;
 use crate::constants::MEMBER_CONTRACT_WASM;
 use crate::util::to_cbor_vec;
 
+/// Cooldown before retrying a GET for an unsynced (previously missing) shard.
+const UNSYNCED_RETRY_COOLDOWN_MS: i64 = 10_000;
+
+fn now_ms() -> i64 {
+    plaza_core::board_state::rate_limit::system_time_ms(crate::util::get_current_system_time())
+}
+
 #[derive(Clone)]
 pub struct MemberShardBoard {
     pub params: MemberShardParametersV1,
@@ -32,13 +39,11 @@ pub struct MemberShardBoard {
     pub synced: bool,
     /// A local member record has not been confirmed by the node yet.
     pub dirty: bool,
+    pub last_fetch: i64,
 }
 
 pub static MEMBER_SHARDS: GlobalSignal<HashMap<ContractInstanceId, MemberShardBoard>> =
     Global::new(HashMap::new);
-
-static LOADED_ALL_BOARDS: std::sync::Mutex<Option<HashSet<VerifyingKey>>> =
-    std::sync::Mutex::new(None);
 
 pub fn member_shard_key(owner: VerifyingKey, bucket: u16) -> ContractKey {
     let params = MemberShardParametersV1 { owner, bucket };
@@ -78,19 +83,27 @@ pub async fn load_member_shard(owner: VerifyingKey, bucket: u16) -> Result<(), S
     }
     let key = member_shard_key(owner, bucket);
     let contract_id = *key.id();
-    // Request each bucket at most once per session. Read-only loads never PUT
-    // an empty shard contract; only `record_member` creates a shard on demand.
-    if MEMBER_SHARDS.read().contains_key(&contract_id) {
+    let now = now_ms();
+    // Read-only loads never PUT an empty shard contract; only `record_member`
+    // creates a shard on demand. Skip buckets that are already synced or were
+    // requested recently, while allowing unsynced (initially empty) buckets to
+    // be retried after the cooldown.
+    let should_skip = MEMBER_SHARDS.read().get(&contract_id).is_some_and(|board| {
+        board.synced || now.saturating_sub(board.last_fetch) < UNSYNCED_RETRY_COOLDOWN_MS
+    });
+    if should_skip {
         return Ok(());
     }
     let params = MemberShardParametersV1 { owner, bucket };
     MEMBER_SHARDS.with_mut(|shards| {
-        shards.entry(contract_id).or_insert(MemberShardBoard {
+        let entry = shards.entry(contract_id).or_insert(MemberShardBoard {
             params,
             state: MemberShardStateV1::default(),
             synced: false,
             dirty: false,
+            last_fetch: now,
         });
+        entry.last_fetch = now;
     });
     send_client_request(ClientRequest::ContractOp(ContractRequest::Get {
         key: contract_id,
@@ -116,17 +129,11 @@ pub async fn load_member_shards_for(
     }
 }
 
-/// Lazily load all buckets of a board once per session (GET-only, no PUT of
-/// empty contracts), used by views that display or select from the full member
-/// directory.
+/// Lazily load all buckets of a board (GET-only, no PUT of empty contracts),
+/// used by views that display or select from the full member directory. Already
+/// synced buckets and recently requested unsynced buckets are skipped by
+/// `load_member_shard`.
 pub async fn load_all_member_shards(owner: VerifyingKey) {
-    {
-        let mut guard = LOADED_ALL_BOARDS.lock().unwrap();
-        let set = guard.get_or_insert_with(HashSet::new);
-        if !set.insert(owner) {
-            return;
-        }
-    }
     for bucket in 0..MEMBER_SHARD_COUNT {
         let _ = load_member_shard(owner, bucket).await;
     }
@@ -320,6 +327,22 @@ pub fn records_for_parent_board(
     records
 }
 
+/// Whether `member_id` is already present in its local member shard and
+/// confirmed by the node.
+pub fn is_member_synced_in_shard(owner: VerifyingKey, member_id: MemberId) -> bool {
+    let bucket = member_shard_bucket(&member_id);
+    let key = member_shard_key(owner, bucket);
+    MEMBER_SHARDS.read().get(key.id()).is_some_and(|shard| {
+        shard.synced
+            && !shard.dirty
+            && shard
+                .state
+                .entries
+                .iter()
+                .any(|entry| entry.member_id() == member_id)
+    })
+}
+
 /// Publish one member entry into its deterministic shard contract.
 pub async fn record_member(owner: VerifyingKey, entry: MemberShardEntryV1) -> Result<(), String> {
     let bucket = member_shard_bucket(&entry.member_id());
@@ -327,44 +350,51 @@ pub async fn record_member(owner: VerifyingKey, entry: MemberShardEntryV1) -> Re
     entry.verify(&params)?;
     let key = member_shard_key(owner, bucket);
     let contract_id = *key.id();
+    let already_synced = MEMBER_SHARDS
+        .read()
+        .get(&contract_id)
+        .map(|board| board.synced)
+        .unwrap_or(false);
     let delta = MemberShardDeltaV1 {
         entries: vec![entry],
     };
+    let now = now_ms();
     MEMBER_SHARDS.with_mut(|shards| {
         let board = shards.entry(contract_id).or_insert(MemberShardBoard {
             params: params.clone(),
             state: MemberShardStateV1::default(),
             synced: false,
             dirty: true,
+            last_fetch: now,
         });
         let _ = board.state.apply_delta(&params, &delta);
         board.dirty = true;
     });
-    let update = send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
-        key,
-        data: UpdateData::Delta(to_cbor_vec(&delta).into()),
-    }))
-    .await;
-    if update.is_ok() {
-        return Ok(());
+    if already_synced {
+        send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
+            key,
+            data: UpdateData::Delta(to_cbor_vec(&delta).into()),
+        }))
+        .await
+        .map_err(|error| format!("send member shard delta failed: {error}"))
+    } else {
+        // The shard contract has not been confirmed on the node yet (`load_*`
+        // is GET-only and never PUTs empty buckets). PUT creates the contract
+        // on first write and is merged additively if another peer already
+        // created it.
+        let state = MEMBER_SHARDS
+            .read()
+            .get(&contract_id)
+            .map(|board| board.state.clone())
+            .unwrap_or_default();
+        send_client_request(ClientRequest::ContractOp(ContractRequest::Put {
+            contract: member_shard_contract(owner, bucket),
+            state: WrappedState::new(to_cbor_vec(&state)),
+            related_contracts: Default::default(),
+            subscribe: true,
+            blocking_subscribe: false,
+        }))
+        .await
+        .map_err(|error| format!("put member shard failed: {error}"))
     }
-    let state = MEMBER_SHARDS
-        .read()
-        .get(&contract_id)
-        .map(|board| board.state.clone())
-        .unwrap_or_default();
-    send_client_request(ClientRequest::ContractOp(ContractRequest::Put {
-        contract: member_shard_contract(owner, bucket),
-        state: WrappedState::new(to_cbor_vec(&state)),
-        related_contracts: Default::default(),
-        subscribe: true,
-        blocking_subscribe: false,
-    }))
-    .await
-    .map_err(|error| {
-        format!(
-            "send member shard delta failed ({}), put failed: {error}",
-            update.err().map(|error| error.to_string()).unwrap_or_default()
-        )
-    })
 }

@@ -80,6 +80,67 @@ pub fn restore_self_membership() -> bool {
     }
 
     let former_owner = board.board_state.ownership.was_owner(&self_id);
+    let is_admin = board
+        .board_state
+        .admin
+        .admins
+        .iter()
+        .any(|admin| admin.admin.id() == self_id);
+    let is_sectioned = board.board_state.mode
+        == plaza_core::board_state::BoardModeV1::SectionedTopicIndex;
+
+    // On sectioned boards, ordinary members live strictly in deterministic
+    // member shards (`member-contract`) and profile shards (`profile-contract`)
+    // instead of growing the parent board's `members` list. Admins and former
+    // owners remain on the parent board because ownership and admin checks read
+    // the parent state directly.
+    if is_sectioned && !former_owner && !is_admin {
+        let Some(authorized_member) = board.self_authorized_member.clone() else {
+            warn!("membership restore skipped: no stored membership to publish");
+            return false;
+        };
+        if crate::components::app::member_contract::is_member_synced_in_shard(board_key, self_id) {
+            info!("membership restore skipped: already synced in member shard");
+            return false;
+        }
+        let profile_info =
+            crate::util::messaging::self_membership_delta(&board).map(|(_, info)| info);
+        if let Some(info) = profile_info {
+            let signer_key = board.self_sk.verifying_key();
+            crate::util::safe_spawn_local(async move {
+                let _ = crate::components::app::profile_contract::record_member_info(
+                    board_key,
+                    info,
+                    signer_key,
+                )
+                .await;
+            });
+        }
+        let invite_token = authorized_member
+            .member
+            .join_proof
+            .as_ref()
+            .and_then(|proof| {
+                board
+                    .board_state
+                    .invites
+                    .tokens
+                    .iter()
+                    .find(|token| token.token.id == proof.token_id)
+                    .cloned()
+            });
+        let entry = plaza_core::board_state::member_shards::MemberShardEntryV1 {
+            member: authorized_member,
+            invite_chain: board.invite_chain.clone(),
+            invite_token,
+        };
+        crate::util::safe_spawn_local(async move {
+            let _ = crate::components::app::member_contract::record_member(board_key, entry).await;
+        });
+        info!("membership restore published stored member record to member shard");
+        return true;
+    }
+
     let (delta, profile_info) = if let Some((members, member_info)) =
         crate::util::messaging::self_membership_delta(&board)
     {

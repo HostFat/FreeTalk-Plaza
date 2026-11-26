@@ -99,6 +99,24 @@ impl ContractInterface for Contract {
                             .apply_delta_incremental(&params, &delta)
                             .map_err(contract_error)?;
                     }
+                    UpdateData::StateAndDelta {
+                        state: state_bytes,
+                        delta: delta_bytes,
+                    } => {
+                        if !state_bytes.as_ref().is_empty() {
+                            let incoming = decode_page_state(state_bytes.as_ref())
+                                .map_err(ContractError::Deser)?;
+                            current.merge(&params, &incoming).map_err(contract_error)?;
+                            full_verify = true;
+                        }
+                        if !delta_bytes.as_ref().is_empty() {
+                            let delta = decode_page_delta(delta_bytes.as_ref())
+                                .map_err(ContractError::Deser)?;
+                            current
+                                .apply_delta_incremental(&params, &delta)
+                                .map_err(contract_error)?;
+                        }
+                    }
                     UpdateData::RelatedState { .. } => {}
                     _ => {}
                 }
@@ -133,6 +151,24 @@ impl ContractInterface for Contract {
                     current
                         .apply_delta_incremental(&params, &delta)
                         .map_err(contract_error)?;
+                }
+                UpdateData::StateAndDelta {
+                    state: state_bytes,
+                    delta: delta_bytes,
+                } => {
+                    if !state_bytes.as_ref().is_empty() {
+                        let incoming =
+                            decode_state(state_bytes.as_ref()).map_err(ContractError::Deser)?;
+                        current.merge(&params, &incoming).map_err(contract_error)?;
+                        full_verify = true;
+                    }
+                    if !delta_bytes.as_ref().is_empty() {
+                        let delta =
+                            decode_delta(delta_bytes.as_ref()).map_err(ContractError::Deser)?;
+                        current
+                            .apply_delta_incremental(&params, &delta)
+                            .map_err(contract_error)?;
+                    }
                 }
                 UpdateData::RelatedState { .. } => {}
                 _ => {}

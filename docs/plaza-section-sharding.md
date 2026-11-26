@@ -100,7 +100,7 @@ la propria fetta di topic. Un aggiornamento tocca una pagina, non tutte.
   per il test.
 - Solo l'owner crea pagine: un membro che trova tutte le pagine piene riceve
   un errore finché l'owner non ne aggiunge una.
-- **Pagine extra compatte e sigillate (`SectionPageStateV1`, rev 35)**: le
+- **Pagine extra compatte e sigillate (`SectionPageStateV1`, rev 35–36)**: le
   pagine `page > 0` non duplicano più `ChatBoardStateV1` (nessuna
   configurazione, sezioni, ban, sospensioni, activity, report o flag) e non
   ricevono mai `sync_section_authority` (che tocca solo il manifest pagina 0,
@@ -109,13 +109,23 @@ la propria fetta di topic. Un aggiornamento tocca una pagina, non tutte.
   topic delle pagine extra quando `topic_pages` è popolato). Finché una pagina
   extra è aperta tiene solo `AuthorizedSectionPageHeaderV1`, `entries` e i
   certificati deduplicati degli autori (190,9 KiB, delta 1 topic 0,97 KiB in
-  4,3 ms); quando è piena e l'owner crea la pagina successiva, la sigilla con
+  4,2 ms); quando è piena e l'owner crea la pagina successiva, la sigilla con
   `AuthorizedSectionPageSealV1` azzerando autori/inviti/ruoli (124,4 KiB,
-  verifica 5,19 ms con 1 firma Ed25519 + BLAKE3 invece di 1,73 s; 10 pagine
+  verifica 5,28 ms con 1 firma Ed25519 + BLAKE3 invece di 1,81 s; 10 pagine
   1,51 MiB vs 3,55 MiB). Gli autori possono comunque modificare titolo e
   anteprima di un topic su pagina sigillata tramite `entry_edits`, verificato
   direttamente contro la chiave dell'entry sigillata. `active_page` controlla
   direttamente l'ultima pagina senza scaricare le pagine sigillate precedenti.
+- **Membri e profili shardati (rev 36)**: sulle board `SectionedTopicIndex` i
+  membri ordinari non scrivono più su `board_state.members` della board madre:
+  vanno esclusivamente in `plaza-member-contract` (32 bucket) e
+  `plaza-profile-contract` (32 bucket). La prima scrittura su uno shard non
+  ancora confermato usa `Put` additivo (creando il contratto on demand), mentre
+  le scritture successive usano `Update` con delta incrementali; le letture
+  restano `GET`-only con retry cooldown di 10 s sui bucket non ancora creati.
+  `MemberShardEntryV1::verify` rifiuta record self-signed senza token e verifica
+  crittograficamente `token.authority` fino a `params.owner` per i token
+  delegati da admin o role-manager.
 - Limiti attuali: l'aggiunta di una pagina resta una singola scrittura sul
   manifest (solo l'owner può creare/sigillare pagine). Se l'aggiornamento del
   manifest fallisce, la pagina resta orfana: non viene caricata e l'owner può

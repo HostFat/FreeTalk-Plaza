@@ -720,8 +720,14 @@ pub fn InviteLinksSection() -> Element {
                         let role_name = data.board_state.roles.role(&token.role_id)
                             .map(|r| r.name.clone())
                             .unwrap_or_else(|| "(role deleted)".to_string());
+                        let mut merged_members = data.board_state.members.clone();
+                        crate::components::app::member_contract::apply_to_members(
+                            data.owner_vk,
+                            &data.board_state,
+                            &mut merged_members,
+                        );
                         let uses = plaza_core::board_state::invites::members_joined_via(
-                            &data.board_state.members.members,
+                            &merged_members.members,
                             &token_id,
                         ).len();
                         let max_text = token.max_uses

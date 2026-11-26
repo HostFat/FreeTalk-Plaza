@@ -12,6 +12,7 @@
 
 use crate::board_state::invites::{join_message, AuthorizedInviteToken};
 use crate::board_state::member::{AuthorizedMember, MemberId, MembersV1};
+use crate::board_state::roles::AuthorityProof;
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::verify_struct;
 use crate::ChatBoardStateV1;
@@ -26,6 +27,9 @@ pub const MEMBER_SHARD_COUNT: u16 = 32;
 pub const MAX_MEMBERS_PER_SHARD: usize = 2_000;
 /// Maximum invite-chain depth accepted inside one shard entry.
 pub const MAX_MEMBER_INVITE_CHAIN: usize = 64;
+/// Maximum nested authority proof depth when verifying delegated invite tokens
+/// inside a standalone shard contract.
+const MAX_SHARD_AUTHORITY_DEPTH: u8 = 8;
 
 /// Deterministic bucket index for a member id.
 pub fn member_shard_bucket(member_id: &MemberId) -> u16 {
@@ -113,13 +117,12 @@ impl MemberShardEntryV1 {
             );
         }
 
-        // Former owner re-registering after a transfer: self-signed. The
-        // client checks `board.ownership.was_owner(&member_id)` before overlay.
+        // Self-signed non-token entries cannot be verified without the parent
+        // board's ownership history (former owners remain on the parent board),
+        // so accepting them in a standalone shard would allow unauthenticated
+        // shard filling.
         if self.member.member.invited_by == member_id {
-            return self
-                .member
-                .verify_signature(&self.member.member.member_vk)
-                .map_err(|error| format!("invalid self-signed member record: {error}"));
+            return Err("self-signed non-token members are not accepted in member shards".to_string());
         }
 
         if self.member.member.invited_by == owner_id {
@@ -157,9 +160,9 @@ impl MemberShardEntryV1 {
                     .map_err(|error| format!("invalid invite chain owner signature: {error}"));
             }
             if current.member.invited_by == current_id {
-                return current
-                    .verify_signature(&current.member.member_vk)
-                    .map_err(|error| format!("invalid former-owner chain signature: {error}"));
+                return Err(
+                    "self-signed non-token ancestor is not accepted in member shards".to_string(),
+                );
             }
             let inviter = chain_by_id
                 .get(&current.member.invited_by)
@@ -176,6 +179,116 @@ impl MemberShardEntryV1 {
         }
 
         Err("member shard invite chain exceeds maximum depth".to_string())
+    }
+
+    fn verify_standalone_admin_authority(
+        owner: &VerifyingKey,
+        signer: &MemberId,
+        proof: Option<&AuthorityProof>,
+        depth: u8,
+    ) -> Result<(), String> {
+        let owner_id = MemberId::from(owner);
+        if *signer == owner_id {
+            return Ok(());
+        }
+        if depth == 0 {
+            return Err("member shard authority proof is nested too deeply".to_string());
+        }
+        let proof = proof
+            .ok_or_else(|| "non-owner invite token in member shard requires an authority proof".to_string())?;
+        if let Some(admin) = &proof.admin {
+            if admin.admin.id() == *signer {
+                admin
+                    .verify_signature(owner)
+                    .map_err(|error| format!("invalid admin authority proof in member shard: {error}"))?;
+                return Ok(());
+            }
+        }
+        Err("member shard signer lacks a valid owner-signed admin proof".to_string())
+    }
+
+    fn verify_standalone_manager_authority(
+        owner: &VerifyingKey,
+        signer: &MemberId,
+        proof: Option<&AuthorityProof>,
+        depth: u8,
+    ) -> Result<(), String> {
+        let owner_id = MemberId::from(owner);
+        if *signer == owner_id {
+            return Ok(());
+        }
+        if Self::verify_standalone_admin_authority(owner, signer, proof, depth).is_ok() {
+            return Ok(());
+        }
+        if depth == 0 {
+            return Err("member shard authority proof is nested too deeply".to_string());
+        }
+        let proof = proof
+            .ok_or_else(|| "non-owner invite token in member shard requires an authority proof".to_string())?;
+        let grant = proof
+            .grant
+            .as_ref()
+            .ok_or_else(|| "member shard authority proof has neither valid admin nor role grant".to_string())?;
+        if grant.role.role.deleted || !grant.role.role.can_manage_access {
+            return Err("member shard proof role does not grant access management".to_string());
+        }
+        if grant.assignment.assignment.role_id != grant.role.role.id
+            || grant.assignment.assignment.member_id != *signer
+            || grant.assignment.assignment.revoked
+        {
+            return Err("member shard proof assignment does not match signer or role".to_string());
+        }
+
+        let role_signer = grant.role.signer.unwrap_or(owner_id);
+        let role_key = if role_signer == owner_id {
+            *owner
+        } else {
+            let key = grant
+                .role
+                .signer_key
+                .ok_or_else(|| "member shard role proof is missing signer key".to_string())?;
+            if MemberId::from(&key) != role_signer {
+                return Err("member shard role proof signer key mismatch".to_string());
+            }
+            key
+        };
+        verify_struct(&grant.role.role, &grant.role.signature, &role_key)
+            .map_err(|error| format!("invalid role signature in member shard proof: {error}"))?;
+        Self::verify_standalone_admin_authority(
+            owner,
+            &role_signer,
+            grant.role.authority.as_deref(),
+            depth - 1,
+        )?;
+
+        let assign_signer = grant.assignment.signer.unwrap_or(owner_id);
+        if assign_signer == *signer {
+            return Err("member shard role assignment proof cannot be self-granted".to_string());
+        }
+        let assign_key = if assign_signer == owner_id {
+            *owner
+        } else {
+            let key = grant
+                .assignment
+                .signer_key
+                .ok_or_else(|| "member shard assignment proof is missing signer key".to_string())?;
+            if MemberId::from(&key) != assign_signer {
+                return Err("member shard assignment proof signer key mismatch".to_string());
+            }
+            key
+        };
+        verify_struct(
+            &grant.assignment.assignment,
+            &grant.assignment.signature,
+            &assign_key,
+        )
+        .map_err(|error| format!("invalid role assignment signature in member shard proof: {error}"))?;
+        Self::verify_standalone_manager_authority(
+            owner,
+            &assign_signer,
+            grant.assignment.authority.as_deref(),
+            depth - 1,
+        )
     }
 
     fn verify_token_member(
@@ -200,16 +313,24 @@ impl MemberShardEntryV1 {
             return Err("invite token is deleted".to_string());
         }
         let owner_id = params.owner_id();
-        let signer_key = match (token.signer, token.signer_key) {
-            (None, _) => params.owner,
-            (Some(signer), _) if signer == owner_id => params.owner,
-            (Some(signer), Some(key)) if MemberId::from(&key) == signer => key,
+        let (signer_id, signer_key) = match (token.signer, token.signer_key) {
+            (None, _) => (owner_id, params.owner),
+            (Some(signer), _) if signer == owner_id => (owner_id, params.owner),
+            (Some(signer), Some(key)) if MemberId::from(&key) == signer => (signer, key),
             _ => {
                 return Err("invite token signer key is missing or mismatched".to_string());
             }
         };
         verify_struct(&token.token, &token.signature, &signer_key)
             .map_err(|error| format!("invalid invite token signature: {error}"))?;
+        if signer_id != owner_id {
+            Self::verify_standalone_manager_authority(
+                &params.owner,
+                &signer_id,
+                token.authority.as_deref(),
+                MAX_SHARD_AUTHORITY_DEPTH,
+            )?;
+        }
 
         proof.verify(
             &token.token.verifying_key,
@@ -655,5 +776,256 @@ mod tests {
         peer_a.apply_delta(&params, &delta).unwrap();
         assert_eq!(peer_a, peer_b);
         assert!(peer_b.delta(&peer_a.summarize()).is_none());
+    }
+
+    #[test]
+    fn self_signed_non_token_member_is_rejected() {
+        let owner = key(1);
+        let attacker = key(99);
+        let owner_id = MemberId::from(&owner.verifying_key());
+        let attacker_id = MemberId::from(&attacker.verifying_key());
+        let bogus = AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: attacker_id,
+                member_vk: attacker.verifying_key(),
+                join_proof: None,
+            },
+            &attacker,
+        );
+        let params = MemberShardParametersV1 {
+            owner: owner.verifying_key(),
+            bucket: member_shard_bucket(&attacker_id),
+        };
+        let entry = MemberShardEntryV1 {
+            member: bogus,
+            invite_chain: Vec::new(),
+            invite_token: None,
+        };
+        let mut state = MemberShardStateV1::default();
+        assert!(state
+            .apply_delta(&params, &MemberShardDeltaV1 { entries: vec![entry] })
+            .is_err());
+    }
+
+    #[test]
+    fn forged_non_owner_invite_token_without_authority_is_rejected() {
+        let owner = key(1);
+        let attacker = key(50);
+        let link_sk = key(51);
+        let bob = key(52);
+        let owner_id = MemberId::from(&owner.verifying_key());
+        let attacker_id = MemberId::from(&attacker.verifying_key());
+        let bob_id = MemberId::from(&bob.verifying_key());
+
+        // Attacker mints their own token without any owner-signed authority.
+        let forged_token = AuthorizedInviteToken::signed_by(
+            InviteToken {
+                id: [42u8; 16],
+                verifying_key: link_sk.verifying_key(),
+                role_id: [1u8; 16],
+                label: "Forged".to_string(),
+                max_uses: None,
+                not_after: None,
+                includes_category_keys: false,
+                created_at: Some(SystemTime::UNIX_EPOCH),
+                generation: 1,
+                deleted: false,
+            },
+            attacker_id,
+            &attacker,
+        );
+        let proof = JoinProof::new(
+            forged_token.token.id,
+            &link_sk,
+            &join_message(&owner.verifying_key(), &bob.verifying_key()),
+        );
+        let bob_member = AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: bob_id,
+                member_vk: bob.verifying_key(),
+                join_proof: Some(proof),
+            },
+            &bob,
+        );
+        let params = MemberShardParametersV1 {
+            owner: owner.verifying_key(),
+            bucket: member_shard_bucket(&bob_id),
+        };
+        let entry = MemberShardEntryV1 {
+            member: bob_member,
+            invite_chain: Vec::new(),
+            invite_token: Some(forged_token),
+        };
+        let mut state = MemberShardStateV1::default();
+        assert!(state
+            .apply_delta(&params, &MemberShardDeltaV1 { entries: vec![entry] })
+            .is_err());
+    }
+
+    #[test]
+    fn delegated_admin_and_role_manager_tokens_verify_with_authority_proof() {
+        use crate::board_state::admin::{Admin, AuthorizedAdmin};
+        use crate::board_state::roles::{
+            AuthorizedRoleAssignment, RoleAssignment, RoleGrantProof,
+        };
+
+        let owner = key(1);
+        let admin_sk = key(20);
+        let manager_sk = key(21);
+        let link_admin_sk = key(22);
+        let link_mgr_sk = key(23);
+        let bob = key(24);
+        let carol = key(25);
+        let owner_id = MemberId::from(&owner.verifying_key());
+        let admin_id = MemberId::from(&admin_sk.verifying_key());
+        let manager_id = MemberId::from(&manager_sk.verifying_key());
+        let bob_id = MemberId::from(&bob.verifying_key());
+        let carol_id = MemberId::from(&carol.verifying_key());
+
+        let admin_record = AuthorizedAdmin::new(
+            Admin {
+                member_id: admin_id,
+                generation: 1,
+                signed_at: SystemTime::UNIX_EPOCH,
+            },
+            &owner,
+        );
+        let admin_proof = AuthorityProof {
+            admin: Some(admin_record),
+            grant: None,
+        };
+
+        // 1) Admin-delegated invite token verifies.
+        let admin_token = AuthorizedInviteToken::signed_by(
+            InviteToken {
+                id: [61u8; 16],
+                verifying_key: link_admin_sk.verifying_key(),
+                role_id: [2u8; 16],
+                label: "Admin link".to_string(),
+                max_uses: None,
+                not_after: None,
+                includes_category_keys: false,
+                created_at: Some(SystemTime::UNIX_EPOCH),
+                generation: 1,
+                deleted: false,
+            },
+            admin_id,
+            &admin_sk,
+        )
+        .with_authority(admin_proof.clone());
+        let bob_proof = JoinProof::new(
+            admin_token.token.id,
+            &link_admin_sk,
+            &join_message(&owner.verifying_key(), &bob.verifying_key()),
+        );
+        let bob_member = AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: bob_id,
+                member_vk: bob.verifying_key(),
+                join_proof: Some(bob_proof),
+            },
+            &bob,
+        );
+        let bob_entry = MemberShardEntryV1 {
+            member: bob_member,
+            invite_chain: Vec::new(),
+            invite_token: Some(admin_token),
+        };
+        let bob_params = MemberShardParametersV1 {
+            owner: owner.verifying_key(),
+            bucket: member_shard_bucket(&bob_id),
+        };
+        bob_entry.verify(&bob_params).expect("admin token verifies");
+
+        // 2) Role-manager-delegated invite token verifies (role + assignment by admin).
+        let role_id = [7u8; 16];
+        let auth_role = AuthorizedRole::signed_by(
+            Role {
+                id: role_id,
+                name: "AccessMgr".to_string(),
+                generation: 1,
+                can_manage_access: true,
+                can_distribute_keys: false,
+                can_edit_posts: false,
+                can_delete_posts: false,
+                can_close_posts: false,
+                can_pin_posts: false,
+                can_move_posts: false,
+                can_manage_trash: false,
+                can_attach_images: false,
+                can_retire_images: false,
+                scope: Vec::new(),
+                deleted: false,
+                signed_at: SystemTime::UNIX_EPOCH,
+            },
+            admin_id,
+            &admin_sk,
+        )
+        .with_authority(admin_proof.clone());
+        let auth_assignment = AuthorizedRoleAssignment::signed_by(
+            RoleAssignment {
+                member_id: manager_id,
+                role_id,
+                generation: 1,
+                revoked: false,
+                signed_at: SystemTime::UNIX_EPOCH,
+            },
+            admin_id,
+            &admin_sk,
+        )
+        .with_authority(admin_proof);
+        let mgr_proof = AuthorityProof {
+            admin: None,
+            grant: Some(Box::new(RoleGrantProof {
+                role: auth_role,
+                assignment: auth_assignment,
+            })),
+        };
+        let mgr_token = AuthorizedInviteToken::signed_by(
+            InviteToken {
+                id: [62u8; 16],
+                verifying_key: link_mgr_sk.verifying_key(),
+                role_id,
+                label: "Mgr link".to_string(),
+                max_uses: None,
+                not_after: None,
+                includes_category_keys: false,
+                created_at: Some(SystemTime::UNIX_EPOCH),
+                generation: 1,
+                deleted: false,
+            },
+            manager_id,
+            &manager_sk,
+        )
+        .with_authority(mgr_proof);
+        let carol_proof = JoinProof::new(
+            mgr_token.token.id,
+            &link_mgr_sk,
+            &join_message(&owner.verifying_key(), &carol.verifying_key()),
+        );
+        let carol_member = AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: carol_id,
+                member_vk: carol.verifying_key(),
+                join_proof: Some(carol_proof),
+            },
+            &carol,
+        );
+        let carol_entry = MemberShardEntryV1 {
+            member: carol_member,
+            invite_chain: Vec::new(),
+            invite_token: Some(mgr_token),
+        };
+        let carol_params = MemberShardParametersV1 {
+            owner: owner.verifying_key(),
+            bucket: member_shard_bucket(&carol_id),
+        };
+        carol_entry
+            .verify(&carol_params)
+            .expect("role-manager token verifies");
     }
 }
