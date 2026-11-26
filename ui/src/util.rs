@@ -405,8 +405,8 @@ pub fn to_cbor_vec<T: serde::Serialize>(value: &T) -> Vec<u8> {
     buffer
 }
 
-pub fn from_cbor_slice<T: serde::de::DeserializeOwned>(data: &[u8]) -> T {
-    ciborium::de::from_reader(data).unwrap()
+pub fn try_from_cbor_slice<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T, String> {
+    ciborium::de::from_reader(data).map_err(|e| format!("CBOR decode error: {e}"))
 }
 
 pub fn owner_vk_to_contract_key(owner_vk: &VerifyingKey) -> ContractKey {

@@ -117,9 +117,6 @@ pub fn ImageAttachment(
                     crate::components::app::toasts::show_error(format!(
                         "Could not retire the contract: {error}"
                     ));
-                    crate::components::app::toasts::show_error(format!(
-                        "Could not retire the contract: {error}"
-                    ));
                 }
             }
         });
@@ -159,10 +156,6 @@ pub fn ImageAttachment(
                 );
             }
         });
-    };
-    let _ready_bytes = match &status {
-        Some(ImageStatus::Ready(bytes)) if opened() => Some(bytes.clone()),
-        _ => None,
     };
 
     use_effect(move || {

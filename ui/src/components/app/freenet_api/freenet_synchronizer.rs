@@ -228,8 +228,10 @@ impl FreenetSynchronizer {
                     }
                     SynchronizerMessage::ConnectionLost => {
                         // Clear the web API so is_connected() returns false
-                        WEB_API.write().take();
-                        *SYNC_STATUS.write() = SynchronizerStatus::Disconnected;
+                        crate::util::defer(|| {
+                            WEB_API.write().take();
+                            *SYNC_STATUS.write() = SynchronizerStatus::Disconnected;
+                        });
                         schedule_reconnect(&mut consecutive_failures, &message_tx);
                     }
                     SynchronizerMessage::PageBecameVisible => {
@@ -417,31 +419,35 @@ impl FreenetSynchronizer {
                                 error!("Received error in API response: {}", e);
 
                                 // "delegate X not found in store" errors from legacy migration
-                                // requests should permanently mark migration as done. The old
-                                // delegate WASM was never installed on this node, so retrying
-                                // across sessions will never succeed.
-                                if e.to_string().contains("delegate")
-                                    && e.to_string().contains("not found")
+                                // requests should permanently mark migration as done. Only match
+                                // errors referencing a known legacy delegate key so DM or current
+                                // chat delegate errors do not suppress migration.
+                                let err_str = e.to_string();
+                                if err_str.contains("delegate")
+                                    && err_str.contains("not found")
+                                    && crate::components::app::chat_delegate::is_legacy_delegate_error(
+                                        &err_str,
+                                    )
                                 {
-                                    info!("Delegate not found error (likely legacy migration) - marking migration complete");
+                                    info!("Legacy delegate not found error - marking migration complete");
                                     mark_legacy_migration_done();
                                 }
 
                                 // Special handling for "not supported" errors
-                                if e.to_string().contains("not supported") {
+                                if err_str.contains("not supported") {
                                     warn!("Detected 'not supported' WebSocket operation. This may indicate API version mismatch.");
                                     // Don't immediately reconnect for this specific error as it's likely to recur
-                                    *SYNC_STATUS.write() = SynchronizerStatus::Error(
-                                        "WebSocket API operation not supported. Check server compatibility.".to_string()
-                                    );
+                                    crate::util::defer(|| {
+                                        *SYNC_STATUS.write() = SynchronizerStatus::Error(
+                                            "WebSocket API operation not supported. Check server compatibility.".to_string()
+                                        );
+                                    });
                                     continue;
                                 }
 
                                 // Log more details about the error
-                                if e.to_string().contains("contract")
-                                    && e.to_string().contains("not found")
-                                {
-                                    let error_msg = e.to_string();
+                                if err_str.contains("contract") && err_str.contains("not found") {
+                                    let error_msg = err_str;
                                     if let Some(contract_id) = error_msg
                                         .split_whitespace()
                                         .find(|&word| word.len() > 30 && !word.contains(':'))
@@ -486,14 +492,20 @@ impl FreenetSynchronizer {
                                             info!("Detected race condition with contract creation. Scheduling retry...");
 
                                             // Reset the board's sync status to Disconnected so it will be retried
-                                            for board_key in &matching_boards {
-                                                info!("Resetting sync status for board {:?} to Disconnected for retry", 
-                                                      MemberId::from(*board_key));
-                                                SYNC_INFO.write().update_sync_status(
-                                                    board_key,
-                                                    BoardSyncStatus::Disconnected,
-                                                );
-                                            }
+                                            let boards_to_reset = matching_boards.clone();
+                                            crate::util::defer(move || {
+                                                let mut sync_info = SYNC_INFO.write();
+                                                for board_key in &boards_to_reset {
+                                                    info!(
+                                                        "Resetting sync status for board {:?} to Disconnected for retry",
+                                                        MemberId::from(*board_key)
+                                                    );
+                                                    sync_info.update_sync_status(
+                                                        board_key,
+                                                        BoardSyncStatus::Disconnected,
+                                                    );
+                                                }
+                                            });
 
                                             // Schedule a retry after a delay
                                             let tx = message_tx.clone();

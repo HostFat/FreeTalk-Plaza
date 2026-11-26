@@ -504,6 +504,7 @@ pub async fn record_member(owner: VerifyingKey, entry: MemberShardEntryV1) -> Re
         entries: vec![entry],
     };
     let now = now_ms();
+    let mut apply_err: Option<String> = None;
     MEMBER_SHARDS.with_mut(|shards| {
         let board = shards.entry(contract_id).or_insert(MemberShardBoard {
             params: params.clone(),
@@ -512,9 +513,15 @@ pub async fn record_member(owner: VerifyingKey, entry: MemberShardEntryV1) -> Re
             dirty: true,
             last_fetch: now,
         });
-        let _ = board.state.apply_delta(&params, &delta);
+        if let Err(error) = board.state.apply_delta(&params, &delta) {
+            apply_err = Some(error);
+            return;
+        }
         board.dirty = true;
     });
+    if let Some(error) = apply_err {
+        return Err(format!("apply member shard delta failed: {error}"));
+    }
     if already_synced {
         send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
             key,

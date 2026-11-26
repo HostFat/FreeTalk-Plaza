@@ -115,10 +115,12 @@ mod imp {
                                             if let Ok(ts) = last.parse::<f64>() {
                                                 if now - ts < 10_000.0 {
                                                     warn!("Auth reload loop detected — stopping automatic reload");
-                                                    *SYNC_STATUS.write() =
-                                                        freenet_synchronizer::SynchronizerStatus::Error(
-                                                            "Connection lost. Please refresh the page.".to_string(),
-                                                        );
+                                                    crate::util::defer(|| {
+                                                        *SYNC_STATUS.write() =
+                                                            freenet_synchronizer::SynchronizerStatus::Error(
+                                                                "Connection lost. Please refresh the page.".to_string(),
+                                                            );
+                                                    });
                                                     return;
                                                 }
                                             }
@@ -130,10 +132,12 @@ mod imp {
                                     }
                                 }
 
-                                *SYNC_STATUS.write() =
-                                    freenet_synchronizer::SynchronizerStatus::Error(
-                                        "Authentication expired. Refreshing page...".to_string(),
-                                    );
+                                crate::util::defer(|| {
+                                    *SYNC_STATUS.write() =
+                                        freenet_synchronizer::SynchronizerStatus::Error(
+                                            "Authentication expired. Refreshing page...".to_string(),
+                                        );
+                                });
                                 // Wait for pending delegate registration to complete.
                                 // This is needed because set_up_chat_delegate() might be
                                 // running concurrently, and we need its WebSocket messages
@@ -183,8 +187,10 @@ mod imp {
 
                         let tx = error_tx.clone();
                         spawn_local(async move {
-                            *SYNC_STATUS.write() =
-                                freenet_synchronizer::SynchronizerStatus::Error(error_msg);
+                            crate::util::defer(move || {
+                                *SYNC_STATUS.write() =
+                                    freenet_synchronizer::SynchronizerStatus::Error(error_msg);
+                            });
 
                             // Trigger reconnection for connection closed errors
                             if is_connection_closed {
@@ -208,7 +214,7 @@ mod imp {
                                 let _ = storage.remove_item("freetalk_last_auth_reload");
                             }
                         }
-                        spawn_local(async move {
+                        crate::util::defer(|| {
                             *SYNC_STATUS.write() =
                                 freenet_synchronizer::SynchronizerStatus::Connected;
                         });

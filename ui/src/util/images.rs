@@ -661,10 +661,42 @@ pub fn handle_image_response(instance: [u8; 32], state: &[u8]) -> bool {
     true
 }
 
+const MAX_IMAGE_CACHE_BYTES: usize = 48 * 1024 * 1024;
+const MAX_IMAGE_CACHE_ENTRIES: usize = 64;
+
+static IMAGE_CACHE_ORDER: LazyLock<Mutex<std::collections::VecDeque<[u8; 32]>>> =
+    LazyLock::new(|| Mutex::new(std::collections::VecDeque::new()));
+
 fn set_image_status(instance: [u8; 32], status: ImageStatus) {
+    let is_ready = matches!(status, ImageStatus::Ready(_));
     IMAGES.with_mut(|images| {
         if let Some(entry) = images.get_mut(&instance) {
             entry.status = status;
+        }
+        if is_ready {
+            if let Ok(mut order) = IMAGE_CACHE_ORDER.lock() {
+                order.retain(|id| *id != instance);
+                order.push_back(instance);
+                let mut total_bytes: usize = images
+                    .values()
+                    .map(|fetch| match &fetch.status {
+                        ImageStatus::Ready(bytes) => bytes.len(),
+                        _ => 0,
+                    })
+                    .sum();
+                while (total_bytes > MAX_IMAGE_CACHE_BYTES || order.len() > MAX_IMAGE_CACHE_ENTRIES)
+                    && order.len() > 1
+                {
+                    let Some(oldest) = order.pop_front() else {
+                        break;
+                    };
+                    if let Some(removed) = images.remove(&oldest) {
+                        if let ImageStatus::Ready(bytes) = removed.status {
+                            total_bytes = total_bytes.saturating_sub(bytes.len());
+                        }
+                    }
+                }
+            }
         }
     });
 }

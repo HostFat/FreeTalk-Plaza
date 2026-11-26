@@ -240,7 +240,22 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 .map_err(|error| format!("decode DM state: {error}"))?;
             DM_CONVERSATIONS.with_mut(|conversations| {
                 if let Some(conversation) = conversations.get_mut(key.id()) {
-                    conversation.state = state;
+                    if let Err(error) = state.verify(&conversation.params) {
+                        dioxus::logger::tracing::warn!(
+                            "Ignoring invalid DM state from GetResponse: {error}"
+                        );
+                        return;
+                    }
+                    if conversation.state.meta.conversation_id == state.meta.conversation_id {
+                        if let Err(error) = conversation.state.merge(&conversation.params, &state) {
+                            dioxus::logger::tracing::warn!(
+                                "DM GetResponse merge failed ({error}); replacing with verified remote state"
+                            );
+                            conversation.state = state;
+                        }
+                    } else {
+                        conversation.state = state;
+                    }
                     conversation.synced = true;
                 }
             });

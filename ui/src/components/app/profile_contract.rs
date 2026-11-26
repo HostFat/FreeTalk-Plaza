@@ -351,6 +351,7 @@ pub async fn record_member_info(
         entries: vec![entry],
     };
     let now = now_ms();
+    let mut apply_err: Option<String> = None;
     PROFILE_SHARDS.with_mut(|shards| {
         let board = shards.entry(contract_id).or_insert(ProfileShardBoard {
             params: params.clone(),
@@ -359,9 +360,15 @@ pub async fn record_member_info(
             dirty: true,
             last_fetch: now,
         });
-        let _ = board.state.apply_delta(&params, &delta);
+        if let Err(error) = board.state.apply_delta(&params, &delta) {
+            apply_err = Some(error);
+            return;
+        }
         board.dirty = true;
     });
+    if let Some(error) = apply_err {
+        return Err(format!("apply profile shard delta failed: {error}"));
+    }
     if already_synced {
         send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
             key,

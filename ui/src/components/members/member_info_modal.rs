@@ -232,7 +232,7 @@ pub fn MemberInfoModal() -> Element {
                                     "👑 Admin"
                                 }
                             }
-                            if member_id == self_member_id.unwrap() {
+                            if member_id == viewer_id {
                                 span {
                                     class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-sm font-medium bg-cyan-500/20 text-cyan-400",
                                     "⭐ You"
@@ -245,7 +245,7 @@ pub fn MemberInfoModal() -> Element {
                                 }
                             }
                             // Check if this member invited the current user
-                            if let Some(self_member) = members_list.iter().find(|m| m.member.id() == self_member_id.unwrap()) {
+                            if let Some(self_member) = members_list.iter().find(|m| m.member.id() == viewer_id) {
                                 if self_member.member.invited_by == member_id {
                                     span {
                                         class: "inline-flex items-center px-2.5 py-0.5 rounded-full text-sm font-medium bg-yellow-500/20 text-yellow-400",
@@ -259,7 +259,7 @@ pub fn MemberInfoModal() -> Element {
                             member_info: member_info.clone()
                         }
 
-                        if member_id == self_member_id.unwrap() {
+                        if member_id == viewer_id {
                             div { class: "mb-4",
                                 label { class: "flex items-start gap-3 text-sm text-text cursor-pointer",
                                     input {

@@ -346,6 +346,7 @@ pub async fn record_activity(
         entries: vec![entry],
     };
     let now = now_ms();
+    let mut apply_err: Option<String> = None;
     ACTIVITY_BOARDS.with_mut(|boards| {
         let board = boards.entry(contract_id).or_insert(ActivityBoard {
             params: params.clone(),
@@ -354,9 +355,15 @@ pub async fn record_activity(
             dirty: true,
             last_fetch: now,
         });
-        let _ = board.state.apply_delta(&params, &delta);
+        if let Err(error) = board.state.apply_delta(&params, &delta) {
+            apply_err = Some(error);
+            return;
+        }
         board.dirty = true;
     });
+    if let Some(error) = apply_err {
+        return Err(format!("apply activity delta failed: {error}"));
+    }
     if already_synced {
         send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
             key,

@@ -79,13 +79,19 @@ pub fn encrypt(
     (ciphertext, nonce, sender_public_key)
 }
 
-#[allow(dead_code)]
-pub(crate) fn ed25519_to_x25519_public_key(ed25519_pk: &VerifyingKey) -> X25519PublicKey {
+pub(crate) fn try_ed25519_to_x25519_public_key(
+    ed25519_pk: &VerifyingKey,
+) -> Result<X25519PublicKey, String> {
     let ed_y = CompressedEdwardsY(ed25519_pk.to_bytes())
         .decompress()
-        .expect("Invalid Edwards point");
+        .ok_or_else(|| "Invalid Edwards point in recipient public key".to_string())?;
     let mont_u = ed_y.to_montgomery().to_bytes();
-    X25519PublicKey::from(mont_u)
+    Ok(X25519PublicKey::from(mont_u))
+}
+
+#[allow(dead_code)]
+pub(crate) fn ed25519_to_x25519_public_key(ed25519_pk: &VerifyingKey) -> X25519PublicKey {
+    try_ed25519_to_x25519_public_key(ed25519_pk).expect("Invalid Edwards point")
 }
 
 /// Decrypts a ciphertext message using ECIES (Elliptic Curve Integrated Encryption Scheme).
