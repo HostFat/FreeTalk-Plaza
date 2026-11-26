@@ -63,17 +63,15 @@ pub enum BoardModeV1 {
     /// Legacy boards: topics and replies live in `recent_messages`.
     #[default]
     LegacyMessages,
-    /// New boards: the board keeps an index and each topic is a contract.
-    TopicIndex,
     /// Section-sharded boards: the parent keeps sections and authority, each
-    /// section is a child board with its own topic index.
+    /// section is a child board with its own topic index and compact pages.
     SectionedTopicIndex,
 }
 
 impl BoardModeV1 {
-    /// Both index layouts keep posts outside the board contract.
+    /// True when posts live in per-topic contracts indexed per section.
     pub fn is_topic_index(&self) -> bool {
-        matches!(self, Self::TopicIndex | Self::SectionedTopicIndex)
+        matches!(self, Self::SectionedTopicIndex)
     }
 }
 

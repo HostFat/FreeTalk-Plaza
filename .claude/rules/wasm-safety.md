@@ -2,36 +2,42 @@
 
 ## Never use `git add -A`, `git add .`, or `git add -u` in this repo
 
-These commands will pick up rebuilt WASM binaries from `ui/public/contracts/`.
-WASM builds are **non-reproducible** — rebuilding produces different binaries
-with different hashes, which changes delegate/contract keys and breaks board
-data access.
+These commands can pick up unintentionally rebuilt WASM binaries from `ui/public/contracts/`.
+Any byte change to a contract or delegate WASM changes its Freenet key (`BLAKE3(BLAKE3(wasm) || params)`), which re-keys contracts and orphans user secrets stored under previous delegate keys.
 
 **Always add files by name:**
 ```bash
 # RIGHT
 git add ui/src/components/conversation.rs ui/src/util.rs
 
-# WRONG — will pick up any rebuilt WASMs in the working tree
+# WRONG — may pick up rebuilt WASMs in the working tree
 git add -A
 git add .
 git add -u
 ```
 
-## Never commit WASM files without migration
+## Canonical WASM builds
 
-If `git status` shows modified `.wasm` files in `ui/public/contracts/`,
-**do not commit them** unless you have added a migration entry to
-`ui/src/components/app/chat_delegate.rs` in the `LEGACY_DELEGATES` array.
+Always rebuild contract and delegate WASMs through the canonical tool:
+```bash
+cargo make sync-wasm
+```
+`wasm-tool sync` builds `--locked` with `CARGO_ENCODED_RUSTFLAGS` path remapping (`CARGO_HOME`, `RUSTUP_HOME`, `rustc --print sysroot`, repo root), runs pinned `wasm-opt` (`binaryen` **125**, `-Oz --strip-debug --strip-producers`), and refuses any artifact that embeds a local machine path. Both `rust-toolchain.toml` and `flake.nix` must stay pinned to the exact same Rust version (`1.94.0`) and `binaryen` version (`125`).
 
-If you see modified WASMs and did NOT intentionally change them (e.g., a build
-rebuilt them as a side effect), restore them:
+## Never commit delegate WASM changes without registering the outgoing hash
+
+Both delegates are tracked by dedicated registries (read by `ui/build.rs` and enforced in CI):
+- Board delegate (`ui/public/contracts/plaza_delegate.wasm`) → `legacy_delegates.toml`
+  - Record outgoing hash: `cargo make add-migration <version> "<description>"`
+- DM delegate (`ui/public/contracts/plaza_dm_delegate.wasm`) → `legacy_dm_delegates.toml`
+  - Record outgoing hash: `cargo make add-dm-migration <version> "<description>"`
+
+Never hand-edit generated arrays in `chat_delegate.rs` or `dm_delegate.rs`; update the TOML registries via `wasm-tool add` / `wasm-tool add --dm`, and verify before committing:
+```bash
+cargo make check-migration
+```
+
+If `git status` shows modified `.wasm` files that you did **not** intentionally rebuild, restore them:
 ```bash
 git checkout HEAD -- ui/public/contracts/
 ```
-
-## Delegate Key Continuity
-
-The delegate key is computed from the WASM binary hash. If the WASM changes,
-users lose access to their board data stored under the old delegate key.
-Adding migration entries allows the UI to read from old delegate keys.

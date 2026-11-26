@@ -215,14 +215,11 @@ pub struct ClientFeatures {
     /// Append the short member id in the member list.
     #[serde(default)]
     pub show_member_ids: bool,
-    /// New boards keep only an index and one contract per topic. Enabled by
-    /// the `?topics=1` developer flag until the topic UI is the default.
+    /// New boards use section-sharded topic contracts. Enabled by the
+    /// `?topics=1` / `?sections=1` developer flag until the topic UI reaches
+    /// parity.
     #[serde(default)]
     pub topic_boards: bool,
-    /// Older devices stored this flag. New topic boards are always
-    /// section-sharded; the field stays so old blobs still deserialize.
-    #[serde(default)]
-    pub sectioned_boards: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
@@ -2339,15 +2336,6 @@ impl BoardData {
             .filter(|value| !value.trim().is_empty())
     }
 
-    /// The address stored in the old append-only action, if any. Used to
-    /// offer a one-time migration in the Mail tab.
-    pub fn legacy_mail_address_for(&self, member_id: MemberId) -> Option<String> {
-        self.board_state
-            .recent_messages
-            .mail_address(&member_id)
-            .map(str::to_string)
-    }
-
     /// The board's Freenet Mail contact, if the owner set one.
     pub fn board_contact_mail(&self) -> Option<String> {
         let contact = self
@@ -3474,18 +3462,13 @@ impl Boards {
             (PrivacyMode::Public, None, None)
         };
 
-        // New index boards start with a General section. The owner signs the
-        // section record; topics created in it carry an owner-signed snapshot.
+        // New section-sharded boards start with a General section. The owner
+        // signs the section record; topics created in it carry an owner-signed
+        // snapshot.
         let mut general_section: Option<
             plaza_core::board_state::sections::AuthorizedSectionV1,
         > = None;
-        let sectioned = board_state.mode
-            == plaza_core::board_state::BoardModeV1::SectionedTopicIndex;
-        if matches!(
-        board_state.mode,
-        plaza_core::board_state::BoardModeV1::TopicIndex
-            | plaza_core::board_state::BoardModeV1::SectionedTopicIndex
-    ) {
+        if board_state.mode == plaza_core::board_state::BoardModeV1::SectionedTopicIndex {
             use plaza_core::board_state::message::MessageId;
             use plaza_core::board_state::privacy::SealedBytes;
             use plaza_core::board_state::sections::{
@@ -3503,15 +3486,11 @@ impl Boards {
                 SealedBytes::private(ciphertext, nonce, version, 7)
             });
             let section_id = MessageId::from_bytes(section_bytes);
-            let child_contract = if sectioned {
-                Some(*crate::components::app::section_contract::section_key(
-                    owner_vk,
-                    section_id,
-                )
-                .id())
-            } else {
-                None
-            };
+            let child_contract = Some(*crate::components::app::section_contract::section_key(
+                owner_vk,
+                section_id,
+            )
+            .id());
             let section = SectionV1 {
                 id: section_id,
                 parent: None,

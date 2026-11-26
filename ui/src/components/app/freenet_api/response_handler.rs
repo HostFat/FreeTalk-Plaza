@@ -331,7 +331,6 @@ impl ResponseHandler {
                                                             stored_pending
                                                         );
 
-                                                        // TODO: Remove legacy migration code after 2026-03-01
                                                         if is_legacy_delegate {
                                                             info!("Successfully loaded boards from LEGACY delegate - migrating to new delegate");
                                                         } else {
@@ -597,8 +596,7 @@ impl ResponseHandler {
                                                             }
                                                         }
 
-                                                        // TODO: Remove legacy migration code after 2026-03-01
-                                                        // If this was from the legacy delegate, save to the new delegate
+                                                        // If this was from a legacy delegate, save to the new delegate
                                                         if is_legacy_delegate {
                                                             info!("Migrating board data from legacy delegate to new delegate");
                                                             wasm_bindgen_futures::spawn_local(

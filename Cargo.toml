@@ -16,7 +16,6 @@ members = [
     "profile-contract",
     "member-contract",
     "ui",
-    "cli",
 ]
 resolver = "2"
 

@@ -819,17 +819,15 @@ pub async fn merge_topic(
             crate::components::app::section_contract::section_page_state(owner, section, 0)
         })
         .is_some_and(|manifest| manifest.topics.entry(&destination).is_some());
-    let (flag_section, flag_section_chain) = if board.board_state.mode
-        == BoardModeV1::SectionedTopicIndex
-        && (source_section != destination_section || !dest_on_page0)
-    {
-        let section = destination_section
-            .ok_or("a cross-section merge needs a destination section")?;
-        let chain = board.board_state.sections.chain(&section);
-        (Some(section), chain)
-    } else {
-        (None, Vec::new())
-    };
+    let (flag_section, flag_section_chain) =
+        if source_section != destination_section || !dest_on_page0 {
+            let section = destination_section
+                .ok_or("a cross-section merge needs a destination section")?;
+            let chain = board.board_state.sections.chain(&section);
+            (Some(section), chain)
+        } else {
+            (None, Vec::new())
+        };
     let conversation = conversation_for(owner, topic_id, 0)?;
     let head = conversation
         .state
@@ -1012,11 +1010,7 @@ pub async fn report_post(
         .map(|entry| entry.report.generation + 1)
         .max()
         .unwrap_or(1);
-    let section = if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
-        index.section_of(&topic_id).0
-    } else {
-        None
-    };
+    let section = index.section_of(&topic_id).0;
     let signer_vk = board.self_sk.verifying_key();
     let proof =
         crate::components::app::member_contract::build_member_proof(owner, signer_vk).map(Box::new);
@@ -1060,11 +1054,7 @@ pub async fn resolve_report(
     let self_id = MemberId::from(&board.self_sk.verifying_key());
     let owner_id = board.current_owner_id();
     let (topic_section, chain) = index.section_of(&topic_id);
-    let section = if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
-        topic_section
-    } else {
-        None
-    };
+    let section = topic_section;
     let (signer_sk, signer, authority) = if self_id != owner_id
         && board.can_moderate(&chain)
     {
@@ -1150,13 +1140,8 @@ pub async fn create_section(
     let mut id_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut id_bytes);
     let id = MessageId::from_bytes(id_bytes);
-    let sectioned = board.board_state.mode
-        == plaza_core::board_state::BoardModeV1::SectionedTopicIndex;
-    let child_key: Option<ContractKey> = if sectioned {
-        Some(crate::components::app::section_contract::section_key(owner, id))
-    } else {
-        None
-    };
+    let child_key: Option<ContractKey> =
+        Some(crate::components::app::section_contract::section_key(owner, id));
     let now = get_current_system_time();
     let (public_name, sealed_name) = if board.is_private() {
         let (secret, version) = board
@@ -1221,23 +1206,21 @@ pub async fn create_section(
         ..Default::default()
     };
     apply_board_delta(owner, delta)?;
-    if sectioned {
-        let refreshed = board_for(owner)?;
-        let sections: Vec<_> = refreshed
-            .board_state
-            .sections
-            .sections
-            .iter()
-            .filter_map(|entry| entry.section.contract.map(|_| entry.section.id))
-            .collect();
-        for section in sections {
-            let _ = crate::components::app::section_contract::sync_section_authority(
-                owner,
-                section,
-                &refreshed.board_state,
-            )
-            .await;
-        }
+    let refreshed = board_for(owner)?;
+    let sections: Vec<_> = refreshed
+        .board_state
+        .sections
+        .sections
+        .iter()
+        .filter_map(|entry| entry.section.contract.map(|_| entry.section.id))
+        .collect();
+    for section in sections {
+        let _ = crate::components::app::section_contract::sync_section_authority(
+            owner,
+            section,
+            &refreshed.board_state,
+        )
+        .await;
     }
     Ok(id)
 }
@@ -1632,22 +1615,9 @@ pub async fn create_topic(
     body: String,
     section: Option<MessageId>,
 ) -> Result<MessageId, String> {
-    let board = board_for(owner)?;
-    let sectioned = board.board_state.mode == BoardModeV1::SectionedTopicIndex;
-    let target_section = if sectioned {
-        Some(section.ok_or("choose a section for the topic")?)
-    } else {
-        section
-    };
-    if let Some(section_id) = target_section {
-        if sectioned {
-            crate::components::app::section_contract::ensure_section_loaded(
-                owner, section_id,
-            )
-            .await?;
-        }
-    }
-    let prepared = prepare_topic(owner, &title, &body, target_section).await?;
+    let section_id = section.ok_or("choose a section for the topic")?;
+    crate::components::app::section_contract::ensure_section_loaded(owner, section_id).await?;
+    let prepared = prepare_topic(owner, &title, &body, Some(section_id)).await?;
     let contract_id = *prepared.key.id();
 
     TOPIC_CACHE.with_mut(|topics| {
@@ -1694,33 +1664,16 @@ pub async fn create_topic(
             prepared.topic_id
         ));
     }
-    if sectioned {
-        if let Some(section_id) = target_section {
-            if let Err(error) = crate::components::app::section_contract::apply_section_delta(
-                owner,
-                section_id,
-                prepared.page,
-                prepared.board_delta,
-            )
-            .await
-            {
-                dioxus::logger::tracing::warn!(
-                    "topic {} was put but not indexed in its section: {}",
-                    prepared.topic_id,
-                    error
-                );
-            }
-        }
-    } else if let Err(error) = apply_board_delta(owner, prepared.board_delta) {
-        // The topic exists; the index can be retried on the next board sync.
-        dioxus::logger::tracing::warn!("topic {} was put but not indexed: {}", prepared.topic_id, error);
-    } else if let Err(error) =
-        crate::components::app::chat_delegate::save_boards_and_wait().await
+    if let Err(error) = crate::components::app::section_contract::apply_section_delta(
+        owner,
+        section_id,
+        prepared.page,
+        prepared.board_delta,
+    )
+    .await
     {
-        // The index is in memory; the periodic save retries, but a reload
-        // before it runs would hide the topic from search and the board list.
         dioxus::logger::tracing::warn!(
-            "topic {} was indexed but the local board copy was not saved: {}",
+            "topic {} was put but not indexed in its section: {}",
             prepared.topic_id,
             error
         );
@@ -1826,15 +1779,11 @@ async fn publish_prepared_reply(
     }
     if let Some(activity) = prepared.activity {
         let section = board_for(owner).ok().and_then(|board| {
-            if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
-                let index = board.with_merged_topics().board_state.topics;
-                index
-                    .section_of(&prepared.topic_id)
-                    .0
-                    .or_else(|| section_for_topic(owner, prepared.topic_id).map(|(s, _)| s))
-            } else {
-                None
-            }
+            let index = board.with_merged_topics().board_state.topics;
+            index
+                .section_of(&prepared.topic_id)
+                .0
+                .or_else(|| section_for_topic(owner, prepared.topic_id).map(|(s, _)| s))
         });
         if let Err(error) = crate::components::app::activity_contract::record_activity(
             owner,
@@ -2014,21 +1963,18 @@ async fn prepare_topic(
     section: Option<MessageId>,
 ) -> Result<PreparedTopic, String> {
     let mut board = board_for(owner)?;
-    if !board.board_state.mode.is_topic_index() {
-        return Err("this board does not use topic contracts".to_string());
+    if board.board_state.mode != BoardModeV1::SectionedTopicIndex {
+        return Err("this board does not use section-sharded topic contracts".to_string());
     }
-    let mut page = 0;
-    if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
-        let section_id = section.ok_or("choose a section for the topic")?;
-        page = crate::components::app::section_contract::active_page(owner, section_id).await?;
-        let child_topics = crate::components::app::section_contract::section_page_index(
-            owner,
-            section_id,
-            page,
-        )
-        .ok_or("the section page is still loading")?;
-        board.board_state.topics = child_topics;
-    }
+    let section_id = section.ok_or("choose a section for the topic")?;
+    let page = crate::components::app::section_contract::active_page(owner, section_id).await?;
+    let child_topics = crate::components::app::section_contract::section_page_index(
+        owner,
+        section_id,
+        page,
+    )
+    .ok_or("the section page is still loading")?;
+    board.board_state.topics = child_topics;
     if title.trim().is_empty() {
         return Err("the topic needs a title".to_string());
     }
@@ -2545,10 +2491,6 @@ async fn apply_topic_board_delta(
     topic_id: MessageId,
     delta: ChatBoardStateV1Delta,
 ) -> Result<(), String> {
-    let board = board_for(owner)?;
-    if board.board_state.mode != BoardModeV1::SectionedTopicIndex {
-        return apply_board_delta(owner, delta);
-    }
     let has_entries = delta
         .topics
         .as_ref()
@@ -3515,14 +3457,10 @@ pub async fn approve_post(
             signer: Some(signer),
             signer_key: Some(signer_sk.verifying_key()),
         };
-        let section = if board.board_state.mode == BoardModeV1::SectionedTopicIndex {
-            index
-                .section_of(&topic_id)
-                .0
-                .or_else(|| section_for_topic(owner, topic_id).map(|(s, _)| s))
-        } else {
-            None
-        };
+        let section = index
+            .section_of(&topic_id)
+            .0
+            .or_else(|| section_for_topic(owner, topic_id).map(|(s, _)| s));
         if let Err(error) = crate::components::app::activity_contract::record_activity(
             owner,
             section,

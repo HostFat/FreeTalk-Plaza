@@ -99,42 +99,26 @@ impl ContractInterface for Contract {
                     }
                     let delta = from_reader::<ChatBoardStateV1Delta, &[u8]>(d.as_ref())
                         .map_err(|e| ContractError::Deser(e.to_string()))?;
-                    let topics_only = initialized
-                        && delta.is_topics_only()
+                    let delta_verify = initialized
                         && matches!(
                             chat_state.mode,
-                            plaza_core::board_state::BoardModeV1::TopicIndex
-                        );
-                    if topics_only {
-                        if let Some(topic_delta) = delta.topics.as_ref() {
-                            chat_state
-                                .apply_topics_delta(&parameters, topic_delta)
-                                .map_err(|e| ContractError::InvalidUpdateWithInfo {
-                                    reason: e.to_string(),
-                                })?;
-                        }
-                    } else {
-                        let delta_verify = initialized
-                            && matches!(
-                                chat_state.mode,
-                                plaza_core::board_state::BoardModeV1::TopicIndex
-                            )
-                            && delta.version.is_none();
+                            plaza_core::board_state::BoardModeV1::SectionedTopicIndex
+                        )
+                        && delta.version.is_none();
+                    chat_state
+                        .apply_delta(&chat_state.clone(), &parameters, &Some(delta.clone()))
+                        .map_err(|e| ContractError::InvalidUpdateWithInfo {
+                            reason: e.to_string(),
+                        })?;
+                    initialized = true;
+                    if delta_verify {
                         chat_state
-                            .apply_delta(&chat_state.clone(), &parameters, &Some(delta.clone()))
+                            .verify_delta(&delta, &parameters)
                             .map_err(|e| ContractError::InvalidUpdateWithInfo {
-                                reason: e.to_string(),
+                                reason: format!("Delta does not verify: {e}"),
                             })?;
-                        initialized = true;
-                        if delta_verify {
-                            chat_state
-                                .verify_delta(&delta, &parameters)
-                                .map_err(|e| ContractError::InvalidUpdateWithInfo {
-                                    reason: format!("Delta does not verify: {e}"),
-                                })?;
-                        } else {
-                            full_verify = true;
-                        }
+                    } else {
+                        full_verify = true;
                     }
                 }
                 UpdateData::StateAndDelta { state, delta } => {

@@ -815,7 +815,6 @@ fn EnableSections() -> Element {
         done.set(true);
         BOARDS.with_mut(|boards| {
             boards.client_features.topic_boards = true;
-            boards.client_features.sectioned_boards = true;
         });
         info!("Section-sharded topic boards enabled from the developer route");
         navigator.push(Route::Home);
@@ -838,7 +837,6 @@ fn EnableSectionsPage(page_size: u32) -> Element {
         done.set(true);
         BOARDS.with_mut(|boards| {
             boards.client_features.topic_boards = true;
-            boards.client_features.sectioned_boards = true;
         });
         let size = page_size.max(1);
         crate::components::app::section_contract::TOPIC_PAGE_SIZE
@@ -1444,15 +1442,10 @@ fn enable_topic_boards_from_query() {
         let Ok(search) = window.location().search() else {
             return;
         };
-        if search.contains("topics=1") && !BOARDS.read().client_features.topic_boards {
+        if (search.contains("topics=1") || search.contains("sections=1"))
+            && !BOARDS.read().client_features.topic_boards
+        {
             BOARDS.with_mut(|boards| boards.client_features.topic_boards = true);
-            info!("Topic-contract boards enabled for new boards");
-        }
-        if search.contains("sections=1") && !BOARDS.read().client_features.sectioned_boards {
-            BOARDS.with_mut(|boards| {
-                boards.client_features.sectioned_boards = true;
-                boards.client_features.topic_boards = true;
-            });
             info!("Section-sharded topic boards enabled for new boards");
         }
         // Test and developer hook: keep the page window small so a real-node
