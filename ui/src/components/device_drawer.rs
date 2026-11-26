@@ -120,26 +120,27 @@ fn switch_state(profile: &crate::board_data::IdentityProfile) -> (bool, bool) {
 }
 
 /// Read one selected file and merge it into the local store, then reload.
-async fn restore_file(file: web_sys::File) {
+async fn restore_file(file: web_sys::File, passphrase: String) -> Result<(), String> {
     let Ok(buffer) = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await else {
-        crate::components::app::toasts::show_error("Could not read the backup file.");
-        return;
+        return Err("Could not read the backup file.".to_string());
     };
     let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
     use std::sync::atomic::Ordering;
     crate::components::app::chat_delegate::IMPORT_IN_PROGRESS.store(true, Ordering::SeqCst);
-    match crate::util::backup::import_bytes(&bytes).await {
+    match crate::util::backup::import_bytes(&bytes, &passphrase).await {
         Ok(count) => {
+            crate::util::backup::clear_selected_file();
             crate::components::app::toasts::show(format!("Restored {count} board(s). Reloading…"));
             crate::util::sleep(std::time::Duration::from_millis(800)).await;
             if let Some(window) = window() {
                 let _ = window.location().reload();
             }
+            Ok(())
         }
         Err(error) => {
             crate::components::app::chat_delegate::IMPORT_IN_PROGRESS
                 .store(false, Ordering::SeqCst);
-            crate::components::app::toasts::show_error(format!("Could not restore: {error}"));
+            Err(error)
         }
     }
 }
@@ -182,6 +183,9 @@ pub fn DeviceDrawer() -> Element {
     let mut forget_confirm = use_signal(|| None::<String>);
     let mut backup_name = use_signal(|| None::<String>);
     let mut backup_error = use_signal(|| None::<String>);
+    let mut backup_passphrase = use_signal(String::new);
+    let mut backup_confirm = use_signal(String::new);
+    let mut restore_passphrase = use_signal(String::new);
 
     let Some(active) = *DEVICE_DRAWER.read() else {
         return rsx! {};
@@ -191,6 +195,9 @@ pub fn DeviceDrawer() -> Element {
         renaming.set(None);
         forget_confirm.set(None);
         backup_error.set(None);
+        backup_passphrase.set(String::new());
+        backup_confirm.set(String::new());
+        restore_passphrase.set(String::new());
         close();
     };
 
@@ -572,8 +579,8 @@ pub fn DeviceDrawer() -> Element {
                                 p { class: "text-xs text-text-muted",
                                     "The backup contains identities, private-board keys, DM identities and conversation keys, drafts and settings stored on this device. Board content stays on Freenet; uploaded image bytes and composer queues are not included."
                                 }
-                                p { class: "text-xs text-amber-300",
-                                    "Keep the file private: it can open every private board and DM saved here."
+                                p { class: "text-xs text-text-muted",
+                                    "The file is encrypted with the passphrase below. Without that passphrase the keys inside cannot be read."
                                 }
                             }
 
@@ -582,15 +589,47 @@ pub fn DeviceDrawer() -> Element {
                                 p { class: "text-xs text-text-muted",
                                     "Download a file with the identities, private-board keys, DM identities and DM conversation keys held by this browser."
                                 }
+                                label { class: "flex flex-col gap-1 text-xs text-text-muted",
+                                    span { "Backup passphrase" }
+                                    input {
+                                        r#type: "password",
+                                        autocomplete: "new-password",
+                                        value: "{backup_passphrase}",
+                                        class: "rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text",
+                                        oninput: move |event| backup_passphrase.set(event.value()),
+                                    }
+                                }
+                                label { class: "flex flex-col gap-1 text-xs text-text-muted",
+                                    span { "Confirm passphrase" }
+                                    input {
+                                        r#type: "password",
+                                        autocomplete: "new-password",
+                                        value: "{backup_confirm}",
+                                        class: "rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text",
+                                        oninput: move |event| backup_confirm.set(event.value()),
+                                    }
+                                }
                                 button {
                                     r#type: "button",
                                     class: "px-4 py-2 bg-accent hover:bg-accent-hover text-white text-sm rounded-lg transition-colors",
                                     onclick: move |_| {
-                                        wasm_bindgen_futures::spawn_local(async {
-                                            match crate::util::backup::download().await {
-                                                Ok(()) => crate::components::app::toasts::show(
-                                                    "Backup downloaded.",
-                                                ),
+                                        let passphrase = backup_passphrase.read().clone();
+                                        let confirm = backup_confirm.read().clone();
+                                        wasm_bindgen_futures::spawn_local(async move {
+                                            if passphrase != confirm {
+                                                crate::components::app::toasts::show_error(
+                                                    "The two passphrases do not match.",
+                                                );
+                                                return;
+                                            }
+                                            match crate::util::backup::download(&passphrase).await {
+                                                Ok(()) => {
+                                                    backup_passphrase.set(String::new());
+                                                    backup_confirm.set(String::new());
+                                                    crate::components::app::toasts::show(
+                                                        "Backup downloaded.",
+                                                    );
+                                                }
                                                 Err(error) => crate::components::app::toasts::show_error(format!(
                                                     "Could not create the backup: {error}"
                                                 )),
@@ -627,14 +666,40 @@ pub fn DeviceDrawer() -> Element {
                                 if let Some(error) = backup_error.read().as_ref() {
                                     p { class: "text-xs text-red-400", "{error}" }
                                 }
+                                label { class: "flex flex-col gap-1 text-xs text-text-muted",
+                                    span { "Restore passphrase" }
+                                    input {
+                                        r#type: "password",
+                                        autocomplete: "current-password",
+                                        value: "{restore_passphrase}",
+                                        class: "rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text",
+                                        oninput: move |event| restore_passphrase.set(event.value()),
+                                    }
+                                }
+                                p { class: "text-xs text-text-muted",
+                                    "Enter the passphrase used when this backup was created."
+                                }
                                 button {
                                     r#type: "button",
                                     class: "px-4 py-2 bg-surface hover:bg-surface-hover text-text text-sm rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
                                     disabled: backup_name.read().is_none(),
                                     onclick: move |_| {
+                                        backup_error.set(None);
+                                        let passphrase = restore_passphrase.read().clone();
                                         wasm_bindgen_futures::spawn_local(async move {
-                                            match crate::util::backup::selected_file() {
-                                                Some(file) => restore_file(file).await,
+                                            match crate::util::backup::peek_selected_file() {
+                                                Some(file) => match restore_file(file, passphrase).await {
+                                                    Ok(()) => {
+                                                        restore_passphrase.set(String::new());
+                                                        backup_name.set(None);
+                                                    }
+                                                    Err(error) => {
+                                                        backup_error.set(Some(error.clone()));
+                                                        crate::components::app::toasts::show_error(
+                                                            format!("Could not restore: {error}"),
+                                                        );
+                                                    }
+                                                },
                                                 None => backup_error.set(Some(
                                                     "Choose a backup file first.".to_string(),
                                                 )),

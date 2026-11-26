@@ -23,10 +23,9 @@
         };
         freenet-shared-pkg = freenet-shared.packages.${system}.default;
 
-        # Pinned explicitly to match the locked rust-overlay revision in flake.lock
-        # (which ships up to 1.94.0). Once `nix flake update rust-overlay` brings in
-        # 1.94.1, switch to:
-        #   (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override { ... }
+        # Same compiler as rust-toolchain.toml. The locked rust-overlay revision
+        # ships 1.94.0 and not 1.94.1, so both pins stay on 1.94.0. Switching
+        # either one alone re-keys every WASM.
         rustToolchain = pkgs.rust-bin.stable."1.94.0".default.override {
           extensions = [ "rust-src" "rust-analyzer" ];
           targets = [ "wasm32-unknown-unknown" ];

@@ -442,11 +442,16 @@ command = "cargo"
 args = ["run", "--manifest-path", "tools/wasm-tool/Cargo.toml", "--", "sync"]
 
 [tasks.check-migration]
-description = "Fail when the committed delegate WASM changed without a legacy_delegates.toml entry"
+description = "Fail when a committed delegate WASM changed without a registry entry"
 command = "cargo"
 args = ["run", "--manifest-path", "tools/wasm-tool/Cargo.toml", "--", "check"]
 
 [tasks.add-migration]
-description = "Record the committed delegate WASM in legacy_delegates.toml (usage: cargo make add-migration V3 \"what changed\")"
+description = "Record the committed board delegate WASM in legacy_delegates.toml (usage: cargo make add-migration V2 \"what changed\")"
 command = "cargo"
 args = ["run", "--manifest-path", "tools/wasm-tool/Cargo.toml", "--", "add", "${@}"]
+
+[tasks.add-dm-migration]
+description = "Record the committed DM delegate WASM in legacy_dm_delegates.toml (usage: cargo make add-dm-migration V2 \"what changed\")"
+command = "cargo"
+args = ["run", "--manifest-path", "tools/wasm-tool/Cargo.toml", "--", "add", "--dm", "${@}"]

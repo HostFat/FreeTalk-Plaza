@@ -10,8 +10,8 @@ use dioxus::prelude::{Global, GlobalSignal, ReadableExt};
 use freenet_stdlib::client_api::ClientRequest::DelegateOp;
 use freenet_stdlib::client_api::DelegateRequest;
 use freenet_stdlib::prelude::{
-    ApplicationMessage, DelegateCode, DelegateContainer, DelegateKey, DelegateWasmAPIVersion,
-    InboundDelegateMsg, Parameters,
+    ApplicationMessage, CodeHash, DelegateCode, DelegateContainer, DelegateKey,
+    DelegateWasmAPIVersion, InboundDelegateMsg, Parameters,
 };
 use futures::channel::oneshot;
 use futures::future::{select, Either};
@@ -44,9 +44,12 @@ static ENSURE_RUNNING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static DELEGATE_READY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static LEGACY_DM_MIGRATION_ATTEMPTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
-static PENDING: LazyLock<Mutex<HashMap<u64, oneshot::Sender<DmDelegateResponseMsg>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static PENDING: LazyLock<
+    Mutex<HashMap<u64, ([u8; 32], oneshot::Sender<DmDelegateResponseMsg>)>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static LAST_ENSURED_PROFILE: LazyLock<Mutex<Option<[u8; 32]>>> =
     LazyLock::new(|| Mutex::new(None));
 
@@ -98,11 +101,52 @@ pub fn is_dm_delegate_key(bytes: &[u8]) -> bool {
     DELEGATE_KEY.bytes() == bytes
 }
 
+include!(concat!(env!("OUT_DIR"), "/legacy_dm_delegates.rs"));
+
+/// True for a DM delegate generation recorded before the one in this build.
+pub fn is_legacy_dm_delegate_key(bytes: &[u8]) -> bool {
+    LEGACY_DM_DELEGATES
+        .iter()
+        .any(|(key, _)| key.as_slice() == bytes && !is_dm_delegate_key(bytes))
+}
+
+/// Fail any pending request aimed at a legacy DM delegate named in `error_msg`
+/// so migration moves on immediately instead of waiting for the 30s timeout.
+pub fn fail_pending_for_legacy_dm_error(error_msg: &str) -> bool {
+    let current = bs58::encode(DELEGATE_KEY.bytes()).into_string();
+    let matched_keys: Vec<[u8; 32]> = LEGACY_DM_DELEGATES
+        .iter()
+        .filter_map(|(key, _)| {
+            let encoded = bs58::encode(key).into_string();
+            (encoded != current && error_msg.contains(&encoded)).then_some(*key)
+        })
+        .collect();
+    if matched_keys.is_empty() {
+        return false;
+    }
+    if let Ok(mut pending) = PENDING.lock() {
+        let ids: Vec<u64> = pending
+            .iter()
+            .filter_map(|(id, (target_key, _))| {
+                matched_keys.contains(target_key).then_some(*id)
+            })
+            .collect();
+        for id in ids {
+            if let Some((_, sender)) = pending.remove(&id) {
+                let _ = sender.send(DmDelegateResponseMsg::Error {
+                    message: "legacy DM delegate not found".to_string(),
+                });
+            }
+        }
+    }
+    true
+}
+
 pub fn complete_dm_pending(request_id: u64, response: DmDelegateResponseMsg) -> bool {
     let Ok(mut pending) = PENDING.lock() else {
         return false;
     };
-    let Some(sender) = pending.remove(&request_id) else {
+    let Some((_, sender)) = pending.remove(&request_id) else {
         return false;
     };
     sender.send(response).is_ok()
@@ -124,9 +168,11 @@ pub async fn set_up_dm_delegate() -> Result<(), String> {
     DELEGATE_READY.store(true, Ordering::SeqCst);
     info!("DM delegate registered");
 
-    // The identity depends on the active profile and can only be initialized
-    // after the response loop is free; do it in the background.
+    // Migrate any older DM delegate before creating a fresh identity/device so
+    // imported keys win without racing initialization. Both run in the
+    // background because they need the response loop to be free.
     wasm_bindgen_futures::spawn_local(async {
+        fire_legacy_dm_migration().await;
         for attempt in 0..6 {
             if attempt > 0 {
                 crate::util::sleep(std::time::Duration::from_millis(400)).await;
@@ -241,6 +287,13 @@ fn active_profile_seed() -> Option<[u8; 32]> {
 pub async fn send_request(
     request: DmDelegateRequestMsg,
 ) -> Result<DmDelegateResponseMsg, String> {
+    send_request_to(DELEGATE_KEY.clone(), request).await
+}
+
+async fn send_request_to(
+    key: DelegateKey,
+    request: DmDelegateRequestMsg,
+) -> Result<DmDelegateResponseMsg, String> {
     let request_id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let envelope = DmDelegateEnvelope {
         request_id,
@@ -251,16 +304,17 @@ pub async fn send_request(
         .map_err(|error| format!("serialize DM request: {error}"))?;
 
     let (sender, receiver) = oneshot::channel();
+    let target_key: [u8; 32] = key.bytes().try_into().unwrap_or_default();
     {
         let mut pending = PENDING
             .lock()
             .map_err(|error| format!("lock DM pending: {error}"))?;
-        pending.insert(request_id, sender);
+        pending.insert(request_id, (target_key, sender));
     }
 
     let app_msg = ApplicationMessage::new(payload);
     let request = DelegateOp(DelegateRequest::ApplicationMessages {
-        key: DELEGATE_KEY.clone(),
+        key,
         params: Parameters::from(Vec::<u8>::new()),
         inbound: vec![InboundDelegateMsg::ApplicationMessage(app_msg)],
     });
@@ -280,6 +334,39 @@ pub async fn send_request(
                 pending.remove(&request_id);
             }
             Err("DM delegate request timed out".to_string())
+        }
+    }
+}
+
+/// Ask each previous DM delegate for its backup and import what it returns.
+/// The current generation is skipped. Runs at most once per session so
+/// reconnects do not re-probe absent generations.
+async fn fire_legacy_dm_migration() {
+    if LEGACY_DM_MIGRATION_ATTEMPTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    for (key_bytes, code_hash_bytes) in LEGACY_DM_DELEGATES {
+        if is_dm_delegate_key(key_bytes) {
+            continue;
+        }
+        let code_hash = CodeHash::new(*code_hash_bytes);
+        let key = DelegateKey::new(*key_bytes, code_hash);
+        match send_request_to(key, DmDelegateRequestMsg::ExportBackup).await {
+            Ok(DmDelegateResponseMsg::Backup { bytes }) if !bytes.is_empty() => {
+                match send_request(DmDelegateRequestMsg::ImportBackup { bytes }).await {
+                    Ok(DmDelegateResponseMsg::Ok) => info!("Imported a legacy DM backup"),
+                    Ok(DmDelegateResponseMsg::Error { message }) => {
+                        warn!("Legacy DM import failed: {message}")
+                    }
+                    Ok(other) => warn!("Unexpected legacy DM import response: {other:?}"),
+                    Err(error) => warn!("Legacy DM import failed: {error}"),
+                }
+            }
+            Ok(DmDelegateResponseMsg::Error { message }) => {
+                info!("Legacy DM delegate had nothing to export: {message}")
+            }
+            Ok(_) => {}
+            Err(error) => info!("Legacy DM delegate not available: {error}"),
         }
     }
 }
@@ -518,4 +605,18 @@ pub async fn ensure_identity_after_profile_switch() -> Result<(), String> {
     ensure_identity_and_device().await?;
     let _ = crate::components::app::dm_contract::load_conversations().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod legacy_registry_tests {
+    use super::{fail_pending_for_legacy_dm_error, is_legacy_dm_delegate_key, DELEGATE_KEY};
+
+    #[test]
+    fn the_day1_dm_delegate_is_not_treated_as_legacy() {
+        assert!(!is_legacy_dm_delegate_key(DELEGATE_KEY.bytes()));
+        let encoded = bs58::encode(DELEGATE_KEY.bytes()).into_string();
+        assert!(!fail_pending_for_legacy_dm_error(&format!(
+            "delegate {encoded} not found in store"
+        )));
+    }
 }

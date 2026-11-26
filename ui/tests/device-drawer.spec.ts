@@ -15,6 +15,9 @@ test("identities and backup live in the device drawer", async ({ page }) => {
   await expect(drawer.getByText("Your identities")).toBeVisible();
 
   await drawer.getByRole("tab", { name: "Backup" }).click();
+  await expect(drawer.getByLabel("Backup passphrase")).toBeVisible();
+  await expect(drawer.getByLabel("Confirm passphrase")).toBeVisible();
+  await expect(drawer.getByLabel("Restore passphrase")).toBeVisible();
   await expect(
     drawer.getByRole("button", { name: "Download backup" }),
   ).toBeVisible();

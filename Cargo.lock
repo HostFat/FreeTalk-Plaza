@@ -5479,6 +5479,7 @@ name = "plaza-ui"
 version = "0.2.0"
 dependencies = [
  "aes-gcm",
+ "argon2",
  "base64 0.22.1",
  "blake3",
  "bs58",
@@ -5514,6 +5515,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "x25519-dalek 2.0.1",
+ "zeroize",
 ]
 
 [[package]]

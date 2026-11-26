@@ -5,9 +5,10 @@
 //! therefore changes the address the node uses for the user's boards.
 //!
 //! Subcommands:
-//!   hash <file>                 print code_hash and delegate_key
-//!   add <version> <description> append the committed WASM to legacy_delegates.toml
-//!   check [--ci <base> <head>]  fail when the committed WASM changed without a registry entry
+//!   hash <file>                        print code_hash and delegate_key
+//!   add [--dm] <version> <description> append the committed delegate WASM to its registry
+//!   check [--ci <base> <head>]         fail when a committed delegate WASM changed without a registry entry
+//!   sync [--changed] [--only <pkg>...] build WASMs reproducibly and copy to committed paths
 //!
 //! Exits non-zero on any error so `cargo make` tasks and CI stop.
 
@@ -17,12 +18,21 @@ use std::process::Command;
 
 const COMMITTED_WASM: &str = "ui/public/contracts/plaza_delegate.wasm";
 const REGISTRY: &str = "legacy_delegates.toml";
+const COMMITTED_DM_WASM: &str = "ui/public/contracts/plaza_dm_delegate.wasm";
+const DM_REGISTRY: &str = "legacy_dm_delegates.toml";
+
+/// Each delegate whose key must survive a rebuild has its own registry.
+/// The board delegate and the DM delegate are checked the same way.
+const TRACKED_DELEGATES: &[(&str, &str)] = &[
+    (COMMITTED_WASM, REGISTRY),
+    (COMMITTED_DM_WASM, DM_REGISTRY),
+];
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         Some("hash") => cmd_hash(args.get(1)),
-        Some("add") => cmd_add(args.get(1), args.get(2)),
+        Some("add") => cmd_add(&args[1..]),
         Some("check") => cmd_check(&args[1..]),
         Some("sync") => cmd_sync(&args[1..]),
         _ => usage(),
@@ -35,7 +45,7 @@ fn main() {
 
 fn usage() -> Result<(), String> {
     eprintln!(
-        "usage:\n  wasm-tool hash <file>\n  wasm-tool add <version> <description>\n  wasm-tool check [--ci <base> <head>]\n  wasm-tool sync [--changed] [--only <package>...]"
+        "usage:\n  wasm-tool hash <file>\n  wasm-tool add [--dm] <version> <description>\n  wasm-tool check [--ci <base> <head>]\n  wasm-tool sync [--changed] [--only <package>...]"
     );
     Err("no subcommand".into())
 }
@@ -92,11 +102,25 @@ fn registry_contains_code_hash(registry: &str, hash: &str) -> bool {
     })
 }
 
-fn cmd_add(version: Option<&String>, description: Option<&String>) -> Result<(), String> {
-    let version = version.ok_or("add needs a version, e.g. V3")?;
-    let description = description.ok_or("add needs a description")?;
+fn parse_add_args<'a>(args: &'a [String]) -> Result<(bool, &'a str, &'a str), String> {
+    let (is_dm, rest) = match args.first().map(String::as_str) {
+        Some("--dm") => (true, &args[1..]),
+        _ => (false, args),
+    };
+    let version = rest.first().map(String::as_str).ok_or("add needs a version, e.g. V2")?;
+    let description = rest.get(1).map(String::as_str).ok_or("add needs a description")?;
+    Ok((is_dm, version, description))
+}
+
+fn cmd_add(args: &[String]) -> Result<(), String> {
+    let (is_dm, version, description) = parse_add_args(args)?;
+    let (wasm_rel, registry_rel) = if is_dm {
+        (COMMITTED_DM_WASM, DM_REGISTRY)
+    } else {
+        (COMMITTED_WASM, REGISTRY)
+    };
     let root = repo_root();
-    let wasm = root.join(COMMITTED_WASM);
+    let wasm = root.join(wasm_rel);
     let bytes = fs::read(&wasm).map_err(|e| {
         format!(
             "cannot read {}: {e}. Run `cargo make sync-wasm` first.",
@@ -104,11 +128,11 @@ fn cmd_add(version: Option<&String>, description: Option<&String>) -> Result<(),
         )
     })?;
     let (code_hash, delegate_key) = hashes(&bytes);
-    let registry = root.join(REGISTRY);
+    let registry = root.join(registry_rel);
     let mut text = fs::read_to_string(&registry).map_err(|e| format!("cannot read {}: {e}", registry.display()))?;
 
     if registry_contains_code_hash(&text, &code_hash) {
-        println!("code_hash {code_hash} is already in {REGISTRY} - nothing to do");
+        println!("code_hash {code_hash} is already in {registry_rel} - nothing to do");
         return Ok(());
     }
 
@@ -119,10 +143,10 @@ fn cmd_add(version: Option<&String>, description: Option<&String>) -> Result<(),
         "\n[[entry]]\nversion = \"{escaped_version}\"\ndescription = \"{escaped_description}\"\ndate = \"{date}\"\ndelegate_key = \"{delegate_key}\"\ncode_hash = \"{code_hash}\"\n"
     ));
     fs::write(&registry, text).map_err(|e| format!("cannot write {}: {e}", registry.display()))?;
-    println!("Added {version} to {REGISTRY}");
+    println!("Added {version} to {registry_rel}");
     println!("  code_hash:    {code_hash}");
     println!("  delegate_key: {delegate_key}");
-    println!("\nNext: rebuild the WASMs, then commit legacy_delegates.toml with them.");
+    println!("\nNext: rebuild the WASMs, then commit {registry_rel} with them.");
     Ok(())
 }
 
@@ -349,9 +373,20 @@ fn cmd_sync(args: &[String]) -> Result<(), String> {
         cargo_args.push(target.package);
     }
 
+    // One lockfile is shared with the UI on purpose for now. Builds stay
+    // `--locked`. Path remapping via CARGO_ENCODED_RUSTFLAGS (which handles
+    // paths with spaces cleanly) keeps two machines on the same bytes.
+    let encoded_rustflags = encoded_remap_rustflags(&root);
+    println!(
+        "CARGO_ENCODED_RUSTFLAGS: {}",
+        encoded_rustflags.replace('\x1f', " ")
+    );
+
     let status = Command::new("cargo")
         .args(&cargo_args)
         .current_dir(&root)
+        .env_remove("RUSTFLAGS")
+        .env("CARGO_ENCODED_RUSTFLAGS", &encoded_rustflags)
         .status()
         .map_err(|e| format!("cannot run cargo: {e}"))?;
     if !status.success() {
@@ -359,8 +394,10 @@ fn cmd_sync(args: &[String]) -> Result<(), String> {
     }
 
     let out = root.join("target/wasm32-unknown-unknown/release");
+    let probes = path_probes(&root);
     for target in &selected {
         let src = out.join(target.wasm_file);
+        refuse_machine_paths(&src, &probes)?;
         for dst in target.destinations {
             let dst = root.join(dst);
             if let Some(parent) = dst.parent() {
@@ -378,62 +415,67 @@ fn cmd_sync(args: &[String]) -> Result<(), String> {
 
 fn cmd_check(args: &[String]) -> Result<(), String> {
     let root = repo_root();
-    let wasm_path = root.join(COMMITTED_WASM);
-    let registry_path = root.join(REGISTRY);
+    for (wasm, registry) in TRACKED_DELEGATES {
+        check_one(&root, wasm, registry, args)?;
+    }
+    Ok(())
+}
+
+fn check_one(root: &Path, wasm: &str, registry_rel: &str, args: &[String]) -> Result<(), String> {
+    let wasm_path = root.join(wasm);
+    let registry_path = root.join(registry_rel);
     let registry = fs::read_to_string(&registry_path)
         .map_err(|e| format!("cannot read {}: {e}", registry_path.display()))?;
 
     if args.first().map(String::as_str) == Some("--ci") {
         let base = args.get(1).ok_or("check --ci needs BASE_SHA")?;
         let head = args.get(2).ok_or("check --ci needs HEAD_SHA")?;
-        let base_hash = hash_at_ref(&root, base)?;
-        let head_hash = hash_at_ref(&root, head)?;
+        let base_hash = hash_at_ref(root, base, wasm)?;
+        let head_hash = hash_at_ref(root, head, wasm)?;
         let Some(base_hash) = base_hash else {
-            println!("committed WASM did not exist at base {base} - no migration needed");
+            println!("{wasm} did not exist at base {base} - no migration needed");
             return Ok(());
         };
-        let head_hash =
-            head_hash.ok_or_else(|| format!("{COMMITTED_WASM} was deleted at head {head}"))?;
+        let head_hash = head_hash.ok_or_else(|| format!("{wasm} was deleted at head {head}"))?;
         if base_hash == head_hash {
-            println!("committed WASM unchanged - no migration needed");
+            println!("{wasm} unchanged - no migration needed");
             return Ok(());
         }
-        let head_registry = registry_at_ref(&root, head)?;
+        let head_registry = file_at_ref(root, head, registry_rel)?;
         if registry_contains_code_hash(&head_registry, &base_hash) {
-            println!("committed WASM changed and the old hash is registered - OK");
+            println!("{wasm} changed and the old hash is registered - OK");
             return Ok(());
         }
         return Err(format!(
-            "committed WASM changed ({base_hash} -> {head_hash}) but {base_hash} is not in \
-             {REGISTRY} on HEAD. Run `cargo make add-migration` and commit the entry."
+            "{wasm} changed ({base_hash} -> {head_hash}) but {base_hash} is not in \
+             {registry_rel} on HEAD. Record the outgoing code_hash before replacing the WASM."
         ));
     }
 
-    // Local mode: compare the working-tree WASM against HEAD's.
     let working = fs::read(&wasm_path)
         .map_err(|e| format!("cannot read {}: {e}", wasm_path.display()))?;
     let (working_hash, _) = hashes(&working);
-    let Some(head_hash) = hash_at_ref(&root, "HEAD")? else {
-        println!("committed WASM is not tracked at HEAD - treating as a new baseline");
+    let Some(head_hash) = hash_at_ref(root, "HEAD", wasm)? else {
+        println!("{wasm} is not tracked at HEAD - treating as a new baseline");
         return Ok(());
     };
     if working_hash == head_hash {
-        println!("committed WASM matches HEAD - no migration needed");
+        println!("{wasm} matches HEAD - no migration needed");
         return Ok(());
     }
     if registry_contains_code_hash(&registry, &head_hash) {
-        println!("committed WASM changed and the old hash is registered - OK");
+        println!("{wasm} changed and the old hash is registered - OK");
         return Ok(());
     }
     Err(format!(
-        "committed WASM changed in the working tree ({head_hash} -> {working_hash}) and \
-         {head_hash} is not in {REGISTRY}. Run `cargo make add-migration`."
+        "{wasm} changed in the working tree ({head_hash} -> {working_hash}) and \
+         {head_hash} is not in {registry_rel}. Record the outgoing code_hash first."
     ))
 }
 
-fn hash_at_ref(root: &Path, git_ref: &str) -> Result<Option<String>, String> {
+fn hash_at_ref(root: &Path, git_ref: &str, wasm: &str) -> Result<Option<String>, String> {
     let exists = Command::new("git")
-        .args(["cat-file", "-e", &format!("{git_ref}:{COMMITTED_WASM}")])
+        .args(["cat-file", "-e", &format!("{git_ref}:{wasm}")])
         .current_dir(root)
         .stderr(std::process::Stdio::null())
         .status()
@@ -442,23 +484,137 @@ fn hash_at_ref(root: &Path, git_ref: &str) -> Result<Option<String>, String> {
         return Ok(None);
     }
     let out = Command::new("git")
-        .args(["show", &format!("{git_ref}:{COMMITTED_WASM}")])
+        .args(["show", &format!("{git_ref}:{wasm}")])
         .current_dir(root)
         .output()
         .map_err(|e| format!("cannot run git show: {e}"))?;
     if !out.status.success() {
-        return Err(format!("git show failed for {git_ref}:{COMMITTED_WASM}"));
+        return Err(format!("git show failed for {git_ref}:{wasm}"));
     }
     Ok(Some(hashes(&out.stdout).0))
 }
 
-fn registry_at_ref(root: &Path, git_ref: &str) -> Result<String, String> {
+fn file_at_ref(root: &Path, git_ref: &str, path: &str) -> Result<String, String> {
     let out = Command::new("git")
-        .args(["show", &format!("{git_ref}:{REGISTRY}")])
+        .args(["show", &format!("{git_ref}:{path}")])
         .current_dir(root)
         .output()
         .map_err(|e| format!("cannot run git show: {e}"))?;
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// `--remap-path-prefix` for the roots that otherwise land in panic locations
+/// and make the WASM depend on the machine that built it. Uses Cargo's
+/// `\x1f`-delimited `CARGO_ENCODED_RUSTFLAGS` so paths with spaces work.
+fn encoded_remap_rustflags(root: &Path) -> String {
+    let mut flags: Vec<String> = if let Ok(existing) = std::env::var("CARGO_ENCODED_RUSTFLAGS") {
+        existing
+            .split('\x1f')
+            .filter(|part| !part.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    } else if let Ok(existing) = std::env::var("RUSTFLAGS") {
+        existing
+            .split_whitespace()
+            .map(ToOwned::to_owned)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    let cargo = std::env::var("CARGO_HOME").unwrap_or_else(|_| format!("{home}/.cargo"));
+    let rustup = std::env::var("RUSTUP_HOME").unwrap_or_else(|_| format!("{home}/.rustup"));
+    let sysroot = rustc_sysroot().unwrap_or_default();
+    let repo = root.display().to_string();
+
+    for (prefix, name) in [
+        (cargo, "/cargo"),
+        (rustup, "/rustup"),
+        (sysroot, "/rustup"),
+        (repo, "/build"),
+    ] {
+        push_remap(&mut flags, &prefix, name);
+    }
+    flags.join("\x1f")
+}
+
+fn rustc_sysroot() -> Option<String> {
+    let out = Command::new("rustc").args(["--print", "sysroot"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+fn push_remap(flags: &mut Vec<String>, prefix: &str, name: &str) {
+    if prefix.is_empty() {
+        return;
+    }
+    let flag = format!("--remap-path-prefix={prefix}={name}");
+    if !flags.contains(&flag) {
+        flags.push(flag);
+    }
+    let forward = prefix.replace('\\', "/");
+    if forward != prefix {
+        let forward_flag = format!("--remap-path-prefix={forward}={name}");
+        if !flags.contains(&forward_flag) {
+            flags.push(forward_flag);
+        }
+    }
+    let back = prefix.replace('/', "\\");
+    if back != prefix && back != forward {
+        let back_flag = format!("--remap-path-prefix={back}={name}");
+        if !flags.contains(&back_flag) {
+            flags.push(back_flag);
+        }
+    }
+}
+
+fn path_probes(root: &Path) -> Vec<String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    let cargo = std::env::var("CARGO_HOME").unwrap_or_else(|_| format!("{home}/.cargo"));
+    let rustup = std::env::var("RUSTUP_HOME").unwrap_or_else(|_| format!("{home}/.rustup"));
+    let mut probes = vec![cargo, rustup, root.display().to_string(), home];
+    let forward: Vec<String> = probes.iter().map(|probe| probe.replace('\\', "/")).collect();
+    let back: Vec<String> = probes.iter().map(|probe| probe.replace('/', "\\")).collect();
+    probes.extend(forward);
+    probes.extend(back);
+    probes.retain(|probe| probe.len() >= 4);
+    probes.sort();
+    probes.dedup();
+    probes
+}
+
+fn refuse_machine_paths(path: &Path, probes: &[String]) -> Result<(), String> {
+    let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    for probe in probes {
+        if contains_bytes(&bytes, probe.as_bytes()) {
+            return Err(format!(
+                "REFUSING: {} contains the build-machine path '{probe}'",
+                path.display()
+            ));
+        }
+    }
+    for pattern in [b"/home/" as &[u8], b"/Users/", b"C:\\Users\\", b"C:/Users/"] {
+        if contains_bytes(&bytes, pattern) {
+            return Err(format!(
+                "REFUSING: {} contains a home-directory path ({})",
+                path.display(),
+                String::from_utf8_lossy(pattern)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|window| window == needle)
 }
 
 /// Local date as YYYY-MM-DD, without pulling in chrono.

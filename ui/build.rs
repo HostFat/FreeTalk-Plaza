@@ -62,12 +62,25 @@ fn main() {
 /// one-line change that both CI (`scripts/check-migration.sh`) and the Wasm
 /// build see, instead of hand-copied byte arrays that drift apart.
 fn generate_legacy_delegates() {
+    generate_one(
+        "legacy_delegates.toml",
+        "legacy_delegates.rs",
+        "LEGACY_DELEGATES",
+    );
+    generate_one(
+        "legacy_dm_delegates.toml",
+        "legacy_dm_delegates.rs",
+        "LEGACY_DM_DELEGATES",
+    );
+}
+
+fn generate_one(registry_name: &str, out_name: &str, const_name: &str) {
     let manifest_dir =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let registry = manifest_dir
         .parent()
         .expect("ui/ must live under the repository root")
-        .join("legacy_delegates.toml");
+        .join(registry_name);
 
     let text = fs::read_to_string(&registry).unwrap_or_else(|e| {
         panic!(
@@ -113,9 +126,9 @@ fn generate_legacy_delegates() {
         &mut code_hash,
     );
 
-    let mut out = String::from(
-        "// Generated from legacy_delegates.toml by ui/build.rs. Do not edit.\n\
-         pub const LEGACY_DELEGATES: &[([u8; 32], [u8; 32])] = &[\n",
+    let mut out = format!(
+        "// Generated from {registry_name} by ui/build.rs. Do not edit.\n\
+         pub const {const_name}: &[([u8; 32], [u8; 32])] = &[\n",
     );
     for (key, hash) in &entries {
         out.push_str("    (");
@@ -127,7 +140,7 @@ fn generate_legacy_delegates() {
     out.push_str("];\n");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
-    fs::write(out_dir.join("legacy_delegates.rs"), out).expect("write legacy_delegates.rs");
+    fs::write(out_dir.join(out_name), out).unwrap_or_else(|e| panic!("write {out_name}: {e}"));
 }
 
 fn flush_entry(
@@ -141,10 +154,7 @@ fn flush_entry(
     match (key, hash) {
         (None, None) => {}
         (Some(key), Some(hash)) => entries.push((key, hash)),
-        _ => panic!(
-            "legacy_delegates.toml entry {} is missing delegate_key or code_hash",
-            version
-        ),
+        _ => panic!("registry entry {version} is missing delegate_key or code_hash"),
     }
     version.clear();
 }
