@@ -549,10 +549,15 @@ impl BoardSynchronizer {
                         let mut id_bytes = [0u8; 32];
                         id_bytes.copy_from_slice(new_contract_id.as_bytes());
                         let new_address = blake3::Hash::from(id_bytes);
+                        let now_ms = plaza_core::board_state::rate_limit::system_time_ms(
+                            crate::util::get_current_system_time(),
+                        );
                         let upgrade = UpgradeV1 {
                             owner_member_id: board_data.owner_id(),
                             version: 1,
                             new_chatboard_address: new_address,
+                            new_revision: plaza_core::CONTRACT_REVISION,
+                            created_at: now_ms,
                         };
                         let authorized_upgrade =
                             AuthorizedUpgradeV1::new(upgrade, board_data.owner_key());
@@ -1153,10 +1158,15 @@ pub async fn send_upgrade_pointers() -> usize {
         };
         let mut id_bytes = [0u8; 32];
         id_bytes.copy_from_slice(&new_id);
+        let now_ms = plaza_core::board_state::rate_limit::system_time_ms(
+            crate::util::get_current_system_time(),
+        );
         let upgrade = UpgradeV1 {
             owner_member_id: owner_id,
             version: 1,
             new_chatboard_address: blake3::Hash::from(id_bytes),
+            new_revision: plaza_core::CONTRACT_REVISION,
+            created_at: now_ms,
         };
         let authorized = AuthorizedUpgradeV1::new(upgrade, &owner_key);
         let upgrade_state = plaza_core::board_state::ChatBoardStateV1 {

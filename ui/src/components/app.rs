@@ -6,6 +6,7 @@ pub mod moderation_contract;
 pub mod profile_contract;
 pub mod member_contract;
 pub mod section_contract;
+pub mod search_index;
 pub mod topic_contract;
 pub mod document_title;
 pub mod freenet_api;
@@ -46,6 +47,18 @@ use plaza_core::board_state::message::MessageId;
 use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::window;
+
+/// Central hook invoked whenever a client contract cache evicts an entry under
+/// its LRU memory budget. Once `freenet-stdlib` exposes a `ContractRequest::Unsubscribe`
+/// operation, this is the single place that will also release the node subscription.
+pub fn notify_contract_evicted(
+    kind: &'static str,
+    contract_id: freenet_stdlib::prelude::ContractInstanceId,
+) {
+    dioxus::logger::tracing::debug!(
+        "evicted cached {kind} contract {contract_id} under LRU budget (unsubscribe hook)"
+    );
+}
 
 /// Application routes
 #[derive(Clone, Debug, PartialEq, Routable)]
@@ -432,12 +445,16 @@ pub fn App() -> Element {
         }
     });
 
-    // Restore cached section indexes before the network GETs finish, so the
-    // board list and search show the last known content immediately.
+    // Restore cached section indexes and persisted full-archive search index
+    // before the network GETs finish, so the board list and search show the
+    // last known content immediately.
     use_effect(move || {
         if *BOARDS_LOADED.read() {
             crate::util::safe_spawn_local(
                 crate::components::app::section_contract::load_persisted_section_boards(),
+            );
+            crate::util::safe_spawn_local(
+                crate::components::app::search_index::load_persisted_search_index(),
             );
         }
     });

@@ -905,6 +905,11 @@ impl ChatBoardStateV1 {
         suspensions.cleanup(self, parameters);
         self.suspensions = suspensions;
 
+        // Deterministic long-term pruning of expired suspensions and expired/
+        // deleted unreferenced invite tokens, anchored to the state's own max
+        // signed timestamp (never wall clock) so all peers converge identically.
+        self.prune_expired_records(parameters);
+
         let mut retirements = std::mem::take(&mut self.image_retirements);
         retirements.cleanup(self, parameters);
         self.image_retirements = retirements;
@@ -970,6 +975,78 @@ impl ChatBoardStateV1 {
         }
 
         Ok(())
+    }
+
+    /// Retention grace period (30 days) before expired suspensions and expired
+    /// or deleted unreferenced invite tokens are pruned deterministically.
+    pub const EXPIRED_RECORD_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+
+    /// Deterministic state-clock watermark derived strictly from signed
+    /// timestamps inside `self` (never wall clock).
+    pub fn deterministic_watermark_ms(&self) -> i64 {
+        let mut max_ms = crate::board_state::rate_limit::system_time_ms(
+            self.configuration.configuration.updated_at,
+        );
+        if let Some(root) = &self.authority_root.0 {
+            max_ms = max_ms.max(root.root.epoch);
+        }
+        for section in &self.sections.sections {
+            max_ms = max_ms.max(crate::board_state::rate_limit::system_time_ms(
+                section.section.signed_at,
+            ));
+        }
+        for suspension in &self.suspensions.suspensions {
+            max_ms = max_ms.max(suspension.suspension.created_at);
+        }
+        for token in &self.invites.tokens {
+            if let Some(created_at) = token.token.created_at {
+                max_ms = max_ms.max(crate::board_state::rate_limit::system_time_ms(created_at));
+            }
+        }
+        for transfer in &self.ownership.transfers {
+            max_ms = max_ms.max(crate::board_state::rate_limit::system_time_ms(
+                transfer.transfer.transferred_at,
+            ));
+        }
+        max_ms
+    }
+
+    /// Deterministically prune long-expired suspensions and deleted/expired
+    /// invite tokens not referenced by any member in `self.members`.
+    pub fn prune_expired_records(&mut self, _parameters: &ChatBoardParametersV1) {
+        let watermark = self.deterministic_watermark_ms();
+        if watermark <= Self::EXPIRED_RECORD_RETENTION_MS {
+            return;
+        }
+        let cutoff = watermark - Self::EXPIRED_RECORD_RETENTION_MS;
+        self.suspensions
+            .suspensions
+            .retain(|entry| entry.suspension.until >= cutoff);
+
+        let referenced_tokens: HashSet<[u8; 16]> = self
+            .members
+            .members
+            .iter()
+            .filter_map(|m| m.member.join_proof.as_ref().map(|p| p.token_id))
+            .collect();
+        self.invites.tokens.retain(|entry| {
+            if referenced_tokens.contains(&entry.token.id) {
+                return true;
+            }
+            if entry.token.deleted {
+                let created = entry
+                    .token
+                    .created_at
+                    .map(crate::board_state::rate_limit::system_time_ms)
+                    .unwrap_or(0);
+                return created >= cutoff;
+            }
+            if let Some(not_after) = entry.token.not_after {
+                let exp_ms = crate::board_state::rate_limit::system_time_ms(not_after);
+                return exp_ms >= cutoff;
+            }
+            true
+        });
     }
 
     /// Keep at most `max_uses` members per invite link, choosing the lowest
@@ -1846,5 +1923,82 @@ mod tests {
         state
             .verify_with_section(&parameters, None)
             .expect("the owner root attests the records");
+    }
+
+    #[test]
+    fn prune_expired_records_drops_old_suspensions_and_unreferenced_expired_invites_deterministically()
+    {
+        use crate::board_state::invites::{AuthorizedInviteToken, InviteToken};
+        use crate::board_state::member_moderation::{AuthorizedSuspension, SuspensionV1};
+        use crate::board_state::rate_limit::system_time_from_ms;
+        use crate::board_state::reports::ReportReason;
+
+        let (mut state, parameters, owner_key) = create_empty_chat_board_state();
+        let member_key = SigningKey::generate(&mut rand::thread_rng());
+        let member_id = MemberId::from(&member_key.verifying_key());
+        state.members.members.push(AuthorizedMember::new(
+            Member {
+                owner_member_id: parameters.owner_id(),
+                invited_by: parameters.owner_id(),
+                member_vk: member_key.verifying_key(),
+                join_proof: None,
+            },
+            &owner_key,
+        ));
+
+        let now_ms = ChatBoardStateV1::EXPIRED_RECORD_RETENTION_MS * 3;
+        state.configuration.configuration.updated_at = system_time_from_ms(now_ms);
+        state.configuration =
+            AuthorizedConfigurationV1::new(state.configuration.configuration.clone(), &owner_key);
+
+        // Old expired suspension (> 30d ago) -> should be pruned.
+        state.suspensions.suspensions.push(AuthorizedSuspension::new(
+            SuspensionV1 {
+                target: member_id,
+                reason: ReportReason::Spam,
+                created_at: 1_000,
+                until: 2_000,
+                generation: 1,
+            },
+            &owner_key,
+        ));
+
+        // Old expired invite token -> should be pruned; fresh token -> kept.
+        let token_key = SigningKey::generate(&mut rand::thread_rng());
+        state.invites.tokens.push(AuthorizedInviteToken::new(
+            InviteToken {
+                id: [1u8; 16],
+                verifying_key: token_key.verifying_key(),
+                role_id: [0u8; 16],
+                max_uses: None,
+                not_after: Some(system_time_from_ms(2_000)),
+                generation: 1,
+                deleted: false,
+                label: "old".to_string(),
+                created_at: Some(system_time_from_ms(1_000)),
+                includes_category_keys: false,
+            },
+            &owner_key,
+        ));
+        state.invites.tokens.push(AuthorizedInviteToken::new(
+            InviteToken {
+                id: [2u8; 16],
+                verifying_key: token_key.verifying_key(),
+                role_id: [0u8; 16],
+                max_uses: None,
+                not_after: Some(system_time_from_ms(now_ms + 10_000)),
+                generation: 1,
+                deleted: false,
+                label: "fresh".to_string(),
+                created_at: Some(system_time_from_ms(now_ms)),
+                includes_category_keys: false,
+            },
+            &owner_key,
+        ));
+
+        state.prune_expired_records(&parameters);
+        assert!(state.suspensions.suspensions.is_empty());
+        assert_eq!(state.invites.tokens.len(), 1);
+        assert_eq!(state.invites.tokens[0].token.id, [2u8; 16]);
     }
 }

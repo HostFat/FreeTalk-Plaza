@@ -30,9 +30,34 @@ use crate::util::to_cbor_vec;
 
 /// Cooldown before retrying a GET for an unsynced (not yet created) feed.
 const UNSYNCED_RETRY_COOLDOWN_MS: i64 = 10_000;
+/// Maximum activity feeds kept in RAM across all boards/sections (LRU evicted).
+const MAX_CACHED_ACTIVITY_FEEDS: usize = 32;
 
 fn now_ms() -> i64 {
     plaza_core::board_state::rate_limit::system_time_ms(crate::util::get_current_system_time())
+}
+
+fn evict_activity_boards(protect: ContractInstanceId) {
+    let mut evicted = Vec::new();
+    ACTIVITY_BOARDS.with_mut(|boards| {
+        while boards.len() > MAX_CACHED_ACTIVITY_FEEDS {
+            let victim = boards
+                .iter()
+                .filter(|(id, board)| **id != protect && !board.dirty)
+                .min_by_key(|(_, board)| board.last_fetch)
+                .map(|(id, _)| *id);
+            match victim {
+                Some(id) => {
+                    boards.remove(&id);
+                    evicted.push(id);
+                }
+                None => break,
+            }
+        }
+    });
+    for id in evicted {
+        crate::components::app::notify_contract_evicted("activity_feed", id);
+    }
 }
 
 #[derive(Clone)]
@@ -104,6 +129,7 @@ pub async fn load_activity(
         });
         entry.last_fetch = now;
     });
+    evict_activity_boards(contract_id);
     send_client_request(ClientRequest::ContractOp(ContractRequest::Get {
         key: contract_id,
         return_contract_code: false,

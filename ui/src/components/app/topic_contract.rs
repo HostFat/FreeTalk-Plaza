@@ -268,6 +268,7 @@ fn evict_topics(protect: ContractInstanceId) {
             match victim {
                 Some(id) => {
                     topics.remove(&id);
+                    crate::components::app::notify_contract_evicted("topic", id);
                 }
                 None => break,
             }
@@ -275,11 +276,32 @@ fn evict_topics(protect: ContractInstanceId) {
     });
 }
 
-pub fn topic_key_for(owner: VerifyingKey, topic_id: MessageId, part: u32) -> ContractKey {
-    let params = TopicParamsV1::new(owner, *topic_id.as_bytes(), part);
+/// Multi-version topic contract code registry. Keeping this dispatch table
+/// allows future topic protocol versions (v2+) to coexist alongside existing v1
+/// topic contracts without re-keying historical discussions.
+pub fn topic_code_for_version(protocol_version: u16) -> Option<&'static [u8]> {
+    match protocol_version {
+        1 => Some(TOPIC_CONTRACT_WASM),
+        _ => None,
+    }
+}
+
+pub fn topic_key_for_version(
+    protocol_version: u16,
+    owner: VerifyingKey,
+    topic_id: MessageId,
+    part: u32,
+) -> Option<ContractKey> {
+    let wasm = topic_code_for_version(protocol_version)?;
+    let mut params = TopicParamsV1::new(owner, *topic_id.as_bytes(), part);
+    params.protocol_version = protocol_version;
     let parameters = Parameters::from(to_cbor_vec(&params));
-    let code = ContractCode::from(TOPIC_CONTRACT_WASM);
-    ContractKey::from_params_and_code(parameters, &code)
+    let code = ContractCode::from(wasm);
+    Some(ContractKey::from_params_and_code(parameters, &code))
+}
+
+pub fn topic_key_for(owner: VerifyingKey, topic_id: MessageId, part: u32) -> ContractKey {
+    topic_key_for_version(1, owner, topic_id, part).expect("topic protocol v1 code is bundled")
 }
 
 pub fn is_known_topic(key: &ContractInstanceId) -> bool {
@@ -547,12 +569,35 @@ pub async fn continue_topic(
         next_part: Some(next_part),
         previous_hash: prev_previous_hash,
     };
+    let admin_seal_proof = if is_owner {
+        None
+    } else {
+        board
+            .board_state
+            .admin
+            .admins
+            .iter()
+            .find(|entry| {
+                entry.admin.id() == creator
+                    && !board.board_state.admin.revoked.iter().any(|rev| {
+                        rev.id() == creator && rev.revocation.generation >= entry.admin.generation
+                    })
+            })
+            .cloned()
+            .map(|admin| AuthorityProof {
+                admin: Some(admin),
+                grant: None,
+            })
+    };
+    let can_seal = is_owner || admin_seal_proof.is_some();
     match &conversation.state {
         TopicPartState::Head(head) => {
-            let posts_seal = if is_owner {
+            let posts_seal = if can_seal {
                 head.build_posts_seal(&conversation.params, now)
                     .ok()
-                    .map(|seal| AuthorizedTopicPageSealV1::new(seal, board.owner_key(), None))
+                    .map(|seal| {
+                        AuthorizedTopicPageSealV1::new(seal, &signer_sk, admin_seal_proof.clone())
+                    })
             } else {
                 None
             };
@@ -567,10 +612,10 @@ pub async fn continue_topic(
             .await?;
         }
         TopicPartState::Page(page) => {
-            let seal = if is_owner {
+            let seal = if can_seal {
                 page.build_seal(&conversation.params, now)
                     .ok()
-                    .map(|seal| AuthorizedTopicPageSealV1::new(seal, board.owner_key(), None))
+                    .map(|seal| AuthorizedTopicPageSealV1::new(seal, &signer_sk, admin_seal_proof))
             } else {
                 None
             };
@@ -1315,14 +1360,70 @@ fn authority_from_board(
     }
     let (root, member_proofs, roles, bans, ban_revocations, suspensions) =
         if let Some(root) = signed_root {
+            let proofs = tree.proofs_for(ids.iter());
+            // Compact role definitions: include only roles referenced by member
+            // proofs, invite tokens of referenced members, active moderation/
+            // access-management roles, or any section ACL on the board so large
+            // boards with dozens of cosmetic roles do not bloat every topic.
+            let mut needed_roles: HashSet<plaza_core::board_state::roles::RoleId> = HashSet::new();
+            for proof in &proofs {
+                for r in &proof.status.roles {
+                    needed_roles.insert(r.role.id);
+                }
+                for a in &proof.status.assignments {
+                    needed_roles.insert(a.assignment.role_id);
+                }
+            }
+            for id in &ids {
+                if let Some(member) = merged_board_state
+                    .members
+                    .members
+                    .iter()
+                    .find(|m| m.member.id() == *id)
+                {
+                    if let Some(join_proof) = &member.member.join_proof {
+                        if let Some(token) = board
+                            .board_state
+                            .invites
+                            .tokens
+                            .iter()
+                            .find(|t| t.token.id == join_proof.token_id)
+                        {
+                            needed_roles.insert(token.token.role_id);
+                        }
+                    }
+                }
+            }
+            for section in &board.board_state.sections.sections {
+                if !section.section.deleted {
+                    needed_roles.extend(section.section.allowed_roles.iter().copied());
+                }
+            }
+            let compact_roles = board
+                .board_state
+                .roles
+                .roles
+                .iter()
+                .filter(|entry| {
+                    needed_roles.contains(&entry.role.id)
+                        || entry.role.can_delete_posts
+                        || entry.role.can_manage_access
+                        || entry.role.can_pin_posts
+                        || entry.role.can_move_posts
+                        || board
+                            .board_state
+                            .invites
+                            .tokens
+                            .iter()
+                            .any(|t| !t.token.deleted && t.token.role_id == entry.role.id)
+                })
+                .cloned()
+                .collect();
             (
                 Some(root),
-                tree.proofs_for(ids.iter()),
+                proofs,
                 plaza_core::board_state::roles::RolesV1 {
-                    // Role definitions stay complete: a token join and a
-                    // role-based moderator need the definition even when the
-                    // member has no signed assignment.
-                    roles: board.board_state.roles.roles.clone(),
+                    roles: compact_roles,
                     assignments: Vec::new(),
                 },
                 Default::default(),

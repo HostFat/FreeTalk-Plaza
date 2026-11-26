@@ -1,6 +1,6 @@
 # Benchmark multi-client: costo strutturale di una board sectioned
 
-Data: 2026-11-25 (rev 37). Build: release locale, Windows. Il test misura lo stato e
+Data: 2026-11-26 (rev 38). Build: release locale, Windows. Il test misura lo stato e
 i payload che il nodo trasmette, poi li moltiplica per il numero di
 subscriber e di sezioni. Non e' una simulazione di rete: e' il costo che la
 struttura attuale impone a ogni aggiornamento.
@@ -215,10 +215,27 @@ la board e le figlie non ricevono più l'activity.
    `moderation`, e chiusura vettori DoS con `MemberProofV1` su `profile`,
    `activity` e `moderation` + post-transfer/succession su `member-contract`
    (fatto, rev 37, v739).
-10. Compattare le definizioni dei ruoli nei topic (le sezioni nelle figlie sono
-    già potate con `SectionsV1::chain_only`).
-11. Subscription lazy con budget/TTL e `Unsubscribe` quando la stdlib lo
-    espone.
+10. Compattare le definizioni dei ruoli nei topic (fatto, rev 38):
+    `authority_from_board` mantiene solo i ruoli effettivamente referenziati o
+    di moderazione/ACL/invito attivo quando la radice Merkle è presente;
+    pruning deterministico 30g sulla board madre (`prune_expired_records`) e
+    quote anti-spam on-contract su `activity`, `moderation` e `profile`.
+11. Subscription lazy con budget RAM LRU e hook `Unsubscribe`-ready (fatto,
+    rev 38): cap espliciti su pagine extra di sezione (24), shard
+    membri/profili/activity/moderazione (32 ciascuno) e `TOPIC_CACHE` (48)
+    instradati su `notify_contract_evicted` (pronto per collegare
+    `ContractRequest::Unsubscribe` non appena esposto dalla stdlib).
+12. Soglie automatiche di regressione in CI (fatto, rev 38): nuova suite
+    `common/tests/scale_slo.rs` eseguita in release a ogni push/PR nel job
+    `test` di `.github/workflows/rust.yml` (~11 s):
+
+| Suite SLO (`scale_slo.rs`) | Valore misurato (rev 38) | Soglia CI |
+|---|---|---|
+| `authority_root @ 1.000 membri` (`verify_with_section` fast-path) | 14,5 ms (vs 2.593 ms piena) | ≤ 500 ms |
+| `section_page` aperta / sigillata (200 topic) | 203,9 KiB / 138,6 KiB | ≤ 260 KiB / ≤ 165 KiB |
+| `section_page` delta 1 topic / verify sigillata | 0,70 KiB / 9,0 ms | ≤ 2 KiB / ≤ 80 ms |
+| `activity` / `moderation` (200 entry) | 154,5 KiB (Δ 0,78 KiB) / 226,4 KiB (Δ 1,16 KiB) | ≤ 220 KiB (Δ ≤ 1,5 KiB) / ≤ 300 KiB (Δ ≤ 2 KiB) |
+| `member` / `profile` shard (1.600 membri, 32 bucket) | max 23,4 KiB (Δ 0,35 KiB) / max 45,9 KiB (Δ 0,68 KiB) | ≤ 40 KiB (Δ ≤ 1 KiB) / ≤ 80 KiB (Δ ≤ 1,5 KiB) |
 
 ## Limiti del benchmark
 

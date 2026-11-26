@@ -101,8 +101,22 @@ la propria fetta di topic. Un aggiornamento tocca una pagina, non tutte.
   pagine extra e 4 MiB, ordinate per `last_used`; le pagine sfrattate vengono
   ricaricate dal nodo. Il route `/test-clear-section-pages` svuota la cache
   per il test.
-- Solo l'owner crea pagine: un membro che trova tutte le pagine piene riceve
-  un errore finché l'owner non ne aggiunge una.
+- **Creazione e sigillatura pagine da owner o admin attivi (rev 38)**: oltre
+  all'owner corrente, qualsiasi admin attivo può creare nuove pagine di sezione
+  (`AuthorizedTopicPageListV1`, `AuthorizedSectionPageHeaderV1`) e sigillare
+  pagine piene di sezione (`AuthorizedSectionPageSealV1`) e topic
+  (`AuthorizedTopicPageSealV1` in `continue_topic`) allegando la propria
+  `AuthorityProof` verificata on-contract. Un membro ordinario che trova tutte
+  le pagine piene riceve un errore finché owner o un admin attivo non ne
+  aggiunge una.
+- **Quote anti-spam, pruning deterministico, LRU e ricerca full-archive (rev 38)**:
+  - `activity-contract`: cap `MAX_ACTIVITY_ENTRIES_PER_AUTHOR = 32` per autori non-owner;
+  - `moderation-contract`: cap `MAX_REPORTS_PER_REPORTER = 25` e burst orario `MAX_FEED_REPORTS_PER_HOUR = 10` per reporter non-owner;
+  - `profile-contract`: limiti anti-exhaustion di versione (`MAX_PROFILE_VERSION_JUMP = 16`, `MAX_PROFILE_VERSION = 1_000_000`);
+  - board madre: `prune_expired_records` (30 giorni deterministici ancorati al max timestamp firmato in stato, mai clock locale) rimuove sospensioni scadute e invite token scaduti/eliminati non referenziati;
+  - cache RAM client: eviction LRU esplicita su pagine extra di sezione (24), shard membri/profili/activity/moderazione (32 ciascuno) e topic (48), con hook `notify_contract_evicted` pronto per `ContractRequest::Unsubscribe`;
+  - ricerca: indice locale full-archive persistito cifrato nel delegate (`SEARCH_INDEX_STORAGE_KEY`, cap 5.000 topic / 2 MiB) combinato ai risultati live, con pulsante `"Index full archive locally"` in `SearchView`;
+  - strategia di upgrade tra revisioni documentata in `docs/plaza-upgrade-strategy.md`.
 - **Pagine extra compatte e sigillate (`SectionPageStateV1`, rev 35–36)**: le
   pagine `page > 0` non duplicano più `ChatBoardStateV1` (nessuna
   configurazione, sezioni, ban, sospensioni, activity, report o flag) e non

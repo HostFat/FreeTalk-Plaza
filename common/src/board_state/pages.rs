@@ -7,6 +7,7 @@
 
 use crate::board_state::member::MemberId;
 use crate::board_state::rate_limit::system_time_from_ms;
+use crate::board_state::roles::{resolve_signer_key, verify_admin_authority, AuthorityProof};
 use crate::board_state::sections::SectionId;
 use crate::board_state::ChatBoardParametersV1;
 use crate::util::{sign_struct, verify_struct};
@@ -46,15 +47,30 @@ pub struct AuthorizedTopicPageListV1 {
     pub signer: MemberId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer_key: Option<VerifyingKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
     pub signature: Signature,
 }
 
 impl AuthorizedTopicPageListV1 {
     pub fn new(
         section: SectionId,
-        mut pages: Vec<u32>,
+        pages: Vec<u32>,
         page_size: u32,
         owner: &SigningKey,
+        updated_at: i64,
+    ) -> Self {
+        Self::new_with_authority(section, pages, page_size, owner, None, updated_at)
+    }
+
+    /// Sign a section page list as either the current board owner (`authority: None`)
+    /// or an active board admin (`authority: Some(AuthorityProof { admin, grant: None })`).
+    pub fn new_with_authority(
+        section: SectionId,
+        mut pages: Vec<u32>,
+        page_size: u32,
+        signer_key: &SigningKey,
+        authority: Option<AuthorityProof>,
         updated_at: i64,
     ) -> Self {
         pages.retain(|page| *page > 0);
@@ -67,17 +83,15 @@ impl AuthorizedTopicPageListV1 {
             updated_at,
         };
         Self {
-            signature: sign_struct(&data, owner),
+            signature: sign_struct(&data, signer_key),
             data,
-            signer: MemberId::from(&owner.verifying_key()),
-            signer_key: Some(owner.verifying_key()),
+            signer: MemberId::from(&signer_key.verifying_key()),
+            signer_key: Some(signer_key.verifying_key()),
+            authority: authority.map(Box::new),
         }
     }
 
-    pub fn verify(&self, owner_key: &VerifyingKey) -> Result<(), String> {
-        if self.signer != MemberId::from(owner_key) {
-            return Err("topic pages are signed by someone other than the owner".to_string());
-        }
+    fn verify_structure(&self) -> Result<(), String> {
         if self.data.pages.len() > MAX_TOPIC_PAGES {
             return Err("too many topic pages".to_string());
         }
@@ -90,8 +104,54 @@ impl AuthorizedTopicPageListV1 {
         if self.data.pages.iter().any(|page| *page == 0) {
             return Err("page 0 is the section manifest".to_string());
         }
+        Ok(())
+    }
+
+    pub fn verify(&self, owner_key: &VerifyingKey) -> Result<(), String> {
+        if self.signer != MemberId::from(owner_key) {
+            return Err("topic pages are signed by someone other than the owner".to_string());
+        }
+        self.verify_structure()?;
         verify_struct(&self.data, &self.signature, owner_key)
             .map_err(|error| format!("invalid topic page signature: {error}"))
+    }
+
+    /// Verify a page list signed by either the current board owner or an active
+    /// board admin at `updated_at`.
+    pub fn verify_against(
+        &self,
+        parent_state: &ChatBoardStateV1,
+        parameters: &ChatBoardParametersV1,
+    ) -> Result<(), String> {
+        self.verify_structure()?;
+        let at = system_time_from_ms(self.data.updated_at);
+        let owner_key = parent_state.ownership.owner_key_at(parameters, at);
+        if self.signer == MemberId::from(&owner_key) {
+            if let Some(key) = self.signer_key {
+                if key != owner_key {
+                    return Err("topic page signer key does not match the owner".to_string());
+                }
+            }
+            return verify_struct(&self.data, &self.signature, &owner_key)
+                .map_err(|error| format!("invalid topic page signature: {error}"));
+        }
+        let key = resolve_signer_key(
+            parent_state,
+            parameters,
+            &self.signer,
+            self.signer_key.as_ref(),
+        )?;
+        verify_struct(&self.data, &self.signature, &key)
+            .map_err(|error| format!("invalid topic page signature: {error}"))?;
+        verify_admin_authority(
+            parent_state,
+            parameters,
+            &self.signer,
+            self.authority.as_deref(),
+            8,
+            at,
+        )
+        .map_err(|_| "topic pages must be signed by the board owner or an active admin".to_string())
     }
 }
 
@@ -136,10 +196,7 @@ impl ComposableState for TopicPageListV1 {
         let Some(list) = &self.0 else {
             return Ok(());
         };
-        let owner_key = parent_state
-            .ownership
-            .owner_key_at(parameters, system_time_from_ms(list.data.updated_at));
-        list.verify(&owner_key)
+        list.verify_against(parent_state, parameters)
     }
 
     fn summarize(
@@ -249,5 +306,47 @@ mod tests {
         }
         let parent = ChatBoardStateV1::default();
         assert!(state.verify(&parent, &params(&owner)).is_err());
+    }
+
+    #[test]
+    fn an_active_admin_can_sign_a_topic_page_list_and_non_admin_is_rejected() {
+        use crate::board_state::admin::{Admin, AuthorizedAdmin};
+
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let admin = SigningKey::from_bytes(&[2u8; 32]);
+        let stranger = SigningKey::from_bytes(&[3u8; 32]);
+        let section = SectionId::from_bytes([7u8; 32]);
+
+        let admin_record = AuthorizedAdmin::new(
+            Admin {
+                member_id: MemberId::from(&admin.verifying_key()),
+                signed_at: system_time_from_ms(1),
+                generation: 1,
+            },
+            &owner,
+        );
+        let mut parent = ChatBoardStateV1::default();
+        parent.admin.admins.push(admin_record.clone());
+
+        let admin_list = AuthorizedTopicPageListV1::new_with_authority(
+            section,
+            vec![1, 2],
+            200,
+            &admin,
+            Some(AuthorityProof {
+                admin: Some(admin_record),
+                grant: None,
+            }),
+            10,
+        );
+        TopicPageListV1(Some(admin_list))
+            .verify(&parent, &params(&owner))
+            .expect("active admin may open extra section pages");
+
+        let stranger_list =
+            AuthorizedTopicPageListV1::new(section, vec![1, 2], 200, &stranger, 10);
+        assert!(TopicPageListV1(Some(stranger_list))
+            .verify(&parent, &params(&owner))
+            .is_err());
     }
 }

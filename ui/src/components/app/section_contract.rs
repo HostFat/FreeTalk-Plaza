@@ -160,11 +160,39 @@ fn schedule_section_save() {
     });
 }
 
-/// Extra pages kept in the delegate blob, newest first. Page 0 (the manifest)
-/// is always kept so the board list and page lists survive a reload. Evicted
-/// pages are fetched again when the user opens them.
+/// Extra pages kept in the delegate blob and in RAM (`SECTION_BOARDS`), newest
+/// first. Page 0 (the manifest) is always kept so the board list and page lists
+/// survive a reload. Evicted extra pages are fetched again on demand.
 const MAX_PERSISTED_SECTION_PAGES: usize = 24;
+const MAX_CACHED_EXTRA_SECTION_PAGES: usize = 24;
 const MAX_PERSISTED_SECTION_BYTES: usize = 4 * 1024 * 1024;
+
+fn evict_extra_section_pages(protect: ContractInstanceId) {
+    let mut evicted = Vec::new();
+    SECTION_BOARDS.with_mut(|boards| {
+        loop {
+            let extra_count = boards.values().filter(|b| b.params.page > 0).count();
+            if extra_count <= MAX_CACHED_EXTRA_SECTION_PAGES {
+                break;
+            }
+            let victim = boards
+                .iter()
+                .filter(|(id, board)| **id != protect && board.params.page > 0 && !board.dirty)
+                .min_by_key(|(_, board)| board.last_used)
+                .map(|(id, _)| *id);
+            match victim {
+                Some(id) => {
+                    boards.remove(&id);
+                    evicted.push(id);
+                }
+                None => break,
+            }
+        }
+    });
+    for id in evicted {
+        crate::components::app::notify_contract_evicted("section_page", id);
+    }
+}
 
 fn cbor_len<T: serde::Serialize>(value: &T) -> usize {
     let mut bytes = Vec::new();
@@ -1594,13 +1622,51 @@ pub async fn create_section_board(
     Ok(key)
 }
 
-/// Seal a full extra page (`page > 0`) as the board owner, compacting away all
-/// duplicated author/invite/role records.
+/// Resolve the signing key and optional admin proof for creating or sealing a
+/// section page: either the current board owner or an active (non-revoked)
+/// board admin.
+fn resolve_section_page_signer(
+    parent_state: &ChatBoardStateV1,
+    owner_sk: Option<SigningKey>,
+    current_owner: VerifyingKey,
+    self_sk: SigningKey,
+) -> Result<(SigningKey, Option<plaza_core::board_state::roles::AuthorityProof>), String> {
+    if let Some(key) = owner_sk.filter(|key| key.verifying_key() == current_owner) {
+        return Ok((key, None));
+    }
+    let self_id = MemberId::from(&self_sk.verifying_key());
+    let active_admin = parent_state
+        .admin
+        .admins
+        .iter()
+        .find(|entry| {
+            entry.admin.id() == self_id
+                && !parent_state.admin.revoked.iter().any(|rev| {
+                    rev.id() == self_id && rev.revocation.generation >= entry.admin.generation
+                })
+        })
+        .cloned();
+    if let Some(admin_record) = active_admin {
+        return Ok((
+            self_sk,
+            Some(plaza_core::board_state::roles::AuthorityProof {
+                admin: Some(admin_record),
+                grant: None,
+            }),
+        ));
+    }
+    Err("only the board owner or an active admin can add or seal a section page".to_string())
+}
+
+/// Seal a full extra page (`page > 0`) as the board owner or an active admin,
+/// compacting away all duplicated author/invite/role records.
 async fn seal_section_page(
     owner: VerifyingKey,
     section: SectionId,
     page: u32,
-    owner_sk: &SigningKey,
+    signer_sk: &SigningKey,
+    authority: Option<plaza_core::board_state::roles::AuthorityProof>,
+    parent_admins: &AdminsV1,
 ) -> Result<(), String> {
     if page == 0 {
         return Ok(());
@@ -1622,8 +1688,15 @@ async fn seal_section_page(
         section,
         page,
     };
-    let seal = AuthorizedSectionPageSealV1::new(&params, &page_state.entries, owner_sk, now_ms())?;
+    let seal = AuthorizedSectionPageSealV1::new_with_authority(
+        &params,
+        &page_state.entries,
+        signer_sk,
+        authority.clone(),
+        now_ms(),
+    )?;
     let delta = SectionPageDeltaV1 {
+        admin: authority.is_some().then(|| parent_admins.clone()),
         seal: Some(seal),
         ..Default::default()
     };
@@ -1647,7 +1720,8 @@ async fn seal_section_page(
 
 /// Create the next compact topic-entry page (`page > 0`) of a section, seal
 /// any full unsealed previous extra pages, and add the new page to the
-/// manifest's owner-signed page list. Only the current owner can add pages.
+/// manifest's signed page list. Both the current owner and active board admins
+/// can add and seal pages.
 pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Result<u32, String> {
     let parent = {
         let boards = crate::components::app::BOARDS.read();
@@ -1659,14 +1733,14 @@ pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Res
                     board.board_state.clone(),
                     board.owner_sk.clone(),
                     board.current_owner_key(),
+                    board.self_sk.clone(),
                 )
             })
             .ok_or("the board is not loaded")?
     };
-    let (parent_state, owner_sk, current_owner) = parent;
-    let owner_sk = owner_sk
-        .filter(|key| key.verifying_key() == current_owner)
-        .ok_or("only the current owner can add a page")?;
+    let (parent_state, owner_sk, current_owner, self_sk) = parent;
+    let (signer_sk, authority) =
+        resolve_section_page_signer(&parent_state, owner_sk, current_owner, self_sk)?;
     let existing_pages = pages_for(owner, section);
     let page_size = page_size_for(owner, section).unwrap_or_else(current_topic_page_size);
 
@@ -1682,7 +1756,16 @@ pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Res
             })
             .unwrap_or(false);
         if should_seal {
-            if let Err(error) = seal_section_page(owner, section, existing, &owner_sk).await {
+            if let Err(error) = seal_section_page(
+                owner,
+                section,
+                existing,
+                &signer_sk,
+                authority.clone(),
+                &parent_state.admin,
+            )
+            .await
+            {
                 dioxus::logger::tracing::warn!("could not seal section page {existing}: {error}");
             }
         }
@@ -1697,7 +1780,7 @@ pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Res
         .section(&section)
         .ok_or("the section does not exist")?;
     let section_chain = parent_state.sections.chain(&section);
-    let header = AuthorizedSectionPageHeaderV1::new(
+    let header = AuthorizedSectionPageHeaderV1::new_with_authority(
         SectionPageHeaderV1 {
             board: owner.to_bytes(),
             section,
@@ -1707,13 +1790,17 @@ pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Res
             allowed_roles: section_data.allowed_roles.clone(),
             created_at: now_ms(),
         },
-        &owner_sk,
+        &signer_sk,
+        authority.clone(),
     );
 
     let mut compact_page = SectionPageStateV1 {
         header: Some(header),
         ..Default::default()
     };
+    if authority.is_some() {
+        compact_page.admin = parent_state.admin.clone();
+    }
     if !parent_state.ownership.transfers.is_empty() {
         compact_page.ownership = parent_state.ownership.clone();
         compact_page.admin = parent_state.admin.clone();
@@ -1756,6 +1843,7 @@ pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Res
         board.ready = true;
         boards.insert(contract_id, board);
     });
+    evict_extra_section_pages(contract_id);
     schedule_section_save();
     send_client_request(ClientRequest::ContractOp(ContractRequest::Put {
         contract,
@@ -1781,7 +1869,14 @@ pub async fn create_section_page(owner: VerifyingKey, section: SectionId) -> Res
     let mut pages = pages_for(owner, section);
     pages.retain(|existing| *existing > 0);
     pages.push(page);
-    let list = AuthorizedTopicPageListV1::new(section, pages, page_size, &owner_sk, now_ms());
+    let list = AuthorizedTopicPageListV1::new_with_authority(
+        section,
+        pages,
+        page_size,
+        &signer_sk,
+        authority,
+        now_ms(),
+    );
     SECTION_BOARDS.with_mut(|boards| {
         if let Some(board) = boards.get_mut(&page0_id) {
             if let SectionBoardState::Manifest(manifest) = &mut board.state {
@@ -1923,6 +2018,9 @@ pub async fn load_section_page(
             board.last_fetch = now_ms();
         }
     });
+    if page > 0 {
+        evict_extra_section_pages(contract_id);
+    }
     send_client_request(ClientRequest::ContractOp(ContractRequest::Get {
         key: contract_id,
         return_contract_code: false,

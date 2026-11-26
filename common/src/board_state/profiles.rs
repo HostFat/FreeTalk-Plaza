@@ -26,6 +26,11 @@ pub const MAX_PROFILES_PER_SHARD: usize = 2_000;
 /// Generous bound for a sealed nickname; the board configuration can be
 /// stricter and the client enforces it.
 pub const MAX_PROFILE_NICKNAME_BYTES: usize = 4_096;
+/// Maximum allowed version jump in a single delta update to prevent
+/// `version = u32::MAX` exhaustion attacks on a member's own profile slot.
+pub const MAX_PROFILE_VERSION_JUMP: u32 = 16;
+/// Absolute upper bound on profile versions.
+pub const MAX_PROFILE_VERSION: u32 = 1_000_000;
 
 /// Deterministic bucket index for a member id.
 pub fn profile_shard_bucket(member_id: &MemberId) -> u16 {
@@ -127,6 +132,9 @@ impl ProfileEntryV1 {
         if self.info.preferred_nickname.declared_len() > MAX_PROFILE_NICKNAME_BYTES {
             return Err("the nickname is too long".to_string());
         }
+        if self.info.version > MAX_PROFILE_VERSION {
+            return Err("profile version exceeds contract cap".to_string());
+        }
         verify_struct(&self.info, &self.signature, &self.signer_key)
             .map_err(|error| format!("invalid profile signature: {error}"))?;
         verify_member_proof(
@@ -200,6 +208,14 @@ impl ProfileStateV1 {
             let member_id = entry.info.member_id;
             match by_member.get_mut(&member_id) {
                 Some(existing) => {
+                    if entry.info.version > existing.info.version
+                        && entry.info.version - existing.info.version > MAX_PROFILE_VERSION_JUMP
+                    {
+                        return Err(format!(
+                            "profile version jump too large ({} -> {})",
+                            existing.info.version, entry.info.version
+                        ));
+                    }
                     if should_replace(existing, entry) {
                         *existing = entry.clone();
                     }
@@ -529,5 +545,41 @@ mod tests {
 
         state.entries.push(entry_for_key(&overflow_key, 1, "Overflow"));
         assert!(state.verify(&params).is_err());
+    }
+
+    #[test]
+    fn profile_version_exhaustion_is_rejected() {
+        let params = ProfileShardParametersV1 {
+            owner: owner_vk(),
+            bucket: 0,
+        };
+        let (key1, _) = key_for_bucket(0, 1);
+        let mut state = ProfileStateV1::default();
+        state
+            .apply_delta(
+                &params,
+                &ProfileDeltaV1 {
+                    entries: vec![entry_for_key(&key1, 1, "Alice")],
+                },
+            )
+            .unwrap();
+        // A huge version jump (attempting version exhaustion) is rejected.
+        assert!(state
+            .apply_delta(
+                &params,
+                &ProfileDeltaV1 {
+                    entries: vec![entry_for_key(&key1, 1 + MAX_PROFILE_VERSION_JUMP + 1, "Spam")],
+                },
+            )
+            .is_err());
+        // A normal version increment succeeds.
+        state
+            .apply_delta(
+                &params,
+                &ProfileDeltaV1 {
+                    entries: vec![entry_for_key(&key1, 2, "Alice 2")],
+                },
+            )
+            .unwrap();
     }
 }

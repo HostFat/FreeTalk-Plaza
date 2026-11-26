@@ -9,6 +9,7 @@
 
 use crate::board_state::member::MemberId;
 use crate::board_state::member_shards::{verify_member_proof, verify_moderation_proof_standalone};
+use crate::board_state::rate_limit::{exceeds_window, REPORT_RATE_WINDOW_MS};
 use crate::board_state::sections::SectionId;
 use crate::board_state::topics::{
     AuthorizedTopicReportResolutionV1, AuthorizedTopicReportV1, TopicReportKey,
@@ -23,6 +24,11 @@ use std::collections::{BTreeMap, HashSet};
 /// the cap is reached; the resolutions that point at them go with them.
 pub const MAX_REPORT_FEED: usize = 500;
 pub const MAX_REPORT_FEED_RESOLUTIONS: usize = 500;
+/// Anti-spam per-reporter quota: no single non-owner member can fill the
+/// entire moderation queue.
+pub const MAX_REPORTS_PER_REPORTER: usize = 25;
+/// Anti-spam hourly burst cap per non-owner reporter inside one moderation feed.
+pub const MAX_FEED_REPORTS_PER_HOUR: usize = 10;
 
 /// Contract parameters for a board or per-section moderation feed.
 /// `section: None` addresses the board-wide feed (flat `TopicIndex`);
@@ -169,6 +175,30 @@ fn upsert_resolution(
     list.push(entry.clone());
 }
 
+fn check_reporter_quotas(
+    reports: &[AuthorizedTopicReportV1],
+    params: &ModerationParametersV1,
+) -> Result<(), String> {
+    let owner_id = MemberId::from(&params.owner);
+    let mut by_reporter: BTreeMap<MemberId, Vec<i64>> = BTreeMap::new();
+    for entry in reports {
+        if entry.report.reporter == owner_id {
+            continue;
+        }
+        let times = by_reporter.entry(entry.report.reporter).or_default();
+        times.push(entry.report.created_at);
+        if times.len() > MAX_REPORTS_PER_REPORTER {
+            return Err("reporter queue quota exceeded".to_string());
+        }
+    }
+    for timestamps in by_reporter.values() {
+        if exceeds_window(timestamps, REPORT_RATE_WINDOW_MS, MAX_FEED_REPORTS_PER_HOUR) {
+            return Err("reporter exceeded report rate limit".to_string());
+        }
+    }
+    Ok(())
+}
+
 impl ReportFeedStateV1 {
     pub fn verify(&self, params: &ModerationParametersV1) -> Result<(), String> {
         if self.reports.len() > MAX_REPORT_FEED {
@@ -184,6 +214,7 @@ impl ReportFeedStateV1 {
                 return Err("duplicate report".to_string());
             }
         }
+        check_reporter_quotas(&self.reports, params)?;
         let mut resolutions = HashSet::new();
         for entry in &self.resolutions {
             verify_resolution(entry, params)?;
@@ -198,8 +229,9 @@ impl ReportFeedStateV1 {
     }
 
     /// Upsert reports first, so a delta can carry a report and its resolution
-    /// together. Enforces caps atomically so a rejected delta leaves `self`
-    /// unchanged and callers do not need to re-verify existing entries.
+    /// together. Enforces caps and per-reporter anti-spam quotas atomically so
+    /// a rejected delta leaves `self` unchanged and callers do not need to
+    /// re-verify existing entries.
     pub fn apply_delta(
         &mut self,
         params: &ModerationParametersV1,
@@ -227,6 +259,7 @@ impl ReportFeedStateV1 {
         if next.resolutions.len() > MAX_REPORT_FEED_RESOLUTIONS {
             return Err("too many report resolutions".to_string());
         }
+        check_reporter_quotas(&next.reports, params)?;
         next.normalize();
         *self = next;
         Ok(())
@@ -583,5 +616,77 @@ mod tests {
         peer_a.apply_delta(&params, &delta).unwrap();
         assert_eq!(peer_a, peer_b);
         assert!(peer_b.delta(&peer_a.summarize()).is_none());
+    }
+
+    #[test]
+    fn single_member_cannot_flood_moderation_feed_or_exceed_rate_limit() {
+        let owner = SigningKey::from_bytes(&[10u8; 32]);
+        let member = SigningKey::from_bytes(&[11u8; 32]);
+        let params = ModerationParametersV1 {
+            owner: owner.verifying_key(),
+            section: None,
+        };
+        let mut state = ReportFeedStateV1::default();
+        // Send MAX_FEED_REPORTS_PER_HOUR reports in the same hour -> allowed.
+        for i in 0..MAX_FEED_REPORTS_PER_HOUR {
+            let mut topic = [0u8; 32];
+            topic[0] = i as u8 + 1;
+            let mut rep = report(&owner, topic, &member, 1);
+            rep.report.created_at = 10_000 + i as i64;
+            rep.signature = sign_struct(&rep.report, &member);
+            state
+                .apply_delta(
+                    &params,
+                    &ReportFeedDeltaV1 {
+                        reports: vec![rep],
+                        resolutions: Vec::new(),
+                    },
+                )
+                .unwrap();
+        }
+        // One more within the same hour must be rejected by the contract.
+        let mut burst = report(&owner, [99u8; 32], &member, 1);
+        burst.report.created_at = 10_500;
+        burst.signature = sign_struct(&burst.report, &member);
+        assert!(state
+            .apply_delta(
+                &params,
+                &ReportFeedDeltaV1 {
+                    reports: vec![burst],
+                    resolutions: Vec::new(),
+                },
+            )
+            .is_err());
+
+        // Spread across many hours, still capped at MAX_REPORTS_PER_REPORTER.
+        for i in MAX_FEED_REPORTS_PER_HOUR..MAX_REPORTS_PER_REPORTER {
+            let mut topic = [0u8; 32];
+            topic[0] = (i + 1) as u8;
+            let mut rep = report(&owner, topic, &member, 1);
+            rep.report.created_at = 10_000 + (i as i64) * (REPORT_RATE_WINDOW_MS + 1_000);
+            rep.signature = sign_struct(&rep.report, &member);
+            state
+                .apply_delta(
+                    &params,
+                    &ReportFeedDeltaV1 {
+                        reports: vec![rep],
+                        resolutions: Vec::new(),
+                    },
+                )
+                .unwrap();
+        }
+        let mut overflow = report(&owner, [200u8; 32], &member, 1);
+        overflow.report.created_at =
+            10_000 + (MAX_REPORTS_PER_REPORTER as i64 + 1) * (REPORT_RATE_WINDOW_MS + 1_000);
+        overflow.signature = sign_struct(&overflow.report, &member);
+        assert!(state
+            .apply_delta(
+                &params,
+                &ReportFeedDeltaV1 {
+                    reports: vec![overflow],
+                    resolutions: Vec::new(),
+                },
+            )
+            .is_err());
     }
 }

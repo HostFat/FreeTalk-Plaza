@@ -1,9 +1,9 @@
 # Specifica del contratto `plaza-topic`
 
 Versione: 1 (implementata).
-Stato: fasi 0–4 completate; move e merge tra sezioni, pagine sezione compatte/sigillate (`SectionPageStateV1`), pagine topic append-only compatte/sigillate (`TopicPageStateV1`), profili shardati in 32 bucket (`plaza-profile-contract`), feed `activity` e `moderation` shardati per sezione (`ActivityParametersV1`/`ModerationParametersV1`), prove crittografiche `MemberProofV1` su `profile`/`activity`/`moderation`, supporto post-transfer/post-succession su `member-contract`, propagazione autorità `O(1)` bounded + lazy on-open/on-reply sync, viste Search/Notifications/Moderation lazy, e successione d'emergenza `OwnershipV1` con quorum storico corretto (`AdminRevocation.appointed_at`) e timelock configurabile (`Configuration.succession_timelock_secs`) pubblicati nella build locale v739.
-L'activity e la moderazione recenti vivono in contratti separati shardati per sezione (o per board su `TopicIndex`). Contratto board alla revisione 37 (`plaza_topic_contract_revision = 2`, `profile`/`activity`/`moderation` rev 3).
-Nessuna migrazione delle vecchie board.
+Stato: fasi 0–4 completate; move e merge tra sezioni, pagine sezione compatte/sigillate (`SectionPageStateV1`) creabili/sigillabili anche da admin attivi, pagine topic append-only compatte/sigillate (`TopicPageStateV1`) sigillabili anche da admin attivi, profili shardati in 32 bucket (`plaza-profile-contract`), feed `activity` e `moderation` shardati per sezione con prove `MemberProofV1` e quote anti-spam lato contratto, pruning deterministico 30g + compattazione ruoli nei topic, eviction RAM LRU + hook `notify_contract_evicted`, indice di ricerca full-archive persistito nel delegate, strategia di upgrade documentata (`docs/plaza-upgrade-strategy.md`) con `AuthorizedUpgradeV1` post-transfer e `topic_code_for_version`, soglie SLO automatiche in CI (`scale_slo`), e successione d'emergenza `OwnershipV1` pubblicati nella build locale v740.
+L'activity e la moderazione recenti vivono in contratti separati shardati per sezione (o per board su `TopicIndex`). Contratto board alla revisione 38 (`plaza_topic_contract_revision = 2`, `profile`/`activity`/`moderation` rev 3).
+Nessuna migrazione automatica delle vecchie board pre-rev 38 (vedere `docs/plaza-upgrade-strategy.md` per la strategia post-lancio).
 
 ## Stato dell'implementazione
 
@@ -12,18 +12,25 @@ Nessuna migrazione delle vecchie board.
 - `topic-contract`: entry point Freenet (`validate_state`, `update_state` con
   `State`/`Delta`/`StateAndDelta`, `summarize_state`, `get_state_delta`) con
   dispatch `part == 0` / `part > 0` e limite di 8 MiB.
-- `plaza-core`: `BoardModeV1`, `SectionsV1`, `TopicIndexV1`, `SectionPageStateV1`,
-  `MemberShardStateV1` + `MemberProofV1`, `ProfileStateV1` (32 bucket),
-  `ActivityParametersV1`/`ActivityStateV1`, `ModerationParametersV1`/`ReportFeedStateV1`,
-  `OwnershipV1` con successione per quorum admin + timelock.
-- Client `ui/src/components/app/topic_contract.rs`, `section_contract.rs`,
-  `member_contract.rs`, `profile_contract.rs`, `activity_contract.rs`,
-  `moderation_contract.rs`; UI `topic_index_view.rs`, `topic_view.rs`,
-  `ownership_view.rs`, ricerca, notifiche e code in Manage (tutte lazy).
-- Test: 55 in `topic-core`, 329 (+ 14 `topic_index`) in `plaza-core`, 111 in
+- `plaza-core`: `BoardModeV1`, `SectionsV1`, `TopicIndexV1`, `SectionPageStateV1`
+  (con creazione/sigillatura owner o admin attivo), `MemberShardStateV1` +
+  `MemberProofV1`, `ProfileStateV1` (32 bucket, cap anti-exhaustion versione),
+  `ActivityParametersV1`/`ActivityStateV1` (cap 32 entry/autore non-owner),
+  `ModerationParametersV1`/`ReportFeedStateV1` (cap 25 report/reporter e
+  10 report/ora per non-owner), `prune_expired_records` deterministico (30g),
+  `AuthorizedUpgradeV1` post-transfer/post-succession, `OwnershipV1` con
+  successione per quorum admin + timelock.
+- Client `ui/src/components/app/topic_contract.rs` (con compattazione ruoli
+  e `topic_code_for_version`), `section_contract.rs`, `member_contract.rs`,
+  `profile_contract.rs`, `activity_contract.rs`, `moderation_contract.rs`
+  (tutti con budget LRU e hook `notify_contract_evicted`), `search_index.rs`
+  (indice locale full-archive persistito nel delegate); UI `topic_index_view.rs`,
+  `topic_view.rs`, `ownership_view.rs`, ricerca (live + archivio locale),
+  notifiche e code in Manage (tutte lazy).
+- Test: 55 in `topic-core`, 336 (+ 4 `scale_slo` in CI) in `plaza-core`, 111 in
   `plaza-ui`, 6 test `ContractInterface` nei contratti secondari/sezione/topic,
-  16 scenari real-node dei topic (16/16 passati su v739) e 29 test statici
-  Playwright Chromium (3 saltati).
+  16 scenari real-node dei topic (16/16 passati su v740) e 29 test statici
+  Playwright Chromium in CI (3 saltati).
 
 Funzioni disponibili: topic creati dall'owner e dai membri, topic privati,
 modifica di topic e risposte, flag owner (pin/close/announce/hide/approve),
@@ -72,9 +79,10 @@ TopicParamsV1 {
 - `TopicId = MessageId` e `SectionId = MessageId` (32 byte) per riusare i tipi
   esistenti.
 - Un cambio di WASM cambia il code hash e quindi la chiave. L'indice della
-  board salva `protocol_version` per ogni topic; il client attuale supporta
-  solo la versione 1. Una versione futura richiede una mappa versione → code
-  hash nel client, non ancora implementata.
+  board salva `protocol_version` per ogni topic; il client usa la tabella di
+  dispatch `topic_code_for_version` / `topic_key_for_version` (attualmente
+  popolata per v1 e pronta ad affiancare v2+ senza rompere i topic esistenti;
+  vedi `docs/plaza-upgrade-strategy.md`).
 - L'owner fondatore resta nei parametri anche dopo un trasferimento di
   ownership; la catena `OwnershipV1` dentro lo stato prova l'owner corrente.
 

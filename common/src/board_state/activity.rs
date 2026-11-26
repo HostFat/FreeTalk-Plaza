@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
 pub const MAX_ACTIVITY_ENTRIES: usize = 200;
+/// Anti-spam per-member quota on a single activity feed: no single non-owner
+/// member can evict everyone else by flooding all 200 slots.
+pub const MAX_ACTIVITY_ENTRIES_PER_AUTHOR: usize = 32;
 pub const MAX_ACTIVITY_COUNT: u32 = 1_000_000;
 pub const MAX_PENDING_APPROVALS: u32 = 10_000;
 
@@ -114,11 +117,22 @@ impl ActivityStateV1 {
         if self.entries.len() > MAX_ACTIVITY_ENTRIES {
             return Err("too many activity entries".to_string());
         }
+        let owner_id = MemberId::from(&params.owner);
         let mut seen = HashSet::new();
+        let mut per_author: BTreeMap<MemberId, usize> = BTreeMap::new();
         for entry in &self.entries {
             entry.verify(params)?;
             if !seen.insert(entry.key()) {
                 return Err("duplicate activity entry".to_string());
+            }
+            if let Some(signer) = entry.activity.signer {
+                if signer != owner_id {
+                    let count = per_author.entry(signer).or_insert(0);
+                    *count += 1;
+                    if *count > MAX_ACTIVITY_ENTRIES_PER_AUTHOR {
+                        return Err("activity author quota exceeded".to_string());
+                    }
+                }
             }
         }
         Ok(())
@@ -150,7 +164,7 @@ impl ActivityStateV1 {
                 None => self.entries.push(entry.clone()),
             }
         }
-        self.normalize();
+        self.normalize(params);
         Ok(())
     }
 
@@ -184,7 +198,7 @@ impl ActivityStateV1 {
         }
     }
 
-    fn normalize(&mut self) {
+    fn normalize(&mut self, params: &ActivityParametersV1) {
         self.entries.sort_by(|left, right| {
             right
                 .activity
@@ -193,6 +207,22 @@ impl ActivityStateV1 {
                 .cmp(&left.activity.activity.last_activity)
                 .then_with(|| left.topic_id.cmp(&right.topic_id))
                 .then_with(|| left.part.cmp(&right.part))
+        });
+        let owner_id = MemberId::from(&params.owner);
+        let mut per_author: BTreeMap<MemberId, usize> = BTreeMap::new();
+        self.entries.retain(|entry| {
+            let Some(signer) = entry.activity.signer else {
+                return true;
+            };
+            if signer == owner_id {
+                return true;
+            }
+            let count = per_author.entry(signer).or_insert(0);
+            if *count >= MAX_ACTIVITY_ENTRIES_PER_AUTHOR {
+                return false;
+            }
+            *count += 1;
+            true
         });
         self.entries.truncate(MAX_ACTIVITY_ENTRIES);
     }
@@ -406,5 +436,48 @@ mod tests {
         peer_a.apply_delta(&params, &delta).unwrap();
         assert_eq!(peer_a, peer_b);
         assert!(peer_b.delta(&peer_a.summarize()).is_none());
+    }
+
+    #[test]
+    fn single_member_cannot_flood_entire_activity_feed() {
+        use crate::board_state::member::{AuthorizedMember, Member};
+        use crate::board_state::member_shards::MemberShardEntryV1;
+
+        let owner = SigningKey::from_bytes(&[1u8; 32]);
+        let member = SigningKey::from_bytes(&[2u8; 32]);
+        let params = params_for(&owner);
+        let auth_member = AuthorizedMember::new(
+            Member {
+                owner_member_id: MemberId::from(&owner.verifying_key()),
+                invited_by: MemberId::from(&owner.verifying_key()),
+                member_vk: member.verifying_key(),
+                join_proof: None,
+            },
+            &owner,
+        );
+        let proof = MemberProofV1 {
+            ownership_transfers: Vec::new(),
+            transfer_admins: Vec::new(),
+            membership: Some(Box::new(MemberShardEntryV1 {
+                member: auth_member,
+                invite_chain: Vec::new(),
+                invite_token: None,
+                ownership_transfers: Vec::new(),
+                transfer_admins: Vec::new(),
+            })),
+        };
+        let mut state = ActivityStateV1::default();
+        let entries: Vec<ActivityEntryV1> = (1..=(MAX_ACTIVITY_ENTRIES_PER_AUTHOR + 15))
+            .map(|i| {
+                let mut e = activity(&member, i as u8, 1, 1_000 + i as i64, 1);
+                e.proof = Some(Box::new(proof.clone()));
+                e
+            })
+            .collect();
+        state
+            .apply_delta(&params, &ActivityDeltaV1 { entries })
+            .unwrap();
+        assert_eq!(state.entries.len(), MAX_ACTIVITY_ENTRIES_PER_AUTHOR);
+        state.verify(&params).unwrap();
     }
 }

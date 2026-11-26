@@ -26,7 +26,10 @@ use crate::board_state::pages::{MAX_TOPICS_PER_PAGE, MAX_TOPIC_PAGE_SIZE};
 use crate::board_state::rate_limit::{
     exceeding_member, system_time_from_ms, MAX_TOPICS_PER_WINDOW, TOPIC_RATE_WINDOW_MS,
 };
-use crate::board_state::roles::{AuthorizedRole, AuthorizedRoleAssignment, RoleId, RolesV1};
+use crate::board_state::roles::{
+    resolve_signer_key, verify_admin_authority, AuthorityProof, AuthorizedRole,
+    AuthorizedRoleAssignment, RoleId, RolesV1,
+};
 use crate::board_state::sections::{SectionId, SectionParametersV1};
 use crate::board_state::topics::{AuthorizedTopicEntryV1, TopicId};
 use crate::board_state::ChatBoardParametersV1;
@@ -66,16 +69,29 @@ pub struct AuthorizedSectionPageHeaderV1 {
     pub signer: MemberId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer_key: Option<VerifyingKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
     pub signature: Signature,
 }
 
 impl AuthorizedSectionPageHeaderV1 {
     pub fn new(header: SectionPageHeaderV1, owner: &SigningKey) -> Self {
+        Self::new_with_authority(header, owner, None)
+    }
+
+    /// Sign an extra section page header as either the current owner or an
+    /// active board admin.
+    pub fn new_with_authority(
+        header: SectionPageHeaderV1,
+        signer_key: &SigningKey,
+        authority: Option<AuthorityProof>,
+    ) -> Self {
         Self {
-            signature: sign_struct(&header, owner),
+            signature: sign_struct(&header, signer_key),
             header,
-            signer: MemberId::from(&owner.verifying_key()),
-            signer_key: Some(owner.verifying_key()),
+            signer: MemberId::from(&signer_key.verifying_key()),
+            signer_key: Some(signer_key.verifying_key()),
+            authority: authority.map(Box::new),
         }
     }
 
@@ -83,6 +99,15 @@ impl AuthorizedSectionPageHeaderV1 {
         &self,
         params: &SectionParametersV1,
         ownership: &OwnershipV1,
+    ) -> Result<(), String> {
+        self.verify_with_admins(params, ownership, &AdminsV1::default())
+    }
+
+    pub fn verify_with_admins(
+        &self,
+        params: &SectionParametersV1,
+        ownership: &OwnershipV1,
+        admin: &AdminsV1,
     ) -> Result<(), String> {
         if params.page == 0 {
             return Err("compact section pages require page > 0".to_string());
@@ -105,22 +130,32 @@ impl AuthorizedSectionPageHeaderV1 {
         let board_params = ChatBoardParametersV1 {
             owner: params.owner,
         };
-        let owner_key =
-            ownership.owner_key_at(&board_params, system_time_from_ms(self.header.created_at));
-        if self.signer != MemberId::from(&owner_key) {
-            return Err("section page header is signed by someone other than the owner".to_string());
-        }
-        if let Some(key) = self.signer_key {
-            if key != owner_key {
-                return Err("section page header signer key does not match the owner".to_string());
+        let at = system_time_from_ms(self.header.created_at);
+        let owner_key = ownership.owner_key_at(&board_params, at);
+        if self.signer == MemberId::from(&owner_key) {
+            if let Some(key) = self.signer_key {
+                if key != owner_key {
+                    return Err("section page header signer key does not match the owner".to_string());
+                }
             }
+            return verify_struct(&self.header, &self.signature, &owner_key)
+                .map_err(|e| format!("invalid section page header signature: {e}"));
         }
-        verify_struct(&self.header, &self.signature, &owner_key)
-            .map_err(|e| format!("invalid section page header signature: {e}"))
+        let mut board = ChatBoardStateV1::default();
+        board.ownership = ownership.clone();
+        board.admin = admin.clone();
+        let key = resolve_signer_key(&board, &board_params, &self.signer, self.signer_key.as_ref())?;
+        verify_struct(&self.header, &self.signature, &key)
+            .map_err(|e| format!("invalid section page header signature: {e}"))?;
+        verify_admin_authority(&board, &board_params, &self.signer, self.authority.as_deref(), 8, at)
+            .map_err(|_| {
+                "section page header must be signed by the board owner or an active admin"
+                    .to_string()
+            })
     }
 }
 
-/// Owner-signed cryptographic seal over a finalized section page's entries.
+/// Owner/admin-signed cryptographic seal over a finalized section page's entries.
 /// Once sealed, duplicated author/invite/role records are dropped and peers
 /// verify the page with 1 Ed25519 signature + 1 BLAKE3 digest.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -139,6 +174,8 @@ pub struct AuthorizedSectionPageSealV1 {
     pub signer: MemberId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer_key: Option<VerifyingKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<AuthorityProof>>,
     pub signature: Signature,
 }
 
@@ -147,6 +184,16 @@ impl AuthorizedSectionPageSealV1 {
         params: &SectionParametersV1,
         entries: &[AuthorizedTopicEntryV1],
         owner: &SigningKey,
+        sealed_at: i64,
+    ) -> Result<Self, String> {
+        Self::new_with_authority(params, entries, owner, None, sealed_at)
+    }
+
+    pub fn new_with_authority(
+        params: &SectionParametersV1,
+        entries: &[AuthorizedTopicEntryV1],
+        signer_key: &SigningKey,
+        authority: Option<AuthorityProof>,
         sealed_at: i64,
     ) -> Result<Self, String> {
         if params.page == 0 {
@@ -163,10 +210,11 @@ impl AuthorizedSectionPageSealV1 {
             sealed_at,
         };
         Ok(Self {
-            signature: sign_struct(&seal, owner),
+            signature: sign_struct(&seal, signer_key),
             seal,
-            signer: MemberId::from(&owner.verifying_key()),
-            signer_key: Some(owner.verifying_key()),
+            signer: MemberId::from(&signer_key.verifying_key()),
+            signer_key: Some(signer_key.verifying_key()),
+            authority: authority.map(Box::new),
         })
     }
 
@@ -174,6 +222,16 @@ impl AuthorizedSectionPageSealV1 {
         &self,
         params: &SectionParametersV1,
         ownership: &OwnershipV1,
+        entries: &[AuthorizedTopicEntryV1],
+    ) -> Result<(), String> {
+        self.verify_with_admins(params, ownership, &AdminsV1::default(), entries)
+    }
+
+    pub fn verify_with_admins(
+        &self,
+        params: &SectionParametersV1,
+        ownership: &OwnershipV1,
+        admin: &AdminsV1,
         entries: &[AuthorizedTopicEntryV1],
     ) -> Result<(), String> {
         if params.page == 0 {
@@ -201,18 +259,28 @@ impl AuthorizedSectionPageSealV1 {
         let board_params = ChatBoardParametersV1 {
             owner: params.owner,
         };
-        let owner_key =
-            ownership.owner_key_at(&board_params, system_time_from_ms(self.seal.sealed_at));
-        if self.signer != MemberId::from(&owner_key) {
-            return Err("section page seal is signed by someone other than the owner".to_string());
-        }
-        if let Some(key) = self.signer_key {
-            if key != owner_key {
-                return Err("section page seal signer key does not match the owner".to_string());
+        let at = system_time_from_ms(self.seal.sealed_at);
+        let owner_key = ownership.owner_key_at(&board_params, at);
+        if self.signer == MemberId::from(&owner_key) {
+            if let Some(key) = self.signer_key {
+                if key != owner_key {
+                    return Err("section page seal signer key does not match the owner".to_string());
+                }
             }
+            return verify_struct(&self.seal, &self.signature, &owner_key)
+                .map_err(|e| format!("invalid section page seal signature: {e}"));
         }
-        verify_struct(&self.seal, &self.signature, &owner_key)
-            .map_err(|e| format!("invalid section page seal signature: {e}"))
+        let mut board = ChatBoardStateV1::default();
+        board.ownership = ownership.clone();
+        board.admin = admin.clone();
+        let key = resolve_signer_key(&board, &board_params, &self.signer, self.signer_key.as_ref())?;
+        verify_struct(&self.seal, &self.signature, &key)
+            .map_err(|e| format!("invalid section page seal signature: {e}"))?;
+        verify_admin_authority(&board, &board_params, &self.signer, self.authority.as_deref(), 8, at)
+            .map_err(|_| {
+                "section page seal must be signed by the board owner or an active admin"
+                    .to_string()
+            })
     }
 }
 
@@ -398,15 +466,52 @@ impl SectionPageStateV1 {
         board
     }
 
+    /// Admin signers of `header` or `seal` when signed by a non-owner admin.
+    fn header_or_seal_admin_signers(&self, params: &SectionParametersV1) -> HashSet<MemberId> {
+        let board_params = ChatBoardParametersV1 {
+            owner: params.owner,
+        };
+        let mut signers = HashSet::new();
+        if let Some(header) = &self.header {
+            let owner_id = self
+                .ownership
+                .owner_at(&board_params, system_time_from_ms(header.header.created_at));
+            if header.signer != owner_id {
+                signers.insert(header.signer);
+            }
+        }
+        if let Some(seal) = &self.seal {
+            let owner_id = self
+                .ownership
+                .owner_at(&board_params, system_time_from_ms(seal.seal.sealed_at));
+            if seal.signer != owner_id {
+                signers.insert(seal.signer);
+            }
+        }
+        signers
+    }
+
     /// Drop duplicated author/invite/role records when sealing a page, keeping
-    /// only the tiny subset required to verify `ownership` if transfers exist.
+    /// only the tiny subset required to verify `ownership` (if transfers exist)
+    /// and any non-owner admin who signed the header or seal.
     pub fn compact_for_seal(&mut self, params: &SectionParametersV1) {
         self.roles.clear();
         self.role_assignments.clear();
+        let admin_signers = self.header_or_seal_admin_signers(params);
         if self.ownership.transfers.is_empty() {
-            self.admin = AdminsV1::default();
+            if admin_signers.is_empty() {
+                self.admin = AdminsV1::default();
+            } else {
+                self.admin
+                    .admins
+                    .retain(|a| admin_signers.contains(&a.admin.id()));
+                self.admin
+                    .revoked
+                    .retain(|r| admin_signers.contains(&r.id()));
+            }
             self.authors.clear();
             self.invites.clear();
+            self.sort();
             return;
         }
         let needed_ids = self.ownership_closure_members(params);
@@ -419,9 +524,10 @@ impl SectionPageStateV1 {
             .collect();
         self.invites
             .retain(|token| needed_tokens.contains(&token.token.id));
-        // Keep only admin/revocation records needed for transfer targets or
-        // succession voters (and any admin who signed a retained invite token).
+        // Keep only admin/revocation records needed for transfer targets,
+        // succession voters, header/seal admin signers, and retained invite tokens.
         let mut needed_admins = ownership_referenced_members(&self.ownership);
+        needed_admins.extend(admin_signers);
         for token in &self.invites {
             if let Some(signer) = token.signer {
                 needed_admins.insert(signer);
@@ -530,7 +636,8 @@ impl SectionPageStateV1 {
         }
 
         if let Some(seal) = &self.seal {
-            // Verify ownership chain if present.
+            let admin_signers = self.header_or_seal_admin_signers(params);
+            // Verify ownership chain (and/or retained admin signer records) if present.
             if !self.ownership.transfers.is_empty() {
                 let board = self.verification_board();
                 board.admin.verify(&board, &board_params)?;
@@ -550,19 +657,22 @@ impl SectionPageStateV1 {
                         "sealed section page retains unreferenced author records".to_string()
                     );
                 }
-            } else if !is_empty_admins(&self.admin)
-                || !self.authors.is_empty()
+            } else if !self.authors.is_empty()
                 || !self.invites.is_empty()
                 || !self.roles.is_empty()
                 || !self.role_assignments.is_empty()
+                || (!is_empty_admins(&self.admin) && admin_signers.is_empty())
             {
                 return Err(
                     "sealed section page must not carry duplicated authority records".to_string(),
                 );
+            } else if !is_empty_admins(&self.admin) {
+                let board = self.verification_board();
+                board.admin.verify(&board, &board_params)?;
             }
 
-            header.verify(params, &self.ownership)?;
-            seal.verify(params, &self.ownership, &self.entries)?;
+            header.verify_with_admins(params, &self.ownership, &self.admin)?;
+            seal.verify_with_admins(params, &self.ownership, &self.admin, &self.entries)?;
 
             // Verify any edits against the sealed original entries.
             let mut seen_edits = HashSet::with_capacity(self.entry_edits.len());
@@ -589,7 +699,7 @@ impl SectionPageStateV1 {
         board.invites.verify(&board, &board_params)?;
         board.members.verify(&board, &board_params)?;
 
-        header.verify(params, &self.ownership)?;
+        header.verify_with_admins(params, &self.ownership, &self.admin)?;
 
         for entry in &self.entries {
             self.verify_entry_against(params, &board, header, entry)?;
@@ -1577,5 +1687,80 @@ mod tests {
         assert!(peer_b.is_sealed());
         assert!(peer_b.authors.is_empty());
         assert!(peer_a.delta(&peer_b.summarize()).is_none());
+    }
+
+    #[test]
+    fn an_active_admin_can_create_and_seal_a_compact_section_page() {
+        use crate::board_state::admin::{Admin, AuthorizedAdmin};
+
+        let admin_sk = SigningKey::from_bytes(&[42u8; 32]);
+        let alice = SigningKey::from_bytes(&[2u8; 32]);
+        let params = page_params(1);
+        let admin_record = AuthorizedAdmin::new(
+            Admin {
+                member_id: MemberId::from(&admin_sk.verifying_key()),
+                signed_at: system_time_from_ms(1),
+                generation: 1,
+            },
+            &owner(),
+        );
+        let auth = AuthorityProof {
+            admin: Some(admin_record.clone()),
+            grant: None,
+        };
+        let header = AuthorizedSectionPageHeaderV1::new_with_authority(
+            SectionPageHeaderV1 {
+                board: owner().verifying_key().to_bytes(),
+                section: params.section,
+                section_chain: vec![params.section],
+                page: 1,
+                page_size: 200,
+                allowed_roles: Vec::new(),
+                created_at: 1_000,
+            },
+            &admin_sk,
+            Some(auth.clone()),
+        );
+        let mut page = SectionPageStateV1 {
+            header: Some(header),
+            admin: AdminsV1 {
+                admins: vec![admin_record],
+                revoked: Vec::new(),
+            },
+            ..Default::default()
+        };
+        page.verify(&params)
+            .expect("active admin can open a compact section page");
+
+        page.apply_delta(
+            &params,
+            &SectionPageDeltaV1 {
+                authors: vec![make_member(&alice)],
+                entries: vec![make_entry(&alice, 1, 2_000, 1, "Topic 1")],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let seal = AuthorizedSectionPageSealV1::new_with_authority(
+            &params,
+            &page.entries,
+            &admin_sk,
+            Some(auth),
+            5_000,
+        )
+        .unwrap();
+        page.apply_delta(
+            &params,
+            &SectionPageDeltaV1 {
+                seal: Some(seal),
+                ..Default::default()
+            },
+        )
+        .expect("active admin can seal a compact section page");
+        assert!(page.is_sealed());
+        assert!(page.authors.is_empty());
+        assert_eq!(page.admin.admins.len(), 1);
+        page.verify(&params).unwrap();
     }
 }

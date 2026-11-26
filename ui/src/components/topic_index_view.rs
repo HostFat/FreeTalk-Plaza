@@ -35,11 +35,13 @@ pub fn TopicIndexView(board_id: String) -> Element {
     });
 
     // Lazily load only the member and profile shard buckets for authors visible
-    // in the loaded topic index.
+    // in the loaded topic index, and keep the persistent local search archive
+    // updated with every loaded page.
     use_effect(move || {
         let Some(board_data) = board.read().clone() else {
             return;
         };
+        crate::components::app::search_index::record_board_topics(&board_data);
         let owner = board_data.owner_vk;
         let authors: Vec<plaza_core::board_state::member::MemberId> = board_data
             .board_state

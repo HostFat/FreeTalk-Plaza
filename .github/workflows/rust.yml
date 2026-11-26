@@ -145,6 +145,8 @@ jobs:
 
     - name: Run tests
       run: nix develop --command cargo nextest run --workspace --no-fail-fast
+    - name: Run scale SLO regression checks
+      run: nix develop --command cargo test -p plaza-core --test scale_slo --release -- --nocapture
 
   # Stage 2b (parallel): UI WASM bundle.
   # Regular pushes and PRs build with `release-fast` (no LTO, 16 codegen units)

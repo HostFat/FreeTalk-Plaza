@@ -29,9 +29,34 @@ use crate::util::to_cbor_vec;
 
 /// Cooldown before retrying a GET for an unsynced (previously missing) shard.
 const UNSYNCED_RETRY_COOLDOWN_MS: i64 = 10_000;
+/// Maximum profile shard buckets kept in RAM across all boards (LRU evicted).
+const MAX_CACHED_PROFILE_SHARDS: usize = 32;
 
 fn now_ms() -> i64 {
     plaza_core::board_state::rate_limit::system_time_ms(crate::util::get_current_system_time())
+}
+
+fn evict_profile_shards(protect: ContractInstanceId) {
+    let mut evicted = Vec::new();
+    PROFILE_SHARDS.with_mut(|shards| {
+        while shards.len() > MAX_CACHED_PROFILE_SHARDS {
+            let victim = shards
+                .iter()
+                .filter(|(id, board)| **id != protect && !board.dirty)
+                .min_by_key(|(_, board)| board.last_fetch)
+                .map(|(id, _)| *id);
+            match victim {
+                Some(id) => {
+                    shards.remove(&id);
+                    evicted.push(id);
+                }
+                None => break,
+            }
+        }
+    });
+    for id in evicted {
+        crate::components::app::notify_contract_evicted("profile_shard", id);
+    }
 }
 
 #[derive(Clone)]
@@ -106,6 +131,7 @@ pub async fn load_profile_shard(owner: VerifyingKey, bucket: u16) -> Result<(), 
         });
         entry.last_fetch = now;
     });
+    evict_profile_shards(contract_id);
     send_client_request(ClientRequest::ContractOp(ContractRequest::Get {
         key: contract_id,
         return_contract_code: false,

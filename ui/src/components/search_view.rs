@@ -253,6 +253,7 @@ fn TopicSearchView() -> Element {
     let mut oldest_first = use_signal(|| false);
 
     let mut loading_pages = use_signal(|| false);
+    let mut indexing_archive = use_signal(|| false);
 
     let board = use_memo(move || {
         let current = CURRENT_BOARD.read().owner_key?;
@@ -263,9 +264,10 @@ fn TopicSearchView() -> Element {
             .cloned()
             .map(|board| board.with_merged_topics())
     });
-    // Search scans loaded topic manifests/pages without fetching every page or
-    // member/profile shard up front. Only when the user types an Author filter
-    // do we load profile shards to resolve nicknames across the board.
+    // Search scans loaded topic manifests/pages plus the persisted delegate
+    // archive index without fetching every page or member/profile shard up
+    // front. Only when the user types an Author filter do we load profile
+    // shards to resolve nicknames across the board.
     use_effect(move || {
         let Some(owner) = CURRENT_BOARD.read().owner_key else {
             return;
@@ -281,6 +283,9 @@ fn TopicSearchView() -> Element {
         return rsx! {};
     };
     let owner = board_data.owner_vk;
+    // Keep the persistent local archive index up to date with every loaded page.
+    crate::components::app::search_index::record_board_topics(&board_data);
+    let archived_count = crate::components::app::search_index::count_for(owner);
 
     let mut sections: Vec<_> = board_data
         .board_state
@@ -309,7 +314,8 @@ fn TopicSearchView() -> Element {
     let mut hits: Vec<_> = if needle.is_empty() && author_needle.is_empty() {
         Vec::new()
     } else {
-        board_data
+        let mut seen_ids = std::collections::HashSet::new();
+        let mut combined: Vec<_> = board_data
             .board_state
             .topics
             .entries
@@ -324,6 +330,7 @@ fn TopicSearchView() -> Element {
             })
             .filter_map(|entry| {
                 let topic_id = entry.entry.topic_id;
+                seen_ids.insert(topic_id);
                 let (section, _) = board_data.board_state.topics.section_of(&topic_id);
                 if section_target.is_some() && section != section_target {
                     return None;
@@ -375,7 +382,54 @@ fn TopicSearchView() -> Element {
                     entry.entry.author,
                 ))
             })
-            .collect()
+            .collect();
+        // Also search persisted archive entries for evicted or previously
+        // indexed older section pages stored in the encrypted delegate.
+        for archived in crate::components::app::search_index::entries_for(owner) {
+            if archived.hidden || archived.merged || !seen_ids.insert(archived.topic_id) {
+                continue;
+            }
+            if section_target.is_some() && archived.section != section_target {
+                continue;
+            }
+            let author_name = board_data
+                .display_nickname(archived.author)
+                .unwrap_or_else(|| archived.author.to_string());
+            if !needle.is_empty()
+                && !archived.title.to_lowercase().contains(&needle)
+                && !archived.preview.to_lowercase().contains(&needle)
+            {
+                continue;
+            }
+            if !author_needle.is_empty()
+                && !author_name.to_lowercase().contains(&author_needle)
+                && !archived.author.to_string().to_lowercase().contains(&author_needle)
+            {
+                continue;
+            }
+            let date = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(archived.created_at)
+                .map(|time| time.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+                .unwrap_or_default();
+            if !from.is_empty() && date < from {
+                continue;
+            }
+            if !to.is_empty() && date > to {
+                continue;
+            }
+            let section_name = archived
+                .section
+                .and_then(|id| topic_contract::section_name(&board_data, &id));
+            combined.push((
+                archived.topic_id,
+                archived.title,
+                archived.preview,
+                author_name,
+                archived.last_activity,
+                section_name,
+                archived.author,
+            ));
+        }
+        combined
     };
     if *oldest_first.read() {
         hits.sort_by_key(|hit| hit.4);
@@ -482,12 +536,12 @@ fn TopicSearchView() -> Element {
 
                     div { class: "flex flex-wrap items-center gap-3 mb-3",
                         p { class: "text-[11px] text-text-muted",
-                            "Searches loaded topic titles and previews. Open a topic to search its full text."
+                            "Searches loaded topics and local archive ({archived_count} indexed). Open a topic to search its full text."
                         }
                         if has_more_pages {
                             button {
                                 r#type: "button",
-                                disabled: *loading_pages.read(),
+                                disabled: *loading_pages.read() || *indexing_archive.read(),
                                 class: "px-2.5 py-1 text-xs rounded-lg bg-surface border border-border text-accent hover:border-accent/50 disabled:opacity-50",
                                 onclick: move |_| {
                                     loading_pages.set(true);
@@ -510,6 +564,26 @@ fn TopicSearchView() -> Element {
                                     "Loading older pages…"
                                 } else {
                                     "Load older pages to expand search"
+                                }
+                            }
+                            button {
+                                r#type: "button",
+                                disabled: *indexing_archive.read() || *loading_pages.read(),
+                                class: "px-2.5 py-1 text-xs rounded-lg bg-surface border border-border text-text hover:border-accent/50 disabled:opacity-50",
+                                onclick: move |_| {
+                                    indexing_archive.set(true);
+                                    spawn(async move {
+                                        let _ = crate::components::app::section_contract::load_all_section_pages_for_board(
+                                            owner,
+                                        )
+                                        .await;
+                                        indexing_archive.set(false);
+                                    });
+                                },
+                                if *indexing_archive.read() {
+                                    "Indexing full archive…"
+                                } else {
+                                    "Index full archive locally"
                                 }
                             }
                         }

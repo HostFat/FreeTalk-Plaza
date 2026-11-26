@@ -38,6 +38,7 @@ pub fn confirm_and_reset(skip_legacy: bool) {
                     boards.blocked_image_hashes.clear();
                     boards.current_board_key = None;
                 });
+                crate::components::app::search_index::clear_memory();
                 crate::components::app::select_board(None);
                 toasts::show("Local data cleared. Reloading…");
                 // Let the delete requests and the toast reach the screen.
