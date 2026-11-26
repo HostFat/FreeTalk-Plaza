@@ -24,6 +24,11 @@ pub fn text_to_html(text: &str) -> String {
     // headings, so cap what the content can produce.
     let html = clamp_headings(&html);
 
+    // Block automatic image loads from Markdown (`![alt](url)`) so remote URLs
+    // cannot leak the reader's IP address or track reads. Convert http(s) URLs
+    // into ordinary clickable links; drop all other image tags to plain text.
+    let html = rewrite_markdown_images(&html);
+
     // Colour fenced code blocks whose language is known.
     let html = highlight_code_blocks(&html);
 
@@ -96,6 +101,52 @@ fn clamp_headings(html: &str) -> String {
         out = out.replace(&format!("</{from}>"), &format!("</{to}>"));
     }
     out
+}
+
+/// Replace every `<img ...>` tag emitted by Markdown with either a safe
+/// clickable link (for `http://`/`https://` URLs) or plain text (for any other
+/// scheme/empty src) so no automatic network request can leak the user's IP.
+fn rewrite_markdown_images(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find("<img ") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        let Some(end) = after.find('>') else {
+            out.push_str(after);
+            return out;
+        };
+        let tag = &after[..=end];
+        let src = extract_html_attr(tag, "src").unwrap_or("");
+        let alt = extract_html_attr(tag, "alt").unwrap_or("");
+        let is_http = src.starts_with("https://") || src.starts_with("http://");
+        if is_http {
+            let label = if alt.is_empty() { src } else { alt };
+            out.push_str("<a href=\"");
+            out.push_str(src);
+            out.push_str("\">[Image: ");
+            out.push_str(label);
+            out.push_str("]</a>");
+        } else if !alt.is_empty() {
+            out.push_str("[Image: ");
+            out.push_str(alt);
+            out.push(']');
+        } else {
+            out.push_str("[Image]");
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn extract_html_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!("{name}=\"");
+    let idx = tag.find(&needle)?;
+    let value_start = idx + needle.len();
+    let tail = &tag[value_start..];
+    let value_end = tail.find('"')?;
+    Some(&tail[..value_end])
 }
 
 /// Add target="_blank" and rel="noopener noreferrer" to all anchor tags in HTML.
@@ -215,6 +266,34 @@ mod tests {
         assert!(
             html.contains("&lt;h1&gt;"),
             "escaped heading markup stays literal: {html}"
+        );
+    }
+
+    #[test]
+    fn external_markdown_images_never_emit_img_tags() {
+        let html = text_to_html("![tracker](https://attacker.example/pixel.png)");
+        assert!(
+            !html.contains("<img"),
+            "external Markdown images must never emit <img> tags: {html}"
+        );
+        assert!(
+            html.contains(
+                r#"<a target="_blank" rel="noopener noreferrer" href="https://attacker.example/pixel.png">[Image: tracker]</a>"#
+            ),
+            "http(s) Markdown images should degrade to safe links: {html}"
+        );
+    }
+
+    #[test]
+    fn non_http_markdown_images_become_plain_text() {
+        let html = text_to_html("![x](data:image/svg+xml,<svg/>)");
+        assert!(
+            !html.contains("<img"),
+            "non-http Markdown images must not emit <img> tags: {html}"
+        );
+        assert!(
+            !html.contains("data:image"),
+            "data: URI must not leak into href or img: {html}"
         );
     }
 }

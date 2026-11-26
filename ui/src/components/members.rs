@@ -92,8 +92,19 @@ fn did_you_invite_member(member_id: MemberId, members: &MembersV1, self_id: Memb
         .unwrap_or(false)
 }
 
-fn format_member_display(member: &MemberDisplay) -> String {
-    let mut tags: Vec<(&str, &str)> = Vec::new();
+#[derive(Clone, PartialEq)]
+struct MemberRow {
+    nickname: String,
+    tags: Vec<(&'static str, &'static str)>,
+    short_id: Option<String>,
+    member_id: MemberId,
+    is_deactivated: bool,
+    is_self: bool,
+    mail_address: Option<String>,
+}
+
+fn member_display_tags(member: &MemberDisplay) -> Vec<(&'static str, &'static str)> {
+    let mut tags: Vec<(&'static str, &'static str)> = Vec::new();
 
     if member.is_owner {
         tags.push(("👑", "Board Owner"));
@@ -114,19 +125,7 @@ fn format_member_display(member: &MemberDisplay) -> String {
         tags.push(("🔭", "In Your Invite Chain"));
     }
 
-    if tags.is_empty() {
-        return member.nickname.clone();
-    }
-
-    let mut html = member.nickname.clone();
-    html.push(' ');
-    for (icon, tooltip) in &tags {
-        html.push_str(&format!(
-            "<span class=\"member-icon\" title=\"{}\">{}</span> ",
-            tooltip, icon
-        ));
-    }
-    html
+    tags
 }
 
 /// Order member IDs by DFS pre-order traversal of the invite tree.
@@ -266,25 +265,24 @@ pub fn MembersView() -> Element {
                 },
             };
 
-            let mut display = format_member_display(&member_display);
-            if boards_read.client_features.show_member_ids {
+            let tags = member_display_tags(&member_display);
+            let short_id = boards_read.client_features.show_member_ids.then(|| {
                 let short = member_id.to_string();
-                display.push_str(&format!(
-                    " <span class=\"text-xs text-text-muted\">· {}</span>",
-                    &short[..short.len().min(8)]
-                ));
-            }
-            all_members.push((
-                display,
+                short[..short.len().min(8)].to_string()
+            });
+            all_members.push(MemberRow {
+                nickname: member_display.nickname,
+                tags,
+                short_id,
                 member_id,
                 is_deactivated,
-                member_id == self_member_id,
-                board_data.mail_address_for(member_id),
-            ));
+                is_self: member_id == self_member_id,
+                mail_address: board_data.mail_address_for(member_id),
+            });
         }
         // Keep the current member at the top; the stable sort preserves the
         // invite-tree order for everyone else.
-        all_members.sort_by_key(|(_, _, _, is_self, _)| !*is_self);
+        all_members.sort_by_key(|row| !row.is_self);
 
         Some(all_members)
     })()
@@ -374,14 +372,30 @@ pub fn MembersView() -> Element {
 
             // Member list - scrollable
             ul { class: "flex-1 px-4 py-4 space-y-1 overflow-y-auto",
-                for (display_name, member_id, is_deactivated, _is_self, mail_address) in members {
+                for MemberRow {
+                    nickname,
+                    tags,
+                    short_id,
+                    member_id,
+                    is_deactivated,
+                    mail_address,
+                    ..
+                } in members {
                     li { key: "{member_id}", class: "flex items-center gap-2",
                         button {
                             class: "flex-1 text-left px-4 py-2 rounded-lg text-text hover:bg-surface transition-colors",
                             title: "Member ID: {member_id}",
                             onclick: move |_| handle_member_click(member_id),
                             span {
-                                dangerous_inner_html: "{display_name}"
+                                "{nickname}"
+                                for (icon, tooltip) in tags.iter() {
+                                    " "
+                                    span { class: "member-icon", title: "{tooltip}", "{icon}" }
+                                }
+                                if let Some(short_id) = &short_id {
+                                    " "
+                                    span { class: "text-xs text-text-muted", "· {short_id}" }
+                                }
                             }
                             if is_deactivated {
                                 span { class: "ml-2 text-xs uppercase tracking-wide text-text-muted",

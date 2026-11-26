@@ -138,16 +138,42 @@ export function scroll_container_to_bottom(id) {
 export function install_shell_hash_bridge() {
     if (window.__freetalk_hash_bridge) return;
     window.__freetalk_hash_bridge = true;
+    const targetOrigin = (() => {
+        try {
+            if (document.referrer) {
+                const origin = new URL(document.referrer).origin;
+                if (origin && origin !== 'null') return origin;
+            }
+        } catch (e) {}
+        return '*';
+    })();
+    const safeHash = (raw) => {
+        const h = raw || '#/';
+        if (h.startsWith('#/invite/') || h.startsWith('#/join/') || h.startsWith('#/dm/join/')) {
+            return '#/';
+        }
+        return h;
+    };
     const send = () => {
         try {
+            if (!window.parent || window.parent === window) return;
             window.parent.postMessage(
-                { __freenet_shell__: true, type: 'hash', hash: location.hash || '#/' },
-                '*'
+                { __freenet_shell__: true, type: 'hash', hash: safeHash(location.hash) },
+                targetOrigin
             );
         } catch (e) {}
     };
     window.addEventListener('hashchange', send);
     send();
+}
+export function js_parent_shell_origin() {
+    try {
+        if (document.referrer) {
+            const origin = new URL(document.referrer).origin;
+            if (origin && origin !== 'null') return origin;
+        }
+    } catch (e) {}
+    return '*';
 }
 ")]
 extern "C" {
@@ -163,6 +189,20 @@ extern "C" {
     fn scroll_container_near_bottom(id: &str, threshold: i32) -> bool;
     fn scroll_container_to_bottom(id: &str);
     fn install_shell_hash_bridge();
+    fn js_parent_shell_origin() -> String;
+}
+
+/// Resolve the parent Freenet shell origin from `document.referrer` when
+/// available, avoiding wildcard `postMessage` targets whenever possible.
+pub fn parent_shell_origin() -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_parent_shell_origin()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        "*".to_string()
+    }
 }
 
 /// Keep the Freenet shell's address bar in sync with the app's route.
@@ -236,7 +276,8 @@ pub fn navigate_in_shell(href: &str) -> bool {
             &JsValue::from_str("href"),
             &JsValue::from_str(href),
         );
-        parent.post_message(&msg, "*").is_ok()
+        let target_origin = parent_shell_origin();
+        parent.post_message(&msg, &target_origin).is_ok()
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

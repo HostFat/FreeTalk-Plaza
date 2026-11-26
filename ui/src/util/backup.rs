@@ -213,6 +213,12 @@ pub async fn download() -> Result<(), String> {
         html.click();
     }
     anchor.remove();
+    // Revoke the temporary object URL after the browser has started the download
+    // so exported private key material does not stay pinned in memory.
+    crate::util::safe_spawn_local(async move {
+        crate::util::sleep(std::time::Duration::from_secs(5)).await;
+        let _ = web_sys::Url::revoke_object_url(&url);
+    });
     Ok(())
 }
 

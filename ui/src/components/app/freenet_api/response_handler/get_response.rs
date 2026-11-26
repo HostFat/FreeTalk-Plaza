@@ -266,54 +266,59 @@ pub async fn handle_get_response(
                     board_data.decrypt_pq_board_secrets();
                 }
 
-                // Set the member's nickname in member_info regardless of whether they were already in the board
-                // This ensures the member has corresponding MemberInfo even if they were already a member
+                // Set the member's nickname in member_info regardless of whether they were already in the board.
+                // Never fall back to plaintext on a Private board if the secret has not arrived yet.
                 let preferred_nickname_sealed = if board_data.board_state.configuration.configuration.privacy_mode == PrivacyMode::Private {
-                    // For private boards, encrypt the nickname with the board secret
                     if let Some((secret, version)) = board_data.get_secret() {
                         use crate::util::ecies::encrypt_with_symmetric_key;
                         let (ciphertext, nonce) =
                             encrypt_with_symmetric_key(secret, preferred_nickname.as_bytes(), version);
-                        SealedBytes::Private {
+                        Some(SealedBytes::Private {
                             ciphertext,
                             nonce,
                             secret_version: version,
                             declared_len_bytes: preferred_nickname.len() as u32,
-                        }
+                        })
                     } else {
-                        warn!("Private board but no secret available for encrypting nickname, using public");
-                        SealedBytes::public(preferred_nickname.clone().into_bytes())
+                        warn!("Private board has no local secret yet; deferring nickname publication to avoid plaintext leak");
+                        None
                     }
                 } else {
-                    SealedBytes::public(preferred_nickname.clone().into_bytes())
+                    Some(SealedBytes::public(preferred_nickname.clone().into_bytes()))
                 };
-
-                let member_info = MemberInfo {
-                    member_id,
-                    version: 0,
-                    preferred_nickname: preferred_nickname_sealed,
-                };
-
-                let authorized_member_info =
-                    AuthorizedMemberInfo::new_with_member_key(member_info.clone(), &self_sk);
 
                 // Store membership credentials for future rejoin.
                 // We do NOT apply the member to board_state here — membership
                 // is published atomically with the first message to avoid
                 // post_apply_cleanup pruning a member with no messages.
                 board_data.self_authorized_member = Some(authorized_member.clone());
-                board_data.self_member_info = Some(authorized_member_info.clone());
-                // The nickname goes to the profile contract; the board only
-                // receives the member record with the first message.
-                let signer_key = self_sk.verifying_key();
-                crate::util::safe_spawn_local(async move {
-                    let _ = crate::components::app::profile_contract::record_member_info(
-                        owner_vk,
-                        authorized_member_info,
-                        signer_key,
-                    )
-                    .await;
-                });
+
+                if let Some(preferred_nickname_sealed) = preferred_nickname_sealed {
+                    let member_info = MemberInfo {
+                        member_id,
+                        version: 0,
+                        preferred_nickname: preferred_nickname_sealed,
+                    };
+
+                    let authorized_member_info =
+                        AuthorizedMemberInfo::new_with_member_key(member_info.clone(), &self_sk);
+
+                    board_data.self_member_info = Some(authorized_member_info.clone());
+                    // The nickname goes to the profile contract; the board only
+                    // receives the member record with the first message.
+                    let signer_key = self_sk.verifying_key();
+                    crate::util::safe_spawn_local(async move {
+                        if let Err(e) = crate::components::app::profile_contract::record_member_info(
+                            owner_vk,
+                            authorized_member_info,
+                            signer_key,
+                        )
+                        .await
+                        {
+                            warn!("Failed to record member profile info on join: {}", e);
+                        }
+                    });
+                }
                 // Capture invite chain from current state
                 if let Ok(chain) = board_data.board_state.members.get_invite_chain(
                     &authorized_member,
@@ -329,11 +334,14 @@ pub async fn handle_get_response(
                     authorized_member.clone(),
                 );
                 crate::util::safe_spawn_local(async move {
-                    let _ = crate::components::app::member_contract::record_member(
+                    if let Err(e) = crate::components::app::member_contract::record_member(
                         owner_vk,
                         shard_entry,
                     )
-                    .await;
+                    .await
+                    {
+                        warn!("Failed to record member shard entry on join: {}", e);
+                    }
                 });
 
                 // Rebuild actions_state from action messages (edit, delete,

@@ -238,14 +238,6 @@ fn create_notification_internal(
     message_preview: &str,
 ) {
     let body = format!("{}: {}", sender_name, message_preview);
-    info!(
-        "Creating notification - title: '{}', body: '{}'",
-        board_name, body
-    );
-
-    // Log to browser console for debugging
-    let console_msg = format!("[River] Creating notification: {} - {}", board_name, body);
-    web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&console_msg));
 
     let options = NotificationOptions::new();
     options.set_body(&body);
@@ -253,11 +245,6 @@ fn create_notification_internal(
 
     match Notification::new_with_options(board_name, &options) {
         Ok(notification) => {
-            // Log to browser console for confirmation
-            web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(
-                "[River] Notification object created successfully",
-            ));
-
             // Set up click handler to focus window and switch to board
             let onclick = Closure::wrap(Box::new(move || {
                 info!("Notification clicked, switching to board");
@@ -275,17 +262,9 @@ fn create_notification_internal(
 
             // Prevent the closure from being dropped
             onclick.forget();
-
-            info!(
-                "Notification created for board: {} (check browser console)",
-                board_name
-            );
         }
         Err(e) => {
             warn!("Failed to create notification: {:?}", e);
-            // Also log to console
-            let err_msg = format!("[River] FAILED to create notification: {:?}", e);
-            web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&err_msg));
         }
     }
 }

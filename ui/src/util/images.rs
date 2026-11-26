@@ -66,13 +66,29 @@ pub fn image_sha256(bytes: &[u8]) -> [u8; 32] {
     plaza_blob_core::sha256(bytes)
 }
 
+/// Normalize and allowlist safe non-scriptable raster image MIME types.
+/// Rejects active document types such as `image/svg+xml` or `text/html` that
+/// would execute scripts if opened via a same-origin `blob:` URL.
+pub fn safe_raster_mime(mime: &str) -> Option<&'static str> {
+    let base = mime.split(';').next()?.trim().to_ascii_lowercase();
+    match base.as_str() {
+        "image/png" => Some("image/png"),
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/webp" => Some("image/webp"),
+        "image/gif" => Some("image/gif"),
+        "image/avif" => Some("image/avif"),
+        _ => None,
+    }
+}
+
 /// Object URL for image bytes. The caller revokes it when the image changes.
 pub fn image_object_url(bytes: &[u8], mime: &str) -> Option<String> {
+    let safe_mime = safe_raster_mime(mime)?;
     let array = js_sys::Uint8Array::from(bytes);
     let parts = js_sys::Array::new();
     parts.push(&array.buffer());
     let options = web_sys::BlobPropertyBag::new();
-    options.set_type(mime);
+    options.set_type(safe_mime);
     let blob = web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &options).ok()?;
     web_sys::Url::create_object_url_with_blob(&blob).ok()
 }
@@ -921,5 +937,19 @@ mod tests {
             current.verifying_key(),
         );
         assert_ne!(first, blob_contract_key(&other));
+    }
+
+    #[test]
+    fn safe_raster_mime_rejects_active_content_types() {
+        assert_eq!(safe_raster_mime("image/png"), Some("image/png"));
+        assert_eq!(safe_raster_mime("IMAGE/JPEG; charset=binary"), Some("image/jpeg"));
+        assert_eq!(safe_raster_mime("image/jpg"), Some("image/jpeg"));
+        assert_eq!(safe_raster_mime("image/webp"), Some("image/webp"));
+        assert_eq!(safe_raster_mime("image/gif"), Some("image/gif"));
+        assert_eq!(safe_raster_mime("image/avif"), Some("image/avif"));
+        assert_eq!(safe_raster_mime("image/svg+xml"), None);
+        assert_eq!(safe_raster_mime("text/html"), None);
+        assert_eq!(safe_raster_mime("application/xhtml+xml"), None);
+        assert_eq!(safe_raster_mime(""), None);
     }
 }

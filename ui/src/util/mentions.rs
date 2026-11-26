@@ -117,9 +117,22 @@ impl MentionDirectory {
         let (masked, mut chips) = self.mask_mentions(text);
         // Never trust the name written in a token: resolve it from the ID so
         // `@[OwnerP](mention:<attacker>)` cannot render as the real owner.
+        // If the ID is unknown, also ensure the untrusted label cannot mimic a
+        // known member's name (or lookalike).
         for (id, name) in chips.iter_mut() {
             if let Some(member) = self.members.iter().find(|member| member.id == *id) {
                 *name = member.name.clone();
+            } else {
+                let candidate_key = confusable_key(name.trim());
+                let impersonates_known = !candidate_key.is_empty()
+                    && self
+                        .members
+                        .iter()
+                        .any(|member| confusable_key(member.name.trim()) == candidate_key);
+                if impersonates_known {
+                    let short = id.to_string();
+                    *name = format!("user-{}", &short[..short.len().min(8)]);
+                }
             }
         }
         let html = crate::util::markdown::text_to_html(&masked);
@@ -254,8 +267,17 @@ fn restore_chips(
 ) -> String {
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
+    let mut in_tag = false;
     while let Some(open_at) = rest.find(OPEN) {
-        out.push_str(&rest[..open_at]);
+        let prefix = &rest[..open_at];
+        for ch in prefix.chars() {
+            match ch {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                _ => {}
+            }
+        }
+        out.push_str(prefix);
         let after = &rest[open_at + OPEN.len_utf8()..];
         let Some(close_at) = after.find(CLOSE) else {
             out.push_str(&rest[open_at..]);
@@ -265,7 +287,12 @@ fn restore_chips(
         let consumed = open_at + OPEN.len_utf8() + index.len() + CLOSE.len_utf8();
         match index.parse::<usize>().ok().and_then(|index| chips.get(index)) {
             Some((id, name)) => {
-                out.push_str(&chip_html(id, name, self_id == Some(*id)));
+                if in_tag {
+                    out.push('@');
+                    out.push_str(&escape_attr(name));
+                } else {
+                    out.push_str(&chip_html(id, name, self_id == Some(*id)));
+                }
             }
             None => out.push_str(&rest[open_at..consumed]),
         }
@@ -566,5 +593,32 @@ mod tests {
         assert!(mentions_member("hello @bob", id, "Bob"));
         assert!(!mentions_member("mail me at a@Bob.com", id, "Bob"));
         assert!(!mentions_member("hello @Bobby", id, "Bob"));
+    }
+
+    #[test]
+    fn unknown_id_cannot_impersonate_known_member() {
+        let fake_id = MemberId::from_bytes([99; 32]);
+        let html = directory().render_html(&format!("@[Alice](mention:{fake_id})"), None);
+        assert!(
+            !html.contains(">@Alice</span>"),
+            "unknown ID must not render as a known member's name: {html}"
+        );
+        assert!(
+            html.contains(">@user-"),
+            "impersonating unknown ID should fall back to user-<id>: {html}"
+        );
+    }
+
+    #[test]
+    fn mention_inside_markdown_link_title_does_not_break_attributes() {
+        let html = directory().render_html(r#"[click](https://freenet.org "hi @Alice")"#, None);
+        assert!(
+            !html.contains(r#"title="hi <span"#),
+            "mention chip must not be injected inside an HTML attribute: {html}"
+        );
+        assert!(
+            html.contains(r#"title="hi @Alice""#),
+            "mention inside attribute should stay plain text: {html}"
+        );
     }
 }

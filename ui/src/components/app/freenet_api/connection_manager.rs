@@ -46,6 +46,7 @@ mod imp {
             // Get auth token to add as query parameter
             let auth_token = AUTH_TOKEN.read().clone();
             let base_url = get_websocket_url();
+            let has_token = auth_token.is_some();
             let websocket_url = if let Some(token) = auth_token {
                 if base_url.contains('?') {
                     format!("{}&authToken={}", base_url, token)
@@ -53,14 +54,17 @@ mod imp {
                     format!("{}?authToken={}", base_url, token)
                 }
             } else {
-                base_url
+                base_url.clone()
             };
 
-            info!("Connecting to Freenet node at: {}", websocket_url);
+            info!(
+                "Connecting to Freenet node at: {} (authToken={})",
+                base_url,
+                if has_token { "present" } else { "none" }
+            );
             *SYNC_STATUS.write() = SynchronizerStatus::Connecting;
             self.connected = false;
 
-            info!("Connecting to WebSocket URL: {}", websocket_url);
             let websocket = web_sys::WebSocket::new(&websocket_url).map_err(|e| {
                 let error_msg = format!("Failed to create WebSocket: {:?}", e);
                 error!("{}", error_msg);
