@@ -1,5 +1,5 @@
 {
-  description = "Pizza Order Manager for Freenet - Development Environment";
+  description = "FreeTalk Plaza - Decentralized Forum on Freenet";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -23,7 +23,11 @@
         };
         freenet-shared-pkg = freenet-shared.packages.${system}.default;
 
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+        # Pinned explicitly to match the locked rust-overlay revision in flake.lock
+        # (which ships up to 1.94.0). Once `nix flake update rust-overlay` brings in
+        # 1.94.1, switch to:
+        #   (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override { ... }
+        rustToolchain = pkgs.rust-bin.stable."1.94.0".default.override {
           extensions = [ "rust-src" "rust-analyzer" ];
           targets = [ "wasm32-unknown-unknown" ];
         };

@@ -24,40 +24,33 @@ async fn main() -> Result<()> {
     // Configuration
     let node_url = "ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native";
 
-    // Board owner verifying key
-    let board_owner_vk_bytes: [u8; 32] =
-        bs58::decode("69Ht4YjZsT884MndR2uWhQYe1wb9b2x77HRq7Dgq7wYE")
+    let read_key_env = |var: &str| -> Result<[u8; 32]> {
+        let encoded = std::env::var(var)
+            .map_err(|_| anyhow!("Missing required environment variable {var}"))?;
+        bs58::decode(encoded.trim())
             .into_vec()?
             .try_into()
-            .map_err(|_| anyhow!("Invalid board owner key"))?;
+            .map_err(|_| anyhow!("Invalid 32-byte base58 key in {var}"))
+    };
+
+    // Board owner verifying key
+    let board_owner_vk_bytes = read_key_env("PLAZA_BOARD_OWNER_VK")?;
     let board_owner_vk = VerifyingKey::from_bytes(&board_owner_vk_bytes)?;
     let board_owner_id = MemberId::from(&board_owner_vk);
 
     // Invite bot signing key (existing member who can invite)
-    let invite_bot_sk_bytes: [u8; 32] =
-        bs58::decode("DQREBvjYDAYxHJ5tb1SiwpTtZyTRtqr3uwzXEXQsXsvt")
-            .into_vec()?
-            .try_into()
-            .map_err(|_| anyhow!("Invalid invite bot key"))?;
+    let invite_bot_sk_bytes = read_key_env("PLAZA_INVITE_BOT_SK")?;
     let invite_bot_sk = SigningKey::from_bytes(&invite_bot_sk_bytes);
     let invite_bot_vk = invite_bot_sk.verifying_key();
     let invite_bot_id = MemberId::from(&invite_bot_vk);
 
     // GitHub bot verifying key (new member to add)
-    let github_bot_vk_bytes: [u8; 32] =
-        bs58::decode("J1AZJYr1fT7kyqusdzii3AESjnuDGqkpwgVWLE1CVfyz")
-            .into_vec()?
-            .try_into()
-            .map_err(|_| anyhow!("Invalid github bot key"))?;
+    let github_bot_vk_bytes = read_key_env("PLAZA_GITHUB_BOT_VK")?;
     let github_bot_vk = VerifyingKey::from_bytes(&github_bot_vk_bytes)?;
     let github_bot_id = MemberId::from(&github_bot_vk);
 
     // GitHub bot signing key (for member info)
-    let github_bot_sk_bytes: [u8; 32] =
-        bs58::decode("ATiVkfVEPP5RTciXhQkD7ZSjNybBYf9vgQLLy3ULG3fx")
-            .into_vec()?
-            .try_into()
-            .map_err(|_| anyhow!("Invalid github bot signing key"))?;
+    let github_bot_sk_bytes = read_key_env("PLAZA_GITHUB_BOT_SK")?;
     let github_bot_sk = SigningKey::from_bytes(&github_bot_sk_bytes);
 
     println!("Connecting to Freenet node at {}...", node_url);

@@ -363,9 +363,12 @@ impl SectionBoard {
 pub static SECTION_BOARDS: GlobalSignal<HashMap<ContractInstanceId, SectionBoard>> =
     Global::new(HashMap::new);
 
+const MAX_SECTION_ACTIVITY_RETRIES: u8 = 5;
+
 struct PendingSectionActivity {
     key: ContractKey,
     activity: HashMap<MessageId, AuthorizedTopicActivityV1>,
+    attempts: u8,
 }
 
 static SECTION_ACTIVITY: Mutex<Vec<(ContractInstanceId, PendingSectionActivity)>> =
@@ -384,7 +387,7 @@ async fn flush_section_activity(contract_id: ContractInstanceId) {
             .position(|(id, _)| *id == contract_id)
             .map(|index| queue.remove(index).1)
     };
-    let Some(pending) = pending else {
+    let Some(mut pending) = pending else {
         return;
     };
     let delta = ChatBoardStateV1Delta {
@@ -410,17 +413,52 @@ async fn flush_section_activity(contract_id: ContractInstanceId) {
             schedule_section_save();
         }
         Err(error) => {
-            dioxus::logger::tracing::warn!("section activity was not sent: {error}");
-            let retry_key = pending.key;
-            {
-                let mut queue = SECTION_ACTIVITY.lock().unwrap();
-                queue.push((contract_id, pending));
-            }
+            pending.attempts = pending.attempts.saturating_add(1);
+            dioxus::logger::tracing::warn!(
+                "section activity was not sent (attempt {}/{}): {error}",
+                pending.attempts,
+                MAX_SECTION_ACTIVITY_RETRIES
+            );
             SECTION_BOARDS.with_mut(|boards| {
                 if let Some(board) = boards.get_mut(&contract_id) {
                     board.dirty = true;
                 }
             });
+            if pending.attempts >= MAX_SECTION_ACTIVITY_RETRIES {
+                dioxus::logger::tracing::warn!(
+                    "Dropping section activity for {contract_id} after {} failed attempts",
+                    pending.attempts
+                );
+                return;
+            }
+            let retry_key = pending.key;
+            let retry_records: Vec<_> = pending.activity.into_values().collect();
+            {
+                let mut queue = SECTION_ACTIVITY.lock().unwrap();
+                if let Some(index) = queue.iter().position(|(id, _)| *id == contract_id) {
+                    for record in retry_records {
+                        queue[index]
+                            .1
+                            .activity
+                            .entry(record.activity.topic_id)
+                            .or_insert(record);
+                    }
+                    queue[index].1.attempts = queue[index].1.attempts.max(pending.attempts);
+                } else {
+                    let mut activity_map = HashMap::new();
+                    for record in retry_records {
+                        activity_map.insert(record.activity.topic_id, record);
+                    }
+                    queue.push((
+                        contract_id,
+                        PendingSectionActivity {
+                            key: retry_key,
+                            activity: activity_map,
+                            attempts: pending.attempts,
+                        },
+                    ));
+                }
+            }
             queue_section_activity(contract_id, retry_key, Vec::new());
         }
     }
@@ -450,6 +488,7 @@ fn queue_section_activity(
                 PendingSectionActivity {
                     key,
                     activity: activity_map,
+                    attempts: 0,
                 },
             ));
         }

@@ -599,6 +599,9 @@ impl BoardSynchronizer {
                                 MemberId::from(*owner_vk),
                                 e
                             );
+                            BOARDS.with_mut(|boards| {
+                                boards.migrated_boards.push((*owner_vk, *old_contract_key));
+                            });
                             crate::components::app::toasts::show_error(format!(
                                 "Could not send the upgrade pointer: {e}"
                             ));

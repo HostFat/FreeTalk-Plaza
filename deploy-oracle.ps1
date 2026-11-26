@@ -11,7 +11,7 @@
 #   pwsh ./deploy-oracle.ps1 -Version 402
 #
 # Environment overrides:
-#   PLAZA_ORACLE_HOST  default 130.61.142.176
+#   PLAZA_ORACLE_HOST  required (or pass -OracleHost)
 #   PLAZA_ORACLE_USER  default ubuntu
 #   PLAZA_ORACLE_KEY   default %USERPROFILE%\.oci\freenet-node
 
@@ -20,12 +20,16 @@ param(
     [int]$Version = 0,
     [int]$LocalPort = 7511,
     [int]$RemotePort = 7509,
-    [string]$OracleHost = $(if ($env:PLAZA_ORACLE_HOST) { $env:PLAZA_ORACLE_HOST } else { '130.61.142.176' }),
+    [string]$OracleHost = $env:PLAZA_ORACLE_HOST,
     [string]$OracleUser = $(if ($env:PLAZA_ORACLE_USER) { $env:PLAZA_ORACLE_USER } else { 'ubuntu' }),
     [string]$KeyPath = $(if ($env:PLAZA_ORACLE_KEY) { $env:PLAZA_ORACLE_KEY } else { Join-Path $env:USERPROFILE '.oci\freenet-node' })
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ([string]::IsNullOrWhiteSpace($OracleHost)) {
+    throw "Oracle host is required. Pass -OracleHost or set PLAZA_ORACLE_HOST."
+}
 
 function Test-LocalPort([int]$Port) {
     $client = [System.Net.Sockets.TcpClient]::new()
@@ -50,7 +54,7 @@ if (-not (Test-LocalPort $LocalPort)) {
     $logPath = Join-Path $env:LOCALAPPDATA 'freetalk-oracle-tunnel.log'
     $startup = [Environment]::GetFolderPath('Startup')
     $launcher = Join-Path $startup 'FreeTalk-Oracle-Tunnel.cmd'
-    $content = "@echo off`r`npwsh -NoProfile -WindowStyle Hidden -File `"$supervisor`"`r`n"
+    $content = "@echo off`r`npwsh -NoProfile -WindowStyle Hidden -File `"$supervisor`" -LocalPort $LocalPort -RemotePort $RemotePort -OracleHost `"$OracleHost`" -OracleUser `"$OracleUser`" -KeyPath `"$KeyPath`"`r`n"
     if (-not (Test-Path -LiteralPath $launcher) -or
         (Get-Content -Raw -LiteralPath $launcher) -ne $content) {
         Set-Content -LiteralPath $launcher -Value $content -Encoding ascii

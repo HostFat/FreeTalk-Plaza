@@ -97,6 +97,9 @@ fn save_to_storage(#[allow(unused_variables)] map: &HashMap<String, f64>) {
     }
 }
 
+const MAX_RECEIVE_TIMES_ENTRIES: usize = 2000;
+const RECEIVE_TIMES_MAX_AGE_MS: f64 = 24.0 * 60.0 * 60.0 * 1000.0;
+
 /// Record receive timestamps for newly arrived messages.
 pub fn record_receive_times(message_ids: &[MessageId]) {
     if message_ids.is_empty() {
@@ -104,11 +107,22 @@ pub fn record_receive_times(message_ids: &[MessageId]) {
     }
     info!("Recording receive times for {} messages", message_ids.len());
     let now = now_ms();
+    let cutoff = now - RECEIVE_TIMES_MAX_AGE_MS;
     RECEIVE_TIMES.with_mut(|map| {
+        map.retain(|_, &mut ts| ts > cutoff);
         let mut new_count = 0;
         for id in message_ids {
             if map.entry(id.to_string()).or_insert(now) == &now {
                 new_count += 1;
+            }
+        }
+        if map.len() > MAX_RECEIVE_TIMES_ENTRIES {
+            let mut entries: Vec<(String, f64)> =
+                map.iter().map(|(k, &v)| (k.clone(), v)).collect();
+            entries.sort_by(|a, b| a.1.total_cmp(&b.1));
+            let remove_count = map.len() - MAX_RECEIVE_TIMES_ENTRIES;
+            for (key, _) in entries.into_iter().take(remove_count) {
+                map.remove(&key);
             }
         }
         save_to_storage(map);

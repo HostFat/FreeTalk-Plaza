@@ -150,7 +150,16 @@ if ($SkipIfUnchanged) {
         Select-Object -First 1
     if ($bundleIndex) {
         $lastBuild = (Get-Item (Join-Path $bundleIndex.FullName 'index.html')).LastWriteTime
-        $inputDirs = @('ui\src', 'common\src', 'plaza-contract\src', 'plaza-delegate\src', 'ui\assets', 'ui\public') |
+        $inputDirs = @(
+            'ui\src', 'ui\assets', 'ui\public', 'common\src',
+            'plaza-contract\src', 'plaza-delegate\src',
+            'plaza-blob-core\src', 'plaza-blob\src',
+            'dm-core\src', 'dm-contract\src', 'dm-delegate\src',
+            'topic-core\src', 'topic-contract\src',
+            'section-contract\src', 'activity-contract\src',
+            'moderation-contract\src', 'profile-contract\src',
+            'member-contract\src'
+        ) |
             ForEach-Object { Join-Path $repoRoot $_ } |
             Where-Object { Test-Path $_ }
         $newestInput = Get-ChildItem $inputDirs -Recurse -File -ErrorAction SilentlyContinue |
@@ -212,8 +221,8 @@ if (-not $SkipContractBuild) {
     }
     $wasmProfile = if ($Production) { 'release' } else { 'release-fast' }
     $wasmArtifacts = @(
-        @{ File = 'plaza_contract.wasm'; Dest = 'plaza_contract.wasm'; Package = 'plaza-contract' },
-        @{ File = 'plaza_delegate.wasm'; Dest = 'plaza_delegate.wasm'; Package = 'plaza-delegate' },
+        @{ File = 'plaza_contract.wasm'; Dest = 'plaza_contract.wasm'; Package = 'plaza-contract'; Profile = 'release' },
+        @{ File = 'plaza_delegate.wasm'; Dest = 'plaza_delegate.wasm'; Package = 'plaza-delegate'; Profile = 'release' },
         @{ File = 'plaza_dm_delegate.wasm'; Dest = 'plaza_dm_delegate.wasm'; Package = 'plaza-dm-delegate'; Profile = 'release' },
         @{ File = 'plaza_dm_contract.wasm'; Dest = 'plaza_dm_contract.wasm'; Package = 'plaza-dm-contract'; Profile = 'release' },
         @{ File = 'plaza_topic_contract.wasm'; Dest = 'plaza_topic_contract.wasm'; Package = 'plaza-topic-contract'; Profile = 'release' },
@@ -222,7 +231,7 @@ if (-not $SkipContractBuild) {
         @{ File = 'plaza_moderation_contract.wasm'; Dest = 'plaza_moderation_contract.wasm'; Package = 'plaza-moderation-contract'; Profile = 'release' },
         @{ File = 'plaza_profile_contract.wasm'; Dest = 'plaza_profile_contract.wasm'; Package = 'plaza-profile-contract'; Profile = 'release' },
         @{ File = 'plaza_member_contract.wasm'; Dest = 'plaza_member_contract.wasm'; Package = 'plaza-member-contract'; Profile = 'release' },
-        @{ File = 'plaza_blob.wasm'; Dest = 'blob_contract.wasm'; Package = 'plaza-blob' }
+        @{ File = 'plaza_blob.wasm'; Dest = 'blob_contract.wasm'; Package = 'plaza-blob'; Profile = 'release' }
     )
     foreach ($artifact in $wasmArtifacts) {
         $wasmPath = Join-Path $repoRoot "ui\public\contracts\$($artifact.Dest)"

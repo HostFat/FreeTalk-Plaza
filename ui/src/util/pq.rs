@@ -66,8 +66,11 @@ pub fn seal_secret(
     // X25519 public key derived from their Ed25519 identity.
     let ephemeral_secret = X25519Secret::random_from_rng(rand::rngs::OsRng);
     let ephemeral_public = X25519PublicKey::from(&ephemeral_secret);
-    let recipient_x25519 = crate::util::ecies::ed25519_to_x25519_public_key(recipient_vk);
+    let recipient_x25519 = crate::util::ecies::try_ed25519_to_x25519_public_key(recipient_vk)?;
     let x25519_shared = ephemeral_secret.diffie_hellman(&recipient_x25519);
+    if !x25519_shared.was_contributory() {
+        return Err("Non-contributory X25519 shared secret".to_string());
+    }
 
     let mut rng = OsRngAdapter(rand::rngs::OsRng);
     let (ciphertext, kem_shared) = ek.encapsulate_with_rng(&mut rng);

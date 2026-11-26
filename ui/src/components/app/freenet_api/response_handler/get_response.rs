@@ -7,7 +7,7 @@ use crate::components::app::{BOARDS, CURRENT_BOARD, PENDING_INVITES, WEB_API};
 use crate::constants::BOARD_CONTRACT_WASM;
 use crate::invites::PendingBoardStatus;
 use crate::util::ecies::decrypt_secret_from_member_blob;
-use crate::util::{from_cbor_slice, owner_vk_to_contract_key, to_cbor_vec};
+use crate::util::{owner_vk_to_contract_key, to_cbor_vec, try_from_cbor_slice};
 use dioxus::logger::tracing::{error, info, warn};
 use dioxus::prelude::ReadableExt;
 use freenet_scaffold::ComposableState;
@@ -94,33 +94,38 @@ pub async fn handle_get_response(
 
         if is_pending_invite {
             info!("This is a subscription for a pending invitation, adding state");
-            let retrieved_state: ChatBoardStateV1 = from_cbor_slice::<ChatBoardStateV1>(&state);
+            let retrieved_state: ChatBoardStateV1 = match try_from_cbor_slice::<ChatBoardStateV1>(
+                &state,
+            ) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    warn!("Ignoring malformed board state in pending-invite GET response: {e}");
+                    return Ok(());
+                }
+            };
 
-            // Get the pending invite data once to avoid multiple reads
+            // Remove the invitation now, before any deferred UI work runs,
+            // while keeping a copy so we can restore it if the PUT below fails.
+            // The node can deliver another GET for the same key immediately,
+            // and leaving the entry here re-enters this branch in a loop.
+            let Some(removed_invite) =
+                PENDING_INVITES.with_mut(|pending| pending.map.remove(&owner_vk))
+            else {
+                return Ok(());
+            };
             let (
                 self_sk,
                 authorized_member,
                 preferred_nickname,
                 link_category_keys,
                 profile_id,
-            ) = {
-                let pending_invites = PENDING_INVITES.read();
-                let invite = &pending_invites.map[&owner_vk];
-                (
-                    invite.invitee_signing_key.clone(),
-                    invite.authorized_member.clone(),
-                    invite.preferred_nickname.clone(),
-                    invite.category_keys.clone(),
-                    invite.profile_id.clone(),
-                )
-            };
-
-            // Remove the invitation now, before any deferred UI work runs.
-            // The node can deliver another GET for the same key immediately,
-            // and leaving the entry here re-enters this branch in a loop.
-            PENDING_INVITES.with_mut(|pending| {
-                pending.map.remove(&owner_vk);
-            });
+            ) = (
+                removed_invite.invitee_signing_key.clone(),
+                removed_invite.authorized_member.clone(),
+                removed_invite.preferred_nickname.clone(),
+                removed_invite.category_keys.clone(),
+                removed_invite.profile_id.clone(),
+            );
 
             // Prepare the member ID for checking
             let member_id: MemberId = authorized_member.member.member_vk.into();
@@ -207,10 +212,13 @@ pub async fn handle_get_response(
                     let current_state = board_data.board_state.clone();
 
                     // Merge the retrieved state into the existing state
-                    board_data
-                        .board_state
-                        .merge(&current_state, &params, &retrieved_state)
-                        .expect("Failed to merge board states");
+                    if let Err(e) =
+                        board_data
+                            .board_state
+                            .merge(&current_state, &params, &retrieved_state)
+                    {
+                        error!("Failed to merge invited board state: {e}");
+                    }
                 }
 
                 // Keys carried by the invite link belong to this member. They
@@ -266,54 +274,59 @@ pub async fn handle_get_response(
                     board_data.decrypt_pq_board_secrets();
                 }
 
-                // Set the member's nickname in member_info regardless of whether they were already in the board
-                // This ensures the member has corresponding MemberInfo even if they were already a member
+                // Set the member's nickname in member_info regardless of whether they were already in the board.
+                // Never fall back to plaintext on a Private board if the secret has not arrived yet.
                 let preferred_nickname_sealed = if board_data.board_state.configuration.configuration.privacy_mode == PrivacyMode::Private {
-                    // For private boards, encrypt the nickname with the board secret
                     if let Some((secret, version)) = board_data.get_secret() {
                         use crate::util::ecies::encrypt_with_symmetric_key;
                         let (ciphertext, nonce) =
                             encrypt_with_symmetric_key(secret, preferred_nickname.as_bytes(), version);
-                        SealedBytes::Private {
+                        Some(SealedBytes::Private {
                             ciphertext,
                             nonce,
                             secret_version: version,
                             declared_len_bytes: preferred_nickname.len() as u32,
-                        }
+                        })
                     } else {
-                        warn!("Private board but no secret available for encrypting nickname, using public");
-                        SealedBytes::public(preferred_nickname.clone().into_bytes())
+                        warn!("Private board has no local secret yet; deferring nickname publication to avoid plaintext leak");
+                        None
                     }
                 } else {
-                    SealedBytes::public(preferred_nickname.clone().into_bytes())
+                    Some(SealedBytes::public(preferred_nickname.clone().into_bytes()))
                 };
-
-                let member_info = MemberInfo {
-                    member_id,
-                    version: 0,
-                    preferred_nickname: preferred_nickname_sealed,
-                };
-
-                let authorized_member_info =
-                    AuthorizedMemberInfo::new_with_member_key(member_info.clone(), &self_sk);
 
                 // Store membership credentials for future rejoin.
                 // We do NOT apply the member to board_state here — membership
                 // is published atomically with the first message to avoid
                 // post_apply_cleanup pruning a member with no messages.
                 board_data.self_authorized_member = Some(authorized_member.clone());
-                board_data.self_member_info = Some(authorized_member_info.clone());
-                // The nickname goes to the profile contract; the board only
-                // receives the member record with the first message.
-                let signer_key = self_sk.verifying_key();
-                crate::util::safe_spawn_local(async move {
-                    let _ = crate::components::app::profile_contract::record_member_info(
-                        owner_vk,
-                        authorized_member_info,
-                        signer_key,
-                    )
-                    .await;
-                });
+
+                if let Some(preferred_nickname_sealed) = preferred_nickname_sealed {
+                    let member_info = MemberInfo {
+                        member_id,
+                        version: 0,
+                        preferred_nickname: preferred_nickname_sealed,
+                    };
+
+                    let authorized_member_info =
+                        AuthorizedMemberInfo::new_with_member_key(member_info.clone(), &self_sk);
+
+                    board_data.self_member_info = Some(authorized_member_info.clone());
+                    // The nickname goes to the profile contract; the board only
+                    // receives the member record with the first message.
+                    let signer_key = self_sk.verifying_key();
+                    crate::util::safe_spawn_local(async move {
+                        if let Err(e) = crate::components::app::profile_contract::record_member_info(
+                            owner_vk,
+                            authorized_member_info,
+                            signer_key,
+                        )
+                        .await
+                        {
+                            warn!("Failed to record member profile info on join: {}", e);
+                        }
+                    });
+                }
                 // Capture invite chain from current state
                 if let Ok(chain) = board_data.board_state.members.get_invite_chain(
                     &authorized_member,
@@ -329,11 +342,14 @@ pub async fn handle_get_response(
                     authorized_member.clone(),
                 );
                 crate::util::safe_spawn_local(async move {
-                    let _ = crate::components::app::member_contract::record_member(
+                    if let Err(e) = crate::components::app::member_contract::record_member(
                         owner_vk,
                         shard_entry,
                     )
-                    .await;
+                    .await
+                    {
+                        warn!("Failed to record member shard entry on join: {}", e);
+                    }
                 });
 
                 // Rebuild actions_state from action messages (edit, delete,
@@ -412,12 +428,12 @@ pub async fn handle_get_response(
                         .write()
                         .update_sync_status(&owner_vk, BoardSyncStatus::Error(e.clone()));
                 });
-                // Reset invite status so the normal retry flow can pick it up
+                // Restore the invite so the normal retry flow can pick it up
+                let mut retry_invite = removed_invite;
+                retry_invite.status = PendingBoardStatus::PendingSubscription;
                 crate::util::defer(move || {
                     PENDING_INVITES.with_mut(|pending_invites| {
-                        if let Some(join) = pending_invites.map.get_mut(&owner_vk) {
-                            join.status = PendingBoardStatus::PendingSubscription;
-                        }
+                        pending_invites.map.insert(owner_vk, retry_invite);
                     });
                 });
             } else {
@@ -512,7 +528,15 @@ pub async fn handle_get_response(
             }
         } else if is_existing_board {
             // This is a refresh GET for an already-subscribed board (e.g., after wake from suspension)
-            let retrieved_state: ChatBoardStateV1 = from_cbor_slice::<ChatBoardStateV1>(&state);
+            let retrieved_state: ChatBoardStateV1 = match try_from_cbor_slice::<ChatBoardStateV1>(
+                &state,
+            ) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    warn!("Ignoring malformed board state in existing-board GET response: {e}");
+                    return Ok(());
+                }
+            };
             info!(
                 "GET response for existing board {:?}: {} members, {} owner transfers",
                 MemberId::from(owner_vk),

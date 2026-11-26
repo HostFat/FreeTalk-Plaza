@@ -19,17 +19,6 @@ fn move_lightbox(delta: isize) {
 
 #[component]
 pub fn Lightbox() -> Element {
-    let state = LIGHTBOX.read().clone();
-    let Some(state) = state else {
-        return rsx! {};
-    };
-    if state.images.is_empty() {
-        return rsx! {};
-    }
-
-    let images_len = state.images.len();
-    let index = state.index.min(images_len - 1);
-    let current = state.images[index].clone();
     let mut zoomed = use_signal(|| false);
     let mut url = use_signal(|| None::<String>);
 
@@ -37,6 +26,11 @@ pub fn Lightbox() -> Element {
     use_effect(move || {
         let state = LIGHTBOX.read().clone();
         let Some(state) = state else {
+            let previous = url.peek().clone();
+            if let Some(previous) = previous {
+                url.set(None);
+                let _ = web_sys::Url::revoke_object_url(&previous);
+            }
             return;
         };
         let Some(image) = state.images.get(state.index) else {
@@ -67,10 +61,25 @@ pub fn Lightbox() -> Element {
         }
     });
 
-    let status = IMAGES
-        .read()
-        .get(&current.instance)
-        .map(|fetch| fetch.status.clone());
+    let state = LIGHTBOX.read().clone();
+    let Some(state) = state else {
+        return rsx! {};
+    };
+    if state.images.is_empty() {
+        return rsx! {};
+    }
+
+    let images_len = state.images.len();
+    let index = state.index.min(images_len - 1);
+    let current = state.images[index].clone();
+
+    let failed_reason = IMAGES.read().get(&current.instance).and_then(|fetch| {
+        if let ImageStatus::Failed(reason) = &fetch.status {
+            Some(reason.clone())
+        } else {
+            None
+        }
+    });
     let close = move || *LIGHTBOX.write() = None;
 
     rsx! {
@@ -113,17 +122,14 @@ pub fn Lightbox() -> Element {
                 }
             } else {
                 div { class: "flex flex-col items-center gap-3 text-white/70 text-sm",
-                    match status {
-                        Some(ImageStatus::Loading) | Some(ImageStatus::Ready(_)) | None => rsx! {
-                            div { class: "animate-spin w-6 h-6 border-2 border-white/30 border-t-white rounded-full" }
-                            "Loading image…"
-                        },
-                        Some(ImageStatus::Failed(reason)) => rsx! {
-                            "Image unavailable"
-                            if !reason.is_empty() {
-                                span { class: "text-white/50", " ({reason})" }
-                            }
-                        },
+                    if let Some(reason) = failed_reason {
+                        "Image unavailable"
+                        if !reason.is_empty() {
+                            span { class: "text-white/50", " ({reason})" }
+                        }
+                    } else {
+                        div { class: "animate-spin w-6 h-6 border-2 border-white/30 border-t-white rounded-full" }
+                        "Loading image…"
                     }
                 }
             }

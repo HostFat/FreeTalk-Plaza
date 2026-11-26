@@ -76,18 +76,27 @@ fn set_document_title(title: &str) {
                 js_sys::Reflect::set(&msg, &JsValue::from_str("title"), &JsValue::from_str(title));
             // Post to parent window (FreeTalk runs inside an iframe)
             let target = window.parent().ok().flatten().unwrap_or(window);
-            let _ = target.post_message(&msg, "*");
+            let target_origin = crate::util::parent_shell_origin();
+            let _ = target.post_message(&msg, &target_origin);
         }
     }
 }
 
-/// Get the current board name (decrypted if private)
+/// Get the current board name for the browser title.
+/// Private board names are never forwarded to the parent shell/browser chrome
+/// so they cannot leak across origins or into window titles.
 fn get_current_board_name() -> Option<String> {
     let current_board = CURRENT_BOARD.read();
     let owner_key = current_board.owner_key?;
 
     let boards = BOARDS.read();
     let board_data = boards.map.get(&owner_key)?;
+
+    if board_data.board_state.configuration.configuration.privacy_mode
+        == plaza_core::board_state::privacy::PrivacyMode::Private
+    {
+        return None;
+    }
 
     let sealed_name = &board_data
         .board_state
@@ -287,7 +296,8 @@ fn set_favicon() {
     );
     let _ = js_sys::Reflect::set(&msg, &JsValue::from_str("href"), &JsValue::from_str(&href));
     let target = window.parent().ok().flatten().unwrap_or(window);
-    let _ = target.post_message(&msg, "*");
+    let target_origin = crate::util::parent_shell_origin();
+    let _ = target.post_message(&msg, &target_origin);
 }
 
 /// Initialize the document title management system.

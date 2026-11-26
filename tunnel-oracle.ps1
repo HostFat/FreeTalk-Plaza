@@ -19,12 +19,15 @@
 param(
     [int]$LocalPort = 7511,
     [int]$RemotePort = 7509,
-    [string]$OracleHost = $(if ($env:PLAZA_ORACLE_HOST) { $env:PLAZA_ORACLE_HOST } else { '130.61.142.176' }),
+    [string]$OracleHost = $env:PLAZA_ORACLE_HOST,
     [string]$OracleUser = $(if ($env:PLAZA_ORACLE_USER) { $env:PLAZA_ORACLE_USER } else { 'ubuntu' }),
     [string]$KeyPath = $(if ($env:PLAZA_ORACLE_KEY) { $env:PLAZA_ORACLE_KEY } else { Join-Path $env:USERPROFILE '.oci\freenet-node' })
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($OracleHost)) {
+    throw "Oracle host is required. Pass -OracleHost or set PLAZA_ORACLE_HOST."
+}
 $logPath = Join-Path $env:LOCALAPPDATA 'freetalk-oracle-tunnel.log'
 
 function Test-LocalPort([int]$Port) {

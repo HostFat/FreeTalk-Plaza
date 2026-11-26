@@ -8,8 +8,7 @@ use super::board_synchronizer::BoardSynchronizer;
 use super::error::SynchronizerError;
 use crate::board_data::Boards;
 use crate::components::app::chat_delegate::{
-    complete_pending_public_key_request, complete_pending_request, complete_pending_sign_request,
-    complete_pending_signing_key_request, is_legacy_delegate_key, mark_legacy_migration_done,
+    complete_pending_response, is_legacy_delegate_key, mark_legacy_migration_done,
     save_boards_to_delegate, set_skip_legacy_cached, BOARDS_STORAGE_KEY, SKIP_LEGACY_STORAGE_KEY,
 };
 use crate::components::app::dm_delegate::{complete_dm_pending, is_dm_delegate_key};
@@ -27,7 +26,7 @@ use freenet_stdlib::prelude::OutboundDelegateMsg;
 pub use get_response::handle_get_response;
 use plaza_core::board_state::privacy::PrivacyMode;
 use plaza_core::board_state::ChatBoardParametersV1;
-use plaza_core::chat_delegate::{ChatDelegateRequestMsg, ChatDelegateResponseMsg};
+use plaza_core::chat_delegate::ChatDelegateResponseMsg;
 use plaza_dm_core::delegate::DmDelegateResponseEnvelope;
 pub use put_response::handle_put_response;
 pub use subscribe_response::handle_subscribe_response;
@@ -220,30 +219,14 @@ impl ResponseHandler {
                     match v {
                         OutboundDelegateMsg::ApplicationMessage(app_msg) => {
                             info!(
-                                "Delegate response is an ApplicationMessage, processed flag: {}",
+                                "Delegate response is an ApplicationMessage ({} bytes), processed flag: {}",
+                                app_msg.payload.len(),
                                 app_msg.processed
                             );
-
-                            // Log the raw payload for debugging
-                            let payload_str = if app_msg.payload.len() < 100 {
-                                format!("{:?}", app_msg.payload)
-                            } else {
-                                format!("{:?}... (truncated)", &app_msg.payload[..100])
-                            };
-                            info!("ApplicationMessage payload: {}", payload_str);
 
                             // Try to deserialize as a response
                             let deserialization_result = from_reader::<ChatDelegateResponseMsg, _>(
                                 app_msg.payload.as_slice(),
-                            );
-
-                            // Also try to deserialize as a request to see if that's what's happening
-                            let request_deser_result = from_reader::<ChatDelegateRequestMsg, _>(
-                                app_msg.payload.as_slice(),
-                            );
-                            info!(
-                                "Deserialization as request result: {:?}",
-                                request_deser_result.is_ok()
                             );
 
                             if let Ok(response) = deserialization_result {
@@ -297,51 +280,7 @@ impl ResponseHandler {
                                 );
 
                                 // Try to complete any pending request waiting for this response
-                                let completed = match &response {
-                                    // Key-value storage responses
-                                    ChatDelegateResponseMsg::GetResponse { key, .. } => {
-                                        complete_pending_request(key, response.clone())
-                                    }
-                                    ChatDelegateResponseMsg::StoreResponse { key, .. } => {
-                                        complete_pending_request(key, response.clone())
-                                    }
-                                    ChatDelegateResponseMsg::DeleteResponse { key, .. } => {
-                                        complete_pending_request(key, response.clone())
-                                    }
-                                    ChatDelegateResponseMsg::ListResponse { .. } => {
-                                        // Use the special list request key
-                                        let list_key =
-                                            plaza_core::chat_delegate::ChatDelegateKey::new(
-                                                b"__list_request__".to_vec(),
-                                            );
-                                        complete_pending_request(&list_key, response.clone())
-                                    }
-                                    // Signing key management responses
-                                    ChatDelegateResponseMsg::StoreSigningKeyResponse {
-                                        board_key,
-                                        ..
-                                    } => complete_pending_signing_key_request(
-                                        board_key,
-                                        response.clone(),
-                                    ),
-                                    ChatDelegateResponseMsg::GetPublicKeyResponse {
-                                        board_key,
-                                        ..
-                                    } => complete_pending_public_key_request(
-                                        board_key,
-                                        response.clone(),
-                                    ),
-                                    // Signing response - use both board_key and request_id for correlation
-                                    ChatDelegateResponseMsg::SignResponse {
-                                        board_key,
-                                        request_id,
-                                        ..
-                                    } => complete_pending_sign_request(
-                                        board_key,
-                                        *request_id,
-                                        response.clone(),
-                                    ),
-                                };
+                                let completed = complete_pending_response(response.clone());
 
                                 if completed {
                                     info!("Completed pending delegate request");
@@ -363,16 +302,19 @@ impl ResponseHandler {
                                             continue;
                                         }
 
-                                        // Check if this is the boards data. A save reads it
-                                        // first to merge boards added by another tab; that
-                                        // read must not run the startup load path.
+                                        // Check if this is the startup boards load.
+                                        // Direct programmatic reads (`completed == true`)
+                                        // and save-merge reads must not re-run startup.
                                         if key.as_bytes() == BOARDS_STORAGE_KEY
+                                            && !completed
                                             && !crate::components::app::chat_delegate::BOARDS_READ_FOR_MERGE
                                                 .swap(false, std::sync::atomic::Ordering::SeqCst)
                                         {
                                             if let Some(boards_data) = value {
-                                                // Deserialize the boards data
-                                                match from_reader::<Boards, _>(&boards_data[..]) {
+                                                // Decode with per-board recovery support
+                                                match Boards::decode(&boards_data)
+                                                    .ok_or_else(|| "Boards::decode returned None".to_string())
+                                                {
                                                     Ok(loaded_boards) => {
                                                         let stored_pending: usize = loaded_boards
                                                             .map

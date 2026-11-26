@@ -111,9 +111,10 @@ fn init_logging(debug: bool, log_path: Option<&Path>) -> Result<Option<WorkerGua
         EnvFilter::from_default_env()
     };
 
+    use std::io::IsTerminal;
     let stderr_layer = fmt::layer()
         .with_writer(std::io::stderr)
-        .with_ansi(atty::is(atty::Stream::Stderr));
+        .with_ansi(std::io::stderr().is_terminal());
 
     let registry = Registry::default().with(filter).with(stderr_layer);
 

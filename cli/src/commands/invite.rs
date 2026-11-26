@@ -84,7 +84,8 @@ pub async fn execute(command: InviteCommands, api: ApiClient, format: OutputForm
             let nickname = match nickname {
                 Some(n) => n,
                 None => {
-                    if atty::is(atty::Stream::Stdin) {
+                    use std::io::IsTerminal;
+                    if std::io::stdin().is_terminal() {
                         dialoguer::Input::<String>::new()
                             .with_prompt("Enter your nickname")
                             .default("Anonymous".to_string())
