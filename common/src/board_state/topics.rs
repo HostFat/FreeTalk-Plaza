@@ -1308,9 +1308,6 @@ pub(crate) mod tests {
         AuthorizedConfigurationV1, Configuration,
     };
     use crate::board_state::member::{AuthorizedMember, Member};
-    use crate::board_state::roles::{
-        AuthorizedRole, AuthorizedRoleAssignment, Role, RoleAssignment,
-    };
     use crate::board_state::sections::{AuthorizedSectionV1, SectionV1};
     use crate::util::sign_struct;
     use std::time::SystemTime;

@@ -170,15 +170,42 @@ impl ComposableState for AuthorityRootStateV1 {
         parameters: &Self::Parameters,
         delta: &Option<Self::Delta>,
     ) -> Result<(), String> {
+        let last_transfer_ms = parent_state
+            .ownership
+            .transfers
+            .last()
+            .map(|t| crate::board_state::rate_limit::system_time_ms(t.transfer.transferred_at));
+
+        if let (Some(existing), Some(last_ms)) = (&self.0, last_transfer_ms) {
+            // An ownership transfer invalidates any commitment signed before it;
+            // drop it so the new owner can sign a fresh one.
+            if existing.root.epoch < last_ms {
+                self.0 = None;
+            }
+        }
+
         if let Some(root) = delta {
-            let candidate = AuthorityRootStateV1(Some(root.clone()));
-            candidate.verify_signature(parent_state, parameters)?;
-            let should_replace = match &self.0 {
-                Some(existing) => root.root.epoch > existing.root.epoch,
-                None => true,
-            };
-            if should_replace {
-                self.0 = Some(root.clone());
+            let owner_key = parent_state
+                .ownership
+                .owner_key_at(parameters, system_time_from_ms(root.root.epoch));
+            root.verify(&owner_key)?;
+
+            // Ignore a genuinely-signed historical root from before the latest
+            // ownership transfer (e.g. gossiped by a peer that has not seen the
+            // transfer yet) so merges remain commutative without resurrecting it.
+            let superseded = last_transfer_ms.is_some_and(|last_ms| root.root.epoch < last_ms);
+            if !superseded {
+                let should_replace = match &self.0 {
+                    Some(existing) => {
+                        root.root.epoch > existing.root.epoch
+                            || (root.root.epoch == existing.root.epoch
+                                && root.signature.to_bytes() < existing.signature.to_bytes())
+                    }
+                    None => true,
+                };
+                if should_replace {
+                    self.0 = Some(root.clone());
+                }
             }
         }
         // The tree may still change in `post_apply_cleanup` (a member can be
@@ -585,5 +612,103 @@ mod tests {
             .unwrap();
         assert!(proof.status.roles.is_empty());
         assert!(proof.status.bans.is_empty());
+    }
+
+    #[test]
+    fn ownership_transfer_drops_stale_root_and_merges_commutatively() {
+        use crate::board_state::admin::{Admin, AuthorizedAdmin};
+        use crate::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
+        use crate::board_state::ownership::{
+            AuthorizedOwnerTransfer, OutgoingOwnerAction, OwnerTransferV1, OwnershipDelta,
+        };
+        use crate::board_state::ChatBoardStateV1Delta;
+        use std::time::Duration;
+
+        let founder = SigningKey::from_bytes(&[1u8; 32]);
+        let next_owner = SigningKey::from_bytes(&[2u8; 32]);
+        let founder_id = MemberId::from(&founder.verifying_key());
+        let next_id = MemberId::from(&next_owner.verifying_key());
+        let params = ChatBoardParametersV1 {
+            owner: founder.verifying_key(),
+        };
+
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let t_transfer = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+
+        let mut base = ChatBoardStateV1 {
+            configuration: AuthorizedConfigurationV1::new(Configuration::default(), &founder),
+            mode: crate::board_state::BoardModeV1::SectionedTopicIndex,
+            ..Default::default()
+        };
+        base.members.members.push(member(2, &founder));
+        base.admin.admins.push(AuthorizedAdmin::new(
+            Admin {
+                member_id: next_id,
+                generation: 0,
+                signed_at: t0,
+            },
+            &founder,
+        ));
+        let tree = AuthorityTreeV1::from_board(&base);
+        let mut old_root_body = tree.root(1_500_000);
+        old_root_body.content_hash = tree.content_hash();
+        let old_root = AuthorizedAuthorityRootV1::new(old_root_body, &founder);
+        base.authority_root = AuthorityRootStateV1(Some(old_root.clone()));
+        base.verify(&base, &params).unwrap();
+
+        let transfer = AuthorizedOwnerTransfer::new(
+            OwnerTransferV1 {
+                from: founder_id,
+                to: next_id,
+                to_key: next_owner.verifying_key(),
+                generation: 1,
+                transferred_at: t_transfer,
+                outgoing: OutgoingOwnerAction::KeepAdmin,
+            },
+            &founder,
+        );
+
+        let mut transferred = base.clone();
+        transferred
+            .apply_delta(
+                &base,
+                &params,
+                &Some(ChatBoardStateV1Delta {
+                    ownership: Some(OwnershipDelta {
+                        transfers: vec![transfer],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .expect("transfer delta drops the former owner's stale root");
+        assert!(transferred.authority_root.0.is_none());
+        transferred.verify(&transferred, &params).unwrap();
+
+        // Commutative merge with a stale peer still carrying the pre-transfer root.
+        let mut ab = transferred.clone();
+        ab.merge(&transferred, &params, &base)
+            .expect("merging stale pre-transfer root into transferred state succeeds");
+        let mut ba = base.clone();
+        ba.merge(&base, &params, &transferred)
+            .expect("merging transferred state into stale state succeeds");
+        assert_eq!(ab, ba);
+        assert!(ab.authority_root.0.is_none());
+
+        // A deposed owner cannot forge a root dated at or after the transfer.
+        let mut forged_body = tree.root(2_500_000);
+        forged_body.content_hash = tree.content_hash();
+        let forged_root = AuthorizedAuthorityRootV1::new(forged_body, &founder);
+        let mut attempt = transferred.clone();
+        assert!(attempt
+            .apply_delta(
+                &transferred,
+                &params,
+                &Some(ChatBoardStateV1Delta {
+                    authority_root: Some(forged_root),
+                    ..Default::default()
+                }),
+            )
+            .is_err());
     }
 }
