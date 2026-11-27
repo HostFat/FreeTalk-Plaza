@@ -418,18 +418,9 @@ pub fn App() -> Element {
         }
     });
 
-    // Once the board state has settled, retire own uploads that no board
-    // references anymore.
-    use_effect(move || {
-        if *BOARDS_LOADED.read() {
-            crate::util::safe_spawn_local(async {
-                crate::util::sleep(std::time::Duration::from_secs(60)).await;
-                if CURRENT_BOARD.read().owner_key.is_some() {
-                    crate::util::owned_images::retire_unused(false);
-                }
-            });
-        }
-    });
+    // Automatic background image retirement was removed because topic posts
+    // live in separate contracts outside `BoardData`; users can still retire
+    // unpublished uploads manually from AuditView.
 
     // Developer flag for the topic-contract UI: `?topics=1` makes the next
     // boards keep an index instead of the legacy message list.

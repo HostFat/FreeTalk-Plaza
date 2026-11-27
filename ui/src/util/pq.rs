@@ -14,6 +14,7 @@ use ml_kem::{DecapsulationKey, EncapsulationKey, MlKem768};
 use plaza_core::board_state::member::MemberId;
 use plaza_core::board_state::pq_secrets::{PqSealedSecret, PqSuite, PQ_KEM_CT_LEN, PQ_KEM_EK_LEN};
 use sha2::{Digest, Sha512};
+use zeroize::Zeroize;
 
 const KDF_CONTEXT: &[u8] = b"freetalk plaza pq board secret v1";
 
@@ -28,14 +29,18 @@ pub fn kem_seed(self_sk: &SigningKey) -> [u8; 64] {
     let mut hasher = Sha512::new();
     hasher.update(b"freetalk plaza pq kem seed v1");
     hasher.update(self_sk.to_bytes());
-    let digest = hasher.finalize();
+    let mut digest = hasher.finalize();
     let mut seed = [0u8; 64];
     seed.copy_from_slice(&digest);
+    digest.as_mut_slice().zeroize();
     seed
 }
 
 pub fn decapsulation_key(self_sk: &SigningKey) -> DecapsulationKey<MlKem768> {
-    DecapsulationKey::<MlKem768>::from_seed(ml_kem::Seed::from(kem_seed(self_sk)))
+    let mut seed = kem_seed(self_sk);
+    let dk = DecapsulationKey::<MlKem768>::from_seed(ml_kem::Seed::from(seed));
+    seed.zeroize();
+    dk
 }
 
 /// FIPS 203 encoded encapsulation key (1184 bytes).
@@ -78,14 +83,18 @@ pub fn seal_secret(
     let mut combined = Vec::with_capacity(64);
     combined.extend_from_slice(x25519_shared.as_bytes());
     combined.extend_from_slice(kem_shared.as_slice());
-    let key = blake3::derive_key(
+    let mut key = blake3::derive_key(
         std::str::from_utf8(KDF_CONTEXT).expect("static context"),
         &combined,
     );
-    let nonce_bytes = crate::util::ecies::generate_board_secret();
+    combined.as_mut_slice().zeroize();
+    let mut nonce_bytes = crate::util::ecies::generate_board_secret();
     let mut nonce = [0u8; 24];
     nonce.copy_from_slice(&nonce_bytes[..24]);
-    let sealed = XChaCha20Poly1305::new((&key).into())
+    nonce_bytes.zeroize();
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    key.zeroize();
+    let sealed = cipher
         .encrypt(
             XNonce::from_slice(&nonce),
             Payload {
@@ -114,12 +123,15 @@ pub fn open_secret(self_sk: &SigningKey, sealed: &PqSealedSecret) -> Result<[u8;
         .decapsulate_slice(&sealed.kem_ciphertext)
         .map_err(|_| "Invalid ML-KEM ciphertext".to_string())?;
 
-    let combined = if matches!(sealed.suite, PqSuite::Hybrid) {
+    let mut combined = if matches!(sealed.suite, PqSuite::Hybrid) {
         let ephemeral = sealed
             .x25519_public
             .ok_or("Hybrid PQ secret is missing its X25519 key")?;
         let own_secret = crate::util::ecies::ed25519_to_x25519_private_key(self_sk);
         let x25519_shared = own_secret.diffie_hellman(&x25519_dalek::PublicKey::from(ephemeral));
+        if !x25519_shared.was_contributory() {
+            return Err("Non-contributory X25519 shared secret".to_string());
+        }
         let mut combined = Vec::with_capacity(64);
         combined.extend_from_slice(x25519_shared.as_bytes());
         combined.extend_from_slice(kem_shared.as_slice());
@@ -127,11 +139,14 @@ pub fn open_secret(self_sk: &SigningKey, sealed: &PqSealedSecret) -> Result<[u8;
     } else {
         kem_shared.as_slice().to_vec()
     };
-    let key = blake3::derive_key(
+    let mut key = blake3::derive_key(
         std::str::from_utf8(KDF_CONTEXT).expect("static context"),
         &combined,
     );
-    let plaintext = XChaCha20Poly1305::new((&key).into())
+    combined.as_mut_slice().zeroize();
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    key.zeroize();
+    let mut plaintext = cipher
         .decrypt(
             XNonce::from_slice(&sealed.nonce),
             Payload {
@@ -141,10 +156,12 @@ pub fn open_secret(self_sk: &SigningKey, sealed: &PqSealedSecret) -> Result<[u8;
         )
         .map_err(|_| "Could not open the PQ board secret".to_string())?;
     if plaintext.len() != 32 {
+        plaintext.as_mut_slice().zeroize();
         return Err("Unexpected PQ board secret length".to_string());
     }
     let mut secret = [0u8; 32];
     secret.copy_from_slice(&plaintext);
+    plaintext.as_mut_slice().zeroize();
     Ok(secret)
 }
 
@@ -225,5 +242,10 @@ mod tests {
 
         let other = SigningKey::from_bytes(&[8u8; 32]);
         assert!(open_secret(&other, &record).is_err());
+
+        let mut low_order = record.clone();
+        low_order.x25519_public = Some([0u8; 32]);
+        let err = open_secret(&sk, &low_order).unwrap_err();
+        assert!(err.contains("Non-contributory"));
     }
 }

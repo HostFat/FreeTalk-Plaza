@@ -77,9 +77,11 @@ pub fn merge_entries(current: &mut Vec<OwnedImage>, loaded: Vec<OwnedImage>) {
             .find(|existing| existing.image.instance == entry.image.instance)
         {
             Some(existing) => {
+                let was_published = existing.published || entry.published;
                 if entry.uploaded_at >= existing.uploaded_at {
                     *existing = entry;
                 }
+                existing.published = was_published;
             }
             None => current.push(entry),
         }
@@ -177,6 +179,7 @@ pub fn record(image: &ImageRef, copy: BlobCopy) {
             .collect(),
         uploaded_at: now_ms(),
         renewed_at: now_ms(),
+        published: false,
     };
     BOARDS.with_mut(|boards| {
         boards
@@ -188,6 +191,41 @@ pub fn record(image: &ImageRef, copy: BlobCopy) {
     });
     OWNED_IMAGES_DIRTY.store(true, Ordering::SeqCst);
     persist();
+}
+
+/// Mark uploaded images as published in a topic post so they are never treated
+/// as unreferenced drafts.
+pub fn mark_published(images: &[ImageRef]) {
+    if images.is_empty() {
+        return;
+    }
+    let mut published_ids = std::collections::HashSet::new();
+    for image in images {
+        published_ids.insert(image.instance);
+        if let Some(thumb) = &image.thumb {
+            published_ids.insert(thumb.instance);
+        }
+    }
+    let mut changed = false;
+    BOARDS.with_mut(|boards| {
+        for entry in &mut boards.owned_images {
+            if !entry.published
+                && (published_ids.contains(&entry.image.instance)
+                    || entry
+                        .image
+                        .thumb
+                        .as_ref()
+                        .is_some_and(|thumb| published_ids.contains(&thumb.instance)))
+            {
+                entry.published = true;
+                changed = true;
+            }
+        }
+    });
+    if changed {
+        OWNED_IMAGES_DIRTY.store(true, Ordering::SeqCst);
+        persist();
+    }
 }
 
 /// Newest first.
@@ -233,13 +271,16 @@ pub fn plaintext_for(instance: &[u8; 32]) -> Option<(Vec<u8>, String)> {
     Some((data, owned.image.mime.clone()))
 }
 
-/// Own uploads no board refers to anymore, older than `min_age_ms`.
+/// Own unpublished uploads no board refers to anymore, older than `min_age_ms`.
 pub fn unreferenced(min_age_ms: i64) -> Vec<OwnedImage> {
     let mut referenced = std::collections::HashSet::new();
     for board in BOARDS.read().map.values() {
         for pending in &board.pending_uploads {
             if let Some(image) = pending.image.as_ref() {
                 referenced.insert(image.instance);
+                if let Some(thumb) = &image.thumb {
+                    referenced.insert(thumb.instance);
+                }
             }
         }
     }
@@ -249,7 +290,8 @@ pub fn unreferenced(min_age_ms: i64) -> Vec<OwnedImage> {
         .owned_images
         .iter()
         .filter(|entry| {
-            !referenced.contains(&entry.image.instance)
+            !entry.published
+                && !referenced.contains(&entry.image.instance)
                 && now - entry.uploaded_at >= min_age_ms
         })
         .cloned()
@@ -459,6 +501,7 @@ mod tests {
             chunks: Vec::new(),
             uploaded_at,
             renewed_at: uploaded_at,
+            published: false,
         }
     }
 
@@ -470,6 +513,22 @@ mod tests {
         assert_eq!(current.len(), 2);
         assert_eq!(current[0].uploaded_at, 20);
         assert_eq!(current[1].image.instance, [2u8; 32]);
+    }
+
+    #[test]
+    fn merging_preserves_published_flag_monotonically() {
+        let mut published = entry(1, 10, 4);
+        published.published = true;
+        let mut current = vec![published];
+        merge_entries(&mut current, vec![entry(1, 20, 4)]);
+        assert_eq!(current.len(), 1);
+        assert!(current[0].published);
+
+        let mut legacy_entry = entry(2, 10, 4);
+        legacy_entry.published = true;
+        let mut current2 = vec![entry(2, 20, 4)];
+        merge_entries(&mut current2, vec![legacy_entry]);
+        assert!(current2[0].published);
     }
 
     #[test]

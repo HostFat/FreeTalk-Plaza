@@ -785,6 +785,7 @@ fn owned_images_are_saved_outside_the_boards_blob() {
         chunks: Vec::new(),
         uploaded_at: 1,
         renewed_at: 1,
+        published: true,
     };
     let boards = Boards {
         map: HashMap::new(),

@@ -147,7 +147,14 @@ impl BoardData {
                     .map(|m| m.member.member_vk)
             };
             let Some(member_vk) = member_vk else { continue };
-            let (ciphertext, nonce, ephemeral_key) = encrypt_secret_for_member(secret, &member_vk);
+            let Ok((ciphertext, nonce, ephemeral_key)) =
+                crate::util::ecies::try_encrypt_secret_for_member(secret, &member_vk)
+            else {
+                dioxus::logger::tracing::warn!(
+                    "Skipping category secret for member with invalid public key"
+                );
+                continue;
+            };
             let record = EncryptedSecretForMemberV1 {
                 member_id: *member_id,
                 secret_version: version,

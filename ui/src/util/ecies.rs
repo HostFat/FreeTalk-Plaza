@@ -28,6 +28,50 @@ fn ecies_aad(recipient: &VerifyingKey) -> Vec<u8> {
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256, Sha512};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519EphemeralSecret};
+use zeroize::Zeroize;
+
+/// Encrypts a plaintext message using ECIES, rejecting invalid or low-order
+/// recipient public keys that would yield a non-contributory shared secret.
+pub fn try_encrypt(
+    recipient_public_key: &VerifyingKey,
+    plaintext: &[u8],
+) -> Result<(Vec<u8>, [u8; 12], X25519PublicKey), String> {
+    // Generate an ephemeral keypair
+    let sender_private_key = X25519EphemeralSecret::random_from_rng(OsRng);
+    let sender_public_key = X25519PublicKey::from(&sender_private_key);
+
+    // Convert Ed25519 verifying key to X25519 public key
+    let recipient_x25519_public_key = try_ed25519_to_x25519_public_key(recipient_public_key)?;
+
+    // Derive shared secret using sender's private key and recipient's public key
+    let shared_secret = sender_private_key.diffie_hellman(&recipient_x25519_public_key);
+    if !shared_secret.was_contributory() {
+        return Err("Non-contributory X25519 shared secret".to_string());
+    }
+
+    // Use the shared secret to derive a symmetric key
+    let mut symmetric_key = Sha256::digest(shared_secret.as_bytes());
+
+    // Generate a random nonce
+    let nonce = rand::random::<[u8; 12]>();
+
+    // Encrypt the plaintext using AES-GCM
+    let cipher = Aes256Gcm::new_from_slice(&symmetric_key)
+        .map_err(|_| "Failed to create cipher".to_string());
+    symmetric_key.as_mut_slice().zeroize();
+    let cipher = cipher?;
+    let ciphertext = cipher
+        .encrypt(
+            &Nonce::from(nonce),
+            Payload {
+                msg: plaintext,
+                aad: &ecies_aad(recipient_public_key),
+            },
+        )
+        .map_err(|_| "encryption failure!".to_string())?;
+
+    Ok((ciphertext, nonce, sender_public_key))
+}
 
 /// Encrypts a plaintext message using ECIES (Elliptic Curve Integrated Encryption Scheme).
 /// Uses ed25519_dalek SigningKey and VerifyingKey because they're used elsewhere in the codebase.
@@ -48,35 +92,7 @@ pub fn encrypt(
     recipient_public_key: &VerifyingKey,
     plaintext: &[u8],
 ) -> (Vec<u8>, [u8; 12], X25519PublicKey) {
-    // Generate an ephemeral keypair
-    let sender_private_key = X25519EphemeralSecret::random_from_rng(OsRng);
-    let sender_public_key = X25519PublicKey::from(&sender_private_key);
-
-    // Convert Ed25519 verifying key to X25519 public key
-    let recipient_x25519_public_key = ed25519_to_x25519_public_key(recipient_public_key);
-
-    // Derive shared secret using sender's private key and recipient's public key
-    let shared_secret = sender_private_key.diffie_hellman(&recipient_x25519_public_key);
-
-    // Use the shared secret to derive a symmetric key
-    let symmetric_key = Sha256::digest(shared_secret.as_bytes());
-
-    // Generate a random nonce
-    let nonce = rand::random::<[u8; 12]>();
-
-    // Encrypt the plaintext using AES-GCM
-    let cipher = Aes256Gcm::new_from_slice(&symmetric_key).expect("Failed to create cipher");
-    let ciphertext = cipher
-        .encrypt(
-            &Nonce::from(nonce),
-            Payload {
-                msg: plaintext,
-                aad: &ecies_aad(recipient_public_key),
-            },
-        )
-        .expect("encryption failure!");
-
-    (ciphertext, nonce, sender_public_key)
+    try_encrypt(recipient_public_key, plaintext).expect("ECIES encryption failure")
 }
 
 pub(crate) fn try_ed25519_to_x25519_public_key(
@@ -85,6 +101,9 @@ pub(crate) fn try_ed25519_to_x25519_public_key(
     let ed_y = CompressedEdwardsY(ed25519_pk.to_bytes())
         .decompress()
         .ok_or_else(|| "Invalid Edwards point in recipient public key".to_string())?;
+    if ed_y.is_small_order() {
+        return Err("Small-order Edwards point in recipient public key".to_string());
+    }
     let mont_u = ed_y.to_montgomery().to_bytes();
     Ok(X25519PublicKey::from(mont_u))
 }
@@ -118,13 +137,18 @@ pub fn decrypt(
 
     // Derive shared secret using recipient's private key and sender's public key
     let shared_secret = recipient_x25519_private_key.diffie_hellman(sender_public_key);
+    if !shared_secret.was_contributory() {
+        return Err("Non-contributory X25519 shared secret".to_string());
+    }
 
     // Use the shared secret to derive the symmetric key
-    let symmetric_key = Sha256::digest(shared_secret.as_bytes());
+    let mut symmetric_key = Sha256::digest(shared_secret.as_bytes());
 
     // Decrypt the ciphertext using AES-GCM
     let cipher = Aes256Gcm::new_from_slice(&symmetric_key)
-        .map_err(|_| "Failed to create cipher".to_string())?;
+        .map_err(|_| "Failed to create cipher".to_string());
+    symmetric_key.as_mut_slice().zeroize();
+    let cipher = cipher?;
     cipher
         .decrypt(
             &Nonce::from(*nonce),
@@ -138,13 +162,16 @@ pub fn decrypt(
 
 #[allow(dead_code)]
 pub(crate) fn ed25519_to_x25519_private_key(ed25519_sk: &SigningKey) -> X25519EphemeralSecret {
-    let h = Sha512::digest(ed25519_sk.to_bytes());
+    let mut h = Sha512::digest(ed25519_sk.to_bytes());
     let mut key = [0u8; 32];
     key.copy_from_slice(&h[..32]);
+    h.as_mut_slice().zeroize();
     key[0] &= 248;
     key[31] &= 127;
     key[31] |= 64;
-    X25519EphemeralSecret::from(key)
+    let secret = X25519EphemeralSecret::from(key);
+    key.zeroize();
+    secret
 }
 
 // ============================================================================
@@ -251,6 +278,15 @@ pub fn generate_board_secret() -> [u8; 32] {
 /// * The encrypted secret (ciphertext).
 /// * A 12-byte nonce.
 /// * The ephemeral X25519 public key.
+/// Encrypts a board secret for a specific member using ECIES, returning an
+/// error if the recipient public key is invalid or low-order.
+pub fn try_encrypt_secret_for_member(
+    secret: &[u8; 32],
+    member_public_key: &VerifyingKey,
+) -> Result<(Vec<u8>, [u8; 12], X25519PublicKey), String> {
+    try_encrypt(member_public_key, secret)
+}
+
 #[allow(dead_code)]
 pub fn encrypt_secret_for_member(
     secret: &[u8; 32],
@@ -278,17 +314,20 @@ pub fn decrypt_secret_from_member_blob(
     ephemeral_sender_key: &X25519PublicKey,
     member_private_key: &SigningKey,
 ) -> Result<[u8; 32], String> {
-    let decrypted = decrypt(member_private_key, ephemeral_sender_key, ciphertext, nonce)?;
+    let mut decrypted = decrypt(member_private_key, ephemeral_sender_key, ciphertext, nonce)?;
 
     if decrypted.len() != 32 {
+        let len = decrypted.len();
+        decrypted.as_mut_slice().zeroize();
         return Err(format!(
             "Decrypted secret has invalid length: {} (expected 32)",
-            decrypted.len()
+            len
         ));
     }
 
     let mut secret = [0u8; 32];
     secret.copy_from_slice(&decrypted);
+    decrypted.as_mut_slice().zeroize();
     Ok(secret)
 }
 
@@ -528,5 +567,23 @@ mod tests {
 
         let result = unseal_bytes(&sealed, Some(&key2));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ecies_rejects_low_order_keys() {
+        let mut rng = OsRng;
+        let recipient_sk = SigningKey::generate(&mut rng);
+        let low_order_ephemeral = X25519PublicKey::from([0u8; 32]);
+        let err = decrypt(&recipient_sk, &low_order_ephemeral, &[0u8; 16], &[0u8; 12])
+            .expect_err("zero X25519 ephemeral key must fail");
+        assert!(err.contains("Non-contributory"));
+
+        // The Ed25519 identity point (y = 1) has small order 1.
+        let mut identity_bytes = [0u8; 32];
+        identity_bytes[0] = 1;
+        let identity_vk = VerifyingKey::from_bytes(&identity_bytes).expect("identity point");
+        let err = try_encrypt(&identity_vk, b"secret")
+            .expect_err("small-order Ed25519 recipient key must fail");
+        assert!(err.contains("Small-order"));
     }
 }

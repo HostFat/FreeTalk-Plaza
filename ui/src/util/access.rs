@@ -292,8 +292,7 @@ pub fn create_role(
     scope.dedup();
     with_admin_board(|data, signing_key, board_key, signer_id| {
         let mut id: RoleId = [0u8; 16];
-        let random = SigningKey::generate(&mut rand::thread_rng());
-        id.copy_from_slice(&random.to_bytes()[..16]);
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
 
         let role = Role {
             id,
@@ -619,9 +618,9 @@ pub fn create_invite_link(
             return Err("Role not found".to_string());
         }
 
-        let token_key = SigningKey::generate(&mut rand::thread_rng());
+        let token_key = SigningKey::generate(&mut rand::rngs::OsRng);
         let mut id: TokenId = [0u8; 16];
-        id.copy_from_slice(&token_key.to_bytes()[..16]);
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
 
         let token = InviteToken {
             id,

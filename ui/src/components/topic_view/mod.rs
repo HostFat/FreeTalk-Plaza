@@ -899,14 +899,14 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                                             let decoded = sealed_content.as_ref().and_then(|sealed| {
                                                 topic_contract::read_post_content(&board_data, sealed)
                                             });
-                                            let html = match &decoded {
+                                            let (html, poll_title) = match &decoded {
                                                 Some(TopicPostContentV1::Text(text)) if !text.trim().is_empty() => {
-                                                    mention_dir.render_html(text, Some(self_id))
+                                                    (mention_dir.render_html(text, Some(self_id)), None)
                                                 }
                                                 Some(TopicPostContentV1::Poll(poll)) => {
-                                                    format!("<p>[Poll: {}]</p>", poll.title)
+                                                    (String::new(), Some(poll.title.clone()))
                                                 }
-                                                _ => String::new(),
+                                                _ => (String::new(), None),
                                             };
                                             let post_images = post.post.images.clone();
                                             rsx! {
@@ -923,6 +923,10 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                                                         div {
                                                             class: "mt-1 prose-message text-text",
                                                             dangerous_inner_html: "{html}",
+                                                        }
+                                                    } else if let Some(poll_title) = poll_title {
+                                                        div { class: "mt-1 prose-message text-text",
+                                                            p { "[Poll: {poll_title}]" }
                                                         }
                                                     }
                                                     if !post_images.is_empty() {

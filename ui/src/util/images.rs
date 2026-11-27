@@ -93,9 +93,12 @@ pub fn image_object_url(bytes: &[u8], mime: &str) -> Option<String> {
     web_sys::Url::create_object_url_with_blob(&blob).ok()
 }
 
-/// Prepared images already uploaded in this page session, keyed by the
-/// plaintext hash. Reusing one avoids a second set of PUTs.
-static UPLOADED_IMAGES: LazyLock<Mutex<HashMap<[u8; 32], ([u8; 32], u32)>>> =
+/// Prepared images already uploaded in this page session, keyed by
+/// `(plaintext_sha, uploader_vk, owner_founding, owner_current)` so unsealed
+/// uploads are never reused across different boards or identities.
+type UploadCacheKey = ([u8; 32], [u8; 32], [u8; 32], [u8; 32]);
+
+static UPLOADED_IMAGES: LazyLock<Mutex<HashMap<UploadCacheKey, ([u8; 32], u32)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Blob contracts whose PUT the node has not acknowledged yet. The upload is
@@ -170,13 +173,19 @@ pub async fn upload_image(
     progress: Option<&dyn Fn(usize, usize)>,
 ) -> Result<([u8; 32], [u8; 32], u32, Option<BlobCopy>), String> {
     let plaintext_sha = image_sha256(&bytes);
+    let cache_key: UploadCacheKey = (
+        plaintext_sha,
+        uploader.verifying_key().to_bytes(),
+        owner_founding.to_bytes(),
+        owner_current.to_bytes(),
+    );
     let size = bytes.len() as u32;
-    // The same file attached twice reuses the contract from this session.
+    // The same file attached twice on the same board reuses the contract from this session.
     if secret.is_none() {
         if let Some((instance, size)) = UPLOADED_IMAGES
             .lock()
             .ok()
-            .and_then(|uploaded| uploaded.get(&plaintext_sha).copied())
+            .and_then(|uploaded| uploaded.get(&cache_key).copied())
         {
             return Ok((instance, plaintext_sha, size, None));
         }
@@ -219,7 +228,7 @@ pub async fn upload_image(
                         if let Some(progress) = progress {
                             progress(size as usize, size as usize);
                         }
-                        remember_upload(secret, plaintext_sha, instance, size);
+                        remember_upload(secret, cache_key, instance, size);
                         return Ok((instance, plaintext_sha, size, None));
                     }
                 }
@@ -238,7 +247,7 @@ pub async fn upload_image(
             progress(size as usize, size as usize);
         }
         info!("Uploaded image blob {instance:?} ({} bytes)", state.stored_len());
-        remember_upload(secret, plaintext_sha, instance, size);
+        remember_upload(secret, cache_key, instance, size);
         return Ok((instance, plaintext_sha, size, Some(copy)));
     }
 
@@ -287,6 +296,7 @@ pub async fn upload_image(
         if let Ok(state) = fetch_blob_state(manifest_instance).await {
             if let Ok(blob) = ciborium::de::from_reader::<BlobStateV1, &[u8]>(&state[..]) {
                 if blob.is_manifest() && blob.chunks == refs {
+                    remember_upload(secret, cache_key, manifest_instance, size);
                     return Ok((manifest_instance, plaintext_sha, size, None));
                 }
             }
@@ -364,13 +374,13 @@ pub async fn upload_image(
         progress(total_bytes, total_bytes);
     }
     info!("Uploaded image manifest {instance:?}");
-    remember_upload(secret, plaintext_sha, instance, size);
+    remember_upload(secret, cache_key, instance, size);
     Ok((instance, plaintext_sha, size, Some(copy)))
 }
 
 fn remember_upload(
     secret: Option<([u8; 32], u32)>,
-    plaintext_sha: [u8; 32],
+    cache_key: UploadCacheKey,
     instance: [u8; 32],
     size: u32,
 ) {
@@ -378,7 +388,7 @@ fn remember_upload(
         return;
     }
     if let Ok(mut uploaded) = UPLOADED_IMAGES.lock() {
-        uploaded.insert(plaintext_sha, (instance, size));
+        uploaded.insert(cache_key, (instance, size));
     }
 }
 
@@ -757,8 +767,28 @@ fn candidate_secrets() -> Vec<([u8; 32], u32)> {
 /// Fetch the manifest's chunks one by one, verify each piece, then reassemble,
 /// decrypt and verify the whole image.
 fn start_chunk_load(instance: [u8; 32], expected: [u8; 32], manifest: BlobStateV1) {
+    if manifest.chunks.is_empty() || manifest.chunks.len() > MAX_CHUNKS {
+        fail_image(
+            instance,
+            format!("invalid chunk count ({})", manifest.chunks.len()),
+        );
+        return;
+    }
+    let mut declared_total: usize = 0;
+    for chunk in &manifest.chunks {
+        if chunk.bytes == 0 || chunk.bytes as usize > CHUNK_BYTES {
+            fail_image(instance, "invalid chunk size in manifest".to_string());
+            return;
+        }
+        declared_total = declared_total.saturating_add(chunk.bytes as usize);
+    }
+    if declared_total > MAX_CHUNKS.saturating_mul(CHUNK_BYTES) {
+        fail_image(instance, "manifest exceeds maximum image size".to_string());
+        return;
+    }
+
     crate::util::safe_spawn_local(async move {
-        let mut all = Vec::new();
+        let mut all = Vec::with_capacity(declared_total);
         // Three chunk downloads in flight at a time.
         for batch in manifest.chunks.chunks(3) {
             let futures = batch.iter().map(|chunk| async move {
@@ -916,7 +946,7 @@ pub async fn retire_in_contract(instance: [u8; 32]) -> Result<(), String> {
             let retired = BlobStateV1::retired_by(
                 &chunk_state,
                 chunk_content,
-                &board.self_sk,
+                &signing_key,
                 role,
             );
             if let Err(error) = send_retirement(chunk.instance, &retired).await {

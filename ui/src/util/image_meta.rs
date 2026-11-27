@@ -29,29 +29,37 @@ fn strip_jpeg(data: &[u8]) -> Vec<u8> {
             out.extend_from_slice(&data[i..]);
             return out;
         }
-        let marker = data[i + 1];
-        if marker == 0xD9 {
-            out.extend_from_slice(&data[i..]);
+        let start = i;
+        while i < data.len() && data[i] == 0xFF {
+            i += 1;
+        }
+        if i >= data.len() {
+            out.extend_from_slice(&data[start..]);
             return out;
         }
-        if marker == 0xDA {
-            // Start of scan: the rest is entropy-coded data.
-            out.extend_from_slice(&data[i..]);
+        let marker = data[i];
+        if marker == 0xD9 || marker == 0xDA {
+            // EOI or Start of scan: the rest is entropy-coded data.
+            out.extend_from_slice(&data[start..]);
             return out;
         }
-        if marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
-            out.extend_from_slice(&data[i..i + 2]);
-            i += 2;
+        if marker == 0x00 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) || marker == 0xD8 {
+            out.extend_from_slice(&data[start..i + 1]);
+            i += 1;
             continue;
         }
-        if i + 4 > data.len() {
-            out.extend_from_slice(&data[i..]);
+        if i + 3 > data.len() {
+            out.extend_from_slice(&data[start..]);
             return out;
         }
-        let length = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-        let end = (i + 2 + length).min(data.len());
+        let length = u16::from_be_bytes([data[i + 1], data[i + 2]]) as usize;
+        if length < 2 {
+            out.extend_from_slice(&data[start..]);
+            return out;
+        }
+        let end = i.saturating_add(1).saturating_add(length).min(data.len());
         if !matches!(marker, 0xE1 | 0xED | 0xFE) {
-            out.extend_from_slice(&data[i..end]);
+            out.extend_from_slice(&data[start..end]);
         }
         i = end;
     }
@@ -67,7 +75,11 @@ fn strip_png(data: &[u8]) -> Vec<u8> {
     while i + 8 <= data.len() {
         let length = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize;
         let kind = &data[i + 4..i + 8];
-        let end = (i + 12 + length).min(data.len());
+        let Some(end) = i.checked_add(12).and_then(|v| v.checked_add(length)) else {
+            out.extend_from_slice(&data[i..]);
+            return out;
+        };
+        let end = end.min(data.len());
         let drop = matches!(kind, b"eXIf" | b"tEXt" | b"zTXt" | b"iTXt" | b"tIME");
         if !drop {
             out.extend_from_slice(&data[i..end]);
@@ -92,7 +104,14 @@ fn strip_webp(data: &[u8]) -> Vec<u8> {
         let kind = &data[i..i + 4];
         let size =
             u32::from_le_bytes([data[i + 4], data[i + 5], data[i + 6], data[i + 7]]) as usize;
-        let end = (i + 8 + size + (size & 1)).min(data.len());
+        let Some(end) = i
+            .checked_add(8)
+            .and_then(|v| v.checked_add(size))
+            .and_then(|v| v.checked_add(size & 1))
+        else {
+            break;
+        };
+        let end = end.min(data.len());
         if kind != b"EXIF" && kind != b"XMP " {
             out.extend_from_slice(&data[i..end]);
         }
@@ -132,6 +151,16 @@ mod tests {
         ]));
     }
 
+    #[test]
+    fn jpeg_drops_exif_preceded_by_fill_bytes() {
+        let mut data = vec![0xFF, 0xD8];
+        data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xE1, 0x00, 0x06, 1, 2, 3, 4]);
+        data.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x04, 7, 7, 1, 2, 0xFF, 0xD9]);
+        let stripped = strip_metadata(&data).expect("jpeg");
+        assert!(!stripped.windows(2).any(|w| w == [0xFF, 0xE1]));
+        assert!(stripped.ends_with(&[0xFF, 0xDA, 0x00, 0x04, 7, 7, 1, 2, 0xFF, 0xD9]));
+    }
+
     fn png_chunk(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
@@ -157,6 +186,21 @@ mod tests {
         assert!(stripped.windows(4).any(|w| w == b"acTL"));
         assert!(stripped.windows(4).any(|w| w == b"IDAT"));
         assert!(stripped.windows(4).any(|w| w == b"IEND"));
+    }
+
+    #[test]
+    fn png_and_webp_handle_max_u32_chunk_lengths_without_overflow() {
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&u32::MAX.to_be_bytes());
+        png.extend_from_slice(b"tEXt");
+        png.extend_from_slice(&[0u8; 8]);
+        let _ = strip_metadata(&png).expect("png");
+
+        let mut webp = b"RIFF\x18\x00\x00\x00WEBP".to_vec();
+        webp.extend_from_slice(b"EXIF");
+        webp.extend_from_slice(&u32::MAX.to_le_bytes());
+        webp.extend_from_slice(&[0u8; 8]);
+        let _ = strip_metadata(&webp).expect("webp");
     }
 
     fn webp_chunk(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {

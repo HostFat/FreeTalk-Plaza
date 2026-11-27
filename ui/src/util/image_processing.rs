@@ -74,7 +74,7 @@ pub async fn prepare_image(file: &web_sys::File, mode: ImageMode) -> Result<Prep
         } else {
             declared
         };
-        let bytes = if mode == ImageMode::StripMetadata {
+        let bytes = if mode != ImageMode::KeepOriginal {
             crate::util::image_meta::strip_metadata(&bytes).unwrap_or(bytes)
         } else {
             bytes
@@ -428,7 +428,14 @@ fn is_animated_webp(bytes: &[u8]) -> bool {
         }
         let size = u32::from_le_bytes([bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7]])
             as usize;
-        i += 8 + size + (size & 1);
+        let Some(next) = i
+            .checked_add(8)
+            .and_then(|v| v.checked_add(size))
+            .and_then(|v| v.checked_add(size & 1))
+        else {
+            return false;
+        };
+        i = next;
     }
     false
 }
