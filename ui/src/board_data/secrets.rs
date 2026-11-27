@@ -737,7 +737,9 @@ impl BoardData {
             return false;
         }
         self.ensure_pq_key();
-        let owner_id = MemberId::from(&self.owner_vk);
+        let founding_owner_id = MemberId::from(&self.owner_vk);
+        let current_owner_vk = self.current_owner_key();
+        let current_owner_id = MemberId::from(&current_owner_vk);
         let mut sets = Vec::new();
 
         for (category_id, category) in categories {
@@ -747,7 +749,9 @@ impl BoardData {
             let readers = self.category_readers(&category);
             let mut recipients = Vec::new();
             for member_id in readers {
-                let verifying_key = if member_id == owner_id {
+                let verifying_key = if member_id == current_owner_id {
+                    Some(current_owner_vk)
+                } else if member_id == founding_owner_id {
                     Some(self.owner_vk)
                 } else {
                     self.board_state
@@ -832,25 +836,31 @@ impl BoardData {
             if sealed.is_empty() {
                 continue;
             }
-            let self_id = MemberId::from(&self.self_sk.verifying_key());
-            sets.push(
-                AuthorizedPqSecretSet::new(
-                    PqSecretSet {
-                        scope: PqScope::Category(category_id),
-                        version: next_set_version,
-                        secret_version,
-                        secrets: sealed,
-                        signed_at: chrono::Utc::now().timestamp_millis(),
-                    },
-                    &self.self_sk,
-                )
-                .with_optional_authority(
+            let signing_key = if self.is_current_owner() {
+                self.owner_key()
+            } else {
+                &self.self_sk
+            };
+            let signer_id = MemberId::from(&signing_key.verifying_key());
+            let mut set = AuthorizedPqSecretSet::new(
+                PqSecretSet {
+                    scope: PqScope::Category(category_id),
+                    version: next_set_version,
+                    secret_version,
+                    secrets: sealed,
+                    signed_at: chrono::Utc::now().timestamp_millis(),
+                },
+                signing_key,
+            );
+            if !self.is_current_owner() {
+                set = set.with_optional_authority(
                     plaza_core::board_state::roles::distributor_authority_proof(
                         &self.board_state,
-                        &self_id,
+                        &signer_id,
                     ),
-                ),
-            );
+                );
+            }
+            sets.push(set);
         }
 
         if sets.is_empty() {
@@ -874,10 +884,13 @@ impl BoardData {
         let Some((secret, secret_version)) = self.get_secret().map(|(s, v)| (*s, v)) else {
             return false;
         };
+        let founding_owner_id = MemberId::from(&self.owner_vk);
+        let current_owner_vk = self.current_owner_key();
+        let current_owner_id = MemberId::from(&current_owner_vk);
         if self
             .board_state
             .pq_secrets
-            .key_for(MemberId::from(&self.owner_vk))
+            .key_for(current_owner_id)
             .is_none()
         {
             self.ensure_pq_key();
@@ -890,14 +903,15 @@ impl BoardData {
             .iter()
             .map(|member| MemberId::from(&member.member.member_vk))
             .collect();
-        live.push(MemberId::from(&self.owner_vk));
+        live.push(current_owner_id);
         live.sort_by_key(|member| member.0 .0);
         live.dedup();
 
-        let owner_id = MemberId::from(&self.owner_vk);
         let mut recipients = Vec::new();
         for member_id in live {
-            let verifying_key = if member_id == owner_id {
+            let verifying_key = if member_id == current_owner_id {
+                Some(current_owner_vk)
+            } else if member_id == founding_owner_id {
                 Some(self.owner_vk)
             } else {
                 self.board_state
@@ -982,7 +996,7 @@ impl BoardData {
         if sealed.is_empty() {
             return false;
         }
-        let self_id = MemberId::from(&self.self_sk.verifying_key());
+        let owner_sk = self.owner_key();
         let set = AuthorizedPqSecretSet::new(
             PqSecretSet {
                 scope: PqScope::Board,
@@ -991,12 +1005,8 @@ impl BoardData {
                 secrets: sealed,
                 signed_at: chrono::Utc::now().timestamp_millis(),
             },
-            &self.self_sk,
-        )
-        .with_optional_authority(plaza_core::board_state::roles::admin_authority_proof(
-            &self.board_state,
-            &self_id,
-        ));
+            owner_sk,
+        );
         self.apply_pq_delta(PqSecretsDelta {
             keys: vec![],
             sets: vec![set],

@@ -13,6 +13,7 @@ pub fn SearchView() -> Element {
 
 #[component]
 fn TopicSearchView() -> Element {
+    let navigator = navigator();
     let mut query = use_signal(String::new);
     let mut author = use_signal(String::new);
     let mut section_index = use_signal(|| 0usize);
@@ -32,6 +33,12 @@ fn TopicSearchView() -> Element {
             .cloned()
             .map(|board| board.with_merged_topics())
     });
+    // Keep the persistent local archive index up to date with every loaded page.
+    use_effect(move || {
+        if let Some(board_data) = board.read().as_ref() {
+            crate::components::app::search_index::record_board_topics(board_data);
+        }
+    });
     // Search scans loaded topic manifests/pages plus the persisted delegate
     // archive index without fetching every page or member/profile shard up
     // front. Only when the user types an Author filter do we load profile
@@ -47,12 +54,56 @@ fn TopicSearchView() -> Element {
             crate::components::app::profile_contract::load_all_profile_shards(owner).await;
         });
     });
+    // Lazily fetch member/profile shards for authors of topics on the active board
+    // when a search query is active.
+    use_effect(move || {
+        let q = query.read().trim().to_lowercase();
+        let a = author.read().trim().to_lowercase();
+        if q.is_empty() && a.is_empty() {
+            return;
+        }
+        let Some(board_data) = board.read().clone() else {
+            return;
+        };
+        let owner = board_data.owner_vk;
+        let hit_authors: Vec<MemberId> = board_data
+            .board_state
+            .topics
+            .entries
+            .iter()
+            .filter(|entry| {
+                let title = topic_contract::read_text(&board_data, &entry.entry.title)
+                    .unwrap_or_default()
+                    .to_lowercase();
+                let preview = topic_contract::read_text(&board_data, &entry.entry.preview)
+                    .unwrap_or_default()
+                    .to_lowercase();
+                q.is_empty() || title.contains(&q) || preview.contains(&q)
+            })
+            .map(|entry| entry.entry.author)
+            .take(100)
+            .collect();
+        if hit_authors.is_empty() {
+            return;
+        }
+        crate::util::safe_spawn_local(async move {
+            crate::components::app::member_contract::load_member_shards_for(
+                owner,
+                hit_authors.iter().copied(),
+            )
+            .await;
+            crate::components::app::profile_contract::load_profile_shards_for(
+                owner,
+                hit_authors,
+            )
+            .await;
+        });
+    });
+
     let Some(board_data) = board.read().clone() else {
         return rsx! {};
     };
     let owner = board_data.owner_vk;
-    // Keep the persistent local archive index up to date with every loaded page.
-    crate::components::app::search_index::record_board_topics(&board_data);
     let archived_count = crate::components::app::search_index::count_for(owner);
 
     let mut sections: Vec<_> = board_data
@@ -206,28 +257,8 @@ fn TopicSearchView() -> Element {
     }
     hits.truncate(100);
 
-    // Lazily fetch member/profile shards only for authors of visible hits.
-    {
-        let hit_authors: Vec<MemberId> = hits.iter().map(|hit| hit.6).collect();
-        if !hit_authors.is_empty() {
-            crate::util::safe_spawn_local(async move {
-                crate::components::app::member_contract::load_member_shards_for(
-                    owner,
-                    hit_authors.iter().copied(),
-                )
-                .await;
-                crate::components::app::profile_contract::load_profile_shards_for(
-                    owner,
-                    hit_authors,
-                )
-                .await;
-            });
-        }
-    }
-
     let has_more_pages = crate::components::app::section_contract::has_more_pages(owner);
     let board_id = bs58::encode(board_data.owner_vk.as_bytes()).into_string();
-    let navigator = navigator();
 
     rsx! {
         div { class: "flex-1 flex flex-col min-w-0 min-h-0 bg-bg",

@@ -23,15 +23,16 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
     board_data.ensure_can_write()?;
 
     let self_id = MemberId::from(&board_data.self_sk.verifying_key());
-    let owner_id = MemberId::from(&current_board);
-    if member_to_ban == self_id || member_to_ban == owner_id {
-        return Err("You cannot ban yourself.".to_string());
+    let founding_owner_id = MemberId::from(&current_board);
+    let current_owner_id = board_data.current_owner_id();
+    if member_to_ban == self_id || member_to_ban == current_owner_id {
+        return Err("You cannot ban yourself or the current board owner.".to_string());
     }
 
     // The owner signs with the owner key; an admin signs as its profile.
     let (signing_key, signer) = board_data.management_signer();
     let board_state_clone = board_data.board_state.clone();
-    let banned_by = signer.unwrap_or_else(|| MemberId::from(&current_board));
+    let banned_by = signer.unwrap_or(current_owner_id);
     let params = ChatBoardParametersV1 {
         owner: current_board,
     };
@@ -110,7 +111,8 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
         })
         .map(|entry| {
             // The revocation must name this signer; `new` would claim the
-            // owner signed it and fail verification for an admin.
+            // founding owner signed it and fail verification for an admin or
+            // a post-handover owner.
             let assignment = plaza_core::board_state::roles::RoleAssignment {
                 role_id: entry.assignment.role_id,
                 member_id: member_to_ban,
@@ -119,8 +121,15 @@ pub async fn ban_member(member_to_ban: MemberId, duration_days: Option<i64>) -> 
                 signed_at: get_current_system_time(),
             };
             match signer {
-                None => plaza_core::board_state::roles::AuthorizedRoleAssignment::new(
+                None if current_owner_id == founding_owner_id => {
+                    plaza_core::board_state::roles::AuthorizedRoleAssignment::new(
+                        assignment,
+                        &signing_key,
+                    )
+                }
+                None => plaza_core::board_state::roles::AuthorizedRoleAssignment::signed_by(
                     assignment,
+                    current_owner_id,
                     &signing_key,
                 ),
                 Some(self_id) => {

@@ -472,12 +472,12 @@ pub fn mentions_member(text: &str, member_id: MemberId, nickname: &str) -> bool 
     let mut from = 0;
     while let Some(offset) = lower[from..].find(&needle) {
         let start = from + offset;
-        let before_ok = text[..start]
+        let before_ok = lower[..start]
             .chars()
             .next_back()
             .map(|ch| !ch.is_alphanumeric() && ch != '_' && ch != '@')
             .unwrap_or(true);
-        let after_ok = text[start + needle.len()..]
+        let after_ok = lower[start + needle.len()..]
             .chars()
             .next()
             .map(|ch| !ch.is_alphanumeric() && ch != '_')

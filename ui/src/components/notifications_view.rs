@@ -62,6 +62,7 @@ fn current_permission_label() -> String {
 
 #[component]
 fn TopicNotificationsView() -> Element {
+    let navigator = navigator();
     let mut loading_pages = use_signal(|| false);
     let board = use_memo(move || {
         let current = CURRENT_BOARD.read().owner_key?;
@@ -72,6 +73,57 @@ fn TopicNotificationsView() -> Element {
             .cloned()
             .map(|board| board.with_merged_topics())
     });
+
+    // Lazily fetch member/profile shards for authors of unread topics inside an effect.
+    use_effect(move || {
+        let Some(board_data) = board.read().clone() else {
+            return;
+        };
+        if board_data.notification_mode == crate::board_data::NotificationMode::Muted {
+            return;
+        }
+        let owner = board_data.owner_vk;
+        let unread_authors: Vec<MemberId> = board_data
+            .board_state
+            .topics
+            .entries
+            .iter()
+            .filter(|entry| {
+                !board_data.board_state.topics.is_hidden(&entry.entry.topic_id)
+                    && board_data
+                        .board_state
+                        .topics
+                        .merged_into(&entry.entry.topic_id)
+                        .is_none()
+            })
+            .filter_map(|entry| {
+                let topic_id = entry.entry.topic_id;
+                let last_at = board_data
+                    .board_state
+                    .topics
+                    .activity_for(&topic_id)
+                    .map(|activity| activity.activity.last_activity)
+                    .unwrap_or(entry.entry.created_at);
+                (last_at > board_data.topic_last_read(&topic_id)).then_some(entry.entry.author)
+            })
+            .collect();
+        if unread_authors.is_empty() {
+            return;
+        }
+        crate::util::safe_spawn_local(async move {
+            crate::components::app::member_contract::load_member_shards_for(
+                owner,
+                unread_authors.iter().copied(),
+            )
+            .await;
+            crate::components::app::profile_contract::load_profile_shards_for(
+                owner,
+                unread_authors,
+            )
+            .await;
+        });
+    });
+
     let Some(board_data) = board.read().clone() else {
         return rsx! {};
     };
@@ -124,42 +176,30 @@ fn TopicNotificationsView() -> Element {
     };
     unread.sort_by_key(|entry| std::cmp::Reverse(entry.3));
 
-    // Lazily fetch member/profile shards only for authors of visible unread topics.
-    {
-        let unread_authors: Vec<MemberId> = unread.iter().map(|entry| entry.5).collect();
-        if !unread_authors.is_empty() {
-            crate::util::safe_spawn_local(async move {
-                crate::components::app::member_contract::load_member_shards_for(
-                    owner,
-                    unread_authors.iter().copied(),
-                )
-                .await;
-                crate::components::app::profile_contract::load_profile_shards_for(
-                    owner,
-                    unread_authors,
-                )
-                .await;
-            });
-        }
-    }
-
     let has_more_pages = crate::components::app::section_contract::has_more_pages(owner);
     let board_id = bs58::encode(board_data.owner_vk.as_bytes()).into_string();
     let result_board = board_id.clone();
-    let navigator = navigator();
     let mark_all = {
-        let entries = board_data.board_state.topics.entries.clone();
+        let marks: Vec<(plaza_core::board_state::message::MessageId, i64)> = board_data
+            .board_state
+            .topics
+            .entries
+            .iter()
+            .map(|entry| {
+                let last_at = board_data
+                    .board_state
+                    .topics
+                    .activity_for(&entry.entry.topic_id)
+                    .map(|activity| activity.activity.last_activity)
+                    .unwrap_or(entry.entry.created_at);
+                (entry.entry.topic_id, last_at)
+            })
+            .collect();
         move |_| {
             BOARDS.with_mut(|boards| {
                 if let Some(board) = boards.map.get_mut(&owner) {
-                    for entry in &entries {
-                        let last_at = board
-                            .board_state
-                            .topics
-                            .activity_for(&entry.entry.topic_id)
-                            .map(|activity| activity.activity.last_activity)
-                            .unwrap_or(entry.entry.created_at);
-                        board.mark_topic_read(entry.entry.topic_id, last_at);
+                    for &(topic_id, last_at) in &marks {
+                        board.mark_topic_read(topic_id, last_at);
                     }
                 }
             });

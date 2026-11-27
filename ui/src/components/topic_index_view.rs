@@ -40,6 +40,17 @@ pub fn TopicIndexView(board_id: String) -> Element {
             .map(|board| board.with_merged_topics())
     });
 
+    let mut last_board_key = use_signal(|| CURRENT_BOARD.read().owner_key);
+    use_effect(move || {
+        let current_key = CURRENT_BOARD.read().owner_key;
+        if *last_board_key.peek() != current_key {
+            last_board_key.set(current_key);
+            section_choice.set(None);
+            active_section_filter.set(None);
+            page.set(0);
+        }
+    });
+
     // Lazily load only the member and profile shard buckets for authors visible
     // in the loaded topic index, and keep the persistent local search archive
     // updated with every loaded page.

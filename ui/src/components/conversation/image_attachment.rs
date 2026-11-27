@@ -160,7 +160,7 @@ pub fn ImageAttachment(
 
     use_effect(move || {
         // NSFW images always need a click, even when auto-load is on.
-        let auto = *crate::util::images::AUTO_LOAD_CURRENT.read();
+        let auto = *crate::util::images::AUTO_LOAD_IMAGES.read();
         if auto && !nsfw && !opened() {
             opened.set(true);
             request_image(instance, expected);

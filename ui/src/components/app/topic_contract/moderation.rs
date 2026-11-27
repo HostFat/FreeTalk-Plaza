@@ -628,11 +628,11 @@ pub(super) fn authority_from_board(
             root.root.digest == digest && root.root.content_hash == content_hash
         })
         .or_else(|| {
-            board.owner_sk.as_ref().map(|owner_sk| {
+            board.is_current_owner().then(|| {
                 let mut root =
                     tree.root(system_time_ms(get_current_system_time()));
                 root.content_hash = content_hash;
-                plaza_topic_core::AuthorizedAuthorityRootV1::new(root, owner_sk)
+                plaza_topic_core::AuthorizedAuthorityRootV1::new(root, board.owner_key())
             })
         });
     // A ban also needs the banner's key to verify its signature. When the

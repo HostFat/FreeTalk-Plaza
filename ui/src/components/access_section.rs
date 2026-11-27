@@ -95,7 +95,7 @@ pub fn RolesSection() -> Element {
     let mut role_pin = use_signal(|| false);
     let mut role_move = use_signal(|| false);
     let mut role_scope = use_signal(|| Vec::<plaza_core::board_state::message::MessageId>::new());
-    let mut assign_index = use_signal(|| 0usize);
+    let mut assign_indices = use_signal(std::collections::HashMap::<RoleId, usize>::new);
     let mut error = use_signal(|| None::<String>);
 
     let Some(data) = board.read().clone() else {
@@ -125,7 +125,6 @@ pub fn RolesSection() -> Element {
         .iter()
         .map(|m| m.member.id())
         .collect();
-    let selected_member = members.get(*assign_index.read()).copied();
 
     // Sections and groups available as moderation scope. Selecting a group
     // covers all of its sections through the section hierarchy.
@@ -524,30 +523,44 @@ pub fn RolesSection() -> Element {
                                         }
                                     }
                                 }
-                                div { class: "flex items-center gap-2",
-                                    select {
-                                        class: "flex-1 px-2 py-1 bg-panel border border-border rounded text-sm text-text",
-                                        onchange: move |evt| {
-                                            if let Ok(index) = evt.value().parse::<usize>() {
-                                                assign_index.set(index);
-                                            }
-                                        },
-                                        for (index, member_id) in members.iter().enumerate() {
-                                            option { value: "{index}", "{nickname_of(&data, *member_id)}" }
-                                        }
-                                    }
-                                    button {
-                                        r#type: "button",
-                                        class: "px-3 py-1 bg-accent hover:bg-accent/80 text-white text-xs rounded",
-                                        onclick: move |_| {
-                                            if let Some(member_id) = selected_member {
-                                                match access::set_role_member(role_id, member_id, true) {
-                                                    Ok(()) => error.set(None),
-                                                    Err(e) => error.set(Some(e)),
+                                {
+                                    let role_assign_index = assign_indices
+                                        .read()
+                                        .get(&role_id)
+                                        .copied()
+                                        .unwrap_or(0);
+                                    let role_selected_member =
+                                        members.get(role_assign_index).copied();
+                                    rsx! {
+                                        div { class: "flex items-center gap-2",
+                                            select {
+                                                class: "flex-1 px-2 py-1 bg-panel border border-border rounded text-sm text-text",
+                                                value: "{role_assign_index}",
+                                                onchange: move |evt| {
+                                                    if let Ok(index) = evt.value().parse::<usize>() {
+                                                        assign_indices.with_mut(|map| {
+                                                            map.insert(role_id, index);
+                                                        });
+                                                    }
+                                                },
+                                                for (index, member_id) in members.iter().enumerate() {
+                                                    option { value: "{index}", "{nickname_of(&data, *member_id)}" }
                                                 }
                                             }
-                                        },
-                                        "Add"
+                                            button {
+                                                r#type: "button",
+                                                class: "px-3 py-1 bg-accent hover:bg-accent/80 text-white text-xs rounded",
+                                                onclick: move |_| {
+                                                    if let Some(member_id) = role_selected_member {
+                                                        match access::set_role_member(role_id, member_id, true) {
+                                                            Ok(()) => error.set(None),
+                                                            Err(e) => error.set(Some(e)),
+                                                        }
+                                                    }
+                                                },
+                                                "Add"
+                                            }
+                                        }
                                     }
                                 }
                             }

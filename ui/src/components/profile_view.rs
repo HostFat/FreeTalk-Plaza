@@ -9,6 +9,7 @@ use std::str::FromStr;
 
 #[component]
 pub fn ProfileView(member_key: String) -> Element {
+    let navigator = navigator();
     let member_id = MemberId::from_str(&member_key).ok();
 
     use_effect(move || {
@@ -120,14 +121,7 @@ pub fn ProfileView(member_key: String) -> Element {
         {
             Some(board) => {
                 let self_id = MemberId::from(&board.self_sk.verifying_key());
-                let owner_id = MemberId::from(&board.owner_vk);
-                let is_moderator = self_id == owner_id
-                    || board
-                        .board_state
-                        .admin
-                        .admins
-                        .iter()
-                        .any(|admin| admin.admin.id() == self_id);
+                let is_moderator = board.is_active_owner() || board.is_active_admin();
                 let notices: Vec<(String, i64)> = board
                     .board_state
                     .warnings
@@ -229,7 +223,7 @@ pub fn ProfileView(member_key: String) -> Element {
                                 {
                                     let topic_id = topic_id.clone();
                                     let board_id = board_id.clone();
-                                    let nav = navigator();
+                                    let nav = navigator.clone();
                                     let timestamp = *timestamp;
                                     rsx! {
                                         button {

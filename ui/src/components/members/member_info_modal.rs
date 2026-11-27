@@ -416,15 +416,7 @@ fn MemberModerationPanel(member_id: MemberId, is_owner: bool) -> Element {
     if is_owner {
         return rsx! {};
     }
-    let self_id = MemberId::from(&board.self_sk.verifying_key());
-    let owner_id = MemberId::from(&board.owner_vk);
-    let can_moderate = self_id == owner_id
-        || board
-            .board_state
-            .admin
-            .admins
-            .iter()
-            .any(|admin| admin.admin.id() == self_id);
+    let can_moderate = board.is_active_owner() || board.is_active_admin();
     if !can_moderate {
         return rsx! {};
     }

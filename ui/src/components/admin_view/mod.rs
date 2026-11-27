@@ -97,15 +97,7 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
         current_board_data
             .read()
             .as_ref()
-            .map(|board_data| {
-                let self_id = MemberId::from(&board_data.self_sk.verifying_key());
-                board_data
-                    .board_state
-                    .admin
-                    .admins
-                    .iter()
-                    .any(|admin| admin.admin.id() == self_id)
-            })
+            .map(|board_data| board_data.is_active_admin())
             .unwrap_or(false)
     });
 
@@ -300,7 +292,7 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                         onclick: move |_| navigate_admin_tab(&tab_board_links, "links"),
                         "Invite links"
                     }
-                    if *is_owner.read() {
+                    if *is_owner.read() || *is_admin.read() {
                         button {
                             r#type: "button",
                             class: if active == "ownership" {

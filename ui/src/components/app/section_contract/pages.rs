@@ -14,6 +14,9 @@ pub(super) fn resolve_section_page_signer(
     if let Some(key) = owner_sk.filter(|key| key.verifying_key() == current_owner) {
         return Ok((key, None));
     }
+    if self_sk.verifying_key() == current_owner {
+        return Ok((self_sk, None));
+    }
     let self_id = MemberId::from(&self_sk.verifying_key());
     let active_admin = parent_state
         .admin

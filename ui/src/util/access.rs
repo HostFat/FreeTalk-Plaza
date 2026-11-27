@@ -272,6 +272,38 @@ fn apply_and_sync(
     }
 }
 
+fn authorized_role(
+    data: &BoardData,
+    role: Role,
+    signing_key: &SigningKey,
+    signer: Option<MemberId>,
+) -> AuthorizedRole {
+    match signer {
+        Some(signer_id) => AuthorizedRole::signed_by(role, signer_id, signing_key)
+            .with_optional_authority(admin_authority_proof(&data.board_state, &signer_id)),
+        None if data.current_owner_id() == MemberId::from(&data.owner_vk) => {
+            AuthorizedRole::new(role, signing_key)
+        }
+        None => AuthorizedRole::signed_by(role, data.current_owner_id(), signing_key),
+    }
+}
+
+fn authorized_role_assignment(
+    data: &BoardData,
+    assignment: RoleAssignment,
+    signing_key: &SigningKey,
+    signer: Option<MemberId>,
+) -> AuthorizedRoleAssignment {
+    match signer {
+        Some(signer_id) => AuthorizedRoleAssignment::signed_by(assignment, signer_id, signing_key)
+            .with_optional_authority(manager_authority_proof(&data.board_state, &signer_id)),
+        None if data.current_owner_id() == MemberId::from(&data.owner_vk) => {
+            AuthorizedRoleAssignment::new(assignment, signing_key)
+        }
+        None => AuthorizedRoleAssignment::signed_by(assignment, data.current_owner_id(), signing_key),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn create_role(
     name: String,
@@ -312,11 +344,7 @@ pub fn create_role(
             deleted: false,
             signed_at: crate::util::get_current_system_time(),
         };
-        let authorized = match signer_id {
-            Some(signer) => AuthorizedRole::signed_by(role, signer, &signing_key)
-                .with_optional_authority(admin_authority_proof(&data.board_state, &signer)),
-            None => AuthorizedRole::new(role, &signing_key),
-        };
+        let authorized = authorized_role(data, role, &signing_key, signer_id);
         let delta = ChatBoardStateV1Delta {
             roles: Some(RolesDelta {
                 roles: vec![authorized],
@@ -361,11 +389,7 @@ pub fn update_role_moderation(
             signed_at: crate::util::get_current_system_time(),
             ..current
         };
-        let authorized = match signer_id {
-            Some(signer) => AuthorizedRole::signed_by(role, signer, &signing_key)
-                .with_optional_authority(admin_authority_proof(&data.board_state, &signer)),
-            None => AuthorizedRole::new(role, &signing_key),
-        };
+        let authorized = authorized_role(data, role, &signing_key, signer_id);
         let delta = ChatBoardStateV1Delta {
             roles: Some(RolesDelta {
                 roles: vec![authorized],
@@ -396,7 +420,7 @@ pub fn set_role_can_distribute_keys(role_id: RoleId, value: bool) -> Result<(), 
         };
         let delta = ChatBoardStateV1Delta {
             roles: Some(RolesDelta {
-                roles: vec![AuthorizedRole::new(role, &owner_sk)],
+                roles: vec![authorized_role(data, role, &owner_sk, None)],
                 assignments: vec![],
             }),
             ..Default::default()
@@ -424,7 +448,7 @@ pub fn set_role_can_manage_trash(role_id: RoleId, value: bool) -> Result<(), Str
         };
         let delta = ChatBoardStateV1Delta {
             roles: Some(RolesDelta {
-                roles: vec![AuthorizedRole::new(role, &owner_sk)],
+                roles: vec![authorized_role(data, role, &owner_sk, None)],
                 assignments: vec![],
             }),
             ..Default::default()
@@ -453,7 +477,7 @@ pub fn set_role_can_attach_images(role_id: RoleId, value: bool) -> Result<(), St
         };
         let delta = ChatBoardStateV1Delta {
             roles: Some(RolesDelta {
-                roles: vec![AuthorizedRole::new(role, &owner_sk)],
+                roles: vec![authorized_role(data, role, &owner_sk, None)],
                 assignments: vec![],
             }),
             ..Default::default()
@@ -481,7 +505,7 @@ pub fn set_role_can_retire_images(role_id: RoleId, value: bool) -> Result<(), St
         };
         let delta = ChatBoardStateV1Delta {
             roles: Some(RolesDelta {
-                roles: vec![AuthorizedRole::new(role, &owner_sk)],
+                roles: vec![authorized_role(data, role, &owner_sk, None)],
                 assignments: vec![],
             }),
             ..Default::default()
@@ -508,7 +532,7 @@ pub fn remove_role(role_id: RoleId) -> Result<(), String> {
         };
         let delta = ChatBoardStateV1Delta {
             roles: Some(RolesDelta {
-                roles: vec![AuthorizedRole::new(role, &owner_sk)],
+                roles: vec![authorized_role(data, role, &owner_sk, None)],
                 assignments: vec![],
             }),
             ..Default::default()
@@ -530,11 +554,7 @@ pub fn set_role_member(role_id: RoleId, member_id: MemberId, grant: bool) -> Res
             revoked: !grant,
             signed_at: crate::util::get_current_system_time(),
         };
-        let authorized = match signer_id {
-            Some(signer) => AuthorizedRoleAssignment::signed_by(assignment, signer, &signing_key)
-                .with_optional_authority(manager_authority_proof(&data.board_state, &signer)),
-            None => AuthorizedRoleAssignment::new(assignment, &signing_key),
-        };
+        let authorized = authorized_role_assignment(data, assignment, &signing_key, signer_id);
         let materialized = if grant {
             crate::components::app::member_contract::records_for_parent_board(
                 board_key,

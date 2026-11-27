@@ -581,12 +581,16 @@ async fn save_boards_once() -> Result<(), String> {
         info!("Skipping delegate save during reset");
         return Ok(());
     }
-    if BOARDS.read().map.is_empty() {
-        // An empty map is never a valid incremental state: it is either the
-        // result of a load race or a reset. Writing it would wipe the board
-        // store (seen after a profile switch).
-        info!("Skipping delegate save of an empty board map");
-        return Ok(());
+    {
+        let boards = BOARDS.read();
+        if boards.map.is_empty() && boards.removed.is_empty() {
+            // An empty map with no removal tombstones is never a valid
+            // incremental state: it is either the result of a load race or a
+            // reset. Writing it would wipe the board store (seen after a
+            // profile switch).
+            info!("Skipping delegate save of an empty board map");
+            return Ok(());
+        }
     }
     if IMPORT_IN_PROGRESS.load(Ordering::SeqCst) {
         info!("Skipping delegate save during import");
@@ -601,12 +605,16 @@ async fn save_boards_once() -> Result<(), String> {
         return Ok(());
     }
 
-    // Never replace real stored boards with an empty map. If the in-memory map
-    // is empty while the delegate had boards, something rejected them and
-    // overwriting would destroy the user's data for good.
-    if *crate::components::app::DELEGATE_HAD_BOARDS.read() && BOARDS.read().map.is_empty() {
-        warn!("Skipping delegate save: stored boards would be overwritten with an empty map");
-        return Ok(());
+    // Never replace real stored boards with an empty map unless explicit
+    // removal tombstones explain why the map is empty (e.g. deleting the last
+    // board). Otherwise something rejected them and overwriting would destroy
+    // the user's data for good.
+    if *crate::components::app::DELEGATE_HAD_BOARDS.read() {
+        let boards = BOARDS.read();
+        if boards.map.is_empty() && boards.removed.is_empty() {
+            warn!("Skipping delegate save: stored boards would be overwritten with an empty map");
+            return Ok(());
+        }
     }
 
     merge_stored_boards().await;

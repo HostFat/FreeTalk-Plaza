@@ -315,6 +315,18 @@ impl Boards {
                 Some("owned_images") => {
                     boards.owned_images = value.deserialized().unwrap_or_default();
                 }
+                Some("client_features") => {
+                    boards.client_features = value.deserialized().unwrap_or_default();
+                }
+                Some("blocked_image_hashes") => {
+                    boards.blocked_image_hashes = value.deserialized().unwrap_or_default();
+                }
+                Some("auto_renew_images") => {
+                    boards.auto_renew_images = value.deserialized().unwrap_or(false);
+                }
+                Some("last_auto_renew_at") => {
+                    boards.last_auto_renew_at = value.deserialized().unwrap_or(0);
+                }
                 _ => {}
             }
         }

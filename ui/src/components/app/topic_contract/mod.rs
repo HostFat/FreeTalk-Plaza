@@ -938,7 +938,31 @@ pub async fn delete_post(
     let board = board_for(owner)?;
     let conversation = conversation_for(owner, topic_id, part)?;
     let now = system_time_ms(get_current_system_time());
-    let signer = MemberId::from(&board.self_sk.verifying_key());
+    let self_id = MemberId::from(&board.self_sk.verifying_key());
+    let target_author = conversation
+        .state
+        .posts()
+        .get(&target)
+        .map(|post| post.post.author)
+        .or_else(|| {
+            conversation
+                .state
+                .as_head()
+                .and_then(|head| head.header.as_ref())
+                .filter(|header| header.header.id() == target)
+                .map(|header| header.header.author)
+        });
+    let (signing_key, authority) = if target_author == Some(self_id) {
+        (board.self_sk.clone(), None)
+    } else if board.is_active_owner() {
+        (board.owner_key().clone(), None)
+    } else {
+        (
+            board.self_sk.clone(),
+            delete_authority(&board, &self_id).map(Box::new),
+        )
+    };
+    let signer = MemberId::from(&signing_key.verifying_key());
     let action = plaza_topic_core::TopicActionV1 {
         kind: TopicActionKind::Delete,
         target,
@@ -952,10 +976,10 @@ pub async fn delete_post(
         signer,
     };
     let authorized = plaza_topic_core::AuthorizedTopicActionV1 {
-        signature: plaza_core::util::sign_struct(&action, &board.self_sk),
+        signature: plaza_core::util::sign_struct(&action, &signing_key),
         action,
-        signer_key: Some(board.self_sk.verifying_key()),
-        authority: None,
+        signer_key: Some(signing_key.verifying_key()),
+        authority,
     };
     publish_part_action(&conversation, authorized).await
 }
@@ -1005,10 +1029,12 @@ pub async fn set_flag(
     let now = system_time_ms(get_current_system_time());
     let owner_key = board.owner_key();
     let signer = MemberId::from(&owner_key.verifying_key());
-    let generation = head
-        .latest_action(target, action_kind)
-        .map(|entry| entry.action.generation + 1)
-        .unwrap_or(1);
+    let generation = [kind_on, kind_off]
+        .into_iter()
+        .filter_map(|k| head.latest_action(target, k).map(|entry| entry.action.generation))
+        .max()
+        .unwrap_or(0)
+        + 1;
     let action = plaza_topic_core::TopicActionV1 {
         kind: action_kind,
         target,

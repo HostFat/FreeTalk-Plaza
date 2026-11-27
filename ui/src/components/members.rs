@@ -612,10 +612,11 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                 }
                 // Capture signing key for delegate migration before moving into BoardData
                 let signing_key_for_migration = export.signing_key.clone();
-                let owner_sk_for_import = export
-                    .owner_signing_key
-                    .clone()
-                    .unwrap_or_else(|| export.signing_key.clone());
+                let imported_owner_sk = export.owner_signing_key.clone().or_else(|| {
+                    (export.signing_key.verifying_key() == owner_key)
+                        .then(|| export.signing_key.clone())
+                });
+                let is_imported_owner = imported_owner_sk.is_some();
                 let board_key_bytes = owner_key.to_bytes();
 
                 // Register the root profile the export carries, if any, before
@@ -632,8 +633,12 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     owner_vk: owner_key,
                     board_state: initial_state, // Will be fully populated on sync
                     self_sk: export.signing_key,
-                    owner_sk: Some(owner_sk_for_import),
-                    owner_profile_id: profile_id.clone(),
+                    owner_sk: imported_owner_sk,
+                    owner_profile_id: if is_imported_owner {
+                        profile_id.clone()
+                    } else {
+                        None
+                    },
                     profile_id: profile_id.clone(),
                     contract_key,
                     last_read_message_id: None,

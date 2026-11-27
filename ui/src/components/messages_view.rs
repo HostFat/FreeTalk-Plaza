@@ -93,16 +93,16 @@ fn ConversationList() -> Element {
                         return;
                     }
                     creating.set(true);
-                    wasm_bindgen_futures::spawn_local(async move {
-                            match dm_contract::create_conversation().await {
+                    spawn(async move {
+                        match dm_contract::create_conversation().await {
                             Ok(id) => {
-                                crate::util::defer(move || *DM_SELECTED.write() = Some(id));
+                                *DM_SELECTED.write() = Some(id);
                             }
                             Err(error) => crate::components::app::toasts::show_error(format!(
                                 "Could not create the conversation: {error}"
                             )),
                         }
-                        crate::util::defer(move || creating.set(false));
+                        creating.set(false);
                     });
                 },
                 if *creating.read() { "Creating…" } else { "New conversation" }
@@ -137,7 +137,7 @@ fn ConversationList() -> Element {
                         };
                         joining.set(true);
                         join_error.set(None);
-                        wasm_bindgen_futures::spawn_local(async move {
+                        spawn(async move {
                             match dm_contract::join_from_link(
                                 parsed.contract_id,
                                 parsed.token,
@@ -147,16 +147,14 @@ fn ConversationList() -> Element {
                             .await
                             {
                                 Ok(()) => {
-                                    crate::util::defer(move || {
-                                        *DM_SELECTED.write() = Some(parsed.contract_id);
-                                        join_link.set(String::new());
-                                        joining.set(false);
-                                    });
+                                    *DM_SELECTED.write() = Some(parsed.contract_id);
+                                    join_link.set(String::new());
+                                    joining.set(false);
                                 }
-                                Err(message) => crate::util::defer(move || {
+                                Err(message) => {
                                     join_error.set(Some(message));
                                     joining.set(false);
-                                }),
+                                }
                             }
                         });
                     },
@@ -205,16 +203,6 @@ fn ConversationList() -> Element {
 
 #[component]
 fn ChatView(contract_id: ContractInstanceId) -> Element {
-    let conversation = dm_contract::DM_CONVERSATIONS
-        .read()
-        .get(&contract_id)
-        .cloned();
-    let Some(conversation) = conversation else {
-        return rsx! {
-            div { class: "p-6 text-sm text-text-muted", "Conversation not found." }
-        };
-    };
-
     let mut plaintexts = use_signal(HashMap::<DmMessageId, String>::new);
     let mut draft = use_signal(String::new);
     let mut sending = use_signal(|| false);
@@ -236,15 +224,13 @@ fn ChatView(contract_id: ContractInstanceId) -> Element {
         if pending.is_empty() {
             return;
         }
-        wasm_bindgen_futures::spawn_local(async move {
+        spawn(async move {
             for message in pending {
                 let id = message.message.id;
                 match dm_contract::decrypt_message(contract_id, message.clone()).await {
                     Ok(text) => {
-                        crate::util::defer(move || {
-                            plaintexts.with_mut(|cache| {
-                                cache.insert(id, text);
-                            });
+                        plaintexts.with_mut(|cache| {
+                            cache.insert(id, text);
                         });
                     }
                     Err(error) => {
@@ -257,6 +243,16 @@ fn ChatView(contract_id: ContractInstanceId) -> Element {
             }
         });
     });
+
+    let conversation = dm_contract::DM_CONVERSATIONS
+        .read()
+        .get(&contract_id)
+        .cloned();
+    let Some(conversation) = conversation else {
+        return rsx! {
+            div { class: "p-6 text-sm text-text-muted", "Conversation not found." }
+        };
+    };
 
     let messages = conversation.state.messages.messages.clone();
     let members = conversation.state.members.members.len();
@@ -282,12 +278,11 @@ fn ChatView(contract_id: ContractInstanceId) -> Element {
                     r#type: "button",
                     class: "px-3 py-1.5 bg-surface hover:bg-surface-hover text-text text-xs rounded-lg",
                     onclick: move |_| {
-                        wasm_bindgen_futures::spawn_local(async move {
+                        spawn(async move {
                             match dm_contract::create_invite(contract_id).await {
                                 Ok(link) => {
                                     crate::util::copy_to_clipboard(&link);
-                                    let link_for_state = link.clone();
-                                    crate::util::defer(move || invite.set(Some(link_for_state)));
+                                    invite.set(Some(link));
                                     crate::components::app::toasts::show("Invite link copied.");
                                 }
                                 Err(error) => crate::components::app::toasts::show_error(format!(
@@ -365,19 +360,15 @@ fn ChatView(contract_id: ContractInstanceId) -> Element {
                     }
                     sending.set(true);
                     error.set(None);
-                    wasm_bindgen_futures::spawn_local(async move {
+                    spawn(async move {
                         match dm_contract::send_message(contract_id, text).await {
                             Ok(()) => {
-                                crate::util::defer(move || {
-                                    draft.set(String::new());
-                                    sending.set(false);
-                                });
+                                draft.set(String::new());
+                                sending.set(false);
                             }
                             Err(message) => {
-                                crate::util::defer(move || {
-                                    error.set(Some(message));
-                                    sending.set(false);
-                                });
+                                error.set(Some(message));
+                                sending.set(false);
                             }
                         }
                     });

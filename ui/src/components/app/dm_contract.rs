@@ -719,6 +719,19 @@ pub async fn load_conversations() -> Result<(), String> {
             key_version
         );
     }
+    static LOADED_DM_IDENTITY: std::sync::LazyLock<
+        std::sync::Mutex<Option<plaza_dm_core::DmIdentityId>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+    let identity_changed = {
+        let mut guard = LOADED_DM_IDENTITY.lock().unwrap();
+        let changed = *guard != Some(identity);
+        *guard = Some(identity);
+        changed
+    };
+    if identity_changed {
+        DM_CONVERSATIONS.with_mut(|conversations| conversations.clear());
+        *crate::components::messages_view::DM_SELECTED.write() = None;
+    }
     let mut to_fetch = Vec::new();
     for conversation in conversations {
         let contract_id = ContractInstanceId::new(conversation.contract_key);
