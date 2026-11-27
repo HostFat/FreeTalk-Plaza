@@ -167,7 +167,7 @@ impl TopicStateV1 {
             .authority
             .ownership
             .owner_at(board_params, system_time_from_ms(at_ms));
-        if author == params.owner_id() || author == owner_at {
+        if author == owner_at {
             return Ok(());
         }
         if self.is_banned(author, at_ms) {
@@ -355,10 +355,6 @@ impl TopicStateV1 {
             if snapshot.section == header.header.id() {
                 return Err("a topic cannot be its own section".to_string());
             }
-            // The Move action itself carries the moderator's authority proof
-            // and is checked by verify_actions. The snapshot fields are covered
-            // by the action signature.
-            return Ok(());
         }
         match (&header.header.section, &self.section) {
             (None, None) => {}
@@ -449,7 +445,6 @@ impl TopicStateV1 {
         params: &TopicParamsV1,
     ) -> Result<(), String> {
         let policy = self.authority.policy();
-        let owner_id = params.owner_id();
         let post = &entry.post;
         if post.id() != *id {
             return Err("post id does not match its content".to_string());
@@ -481,7 +476,11 @@ impl TopicStateV1 {
         verify_struct(post, &entry.signature, &author_key)
             .map_err(|error| format!("invalid post signature: {error}"))?;
 
-        if post.author == owner_id {
+        let owner_at = self
+            .authority
+            .ownership
+            .owner_at(board_params, system_time_from_ms(post.created_at));
+        if post.author == owner_at {
             return Ok(());
         }
         if self.is_banned(post.author, post.created_at) {
@@ -608,6 +607,42 @@ impl TopicStateV1 {
             .kind
             .power()
             .ok_or("the action has no moderation power")?;
+        if action.kind == TopicActionKind::Move {
+            let SealedBytes::Public { value } = &action.payload else {
+                return Err("a section move payload must be public".to_string());
+            };
+            let dest: SectionSnapshotV1 = ciborium::de::from_reader(value.as_slice())
+                .map_err(|error| format!("decode section move: {error}"))?;
+            if !dest.chain.contains(&dest.section) {
+                return Err("section move chain does not include the section".to_string());
+            }
+            if dest.section == header.header.id() {
+                return Err("a topic cannot be its own section".to_string());
+            }
+            let source_chain = self.source_section_chain_before_move(
+                header.header.id(),
+                action.generation,
+            );
+            verify_moderation_authority(
+                view,
+                board_params,
+                &signer,
+                power,
+                &source_chain,
+                entry.authority.as_deref(),
+                at,
+            )?;
+            verify_moderation_authority(
+                view,
+                board_params,
+                &signer,
+                power,
+                &dest.chain,
+                entry.authority.as_deref(),
+                at,
+            )?;
+            return Ok(());
+        }
         let chain = self.section_chain();
         verify_moderation_authority(
             view,
@@ -994,11 +1029,15 @@ impl TopicStateV1 {
         at: i64,
         params: &TopicParamsV1,
     ) -> Result<VerifyingKey, String> {
+        let owner_at_key = self
+            .authority
+            .ownership
+            .owner_key_at(board_params, system_time_from_ms(at));
+        if author == MemberId::from(&owner_at_key) {
+            return Ok(owner_at_key);
+        }
         if author == params.owner_id() {
-            return Ok(self
-                .authority
-                .ownership
-                .owner_key_at(board_params, system_time_from_ms(at)));
+            return Ok(params.board_owner);
         }
         if let Some(participant) = self
             .participants
@@ -1010,6 +1049,41 @@ impl TopicStateV1 {
         // An admin or a role holder may act without being a participant, but
         // posts are attributed to members; resolve the key from the view.
         resolve_signer_key(view, board_params, &author, None)
+    }
+
+    fn source_section_chain_before_move(
+        &self,
+        target: MessageId,
+        generation: u64,
+    ) -> Vec<MessageId> {
+        let prior = self
+            .actions
+            .iter()
+            .filter(|entry| {
+                entry.action.target == target
+                    && entry.action.kind == TopicActionKind::Move
+                    && entry.action.generation < generation
+            })
+            .max_by(|a, b| {
+                a.action
+                    .generation
+                    .cmp(&b.action.generation)
+                    .then_with(|| a.action.created_at.cmp(&b.action.created_at))
+                    .then_with(|| b.signature.to_bytes().cmp(&a.signature.to_bytes()))
+            });
+        if let Some(action) = prior {
+            if let SealedBytes::Public { value } = &action.action.payload {
+                if let Ok(snapshot) =
+                    ciborium::de::from_reader::<SectionSnapshotV1, _>(value.as_slice())
+                {
+                    return snapshot.chain;
+                }
+            }
+        }
+        self.section
+            .as_ref()
+            .map(|section| section.snapshot.chain.clone())
+            .unwrap_or_default()
     }
 
     fn section_chain(&self) -> Vec<MessageId> {
@@ -1029,7 +1103,7 @@ impl TopicStateV1 {
         author: MemberId,
         view: &ChatBoardStateV1,
         board_params: &ChatBoardParametersV1,
-        params: &TopicParamsV1,
+        _params: &TopicParamsV1,
     ) -> bool {
         let Some(section) = self.effective_section() else {
             return true;
@@ -1038,10 +1112,7 @@ impl TopicStateV1 {
             return true;
         }
         let owner = self.authority.ownership.current_owner(board_params);
-        if author == owner
-            || author == params.owner_id()
-            || view.admin.admins.iter().any(|a| a.admin.id() == author)
-        {
+        if author == owner || view.admin.admins.iter().any(|a| a.admin.id() == author) {
             return true;
         }
         view.roles

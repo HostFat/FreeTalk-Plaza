@@ -209,6 +209,7 @@ pub async fn upload_image(
         if let (Some(nonce), Some(version)) = (nonce, secret_version) {
             state = state.sealed(nonce, version);
         }
+        let state = state.sign_live(&parameters, uploader);
         state.validate(&parameters)?;
         // Unsealed content is content-addressed: if the node already has it,
         // skip the PUT. Sealed ciphertext differs on every upload.
@@ -321,7 +322,8 @@ pub async fn upload_image(
                 width,
                 height,
                 piece.to_vec(),
-            );
+            )
+            .sign_live(&parameters, uploader);
             state.validate(&parameters)?;
             let (instance, receiver) = send_blob_with_retry(&parameters, &state).await?;
             in_flight.push((
@@ -363,6 +365,7 @@ pub async fn upload_image(
     if let (Some(nonce), Some(version)) = (nonce, secret_version) {
         state = state.sealed(nonce, version);
     }
+    let state = state.sign_live(&parameters, uploader);
     state.validate(&parameters)?;
     let copy = BlobCopy {
         parameters: to_cbor_vec(&parameters),

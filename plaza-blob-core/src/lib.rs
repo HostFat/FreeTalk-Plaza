@@ -63,6 +63,22 @@ pub struct BlobStateV1 {
     pub retired: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retirement: Option<RetirementProof>,
+    /// Uploader signature over `LiveMetadataV1` (sha256, mime, width, height,
+    /// nonce, secret_version), preventing peers from tampering with live blob
+    /// metadata or grinding lower canonical hashes to corrupt images.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_signature: Option<Signature>,
+}
+
+/// Live blob metadata covered by `BlobStateV1::live_signature`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct LiveMetadataV1 {
+    pub sha256: [u8; 32],
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    pub nonce: Option<[u8; 12]>,
+    pub secret_version: Option<u32>,
 }
 
 /// One chunk of a larger payload, with the contract that holds it.
@@ -152,6 +168,15 @@ impl BlobParametersV1 {
         }
     }
 
+    /// Key authorized for a specific retirement role.
+    pub fn key_for_role(&self, role: RetirementRole) -> &VerifyingKey {
+        match role {
+            RetirementRole::Uploader => &self.uploader,
+            RetirementRole::OwnerFounding => &self.owner_founding,
+            RetirementRole::OwnerCurrent => &self.owner_current,
+        }
+    }
+
     /// Which role, if any, this key holds for the blob.
     pub fn role_of(&self, key: &VerifyingKey) -> Option<RetirementRole> {
         if *key == self.uploader {
@@ -185,6 +210,7 @@ impl BlobStateV1 {
             secret_version: None,
             retired: false,
             retirement: None,
+            live_signature: None,
         }
     }
 
@@ -207,6 +233,7 @@ impl BlobStateV1 {
             secret_version: None,
             retired: false,
             retirement: None,
+            live_signature: None,
         }
     }
 
@@ -215,6 +242,25 @@ impl BlobStateV1 {
         self.nonce = Some(nonce);
         self.secret_version = Some(secret_version);
         self
+    }
+
+    /// Sign the live blob metadata and parameter hash with the uploader key.
+    /// Must be called after any `.sealed(...)` call.
+    pub fn sign_live(mut self, parameters: &BlobParametersV1, uploader: &SigningKey) -> Self {
+        let meta = self.live_metadata(parameters);
+        self.live_signature = Some(sign_struct(&meta, uploader));
+        self
+    }
+
+    fn live_metadata(&self, parameters: &BlobParametersV1) -> LiveMetadataV1 {
+        LiveMetadataV1 {
+            sha256: parameters.sha256,
+            mime: self.mime.clone(),
+            width: self.width,
+            height: self.height,
+            nonce: self.nonce,
+            secret_version: self.secret_version,
+        }
     }
 
     /// Total stored bytes: the data itself or the sum of the chunks.
@@ -238,6 +284,9 @@ impl BlobStateV1 {
             let Some(proof) = self.retirement.as_ref() else {
                 return Err("Retired blob has no retirement proof".to_string());
             };
+            if self.live_signature.is_some() {
+                return Err("Retired blob cannot carry a live metadata signature".to_string());
+            }
             if !self.mime.is_empty() && !ALLOWED_MIME_TYPES.contains(&self.mime.as_str()) {
                 return Err(format!("Retired blob mime type not allowed: {}", self.mime));
             }
@@ -247,11 +296,8 @@ impl BlobStateV1 {
             if self.nonce.is_some() || self.secret_version.is_some() {
                 return Err("Retired blob still carries a seal".to_string());
             }
-            let expected_role = parameters
-                .role_of(&proof.signer)
-                .ok_or("Retirement signer is not authorized for this blob")?;
-            if proof.role != expected_role {
-                return Err("Retirement role does not match the signer".to_string());
+            if &proof.signer != parameters.key_for_role(proof.role) {
+                return Err("Retirement signer does not match the claimed role".to_string());
             }
             let payload = RetirementV1 {
                 sha256: parameters.sha256,
@@ -263,6 +309,12 @@ impl BlobStateV1 {
         if self.retirement.is_some() {
             return Err("A live blob cannot carry a retirement proof".to_string());
         }
+        let Some(live_sig) = self.live_signature.as_ref() else {
+            return Err("Live blob is missing uploader metadata signature".to_string());
+        };
+        let meta = self.live_metadata(parameters);
+        verify_struct(&meta, live_sig, &parameters.uploader)
+            .map_err(|e| format!("Invalid live blob metadata signature: {e}"))?;
         if self.nonce.is_some() != self.secret_version.is_some() {
             return Err("A sealed blob needs both a nonce and a secret version".to_string());
         }
@@ -363,6 +415,7 @@ impl BlobStateV1 {
                 signature: sign_struct(&payload, signer),
                 role,
             }),
+            live_signature: None,
         }
     }
 
@@ -395,6 +448,7 @@ impl BlobStateV1 {
                 signature: sign_struct(&payload, signer),
                 role,
             }),
+            live_signature: None,
         })
     }
 }
@@ -428,7 +482,7 @@ pub fn merge_states(
     }
 }
 
-fn canonical_blob_hash(state: &BlobStateV1) -> [u8; 32] {
+pub fn canonical_blob_hash(state: &BlobStateV1) -> [u8; 32] {
     let mut bytes = Vec::new();
     let _ = ciborium::ser::into_writer(state, &mut bytes);
     sha256(&bytes)
@@ -462,7 +516,8 @@ mod tests {
             800,
             600,
             data,
-        );
+        )
+        .sign_live(&parameters, &uploader);
         (parameters, state, [uploader, founding, current])
     }
 
@@ -478,6 +533,22 @@ mod tests {
         let mut empty = state.clone();
         empty.data.clear();
         assert!(empty.validate(&parameters).is_err());
+    }
+
+    #[test]
+    fn live_metadata_tampering_is_rejected() {
+        let (parameters, state, signers) = setup();
+        let mut forged_nonce = state.clone().sealed([9u8; 12], 42);
+        assert!(forged_nonce.validate(&parameters).is_err());
+        assert!(merge_states(&state, &forged_nonce, &parameters).is_err());
+
+        // Unsigned live state is also rejected.
+        forged_nonce.live_signature = None;
+        assert!(forged_nonce.validate(&parameters).is_err());
+
+        // Metadata signed by a non-uploader key is rejected.
+        let wrong_signer = state.clone().sign_live(&parameters, &signers[1]);
+        assert!(wrong_signer.validate(&parameters).is_err());
     }
 
     #[test]
@@ -544,6 +615,7 @@ mod tests {
 
     #[test]
     fn a_manifest_validates_and_checks_its_chunk_list() {
+        let (uploader, _, _, _) = keys();
         let chunks = vec![
             ChunkRef {
                 instance: [11u8; 32],
@@ -563,7 +635,8 @@ mod tests {
             800,
             600,
             chunks.clone(),
-        );
+        )
+        .sign_live(&parameters, &uploader);
         state.validate(&parameters).expect("a manifest passes");
         assert!(state.is_manifest());
         assert_eq!(state.stored_len(), CHUNK_BYTES + 500);
@@ -586,7 +659,8 @@ mod tests {
             800,
             600,
             duplicated,
-        );
+        )
+        .sign_live(&duplicated_parameters, &uploader);
         assert!(duplicated_state.validate(&duplicated_parameters).is_err());
 
         let mut oversized = chunks.clone();
@@ -598,7 +672,8 @@ mod tests {
             800,
             600,
             oversized,
-        );
+        )
+        .sign_live(&oversized_parameters, &uploader);
         assert!(oversized_state.validate(&oversized_parameters).is_err());
 
         let mut empty_chunk = chunks.clone();
@@ -610,18 +685,23 @@ mod tests {
             800,
             600,
             empty_chunk,
-        );
+        )
+        .sign_live(&empty_parameters, &uploader);
         assert!(empty_state.validate(&empty_parameters).is_err());
     }
 
     #[test]
     fn a_sealed_blob_carries_a_nonce_and_a_version() {
-        let (parameters, state, _) = setup();
-        let sealed = state.clone().sealed([7u8; 12], 3);
+        let (parameters, state, signers) = setup();
+        let sealed = state
+            .clone()
+            .sealed([7u8; 12], 3)
+            .sign_live(&parameters, &signers[0]);
         sealed.validate(&parameters).expect("a sealed blob passes");
 
         let mut half = sealed.clone();
         half.secret_version = None;
+        let half = half.sign_live(&parameters, &signers[0]);
         assert!(half.validate(&parameters).is_err());
     }
 
@@ -633,14 +713,15 @@ mod tests {
             bytes: CHUNK_BYTES as u32,
         }];
         let parameters = manifest_params(&chunks);
+        let (uploader, _, _, _) = keys();
         let state = BlobStateV1::manifest(
             &parameters,
             "image/webp".to_string(),
             800,
             600,
             chunks,
-        );
-        let (uploader, _, _, _) = keys();
+        )
+        .sign_live(&parameters, &uploader);
         let retired = state.retire(&parameters, &uploader).expect("retire");
         retired.validate(&parameters).expect("retired manifest verifies");
         assert!(retired.chunks.is_empty());
@@ -683,7 +764,8 @@ mod tests {
             10,
             10,
             chunk_data,
-        );
+        )
+        .sign_live(&parameters, &uploader);
         let retired = state.retire(&parameters, &current).expect("retire the chunk");
         retired
             .validate(&parameters)

@@ -695,6 +695,7 @@ impl OwnershipV1 {
                  .0
                 .cmp(&b.deactivation.member.0 .0)
                 .then(b.deactivation.generation.cmp(&a.deactivation.generation))
+                .then_with(|| a.signature.to_bytes().cmp(&b.signature.to_bytes()))
         });
         self.deactivations
             .dedup_by_key(|entry| entry.deactivation.member);
@@ -873,13 +874,23 @@ impl ComposableState for OwnershipV1 {
             .succession_votes
             .extend(delta.succession_votes.iter().cloned());
         trial.cleanup(parent_state, parameters);
-        // A delta may extend the chain, never shorten an accepted one. When a
-        // record elsewhere in the update invalidates an earlier transfer (a
-        // newer admin appointment for the member that transfer handed the board
-        // to), cleanup would drop it and hand the board back. Keep the chain.
-        let keeps_accepted_chain = trial.transfers.len() >= self.transfers.len()
-            && trial.transfers[..self.transfers.len()] == self.transfers[..];
-        if keeps_accepted_chain && trial.verify(parent_state, parameters).is_ok() {
+        // A delta may extend the chain or replace a concurrent fork at the same
+        // generation with a strictly lower canonical digest, never shorten an
+        // accepted chain.
+        let keeps_or_canonically_beats = trial.transfers.len() >= self.transfers.len()
+            && match self
+                .transfers
+                .iter()
+                .zip(trial.transfers.iter())
+                .find(|(a, b)| a != b)
+            {
+                None => true,
+                Some((existing, incoming)) => {
+                    existing.transfer.generation == incoming.transfer.generation
+                        && incoming.transfer.digest() < existing.transfer.digest()
+                }
+            };
+        if keeps_or_canonically_beats && trial.verify(parent_state, parameters).is_ok() {
             *self = trial;
         }
         Ok(())

@@ -41,8 +41,21 @@ impl ComposableState for MembersV1 {
 
         let owner_id = parameters.owner_id();
         let members_by_id = self.members_by_member_id();
+        let mut seen_ids = HashSet::with_capacity(self.members.len());
 
         for member in &self.members {
+            if !seen_ids.insert(member.member.id()) {
+                return Err(format!(
+                    "Duplicate member ID in members list: {:?}",
+                    member.member.id()
+                ));
+            }
+            if member.member.owner_member_id != owner_id {
+                return Err(format!(
+                    "Member {:?} belongs to a different board",
+                    member.member.id()
+                ));
+            }
             let has_transferred = !parent_state.ownership.transfers.is_empty();
             if member.member.id() == owner_id && !has_transferred {
                 return Err("Owner should not be included in the members list".to_string());
@@ -124,8 +137,15 @@ impl ComposableState for MembersV1 {
                     .or_insert(member);
             }
 
+            let owner_id = parameters.owner_id();
             // Verify that all new members have valid invites
             for member in &delta.added {
+                if member.member.owner_member_id != owner_id {
+                    return Err(format!(
+                        "Member {:?} belongs to a different board",
+                        member.member.id()
+                    ));
+                }
                 if let Some(proof) = &member.member.join_proof {
                     Self::verify_token_join(member, proof, parent_state, parameters)?;
                 } else if member.member.invited_by == member.member.id() {
@@ -183,6 +203,9 @@ impl MembersV1 {
         parent_state: &ChatBoardStateV1,
         parameters: &ChatBoardParametersV1,
     ) -> Result<(), String> {
+        if member.member.owner_member_id != parameters.owner_id() {
+            return Err("Token-joined member belongs to a different board".to_string());
+        }
         if member.member.invited_by != member.member.id() {
             return Err("A token-joined member must be self-signed".to_string());
         }
@@ -212,6 +235,12 @@ impl MembersV1 {
         parameters: &ChatBoardParametersV1,
         members_by_id: &HashMap<MemberId, &AuthorizedMember>,
     ) -> Result<(), String> {
+        if member.member.owner_member_id != parameters.owner_id() {
+            return Err(format!(
+                "Member {:?} belongs to a different board",
+                member.member.id()
+            ));
+        }
         if member.member.invited_by == parameters.owner_id() {
             // Member was invited by the owner, verify signature against owner's key
             member
@@ -349,6 +378,12 @@ impl MembersV1 {
         let mut visited_members = HashSet::new();
 
         loop {
+            if current_member.member.owner_member_id != owner_id {
+                return Err(format!(
+                    "Member {:?} belongs to a different board",
+                    current_member.member.id()
+                ));
+            }
             if !visited_members.insert(current_member.member.id()) {
                 return Err(format!(
                     "Circular invite chain detected for member {:?}",

@@ -117,6 +117,11 @@ impl ContractInterface for Contract {
                             .map_err(|e| ContractError::InvalidUpdateWithInfo {
                                 reason: format!("Delta does not verify: {e}"),
                             })?;
+                        chat_state
+                            .verify_sectioned_layout(&parameters, None)
+                            .map_err(|e| ContractError::InvalidUpdateWithInfo {
+                                reason: format!("Delta violates sectioned layout: {e}"),
+                            })?;
                     } else {
                         full_verify = true;
                     }

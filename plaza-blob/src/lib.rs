@@ -6,13 +6,15 @@
 
 use ciborium::{de::from_reader, ser::into_writer};
 use freenet_stdlib::prelude::*;
-use plaza_blob_core::{merge_states, BlobParametersV1, BlobStateV1};
+use plaza_blob_core::{canonical_blob_hash, merge_states, BlobParametersV1, BlobStateV1};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 struct BlobSummary {
     sha256: [u8; 32],
     retired: bool,
+    #[serde(default)]
+    state_hash: [u8; 32],
 }
 
 #[allow(dead_code)]
@@ -105,6 +107,7 @@ impl ContractInterface for Contract {
         let summary = BlobSummary {
             sha256: parameters.sha256,
             retired: state.retired,
+            state_hash: canonical_blob_hash(&state),
         };
         let mut bytes = Vec::new();
         into_writer(&summary, &mut bytes).map_err(|e| ContractError::Deser(e.to_string()))?;
@@ -126,6 +129,7 @@ impl ContractInterface for Contract {
         let current = BlobSummary {
             sha256: parameters.sha256,
             retired: state.retired,
+            state_hash: canonical_blob_hash(&state),
         };
         let known = if summary.as_ref().is_empty() {
             None

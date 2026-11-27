@@ -173,14 +173,12 @@ impl ComposableState for MailAddressesV1 {
                     .iter_mut()
                     .find(|existing| existing.record.member_id == member_id)
                 {
-                    if authorized.record.version > existing.record.version {
-                        *existing = authorized.clone();
-                    } else if authorized.record.version == existing.record.version
-                        && authorized.record != existing.record
+                    if authorized.record.version > existing.record.version
+                        || (authorized.record.version == existing.record.version
+                            && authorized.record != existing.record
+                            && authorized.signature.to_bytes() < existing.signature.to_bytes())
                     {
-                        return Err(format!(
-                            "Conflicting mail address versions for member: {member_id:?}"
-                        ));
+                        *existing = authorized.clone();
                     }
                 } else {
                     self.records.push(authorized.clone());
@@ -191,10 +189,11 @@ impl ComposableState for MailAddressesV1 {
         // Keep only the current owner and members. A record for someone who
         // left is not useful and would let a stale peer keep state alive.
         let owner_id = parameters.owner_id();
+        let current_owner = parent_state.ownership.current_owner(parameters);
         let members = parent_state.members.members_by_member_id();
         self.records.retain(|authorized| {
             let id = authorized.record.member_id;
-            id == owner_id || members.contains_key(&id)
+            id == owner_id || id == current_owner || members.contains_key(&id)
         });
         self.records
             .sort_by_key(|authorized| authorized.record.member_id);

@@ -649,9 +649,9 @@ impl TopicPageStateV1 {
         let creator = header.header.creator;
         let at = system_time_from_ms(header.header.created_at);
         let owner_at = self.authority.ownership.owner_at(board_params, at);
-        if creator == params.owner_id() || creator == owner_at {
+        if creator == owner_at {
             let owner_key = self.authority.ownership.owner_key_at(board_params, at);
-            if header.creator_key != owner_key && header.creator_key != params.board_owner {
+            if header.creator_key != owner_key {
                 return Err("page creator key does not match board owner".to_string());
             }
             return Ok(());
@@ -695,7 +695,7 @@ impl TopicPageStateV1 {
         author: MemberId,
         view: &ChatBoardStateV1,
         board_params: &ChatBoardParametersV1,
-        params: &TopicParamsV1,
+        _params: &TopicParamsV1,
     ) -> bool {
         let Some(header) = &self.header else {
             return true;
@@ -704,10 +704,7 @@ impl TopicPageStateV1 {
             return true;
         }
         let owner = self.authority.ownership.current_owner(board_params);
-        if author == owner
-            || author == params.owner_id()
-            || view.admin.admins.iter().any(|a| a.admin.id() == author)
-        {
+        if author == owner || view.admin.admins.iter().any(|a| a.admin.id() == author) {
             return true;
         }
         view.roles
@@ -724,11 +721,15 @@ impl TopicPageStateV1 {
         at: i64,
         params: &TopicParamsV1,
     ) -> Result<VerifyingKey, String> {
+        let owner_at_key = self
+            .authority
+            .ownership
+            .owner_key_at(board_params, system_time_from_ms(at));
+        if author == MemberId::from(&owner_at_key) {
+            return Ok(owner_at_key);
+        }
         if author == params.owner_id() {
-            return Ok(self
-                .authority
-                .ownership
-                .owner_key_at(board_params, system_time_from_ms(at)));
+            return Ok(params.board_owner);
         }
         if let Some(participant) = self
             .participants
@@ -782,7 +783,6 @@ impl TopicPageStateV1 {
         params: &TopicParamsV1,
     ) -> Result<(), String> {
         let policy = self.authority.policy();
-        let owner_id = params.owner_id();
         let post = &entry.post;
         if post.id() != *id {
             return Err("post id does not match its content".to_string());
@@ -815,7 +815,11 @@ impl TopicPageStateV1 {
         verify_struct(post, &entry.signature, &author_key)
             .map_err(|error| format!("invalid post signature: {error}"))?;
 
-        if post.author == owner_id {
+        let owner_at = self
+            .authority
+            .ownership
+            .owner_at(board_params, system_time_from_ms(post.created_at));
+        if post.author == owner_at {
             return Ok(());
         }
         if is_member_banned(&self.authority, post.author, post.created_at) {

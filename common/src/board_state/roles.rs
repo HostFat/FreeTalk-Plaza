@@ -1037,7 +1037,10 @@ impl ComposableState for RolesV1 {
                     Some(existing)
                         if existing.role.generation > role.role.generation
                             || (existing.role.generation == role.role.generation
-                                && record_digest(&existing.role) <= record_digest(&role.role)) => {}
+                                && ((existing.role.deleted && !role.role.deleted)
+                                    || (existing.role.deleted == role.role.deleted
+                                        && record_digest(&existing.role)
+                                            <= record_digest(&role.role)))) => {}
                     _ => {
                         combined.roles.retain(|r| r.role.id != role.role.id);
                         combined.roles.push(role.clone());
@@ -1058,9 +1061,11 @@ impl ComposableState for RolesV1 {
                         if existing.assignment.generation > assignment.assignment.generation
                             || (existing.assignment.generation
                                 == assignment.assignment.generation
-                                && (existing.assignment.revoked
-                                    || record_digest(&existing.assignment)
-                                        <= record_digest(&assignment.assignment))) => {}
+                                && ((existing.assignment.revoked && !assignment.assignment.revoked)
+                                    || (existing.assignment.revoked
+                                        == assignment.assignment.revoked
+                                        && record_digest(&existing.assignment)
+                                            <= record_digest(&assignment.assignment)))) => {}
                     _ => {
                         combined
                             .assignments
