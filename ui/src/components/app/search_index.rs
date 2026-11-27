@@ -152,9 +152,6 @@ pub async fn load_persisted_search_index() {
 /// entries of `board`. Only schedules a delegate write if at least one entry
 /// was added or changed.
 pub fn record_board_topics(board: &BoardData) {
-    if !board.board_state.mode.is_topic_index() {
-        return;
-    }
     let owner = board.owner_vk;
     let mut updates: Vec<IndexedTopicSummary> = Vec::new();
     for entry in &board.board_state.topics.entries {

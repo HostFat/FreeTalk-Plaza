@@ -1,4 +1,4 @@
-//! Shared reason and status codes for topic/post reports and member moderation.
+//! Shared reason codes for topic/post reports and member moderation.
 //!
 //! Reasons are codes rather than free text so board state carries no private
 //! commentary about members.
@@ -23,24 +23,6 @@ impl ReportReason {
             ReportReason::OffTopic => "Off topic",
             ReportReason::Illegal => "Illegal content",
             ReportReason::Other => "Other",
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum ReportStatus {
-    #[default]
-    Open,
-    Resolved,
-    Dismissed,
-}
-
-impl ReportStatus {
-    pub fn label(&self) -> &'static str {
-        match self {
-            ReportStatus::Open => "Open",
-            ReportStatus::Resolved => "Resolved",
-            ReportStatus::Dismissed => "Dismissed",
         }
     }
 }

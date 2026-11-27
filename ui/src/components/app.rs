@@ -11,7 +11,6 @@ pub mod topic_contract;
 pub mod document_title;
 pub mod freenet_api;
 pub mod notifications;
-pub mod receive_times;
 pub mod sync_info;
 pub mod toasts;
 
@@ -38,7 +37,6 @@ use dioxus::prelude::*;
 use ed25519_dalek::VerifyingKey;
 use freenet_stdlib::client_api::{ClientRequest, WebApi};
 use plaza_core::board_state::member::MemberId;
-use plaza_core::board_state::message::MessageId;
 use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::window;
@@ -104,8 +102,6 @@ pub enum Route {
     AdminStructure { board_id: String },
     #[route("/board/:board_id/admin/audit")]
     AdminAudit { board_id: String },
-    #[route("/board/:board_id/admin/trash")]
-    AdminTrash { board_id: String },
     #[route("/board/:board_id/purge/:post_id")]
     AdminPurge { board_id: String, post_id: String },
     #[route("/board/:board_id/admin/roles")]
@@ -131,23 +127,6 @@ pub enum Route {
 
 pub static BOARDS: GlobalSignal<Boards> = Global::new(initial_boards);
 
-/// Confirmed upload steps per attachment, while an upload runs.
-pub static UPLOAD_PROGRESS: GlobalSignal<std::collections::HashMap<String, (usize, usize)>> =
-    Global::new(std::collections::HashMap::new);
-
-/// True when the durable upload queue refused a file because of its cap.
-pub static PENDING_QUEUE_FULL: GlobalSignal<bool> = Global::new(|| false);
-
-/// Messages this client sent that the network has not confirmed yet, mapped to
-/// the board they belong to so a confirmation clears the right badges.
-pub static PENDING_POSTS: GlobalSignal<std::collections::HashMap<MessageId, VerifyingKey>> =
-    Global::new(std::collections::HashMap::new);
-
-/// Drop the pending marker of every message on a board the node just confirmed.
-pub fn confirm_pending_posts(board: VerifyingKey) {
-    PENDING_POSTS.with_mut(|pending| pending.retain(|_, owner| *owner != board));
-}
-
 /// Set once the boards stored in the delegate have been read (or the delegate
 /// answered that it has none). Until then `BOARDS` is empty only because the
 /// load has not finished, and persisting it would overwrite real data.
@@ -167,8 +146,6 @@ pub static MEMBER_INFO_MODAL: GlobalSignal<MemberInfoModalSignal> =
 /// it and routes in place so the open topic and composer stay alive.
 pub static INTERCEPTED_JOIN_TOKEN: GlobalSignal<Option<String>> = Global::new(|| None);
 
-/// The topic view stays pinned to the latest reply until the reader scrolls up.
-pub static CONVERSATION_PINNED: GlobalSignal<bool> = Global::new(|| true);
 /// Whether the "About FreeTalk Plaza" panel is open.
 pub static ABOUT_MODAL: GlobalSignal<bool> = Global::new(|| false);
 pub static EDIT_BOARD_MODAL: GlobalSignal<EditBoardModalSignal> =
@@ -214,53 +191,8 @@ pub struct LightboxState {
 
 pub static LIGHTBOX: GlobalSignal<Option<LightboxState>> = Global::new(|| None);
 
-/// Tracks the current category being viewed (for auto-parenting new posts/categories)
-pub static CURRENT_CATEGORY: GlobalSignal<CurrentCategoryContext> =
-    Global::new(|| CurrentCategoryContext::default());
-
-/// Tracks the single post being viewed, so the top-bar composer replies to it.
-pub static CURRENT_POST: GlobalSignal<CurrentPostContext> =
-    Global::new(|| CurrentPostContext::default());
-
 /// Current hash route, used to highlight the active top-bar tab.
 pub static CURRENT_HASH: GlobalSignal<String> = Global::new(String::new);
-
-/// Bumped by "New post" buttons elsewhere in the app to open the shared
-/// composer in the top bar (which already knows the current category).
-pub static COMPOSE_REQUEST: GlobalSignal<u64> = Global::new(|| 0);
-
-/// Group id (as a string) to scroll to after returning to the home page.
-pub static SCROLL_TO_GROUP: GlobalSignal<Option<String>> = Global::new(|| None);
-
-/// A post selected for quoting. The composer drains the collection and turns
-/// every entry into a quoted block, so several posts can be quoted at once.
-#[derive(Clone, PartialEq)]
-pub struct QuoteRequest {
-    pub target: MessageId,
-    pub author: String,
-    pub preview: String,
-    pub text: String,
-}
-pub static QUOTE_COLLECTION: GlobalSignal<Vec<QuoteRequest>> = Global::new(Vec::new);
-
-/// Context for the currently viewed category
-#[derive(Clone, Default)]
-pub struct CurrentCategoryContext {
-    /// The category message ID being viewed
-    pub category_id: Option<MessageId>,
-    /// Category name (for reply preview)
-    pub category_name: Option<String>,
-    /// Author name of the category (for reply context)
-    pub author_name: Option<String>,
-}
-
-/// The single post currently open, used as the reply target of the top bar.
-#[derive(Clone, PartialEq, Default)]
-pub struct CurrentPostContext {
-    pub message_id: Option<MessageId>,
-    pub author_name: Option<String>,
-    pub preview: Option<String>,
-}
 
 /// Mark a board as needing sync, deferred via setTimeout(0).
 ///
@@ -1253,14 +1185,6 @@ fn AdminPurge(board_id: String, post_id: String) -> Element {
     let _ = post_id;
     rsx! {
         BoardGate { board_id: board_id.clone(), AdminView { tab: "moderation".to_string() } }
-    }
-}
-
-/// Admin view, trash tab
-#[component]
-fn AdminTrash(board_id: String) -> Element {
-    rsx! {
-        BoardGate { board_id: board_id.clone(), AdminView { tab: "trash".to_string() } }
     }
 }
 

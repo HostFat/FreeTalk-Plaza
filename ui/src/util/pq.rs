@@ -214,7 +214,6 @@ pub fn housekeeping() {
             return;
         }
         board.decrypt_pq_board_secrets();
-        board.decrypt_pq_trash_secret();
         changed |= board.ensure_pq_key();
         changed |= board.generate_missing_pq_secrets();
         changed |= board.generate_missing_pq_category_secrets();

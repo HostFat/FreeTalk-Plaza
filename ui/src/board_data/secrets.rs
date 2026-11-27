@@ -516,7 +516,6 @@ impl BoardData {
         }
         self.current_secret_version = Some(current_version);
         self.decrypt_pq_board_secrets();
-        self.decrypt_pq_trash_secret();
     }
 
     /// Recover the board key with any identity this device holds.
@@ -581,7 +580,6 @@ impl BoardData {
         for key in &candidates {
             self.decrypt_pq_board_secrets_for_key(key);
         }
-        self.decrypt_pq_trash_secret();
     }
 
     /// Try the PQ sets for the board secret. Old versions stay in `secrets`.
@@ -625,49 +623,6 @@ impl BoardData {
                         error
                     );
                 }
-            }
-        }
-    }
-
-    /// Open the PQ sets for the moderator trash key.
-    pub fn decrypt_pq_trash_secret(&mut self) {
-        use plaza_core::board_state::pq_secrets::PqScope;
-        let self_id = MemberId::from(&self.self_sk.verifying_key());
-        let Some(latest) = self
-            .board_state
-            .pq_secrets
-            .sets
-            .iter()
-            .filter(|entry| matches!(entry.set.scope, PqScope::Trash))
-            .max_by_key(|entry| entry.set.version)
-        else {
-            return;
-        };
-        // The visible profile is the normal key holder. The owner key also
-        // holds the trash key on a split board, and the owner must keep access
-        // even after removing its profile from the list.
-        let mut candidates = vec![(self_id, self.self_sk.clone())];
-        if self.is_current_owner() {
-            candidates.push((self.current_owner_id(), self.owner_key().clone()));
-        }
-        let opened = candidates.iter().find_map(|(id, key)| {
-            latest
-                .set
-                .secrets
-                .iter()
-                .find(|secret| secret.member_id == *id)
-                .and_then(|secret| crate::util::pq::open_secret(key, secret).ok())
-        });
-        match opened {
-            Some(key) => {
-                self.trash_secret = Some((latest.set.secret_version, key));
-                self.trash_secrets.insert(latest.set.secret_version, key);
-            }
-            None => {
-                // A newer set without our record means access was revoked. Older
-                // keys stay: they only open items sealed before the rotation.
-                self.trash_secrets.remove(&latest.set.secret_version);
-                self.trash_secret = None;
             }
         }
     }

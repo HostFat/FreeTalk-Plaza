@@ -903,9 +903,6 @@ const MAX_PROACTIVE_AUTHORITY_SYNC_TOPICS: usize = 16;
 /// role change.
 pub async fn propagate_authority(owner: VerifyingKey) -> Result<(), String> {
     let board = board_for(owner)?;
-    if !board.board_state.mode.is_topic_index() {
-        return Ok(());
-    }
     let mut cached_targets: Vec<(i64, MessageId, u32)> = TOPIC_CACHE
         .read()
         .values()

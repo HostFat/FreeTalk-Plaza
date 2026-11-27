@@ -101,24 +101,6 @@ impl ViewerPowers {
     }
 }
 
-/// Unsent composer content. Local to this user and persisted in the delegate
-/// store, so a reload or a navigation does not lose a half-written post.
-#[derive(Clone, PartialEq, Serialize, Deserialize, Debug, Default)]
-pub struct ComposerDraft {
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub text: String,
-    #[serde(default)]
-    pub reply_to: Option<MessageId>,
-    #[serde(default)]
-    pub reply_author: String,
-    #[serde(default)]
-    pub reply_preview: String,
-    #[serde(default)]
-    pub updated_at: i64,
-}
-
 /// An image prepared for upload that is not published yet. It rides with the
 /// board in the delegate store, so a reload can resume it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -140,33 +122,6 @@ pub struct PendingUpload {
     /// Set once the blob is on the node, so a reload does not upload it again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<plaza_core::board_state::images::ImageRef>,
-}
-
-/// A post waiting for its images. The composer writes it when the user sends
-/// during an upload; the background resume finishes uploads and publishes it.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-pub struct PendingSend {
-    pub title: String,
-    pub text: String,
-    pub reply_to: Option<MessageId>,
-    pub reply_author: Option<String>,
-    pub reply_preview: Option<String>,
-    pub category_id: Option<MessageId>,
-    /// Attachments still uploading when the post was queued.
-    #[serde(default)]
-    pub attachment_ids: Vec<String>,
-    /// Attachments already uploaded, kept so a crash mid-resume loses nothing.
-    #[serde(default)]
-    pub images: Vec<plaza_core::board_state::images::ImageRef>,
-    /// The topic author moderates replies; queued with the rest of the intent.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub auto_moderated: bool,
-    /// Topic membership key for the queued reply, kept so a resume can prove
-    /// membership even before the board state is merged again.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic_proof_key: Option<SigningKey>,
-    #[serde(default)]
-    pub queued_at: i64,
 }
 
 /// Raw copies of one uploaded blob, kept so it can be put back on the
@@ -290,11 +245,6 @@ pub struct BoardData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_profile_id: Option<String>,
     pub contract_key: ContractKey,
-    /// The last message ID that was read by the user (for unread tracking)
-    /// Messages after this ID from other users are considered unread.
-    /// This is persisted to delegate storage.
-    #[serde(default)]
-    pub last_read_message_id: Option<MessageId>,
     /// All decrypted board secrets by version (if board is private)
     /// Maps secret_version -> decrypted 32-byte secret
     #[serde(skip)]
@@ -307,10 +257,6 @@ pub struct BoardData {
     /// Last time the user marked notifications as read (milliseconds).
     #[serde(default)]
     pub last_visit: i64,
-
-    /// Last time each section was opened (milliseconds), for unread badges.
-    #[serde(default)]
-    pub read_categories: HashMap<MessageId, i64>,
 
     /// Last time each topic was opened (milliseconds) for index boards.
     #[serde(default)]
@@ -333,27 +279,12 @@ pub struct BoardData {
     #[serde(default)]
     pub nickname_requests: Vec<NicknameRequest>,
 
-    /// The composer's unsent post. Local UI state, never shared with the board.
-    #[serde(default)]
-    pub draft: Option<ComposerDraft>,
-    /// Drafts the user saved for later. Local UI state, kept newest first.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub drafts: Vec<ComposerDraft>,
-    /// Days after which items in the trash are purged when the Trash page
-    /// opens. Zero disables it. Local preference.
-    #[serde(default)]
-    pub trash_retention_days: u32,
     /// Image uploads prepared but not yet published. Kept in memory only: the
     /// records carry the file bytes (up to 24 MiB) and are stored under their
     /// own delegate key. The field still deserializes so a blob written by an
     /// older version can be migrated; new saves omit it.
     #[serde(default, skip_serializing)]
     pub pending_uploads: Vec<PendingUpload>,
-
-    /// A post the user asked to publish whose images were still uploading.
-    /// Persisted so a reload finishes the upload and sends it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_send: Option<PendingSend>,
 
     /// Sections the user follows. New topics in these sections show up in the
     /// notifications list. Local preference, persisted in the delegate.
@@ -372,13 +303,6 @@ pub struct BoardData {
     /// before the rotation stay readable. Local to this member.
     #[serde(default)]
     pub old_category_secrets: HashMap<MessageId, HashMap<u32, [u8; 32]>>,
-    /// Decrypted board trash key: (secret version, key). Local to each manager.
-    #[serde(default)]
-    pub trash_secret: Option<(u32, [u8; 32])>,
-    /// Every trash key this client has opened, by secret version. Rotation
-    /// replaces the current key; older items stay readable with their version.
-    #[serde(default)]
-    pub trash_secrets: HashMap<u32, [u8; 32]>,
     /// The current (latest) secret version
     #[serde(skip)]
     pub current_secret_version: Option<u32>,
