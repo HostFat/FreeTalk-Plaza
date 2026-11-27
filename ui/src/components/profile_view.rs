@@ -1,8 +1,7 @@
-//! Public member profile: nickname, roles, post count and recent posts.
+//! Public member profile: nickname, roles, topic count and recent topics.
 //! No avatar for now.
 
 use crate::components::app::{Route, BOARDS, CURRENT_BOARD};
-use crate::components::conversation::get_all_messages;
 use crate::util::format_utc_as_local_time;
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
@@ -27,18 +26,40 @@ pub fn ProfileView(member_key: String) -> Element {
         let current = CURRENT_BOARD.read().owner_key?;
         let boards = BOARDS.read();
         let board = boards.map.get(&current)?.clone().with_merged_topics();
-        let self_id = MemberId::from(&board.self_sk.verifying_key());
-        let messages = get_all_messages(
-            &board.board_state,
-            self_id,
-            &board.secrets,
-            &board.category_secrets,
-            &board.old_category_secrets,
-        );
         let nickname = member_id
             .and_then(|target| board.display_nickname(target))
             .unwrap_or_else(|| member_id.map(|t| t.to_string()).unwrap_or_default());
-        Some((board.owner_vk, messages, nickname))
+        let topics: Vec<(String, String, i64)> = member_id
+            .map(|target| {
+                let mut authored: Vec<(String, String, i64)> = board
+                    .board_state
+                    .topics
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.entry.author == target
+                            && !board.board_state.topics.is_hidden(&entry.entry.topic_id)
+                            && board
+                                .board_state
+                                .topics
+                                .merged_into(&entry.entry.topic_id)
+                                .is_none()
+                    })
+                    .map(|entry| {
+                        let id = bs58::encode(entry.entry.topic_id.as_bytes()).into_string();
+                        let title = crate::components::app::topic_contract::read_text(
+                            &board,
+                            &entry.entry.title,
+                        )
+                        .unwrap_or_else(|| "Untitled".to_string());
+                        (id, title, entry.entry.created_at)
+                    })
+                    .collect();
+                authored.sort_by_key(|entry| std::cmp::Reverse(entry.2));
+                authored
+            })
+            .unwrap_or_default();
+        Some((board.owner_vk, topics, nickname))
     });
 
     let board_id = CURRENT_BOARD
@@ -50,7 +71,7 @@ pub fn ProfileView(member_key: String) -> Element {
     let Some(target) = member_id else {
         return rsx! {};
     };
-    let Some((owner_vk, messages, nickname)) = board.read().clone() else {
+    let Some((owner_vk, mut topics, nickname)) = board.read().clone() else {
         return rsx! {};
     };
 
@@ -79,14 +100,8 @@ pub fn ProfileView(member_key: String) -> Element {
             .unwrap_or_default()
     };
 
-    let mut posts: Vec<_> = messages
-        .iter()
-        .filter(|message| !message.is_category && message.author_id == target)
-        .cloned()
-        .collect();
-    posts.sort_by_key(|post| std::cmp::Reverse(post.time));
-    let post_count = posts.len();
-    posts.truncate(30);
+    let topic_count = topics.len();
+    topics.truncate(30);
 
     let mail_address = {
         let boards = BOARDS.read();
@@ -163,7 +178,7 @@ pub fn ProfileView(member_key: String) -> Element {
                             }
                         }
                         p { class: "text-xs text-text-muted mt-2",
-                            "{post_count} post(s)"
+                            "{topic_count} topic(s)"
                         }
                         if let Some(address) = mail_address {
                             div { class: "mt-3 flex flex-wrap items-center gap-2",
@@ -205,30 +220,30 @@ pub fn ProfileView(member_key: String) -> Element {
                             }
                         }
                     }
-                    h2 { class: "text-lg font-semibold text-text-muted mb-3", "Recent posts" }
-                    if posts.is_empty() {
-                        p { class: "text-text-muted text-sm", "No posts yet." }
+                    h2 { class: "text-lg font-semibold text-text-muted mb-3", "Recent topics" }
+                    if topics.is_empty() {
+                        p { class: "text-text-muted text-sm", "No topics yet." }
                     } else {
                         div { class: "space-y-2",
-                            for post in posts.iter() {
+                            for (topic_id, title, timestamp) in topics.iter() {
                                 {
-                                    let post_id = post.id_string();
+                                    let topic_id = topic_id.clone();
                                     let board_id = board_id.clone();
                                     let nav = navigator();
-                                    let timestamp = post.time.timestamp_millis();
+                                    let timestamp = *timestamp;
                                     rsx! {
                                         button {
-                                            key: "{post_id}",
+                                            key: "{topic_id}",
                                             r#type: "button",
                                             class: "w-full text-left bg-panel border border-border rounded-lg px-4 py-3 hover:border-accent/50 transition-colors",
                                             onclick: move |_| {
-                                                nav.push(Route::Post {
+                                                nav.push(Route::Topic {
                                                     board_id: board_id.clone(),
-                                                    post_id: post_id.clone(),
+                                                    topic_id: topic_id.clone(),
                                                 });
                                             },
                                             div { class: "flex items-baseline gap-2 flex-wrap",
-                                                span { class: "text-base font-semibold text-text", "{post.title_text}" }
+                                                span { class: "text-base font-semibold text-text", "{title}" }
                                                 span { class: "text-xs text-text-muted", "· {format_utc_as_local_time(timestamp)}" }
                                             }
                                         }

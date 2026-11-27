@@ -352,13 +352,7 @@ pub async fn handle_get_response(
                     }
                 });
 
-                // Rebuild actions_state from action messages (edit, delete,
-                // reaction). actions_state is #[serde(skip)], and private or
-                // category-scoped actions need their own key.
                 board_data.decrypt_category_secrets();
-                board_data.rebuild_actions_with_local_secrets(&ChatBoardParametersV1 {
-                    owner: owner_vk,
-                });
             });
             });
 
@@ -564,7 +558,6 @@ pub async fn handle_get_response(
                             );
                             board_data.capture_self_membership_data(&params);
                             board_data.decrypt_category_secrets();
-                            board_data.rebuild_actions_with_local_secrets(&params);
                         } else {
                         // Merge the retrieved state into the existing state
                         match board_data.board_state.merge(
@@ -577,19 +570,12 @@ pub async fn handle_get_response(
                                     "Successfully merged refreshed state for board {:?}",
                                     MemberId::from(owner_vk)
                                 );
-                                // Note: we intentionally do NOT record receive times here.
-                                // GET responses don't reflect real-time message arrival —
-                                // we don't know when these messages actually propagated
-                                // to our node. Only subscription UPDATE notifications
-                                // capture the true arrival moment.
-
                                 // Migration: capture self membership data for old boards
                                 board_data.capture_self_membership_data(&params);
 
                                 // New category keys may have arrived with the
                                 // refreshed state.
                                 board_data.decrypt_category_secrets();
-                                board_data.rebuild_actions_with_local_secrets(&params);
                             }
                             Err(e) => {
                                 error!(

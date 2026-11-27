@@ -13,7 +13,7 @@ use plaza_core::board_state::content::CategoryContentV1;
 use plaza_core::board_state::admin::{Admin, AuthorizedAdmin};
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
 use plaza_core::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
-use plaza_core::board_state::message::{BoardMessageBody, MessageId, SecretScope};
+use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::privacy::{
     BoardCipherSpec, BoardDisplayMetadata, PrivacyMode, SealedBytes,
 };
@@ -775,252 +775,30 @@ impl BoardData {
         }
     }
 
-    /// The newest secret that opens this body, whichever scope sealed it.
-    pub fn body_secret(&self, content: &BoardMessageBody) -> Option<([u8; 32], u32)> {
-        match content {
-            BoardMessageBody::Private {
-                secret_version,
-                secret_scope,
-                ..
-            } => match secret_scope {
-                SecretScope::Board => self
-                    .get_secret_for_version(*secret_version)
-                    .map(|secret| (*secret, *secret_version)),
-                SecretScope::Category(id) => self
-                    .category_secret(id)
-                    .filter(|(version, _)| version == secret_version)
-                    .map(|(version, secret)| (secret, version))
-                    .or_else(|| {
-                        self.old_category_secrets
-                            .get(id)
-                            .and_then(|versions| versions.get(secret_version))
-                            .map(|secret| (*secret, *secret_version))
-                    }),
-            },
-            BoardMessageBody::Public { .. } => None,
-        }
-    }
-
-    /// Decode a category message. `None` when this client cannot open it.
-    pub fn decode_category(&self, content: &BoardMessageBody) -> Option<CategoryContentV1> {
-        use crate::util::ecies::decrypt_with_symmetric_key;
-        use plaza_core::board_state::content::CONTENT_TYPE_CATEGORY;
-
-        match content {
-            BoardMessageBody::Public {
-                content_type, data, ..
-            } if *content_type == CONTENT_TYPE_CATEGORY => CategoryContentV1::decode(data).ok(),
-            BoardMessageBody::Private {
-                content_type,
-                ciphertext,
-                nonce,
-                ..
-            } if *content_type == CONTENT_TYPE_CATEGORY => {
-                let (secret, version) = self.body_secret(content)?;
-                let bytes = decrypt_with_symmetric_key(&secret, ciphertext, nonce, version).ok()?;
-                CategoryContentV1::decode(&bytes).ok()
-            }
-            _ => None,
-        }
-    }
-
-    /// Category content with its sealed name opened when we hold its key.
-    pub fn readable_category(
-        &self,
-        category_id: &MessageId,
-        content: &BoardMessageBody,
-    ) -> Option<CategoryContentV1> {
-        let mut category = self.decode_category(content)?;
-        if let Some(sealed) = category.sealed_name.as_ref() {
-            let mut keys = Vec::new();
-            if let Some((_, key)) = self.category_secret(category_id) {
-                keys.push(key);
-            }
-            if let Some(versions) = self.old_category_secrets.get(category_id) {
-                keys.extend(versions.values().copied());
-            }
-            for key in keys {
-                if let Ok(bytes) = crate::util::ecies::unseal_bytes(sealed, Some(&key)) {
-                    if let Ok(name) = String::from_utf8(bytes) {
-                        category.name = name;
-                        break;
-                    }
-                }
-            }
-        }
-        Some(category)
-    }
-
-    /// A restricted category is readable only with its own key. The owner
-    /// always holds the key because creation distributes one to them.
-    pub fn can_read_category(&self, category_id: &MessageId, content: &BoardMessageBody) -> bool {
-        match self.decode_category(content) {
-            Some(category) if category.is_restricted() => {
-                self.category_secret(category_id).is_some()
-            }
-            Some(_) => true,
-            None => false,
-        }
-    }
-
-    /// The category a reply belongs to: the target itself when it is a
-    /// restricted category, otherwise the category scope of the target.
-    pub fn category_for_target(&self, target: &MessageId) -> Option<MessageId> {
-        let message = self
-            .board_state
-            .recent_messages
-            .messages
-            .iter()
-            .find(|m| m.id() == *target)?;
-        if let Some(category) = self.decode_category(&message.message.content) {
-            if category.is_restricted() {
-                return Some(target.clone());
-            }
-        }
-        match &message.message.content {
-            BoardMessageBody::Private {
-                secret_scope: SecretScope::Category(id),
-                ..
-            } => Some(id.clone()),
-            _ => None,
-        }
-    }
-
-    /// Secret to seal a post in the category that owns `target`.
-    pub fn posting_secret_for(&self, target: &MessageId) -> Option<(MessageId, [u8; 32], u32)> {
-        let category_id = self.category_for_target(target)?;
-        let (version, secret) = self.category_secret(&category_id)?;
-        Some((category_id, secret, version))
-    }
-
-    /// Root topic a message belongs to. A public `topic_id` counts only with a
-    /// valid membership proof; otherwise the readable reply body is followed.
-    /// A message with neither is its own root.
-    pub fn topic_root_for(&self, target: &MessageId) -> Option<MessageId> {
-        let mut current = target.clone();
-        for _ in 0..64 {
-            let message = self
-                .board_state
-                .recent_messages
-                .messages
-                .iter()
-                .find(|message| message.id() == current)?;
-            if let Some(root) = &message.message.topic_id {
-                let valid = self
-                    .topic_public_key(root)
-                    .map(|key| message.message.has_valid_topic_proof(&key))
-                    .unwrap_or(false);
-                if valid {
-                    return Some(root.clone());
-                }
-            }
-            match self.readable_reply_target(&message.message.content) {
-                Some(parent) => current = parent,
-                None => return Some(current),
-            }
-        }
-        None
-    }
-
-    /// Public membership key of a topic, when it published one.
-    pub fn topic_public_key(&self, topic: &MessageId) -> Option<VerifyingKey> {
-        self.board_state
-            .recent_messages
-            .messages
-            .iter()
-            .find(|message| message.id() == *topic)
-            .and_then(|message| message.message.topic_public_key)
-    }
-
-    /// Topic membership private key, opened from the topic content when this
-    /// client holds the key that sealed it.
-    pub fn topic_membership_key(&self, topic: &MessageId) -> Option<SigningKey> {
-        use plaza_core::board_state::content::{
-            PollContentV1, TextContentV1, CONTENT_TYPE_POLL, CONTENT_TYPE_TEXT,
-        };
-        let message = self
-            .board_state
-            .recent_messages
-            .messages
-            .iter()
-            .find(|message| message.id() == *topic)?;
-        let plaintext = self.content_plaintext(&message.message.content)?;
-        let key = match message.message.content.content_type() {
-            CONTENT_TYPE_TEXT => TextContentV1::decode(&plaintext)
-                .ok()?
-                .topic_membership_key?,
-            CONTENT_TYPE_POLL => PollContentV1::decode(&plaintext)
-                .ok()?
-                .topic_membership_key?,
-            _ => return None,
-        };
-        let public = message.message.topic_public_key?;
-        (public == key.verifying_key()).then_some(key)
-    }
-
-    /// Root topic of `target` and the key a reply must use to prove membership.
-    pub fn topic_proof_key_for(&self, target: &MessageId) -> Option<(MessageId, SigningKey)> {
-        let root = self.topic_root_for(target)?;
-        let key = self.topic_membership_key(&root)?;
-        Some((root, key))
-    }
-
-    /// Plaintext of a content body, public or sealed with a key we hold.
-    fn content_plaintext(&self, content: &BoardMessageBody) -> Option<Vec<u8>> {
-        match content {
-            BoardMessageBody::Public { data, .. } => Some(data.clone()),
-            BoardMessageBody::Private {
-                ciphertext,
-                nonce,
-                ..
-            } => {
-                let (secret, version) = self.body_secret(content)?;
-                crate::util::ecies::decrypt_with_symmetric_key(
-                    &secret, ciphertext, nonce, version,
-                )
-                .ok()
-            }
-        }
-    }
-
-    /// Reply target the body names, public or sealed with a key we hold.
-    fn readable_reply_target(&self, content: &BoardMessageBody) -> Option<MessageId> {
-        use plaza_core::board_state::content::{ReplyContentV1, CONTENT_TYPE_REPLY};
-        match content {
-            BoardMessageBody::Public {
-                content_type, data, ..
-            } if *content_type == CONTENT_TYPE_REPLY => {
-                ReplyContentV1::decode(data).ok().map(|reply| reply.target_message_id)
-            }
-            BoardMessageBody::Private {
-                content_type,
-                ciphertext,
-                nonce,
-                ..
-            } if *content_type == CONTENT_TYPE_REPLY => {
-                let (secret, version) = self.body_secret(content)?;
-                let bytes = crate::util::ecies::decrypt_with_symmetric_key(
-                    &secret,
-                    ciphertext,
-                    nonce,
-                    version,
-                )
-                .ok()?;
-                ReplyContentV1::decode(&bytes).ok().map(|reply| reply.target_message_id)
-            }
-            _ => None,
-        }
-    }
-
-    /// Every restricted category this client can decode, with its content.
+    /// Every restricted section on this board, projected into `CategoryContentV1`
+    /// for role-based key distribution and rotation.
     pub fn restricted_categories(&self) -> Vec<(MessageId, CategoryContentV1)> {
         self.board_state
-            .recent_messages
-            .messages
+            .sections
+            .sections
             .iter()
-            .filter_map(|message| {
-                let category = self.decode_category(&message.message.content)?;
-                category.is_restricted().then(|| (message.id(), category))
+            .filter(|entry| !entry.section.deleted && !entry.section.allowed_roles.is_empty())
+            .map(|entry| {
+                let section = &entry.section;
+                let category = CategoryContentV1 {
+                    name: section.name.clone(),
+                    description: section.description.clone(),
+                    icon: section.icon.clone(),
+                    color: section.color.clone(),
+                    parent_category_id: section.parent,
+                    allowed_roles: section.allowed_roles.clone(),
+                    sealed_name: section.sealed_name.clone(),
+                    hidden: section.hidden,
+                    is_group: section.is_group,
+                    images_allowed: section.images_allowed,
+                    auto_moderated_topics: section.auto_moderated_topics,
+                };
+                (section.id, category)
             })
             .collect()
     }
@@ -1174,248 +952,6 @@ impl BoardData {
         Ok(delta)
     }
 
-    /// Recompute edits, deletions and reactions, opening actions sealed with
-    /// the board key or with a category key. The contract only understands
-    /// public actions, so every private action is decrypted here.
-    pub fn rebuild_actions_with_local_secrets(&mut self, parameters: &ChatBoardParametersV1) {
-        use crate::util::ecies::decrypt_with_symmetric_key;
-        use std::collections::HashSet;
-
-        let decrypted_actions: HashMap<MessageId, Vec<u8>> = self
-            .board_state
-            .recent_messages
-            .messages
-            .iter()
-            .filter(|message| message.message.content.is_action())
-            .filter_map(|message| match &message.message.content {
-                BoardMessageBody::Private {
-                    ciphertext, nonce, ..
-                } => {
-                    let (key, version) = self.body_secret(&message.message.content)?;
-                    decrypt_with_symmetric_key(&key, ciphertext, nonce, version)
-                        .ok()
-                        .map(|plaintext| (message.id(), plaintext))
-                }
-                BoardMessageBody::Public {
-                    content_type, data, ..
-                } if *content_type == plaza_core::board_state::content::CONTENT_TYPE_ACTION => {
-                    Some((message.id(), data.clone()))
-                }
-                BoardMessageBody::Public {
-                    content_type, data, ..
-                } if *content_type
-                    == plaza_core::board_state::content::CONTENT_TYPE_MODERATION_ACTION =>
-                {
-                    let envelope =
-                        plaza_core::board_state::content::ModerationActionV1::decode(data).ok()?;
-                    match envelope.payload {
-                        plaza_core::board_state::privacy::SealedBytes::Public { value } => {
-                            Some((message.id(), value))
-                        }
-                        plaza_core::board_state::privacy::SealedBytes::Private {
-                            ciphertext,
-                            nonce,
-                            secret_version,
-                            ..
-                        } => {
-                            let category_key = self
-                                .category_secret(&envelope.target)
-                                .filter(|(version, _)| *version == secret_version)
-                                .map(|(_, key)| key);
-                            let key = category_key
-                                .or_else(|| self.get_secret_for_version(secret_version).copied())?;
-                            decrypt_with_symmetric_key(&key, &ciphertext, &nonce, secret_version)
-                                .ok()
-                                .map(|plaintext| (message.id(), plaintext))
-                        }
-                    }
-                }
-                _ => None,
-            })
-            .collect();
-
-        if decrypted_actions.is_empty() {
-            self.board_state.recent_messages.rebuild_actions_state();
-            return;
-        }
-
-        let owner_id = MemberId::from(&parameters.owner);
-        let admin_ids: HashSet<MemberId> = self
-            .board_state
-            .admin
-            .admins
-            .iter()
-            .map(|admin| admin.admin.id())
-            .collect();
-
-        let routes = self.board_state.moderation.routes_map();
-        let mut closed = HashSet::new();
-        let mut grants = Vec::new();
-        for flag in &self.board_state.moderation.feature_flags {
-            if flag.flag.kind == plaza_core::board_state::moderation::FeatureKind::Closed
-                && flag.flag.value
-            {
-                closed.insert(flag.flag.target);
-            }
-        }
-        for role in &self.board_state.roles.roles {
-            if role.role.deleted || (!role.role.can_edit_posts && !role.role.can_delete_posts) {
-                continue;
-            }
-            for member_id in self.board_state.roles.members_of_role(&role.role.id) {
-                grants.push(plaza_core::board_state::message::ModerationGrant {
-                    member_id,
-                    can_edit: role.role.can_edit_posts,
-                    can_delete: role.role.can_delete_posts,
-                    scope: role.role.scope.clone(),
-                });
-            }
-        }
-        let scope_chains = self
-            .board_state
-            .recent_messages
-            .messages
-            .iter()
-            .map(|message| {
-                (
-                    message.id(),
-                    plaza_core::board_state::moderation::category_chain(&routes, &message.id()),
-                )
-            })
-            .collect();
-        let moderation = plaza_core::board_state::message::ModerationPermissions {
-            closed,
-            grants,
-            scope_chains,
-        };
-        let member_ids: HashSet<MemberId> = self
-            .board_state
-            .members
-            .members
-            .iter()
-            .map(|member| member.member.id())
-            .collect();
-        let reactions_enabled = self
-            .board_state
-            .configuration
-            .configuration
-            .reactions_enabled;
-        self.board_state
-            .recent_messages
-            .rebuild_actions_state_with_permissions(
-                &decrypted_actions,
-                Some(owner_id),
-                Some(&admin_ids),
-                Some(&moderation),
-                reactions_enabled,
-                Some(&member_ids),
-            );
-    }
-
-    /// Drop action messages that the current contract rules reject.
-    ///
-    /// A board written by an older build can carry an action that was valid
-    /// then and is not valid now. A full-state update would be rejected for
-    /// every later post, so remove the offending action locally first.
-    pub fn prune_invalid_actions(&mut self) -> usize {
-        use plaza_core::board_state::content::CONTENT_TYPE_MODERATION_ACTION;
-        use plaza_core::board_state::message::BoardMessageBody;
-
-        let params = ChatBoardParametersV1 { owner: self.owner_vk };
-        let owner_id = MemberId::from(&self.owner_vk);
-        let admin_ids: std::collections::HashSet<MemberId> = self
-            .board_state
-            .admin
-            .admins
-            .iter()
-            .map(|admin| admin.admin.id())
-            .collect();
-        let authors: std::collections::HashMap<_, _> = self
-            .board_state
-            .recent_messages
-            .messages
-            .iter()
-            .map(|message| (message.id(), message.message.author))
-            .collect();
-        let before = self.board_state.recent_messages.messages.len();
-        self.board_state.recent_messages.messages.retain(|message| {
-            let action = match &message.message.content {
-                BoardMessageBody::Public {
-                    content_type,
-                    data,
-                    ..
-                } if *content_type == CONTENT_TYPE_MODERATION_ACTION => {
-                    plaza_core::board_state::content::ModerationActionV1::decode(data).ok()
-                }
-                _ => None,
-            };
-            let Some(action) = action else {
-                return true;
-            };
-            if action.action_type == plaza_core::board_state::content::ACTION_TYPE_REACTION
-                || action.action_type
-                    == plaza_core::board_state::content::ACTION_TYPE_REMOVE_REACTION
-            {
-                return true;
-            }
-            let actor = message.message.author;
-            if actor == owner_id || admin_ids.contains(&actor) {
-                return true;
-            }
-            let target_author = authors.get(&action.target).copied();
-            target_author == Some(actor)
-        });
-        let mut removed = before - self.board_state.recent_messages.messages.len();
-        loop {
-            if self
-                .board_state
-                .moderation
-                .validate_actions(&self.board_state, &params)
-                .is_ok()
-            {
-                break;
-            }
-            let mut removed_one = false;
-            for index in 0..self.board_state.recent_messages.messages.len() {
-                let is_action = matches!(
-                    &self.board_state.recent_messages.messages[index].message.content,
-                    BoardMessageBody::Public { content_type, .. }
-                        if *content_type == CONTENT_TYPE_MODERATION_ACTION
-                );
-                if !is_action {
-                    continue;
-                }
-                let message = self
-                    .board_state
-                    .recent_messages
-                    .messages
-                    .remove(index);
-                if self
-                    .board_state
-                    .moderation
-                    .validate_actions(&self.board_state, &params)
-                    .is_ok()
-                {
-                    removed += 1;
-                    removed_one = true;
-                    break;
-                }
-                self
-                    .board_state
-                    .recent_messages
-                    .messages
-                    .insert(index, message);
-            }
-            if !removed_one {
-                break;
-            }
-        }
-        if removed > 0 {
-            self.rebuild_actions_with_local_secrets(&params);
-        }
-        removed
-    }
-
     /// Whether this client may sign category key distributions: the owner, or
     /// a member of a role the owner allowed to distribute keys.
     pub fn can_distribute_category_keys(&self) -> bool {
@@ -1511,7 +1047,8 @@ impl BoardData {
             return false;
         }
         self.board_state.members.members.is_empty()
-            && self.board_state.recent_messages.messages.is_empty()
+            && self.board_state.topics.entries.is_empty()
+            && self.board_state.sections.sections.is_empty()
     }
 
     /// Check if the board is in private mode
@@ -2283,23 +1820,35 @@ impl BoardData {
         self.can_participate().is_ok()
     }
 
-    /// Whether a section allows images, following the signed on/off actions.
+    /// Whether a section allows images.
     pub fn section_images_allowed(&self, section: &MessageId) -> bool {
-        let parameters = self.board_parameters();
         self.board_state
-            .recent_messages
-            .section_allows_images(&self.board_state, &parameters, section)
+            .sections
+            .sections
+            .iter()
+            .find(|entry| !entry.section.deleted && entry.section.id == *section)
+            .map(|entry| entry.section.images_allowed)
+            .unwrap_or(true)
     }
 
     /// Whether the composer may offer the auto-moderated topic option here.
-    /// The section override wins over the board configuration; a sealed
-    /// section record falls back to the board default. Private boards and
-    /// restricted sections are offered too: the flag rides in the signed
-    /// public metadata, so the contract can enforce it without the body.
+    /// The section override wins over the board configuration.
     pub fn auto_moderated_topics_enabled(&self, section: Option<&MessageId>) -> bool {
-        self.board_state
-            .recent_messages
-            .section_auto_moderated_topics(&self.board_state, &self.board_parameters(), section)
+        section
+            .and_then(|id| {
+                self.board_state
+                    .sections
+                    .sections
+                    .iter()
+                    .find(|entry| !entry.section.deleted && entry.section.id == *id)
+                    .and_then(|entry| entry.section.auto_moderated_topics)
+            })
+            .unwrap_or(
+                self.board_state
+                    .configuration
+                    .configuration
+                    .auto_moderated_topics,
+            )
     }
 
     /// Whether the owner enabled reactions for this board.
@@ -2307,16 +1856,8 @@ impl BoardData {
         self.board_state.configuration.configuration.reactions_enabled
     }
 
-    /// The nickname to show for a member: a moderator override first, then the
-    /// member's own published name.
+    /// The nickname to show for a member from their published member info.
     pub fn display_nickname(&self, member_id: MemberId) -> Option<String> {
-        if let Some(override_name) = self
-            .board_state
-            .recent_messages
-            .nickname_override(&member_id)
-        {
-            return Some(override_name.nickname.clone());
-        }
         self.board_state
             .member_info
             .member_info
@@ -2362,7 +1903,8 @@ impl BoardData {
     }
 
     /// The newest nickname request for a member, whatever its status.
-    pub fn latest_nickname_request(&self, member_id: MemberId) -> Option<&NicknameRequest> {        self.nickname_requests
+    pub fn latest_nickname_request(&self, member_id: MemberId) -> Option<&NicknameRequest> {
+        self.nickname_requests
             .iter()
             .filter(|request| request.member_id == member_id)
             .max_by_key(|request| request.created_at)
@@ -2415,7 +1957,7 @@ impl BoardData {
         out
     }
 
-    /// Key to seal an image attached in `section`, or to a reply of `target`.
+    /// Key to seal an image attached in `section`, or to a topic `target`.
     /// The section key comes first, then the board secret of a private board.
     pub fn image_upload_secret(
         &self,
@@ -2423,8 +1965,10 @@ impl BoardData {
         target: Option<&MessageId>,
     ) -> Option<([u8; 32], u32)> {
         if let Some(target) = target {
-            if let Some((_, key, version)) = self.posting_secret_for(target) {
-                return Some((key, version));
+            if let (Some(section_id), _) = self.board_state.topics.section_of(target) {
+                if let Some((version, key)) = self.category_secret(&section_id) {
+                    return Some((key, version));
+                }
             }
         }
         if let Some(section) = section {
@@ -2446,20 +1990,14 @@ impl BoardData {
         }
         let parameters = self.board_parameters();
         let self_id = MemberId::from(&self.self_sk.verifying_key());
-        if !plaza_core::board_state::message::author_may_attach_images(
-            &self.board_state,
-            &parameters,
-            &self_id,
-            section,
-        ) {
+        let allowed_by_role = self_id == self.board_state.ownership.current_owner(&parameters)
+            || plaza_core::board_state::roles::is_board_admin(&self.board_state, &self_id)
+            || self.board_state.roles.can_attach_images(&self_id, section);
+        if !allowed_by_role {
             return false;
         }
         match section {
-            Some(section) => self.board_state.recent_messages.section_allows_images(
-                &self.board_state,
-                &parameters,
-                section,
-            ),
+            Some(section) => self.section_images_allowed(section),
             None => true,
         }
     }
@@ -3807,9 +3345,6 @@ impl Boards {
             // show restricted categories without waiting for a network round trip.
             board_data.decrypt_board_secrets();
             board_data.decrypt_category_secrets();
-            // Moderation actions are stored as messages; recompute the derived
-            // deleted/edited state so a loaded board reflects them immediately.
-            board_data.rebuild_actions_with_local_secrets(&ChatBoardParametersV1 { owner: vk });
 
             // If the contract key changed (WASM was updated), track for upgrade pointer
             if old_contract_key != board_data.contract_key {
@@ -5175,31 +4710,6 @@ mod tests {
                 &owner_sk,
             ));
 
-        // A member with no messages is pruned by post-apply cleanup. Give the
-        // invitee one post so they stay in the state, as a real client would.
-        board.board_state.recent_messages.messages.push(
-            plaza_core::board_state::message::AuthorizedMessageV1::new(
-                plaza_core::board_state::message::MessageV1 {
-                    images: Vec::new(),
-                    board_owner: owner_id,
-                    author: invitee_id,
-                    time: get_current_system_time(),
-                    content: plaza_core::board_state::message::BoardMessageBody::public(
-                        "hello".to_string(),
-                        String::new(),
-                    ),
-                    reply_to: None,
-                    topic_id: None,
-                    topic_public_key: None,
-                    topic_proof: None,
-                    section_id: None,
-                    section_auto_moderated: None,
-                    auto_moderated: false,
-                },
-                &invitee_sk,
-            ),
-        );
-
         // The owner distributes the secret (same call the sync path makes when
         // a member joins) and applies it to the board state.
         let state_before = board.board_state.clone();
@@ -5309,13 +4819,11 @@ mod tests {
     fn restricted_category_reaches_only_role_members() {
         use crate::util::ecies::seal_bytes;
         use plaza_core::board_state::category_secrets::CategorySecretsDelta;
-        use plaza_core::board_state::content::{
-            CategoryContentV1, CATEGORY_CONTENT_VERSION, CONTENT_TYPE_CATEGORY,
-        };
-        use plaza_core::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
+        use plaza_core::board_state::content::CategoryContentV1;
         use plaza_core::board_state::roles::{
             AuthorizedRole, AuthorizedRoleAssignment, Role, RoleAssignment, RolesDelta,
         };
+        use plaza_core::board_state::sections::{AuthorizedSection, SectionV1, SectionsDelta};
         use plaza_core::board_state::ChatBoardStateV1Delta;
 
         let mut rng = rand::thread_rng();
@@ -5403,59 +4911,41 @@ mod tests {
                             &owner_sk,
                         )],
                     }),
-                    // A member with no messages is pruned by cleanup, so keep
-                    // the invitee alive with one post, as a real board would.
-                    recent_messages: Some(vec![AuthorizedMessageV1::new(
-                        MessageV1 {
-                            images: Vec::new(),
-                            board_owner: owner_id,
-                            author: invitee_id,
-                            content: BoardMessageBody::public(String::new(), "hello".to_string()),
-                            time: get_current_system_time(),
-                            reply_to: None,
-                            topic_id: None,
-                            topic_public_key: None,
-                            topic_proof: None,
-                            section_id: None,
-                            section_auto_moderated: None,
-                            auto_moderated: false,
-                        },
-                        &invitee_sk,
-                    )]),
                     ..Default::default()
                 }),
             )
             .expect("roles apply");
 
-        // The category the create-category modal builds for a restricted entry.
         let category_secret = [3u8; 32];
         let sealed_name = seal_bytes(b"Members only", &category_secret, 0);
+        let category_id = MessageId::from_bytes([11u8; 32]);
         let category = CategoryContentV1::new(
             "Restricted category".to_string(),
             None,
             "#6366f1".to_string(),
         )
-        .with_allowed_roles(vec![role_id], sealed_name, true);
-        let message = MessageV1 {
-            images: Vec::new(),
-            board_owner: owner_id,
-            author: owner_id,
-            content: BoardMessageBody::public_raw(
-                CONTENT_TYPE_CATEGORY,
-                CATEGORY_CONTENT_VERSION,
-                category.encode(),
-            ),
-            time: get_current_system_time(),
-            reply_to: None,
-            topic_id: None,
-            topic_public_key: None,
-            topic_proof: None,
-            section_id: None,
-            section_auto_moderated: None,
-            auto_moderated: false,
-        };
-        let authorized = AuthorizedMessageV1::new(message, &owner_sk);
-        let category_id = authorized.id();
+        .with_allowed_roles(vec![role_id], sealed_name.clone(), true);
+        let authorized_section = AuthorizedSection::new(
+            SectionV1 {
+                id: category_id,
+                parent: None,
+                name: "Restricted category".to_string(),
+                description: None,
+                icon: None,
+                color: "#6366f1".to_string(),
+                allowed_roles: vec![role_id],
+                sealed_name: Some(sealed_name),
+                hidden: true,
+                is_group: false,
+                images_allowed: true,
+                auto_moderated_topics: None,
+                generation: 1,
+                deleted: false,
+                contract: None,
+                signed_at: get_current_system_time(),
+            },
+            &owner_sk,
+        );
 
         let readers = board.category_readers(&category);
         assert!(readers.contains(&invitee_id));
@@ -5468,14 +4958,16 @@ mod tests {
                 &before,
                 &params,
                 &Some(ChatBoardStateV1Delta {
-                    recent_messages: Some(vec![authorized]),
+                    sections: Some(SectionsDelta {
+                        sections: vec![authorized_section],
+                    }),
                     category_secrets: Some(CategorySecretsDelta {
                         sets: vec![secret_set],
                     }),
                     ..Default::default()
                 }),
             )
-            .expect("category and its secret set apply");
+            .expect("section and its secret set apply");
         board.decrypt_category_secrets();
         assert_eq!(
             board.category_secret(&category_id),
@@ -5525,22 +5017,13 @@ mod tests {
         }));
 
         let owner_view = boards.map.get(&key).unwrap().clone();
-        let content = owner_view
-            .board_state
-            .recent_messages
-            .messages
-            .iter()
-            .find(|m| m.id() == category_id)
-            .expect("category message present")
-            .message
-            .content
-            .clone();
-        let owner_category = owner_view
-            .readable_category(&category_id, &content)
-            .expect("owner reads it");
-        assert_eq!(owner_category.name, "Members only");
+        assert_eq!(
+            owner_view.restricted_categories().len(),
+            1,
+            "restricted section is discovered from sections state"
+        );
 
-        // The invitee decrypts their blob and sees the same name.
+        // The invitee decrypts their blob and recovers the category key.
         let mut invitee_view = owner_view.clone();
         invitee_view.self_sk = invitee_sk.clone();
         invitee_view.owner_sk = None;
@@ -5550,10 +5033,6 @@ mod tests {
             invitee_view.category_secret(&category_id),
             Some((0, category_secret))
         );
-        let invitee_category = invitee_view
-            .readable_category(&category_id, &content)
-            .expect("invitee reads it");
-        assert_eq!(invitee_category.name, "Members only");
 
         // The outsider is a board member but not in the role: no blob.
         let outsider_id: MemberId = outsider_sk.verifying_key().into();
@@ -5563,11 +5042,6 @@ mod tests {
         outsider_view.category_secrets.clear();
         outsider_view.decrypt_category_secrets();
         assert!(outsider_view.category_secret(&category_id).is_none());
-        assert!(!outsider_view.can_read_category(&category_id, &content));
-        let outsider_category = outsider_view
-            .readable_category(&category_id, &content)
-            .expect("placeholder still decodes");
-        assert_eq!(outsider_category.name, "Restricted category");
 
         // A post sealed with the category key opens only for key holders.
         let category_post = seal_bytes(b"members only post", &category_secret, 0);
@@ -5611,26 +5085,6 @@ mod tests {
                             &owner_sk,
                         )],
                     }),
-                    recent_messages: Some(vec![AuthorizedMessageV1::new(
-                        MessageV1 {
-                            images: Vec::new(),
-                            board_owner: owner_id,
-                            author: outsider_id,
-                            content: BoardMessageBody::public(
-                                String::new(),
-                                "joined the role".to_string(),
-                            ),
-                            time: get_current_system_time(),
-                            reply_to: None,
-                            topic_id: None,
-                            topic_public_key: None,
-                            topic_proof: None,
-                            section_id: None,
-                            section_auto_moderated: None,
-                            auto_moderated: false,
-                        },
-                        &outsider_sk,
-                    )]),
                     ..Default::default()
                 }),
             )
@@ -5957,31 +5411,35 @@ mod tests {
         let synced_board = make_board(invitee_sk.clone(), vec![auth_member]);
         assert!(!synced_board.is_awaiting_initial_sync());
 
-        // Synced board with members pruned but messages present: NOT awaiting sync
+        // Synced board with members pruned but sections present: NOT awaiting sync
         let mut pruned_board = make_board(invitee_sk, vec![]);
-        use plaza_core::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
-        let dummy_msg = AuthorizedMessageV1 {
-            message: MessageV1 {
-                images: Vec::new(),
-                board_owner: owner_vk.into(),
-                author: owner_vk.into(),
-                content: BoardMessageBody::public(String::new(), "test".to_string()),
-                time: std::time::SystemTime::UNIX_EPOCH,
-                reply_to: None,
-                topic_id: None,
-                topic_public_key: None,
-                topic_proof: None,
-                section_id: None,
-                section_auto_moderated: None,
-                auto_moderated: false,
+        use plaza_core::board_state::sections::{AuthorizedSection, SectionV1};
+        let dummy_section = AuthorizedSection::new(
+            SectionV1 {
+                id: plaza_core::board_state::message::MessageId::from_bytes([1u8; 32]),
+                parent: None,
+                name: "General".to_string(),
+                description: None,
+                icon: None,
+                color: "#6366f1".to_string(),
+                allowed_roles: Vec::new(),
+                sealed_name: None,
+                hidden: false,
+                is_group: false,
+                images_allowed: true,
+                auto_moderated_topics: None,
+                generation: 1,
+                deleted: false,
+                contract: None,
+                signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
-            signature: ed25519_dalek::Signature::from_bytes(&[0u8; 64]),
-        };
+            &owner_sk,
+        );
         pruned_board
             .board_state
-            .recent_messages
-            .messages
-            .push(dummy_msg);
+            .sections
+            .sections
+            .push(dummy_section);
         assert!(!pruned_board.is_awaiting_initial_sync());
     }
 

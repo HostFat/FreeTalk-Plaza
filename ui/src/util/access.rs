@@ -252,9 +252,6 @@ fn apply_and_sync(
                 &Some(delta),
             ) {
                 Ok(_) => {
-                    board.rebuild_actions_with_local_secrets(&ChatBoardParametersV1 {
-                        owner: board_key,
-                    });
                     applied = true;
                 }
                 Err(e) => error = Some(e),

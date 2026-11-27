@@ -1,13 +1,11 @@
-//! Browser/system notifications for new replies and mentions.
+//! Browser/system notifications for new topic activity.
 //!
-//! The in-app list is filtered by each board's notification mode. This bridge
-//! shows the same notices as OS notifications when the tab is hidden, honours
-//! the mode, and marks existing notices as seen on the first run so a reload
-//! does not replay the whole list.
+//! Shows OS notifications when the tab is hidden, honours the per-board
+//! notification mode, and marks existing topics as seen on the first run so a
+//! reload does not replay the whole list.
 
 use crate::board_data::NotificationMode;
 use crate::components::app::{BOARDS, BOARDS_LOADED, CURRENT_BOARD};
-use crate::components::conversation::get_all_messages;
 use crate::util::notifications::{self, NoticeKind};
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
@@ -26,30 +24,16 @@ pub fn SystemNotificationsBridge() -> Element {
         let Some(key) = CURRENT_BOARD.read().owner_key else {
             return;
         };
-        let board = BOARDS.read().map.get(&key).cloned();
+        let board = BOARDS
+            .read()
+            .map
+            .get(&key)
+            .cloned()
+            .map(|board| board.with_merged_topics());
         let Some(board) = board else {
             return;
         };
         let self_id = MemberId::from(&board.self_sk.verifying_key());
-        let messages = get_all_messages(
-            &board.board_state,
-            self_id,
-            &board.secrets,
-            &board.category_secrets,
-            &board.old_category_secrets,
-        );
-        let nickname = notifications::self_nickname(&board, self_id);
-        // Collect everything for the seen set; the board mode only decides
-        // which new notices become an OS notification.
-        let notices = notifications::collect(
-            &messages,
-            self_id,
-            &nickname,
-            board.last_visit,
-            &board.subscribed_categories,
-            &board.read_categories,
-            NotificationMode::All,
-        );
 
         let first_run = !*initialized.peek();
         if first_run {
@@ -57,31 +41,39 @@ pub fn SystemNotificationsBridge() -> Element {
         }
         let mut known = seen.peek().clone();
         let mut pending: Vec<(String, String, MessageId)> = Vec::new();
-        for notice in &notices {
-            if !known.insert(notice.message.message_id) {
+        for entry in &board.board_state.topics.entries {
+            let topic_id = entry.entry.topic_id;
+            if entry.entry.author == self_id
+                || board.board_state.topics.is_hidden(&topic_id)
+                || board.board_state.topics.merged_into(&topic_id).is_some()
+            {
+                continue;
+            }
+            let last_at = board
+                .board_state
+                .topics
+                .activity_for(&topic_id)
+                .map(|activity| activity.activity.last_activity)
+                .unwrap_or(entry.entry.created_at);
+            if last_at <= board.topic_last_read(&topic_id) {
+                continue;
+            }
+            if !known.insert(topic_id) {
                 continue;
             }
             let notify = !first_run
-                && notifications::mode_allows(board.notification_mode, notice.kind);
+                && board.notification_mode != NotificationMode::Muted
+                && notifications::mode_allows(board.notification_mode, NoticeKind::Section);
             if notify {
-                let title = match notice.kind {
-                    NoticeKind::Reply => {
-                        format!("New reply from {}", notice.message.author_name)
-                    }
-                    NoticeKind::Mention => {
-                        format!("{} mentioned you", notice.message.author_name)
-                    }
-                    NoticeKind::Section => format!(
-                        "New topic in {}",
-                        notice.message.title_text
-                    ),
-                };
-                let body = if notice.message.title_text.is_empty() {
-                    notice.message.content_text.clone()
-                } else {
-                    notice.message.title_text.clone()
-                };
-                pending.push((title, body, notice.message.message_id));
+                let author = board
+                    .display_nickname(entry.entry.author)
+                    .unwrap_or_else(|| entry.entry.author.to_string());
+                let title_text = crate::components::app::topic_contract::read_text(
+                    &board,
+                    &entry.entry.title,
+                )
+                .unwrap_or_else(|| "Untitled".to_string());
+                pending.push((format!("New topic from {author}"), title_text, topic_id));
             }
         }
         *seen.write() = known;
@@ -102,7 +94,8 @@ pub fn SystemNotificationsBridge() -> Element {
             }
             let board_id = bs58::encode(key.as_bytes()).into_string();
             for (title, body, id) in pending {
-                show_notification(&title, &body, &id.to_string(), &board_id, &id.to_string());
+                let topic_b58 = bs58::encode(id.as_bytes()).into_string();
+                show_notification(&title, &body, &topic_b58, &board_id, &topic_b58);
             }
         }
         #[cfg(not(target_arch = "wasm32"))]

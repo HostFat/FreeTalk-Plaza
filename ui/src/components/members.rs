@@ -220,26 +220,20 @@ pub fn MembersView() -> Element {
             let is_admin = admin_ids.contains(&member_id);
             let is_deactivated = board_state.ownership.is_deactivated_now(&member_id);
 
-            let nickname = if let Some(override_name) =
-                board_state.recent_messages.nickname_override(&member_id)
-            {
-                override_name.nickname.clone()
-            } else {
-                member_info
-                    .member_info
-                    .iter()
-                    .find(|mi| mi.member_info.member_id == member_id)
-                    .map(|mi| {
-                        match unseal_bytes_with_secrets(
-                            &mi.member_info.preferred_nickname,
-                            board_secrets,
-                        ) {
-                            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                            Err(_) => mi.member_info.preferred_nickname.to_string_lossy(),
-                        }
-                    })
-                    .unwrap_or_else(|| "Unknown".to_string())
-            };
+            let nickname = member_info
+                .member_info
+                .iter()
+                .find(|mi| mi.member_info.member_id == member_id)
+                .map(|mi| {
+                    match unseal_bytes_with_secrets(
+                        &mi.member_info.preferred_nickname,
+                        board_secrets,
+                    ) {
+                        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                        Err(_) => mi.member_info.preferred_nickname.to_string_lossy(),
+                    }
+                })
+                .unwrap_or_else(|| "Unknown".to_string());
 
             let member_display = MemberDisplay {
                 nickname,
@@ -754,23 +748,11 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     if migrated {
                         dioxus::logger::tracing::info!("Import: signing key migrated to delegate");
                         crate::util::defer(move || {
-                            let mut sanitized = false;
                             BOARDS.with_mut(|boards| {
                                 if let Some(rd) = boards.map.get_mut(&owner_key) {
                                     rd.key_migrated_to_delegate = true;
-                                    // Remove any messages with invalid signatures
-                                    // left by a stale delegate key
-                                    let params = ChatBoardParametersV1 { owner: owner_key };
-                                    let removed = crate::signing::remove_unverifiable_messages(
-                                        &mut rd.board_state,
-                                        &params,
-                                    );
-                                    sanitized = removed > 0;
                                 }
                             });
-                            if sanitized {
-                                mark_needs_sync(owner_key);
-                            }
                         });
                     } else {
                         dioxus::logger::tracing::warn!(

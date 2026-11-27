@@ -426,15 +426,9 @@ impl ResponseHandler {
                                                                     }
                                                                 }
 
-                                                                // Rebuild actions_state for each loaded board.
-                                                                // actions_state is #[serde(skip)]; private and
-                                                                // category-scoped actions need their key.
+                                                                // Open category secrets for each loaded board.
                                                                 for board_data in current_boards.map.values_mut() {
-                                                                    let owner = board_data.owner_vk;
                                                                     board_data.decrypt_category_secrets();
-                                                                    board_data.rebuild_actions_with_local_secrets(
-                                                                        &ChatBoardParametersV1 { owner },
-                                                                    );
                                                                 }
                                                             }
                                                         });

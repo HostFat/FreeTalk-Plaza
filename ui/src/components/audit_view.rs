@@ -1,12 +1,10 @@
 //! Public moderation history assembled from the state records.
 
 use crate::components::app::{BOARDS, CURRENT_BOARD};
-use crate::components::conversation::get_all_messages;
 use crate::util::ecies::unseal_bytes_with_secrets;
 use crate::util::format_utc_as_local_time;
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
-use plaza_core::board_state::message::MessageId;
 use std::collections::HashMap;
 use std::time::UNIX_EPOCH;
 use wasm_bindgen_futures::spawn_local;
@@ -35,14 +33,6 @@ pub fn AuditView() -> Element {
     let Some(board) = board.read().clone() else {
         return rsx! {};
     };
-    let self_id = MemberId::from(&board.self_sk.verifying_key());
-    let messages = get_all_messages(
-        &board.board_state,
-        self_id,
-        &board.secrets,
-        &board.category_secrets,
-        &board.old_category_secrets,
-    );
     let names: HashMap<MemberId, String> = board
         .board_state
         .member_info
@@ -59,28 +49,7 @@ pub fn AuditView() -> Element {
             (info.member_info.member_id, nickname)
         })
         .collect();
-    let titles: HashMap<MessageId, String> = messages
-        .iter()
-        .map(|message| {
-            let title = if message.title_text.trim().is_empty() {
-                if message.is_category {
-                    message.category_name.clone().unwrap_or_default()
-                } else {
-                    "Untitled".to_string()
-                }
-            } else {
-                message.title_text.clone()
-            };
-            (message.message_id, title)
-        })
-        .collect();
     let name = |id: &MemberId| names.get(id).cloned().unwrap_or_else(|| id.to_string());
-    let title = |id: &MessageId| {
-        titles
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| "a deleted post".to_string())
-    };
 
     let mut entries: Vec<(i64, String)> = Vec::new();
     for ban in &board.board_state.bans.0 {
@@ -125,78 +94,6 @@ pub fn AuditView() -> Element {
                 name(&suspension.suspension.target),
                 format_utc_as_local_time(suspension.suspension.until),
                 suspension.suspension.reason.label()
-            ),
-        ));
-    }
-    for report in &board.board_state.reports.reports {
-        entries.push((
-            report.report.created_at,
-            format!(
-                "Reported {} for {} (by {})",
-                title(&report.report.target),
-                report.report.reason.label(),
-                name(&report.report.reporter)
-            ),
-        ));
-    }
-    for resolution in &board.board_state.reports.resolutions {
-        let target = board
-            .board_state
-            .reports
-            .reports
-            .iter()
-            .find(|report| report.id() == resolution.resolution.report_id)
-            .map(|report| title(&report.report.target))
-            .unwrap_or_else(|| "a deleted post".to_string());
-        entries.push((
-            0,
-            format!(
-                "Report on {} marked {}",
-                target,
-                resolution.resolution.status.label()
-            ),
-        ));
-    }
-    for approval in &board.board_state.approvals.approvals {
-        entries.push((
-            0,
-            format!(
-                "{} {}",
-                if approval.approval.approved {
-                    "Approved"
-                } else {
-                    "Rejected"
-                },
-                title(&approval.approval.target)
-            ),
-        ));
-    }
-    for flag in &board.board_state.moderation.feature_flags {
-        if !flag.flag.value {
-            continue;
-        }
-        let action = match flag.flag.kind {
-            plaza_core::board_state::moderation::FeatureKind::Pinned => "pinned",
-            plaza_core::board_state::moderation::FeatureKind::Closed => "closed",
-            plaza_core::board_state::moderation::FeatureKind::Announced => "announced",
-            plaza_core::board_state::moderation::FeatureKind::Merged => "merged",
-        };
-        entries.push((
-            flag.flag.created_at,
-            format!("{}: {}", title(&flag.flag.target), action),
-        ));
-    }
-    for change in &board.board_state.moderation.moves {
-        entries.push((
-            change.change.created_at,
-            format!(
-                "Moved {} to {}",
-                title(&change.change.target),
-                change
-                    .change
-                    .new_parent
-                    .map(|id| title(&id))
-                    .unwrap_or_else(|| "the board root".to_string())
             ),
         ));
     }

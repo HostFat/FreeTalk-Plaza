@@ -78,33 +78,32 @@ pub fn TopBar() -> Element {
             return 0;
         };
         let board = board.clone().with_merged_topics();
-        if board.board_state.mode.is_topic_index() {
-            board
-                .board_state
-                .topics
-                .entries
-                .iter()
-                .filter(|entry| {
-                    !board.board_state.topics.is_hidden(&entry.entry.topic_id)
-                        && board
-                            .board_state
-                            .topics
-                            .merged_into(&entry.entry.topic_id)
-                            .is_none()
-                })
-                .filter(|entry| {
-                    let last_at = board
+        if board.notification_mode == crate::board_data::NotificationMode::Muted {
+            return 0;
+        }
+        board
+            .board_state
+            .topics
+            .entries
+            .iter()
+            .filter(|entry| {
+                !board.board_state.topics.is_hidden(&entry.entry.topic_id)
+                    && board
                         .board_state
                         .topics
-                        .activity_for(&entry.entry.topic_id)
-                        .map(|activity| activity.activity.last_activity)
-                        .unwrap_or(entry.entry.created_at);
-                    last_at > board.topic_last_read(&entry.entry.topic_id)
-                })
-                .count()
-        } else {
-            crate::util::notifications::unread_count(&board)
-        }
+                        .merged_into(&entry.entry.topic_id)
+                        .is_none()
+            })
+            .filter(|entry| {
+                let last_at = board
+                    .board_state
+                    .topics
+                    .activity_for(&entry.entry.topic_id)
+                    .map(|activity| activity.activity.last_activity)
+                    .unwrap_or(entry.entry.created_at);
+                last_at > board.topic_last_read(&entry.entry.topic_id)
+            })
+            .count()
     });
 
     // Don't render if no board is selected
@@ -465,8 +464,6 @@ pub fn TopBar() -> Element {
                     },
                 }
             }
-
-            crate::components::report_modal::ReportModal {}
         }
     }
 }

@@ -12,8 +12,6 @@ use crate::components::app::{BOARDS, CURRENT_BOARD, EDIT_BOARD_MODAL};
 use crate::components::audit_view::AuditView;
 use crate::components::members::member_info_modal::ban_button::{lift_ban, BanButton};
 use crate::components::moderation_view::ModerationView;
-use crate::components::structure_view::StructureView;
-use crate::components::trash_view::TrashView;
 use crate::util::format_utc_as_local_time;
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
@@ -217,20 +215,10 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
         };
     }
 
-    if !show_all() && !*can_manage_trash.read() {
-        return rsx! {
-            div { class: "flex-1 flex items-center justify-center p-4",
-                p { class: "text-text-muted", "Only the board owner, admins and trash managers can open this page." }
-            }
-        };
-    }
-
-    // Trash managers who are not admins get a focused Manage page with Trash.
     if !show_all() {
         return rsx! {
-            div { class: "flex-1 flex flex-col p-6 overflow-y-auto space-y-4",
-                h1 { class: "text-xl font-semibold text-text", "Manage" }
-                TrashView {}
+            div { class: "flex-1 flex items-center justify-center p-4",
+                p { class: "text-text-muted", "Only the board owner and admins can open this page." }
             }
         };
     }
@@ -238,8 +226,6 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
     let tab_board_admins = board_id_for_tabs.clone();
     let tab_board_bans = board_id_for_tabs.clone();
     let tab_board_moderation = board_id_for_tabs.clone();
-    let tab_board_structure = board_id_for_tabs.clone();
-    let tab_board_trash = board_id_for_tabs.clone();
     let tab_board_roles = board_id_for_tabs.clone();
     let tab_board_links = board_id_for_tabs.clone();
     let tab_board_ownership = board_id_for_tabs.clone();
@@ -283,16 +269,6 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                     }
                     button {
                         r#type: "button",
-                        class: if active == "structure" {
-                            "px-4 py-2 rounded-md text-sm bg-accent text-white"
-                        } else {
-                            "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
-                        },
-                        onclick: move |_| navigate_admin_tab(&tab_board_structure, "structure"),
-                        "Structure"
-                    }
-                    button {
-                        r#type: "button",
                         class: if active == "audit" {
                             "px-4 py-2 rounded-md text-sm bg-accent text-white"
                         } else {
@@ -303,16 +279,6 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                             move |_| navigate_admin_tab(&board, "audit")
                         },
                         "Audit"
-                    }
-                    button {
-                        r#type: "button",
-                        class: if active == "trash" {
-                            "px-4 py-2 rounded-md text-sm bg-accent text-white"
-                        } else {
-                            "px-4 py-2 rounded-md text-sm text-text-muted hover:text-text"
-                        },
-                        onclick: move |_| navigate_admin_tab(&tab_board_trash, "trash"),
-                        "Trash"
                     }
                     button {
                         r#type: "button",
@@ -582,14 +548,10 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                         }
                     }
                 }
-            } else if active == "moderation" {
+            } else if active == "moderation" || active == "structure" || active == "trash" {
                 ModerationView {}
-            } else if active == "structure" {
-                StructureView {}
             } else if active == "audit" {
                 AuditView {}
-            } else if active == "trash" {
-                TrashView {}
             } else if active == "roles" {
                 RolesSection {}
             } else if active == "ownership" {

@@ -243,9 +243,6 @@ pub struct QuoteRequest {
 }
 pub static QUOTE_COLLECTION: GlobalSignal<Vec<QuoteRequest>> = Global::new(Vec::new);
 
-/// Post the report modal is open for.
-pub static REPORT_TARGET: GlobalSignal<Option<MessageId>> = Global::new(|| None);
-
 /// Context for the currently viewed category
 #[derive(Clone, Default)]
 pub struct CurrentCategoryContext {
@@ -421,11 +418,10 @@ pub fn App() -> Element {
         }
     });
 
-    // Finish posts whose images were still uploading when the page closed.
+    // Once the board state has settled, retire own uploads that no board
+    // references anymore.
     use_effect(move || {
         if *BOARDS_LOADED.read() {
-            crate::util::pending_send::resume_all();            // Once the board state has settled, retire own uploads that no
-            // board references anymore.
             crate::util::safe_spawn_local(async {
                 crate::util::sleep(std::time::Duration::from_secs(60)).await;
                 if CURRENT_BOARD.read().owner_key.is_some() {
@@ -1260,13 +1256,12 @@ fn AdminAudit(board_id: String) -> Element {
     }
 }
 
-/// Dedicated purge route
+/// Legacy purge route: opens the moderation queue.
 #[component]
 fn AdminPurge(board_id: String, post_id: String) -> Element {
+    let _ = post_id;
     rsx! {
-        BoardGate { board_id: board_id.clone(),
-            crate::components::purge_view::PurgeView { board_id: board_id.clone(), post_id: post_id.clone() }
-        }
+        BoardGate { board_id: board_id.clone(), AdminView { tab: "moderation".to_string() } }
     }
 }
 
