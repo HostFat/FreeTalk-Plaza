@@ -237,21 +237,8 @@ pub fn plaintext_for(instance: &[u8; 32]) -> Option<(Vec<u8>, String)> {
 pub fn unreferenced(min_age_ms: i64) -> Vec<OwnedImage> {
     let mut referenced = std::collections::HashSet::new();
     for board in BOARDS.read().map.values() {
-        for message in &board.board_state.recent_messages.messages {
-            for image in &message.message.images {
-                referenced.insert(image.instance);
-                if let Some(thumb) = image.thumb.as_ref() {
-                    referenced.insert(thumb.instance);
-                }
-            }
-        }
         for pending in &board.pending_uploads {
             if let Some(image) = pending.image.as_ref() {
-                referenced.insert(image.instance);
-            }
-        }
-        if let Some(draft) = board.pending_send.as_ref() {
-            for image in &draft.images {
                 referenced.insert(image.instance);
             }
         }

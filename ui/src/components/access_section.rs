@@ -128,20 +128,22 @@ pub fn RolesSection() -> Element {
     let selected_member = members.get(*assign_index.read()).copied();
 
     // Sections and groups available as moderation scope. Selecting a group
-    // covers all of its sections through the category chain.
+    // covers all of its sections through the section hierarchy.
     let scope_options: Vec<(plaza_core::board_state::message::MessageId, String)> = data
         .board_state
-        .recent_messages
-        .messages
+        .sections
+        .sections
         .iter()
-        .filter_map(|message| {
-            let category = data.readable_category(&message.id(), &message.message.content)?;
-            let label = if category.is_group {
-                format!("{} (group)", category.name)
+        .filter(|entry| !entry.section.deleted)
+        .map(|entry| {
+            let name = crate::components::app::topic_contract::section_name(&data, &entry.section.id)
+                .unwrap_or_else(|| entry.section.name.clone());
+            let label = if entry.section.is_group {
+                format!("{name} (group)")
             } else {
-                category.name.clone()
+                name
             };
-            Some((message.id(), label))
+            (entry.section.id, label)
         })
         .collect();
 

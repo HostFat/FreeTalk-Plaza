@@ -3,7 +3,6 @@
 pub mod access;
 pub mod avatar;
 pub mod crop_math;
-pub mod drafts;
 pub mod feedback;
 pub mod highlight;
 pub mod ecies;
@@ -24,14 +23,11 @@ pub mod moderation_queue;
 pub mod notifications;
 pub mod owned_images;
 pub mod pending_uploads;
-pub mod pending_send;
 pub mod pq;
 pub mod reset;
 pub mod retry;
 pub mod storage;
 pub mod spectator;
-pub mod subscriptions;
-pub mod trash_actions;
 pub mod uploads;
 
 use ed25519_dalek::VerifyingKey;

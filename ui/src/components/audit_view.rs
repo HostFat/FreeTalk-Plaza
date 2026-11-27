@@ -1,12 +1,10 @@
 //! Public moderation history assembled from the state records.
 
 use crate::components::app::{BOARDS, CURRENT_BOARD};
-use crate::components::conversation::get_all_messages;
 use crate::util::ecies::unseal_bytes_with_secrets;
 use crate::util::format_utc_as_local_time;
 use dioxus::prelude::*;
 use plaza_core::board_state::member::MemberId;
-use plaza_core::board_state::message::MessageId;
 use std::collections::HashMap;
 use std::time::UNIX_EPOCH;
 use wasm_bindgen_futures::spawn_local;
@@ -35,14 +33,6 @@ pub fn AuditView() -> Element {
     let Some(board) = board.read().clone() else {
         return rsx! {};
     };
-    let self_id = MemberId::from(&board.self_sk.verifying_key());
-    let messages = get_all_messages(
-        &board.board_state,
-        self_id,
-        &board.secrets,
-        &board.category_secrets,
-        &board.old_category_secrets,
-    );
     let names: HashMap<MemberId, String> = board
         .board_state
         .member_info
@@ -59,28 +49,7 @@ pub fn AuditView() -> Element {
             (info.member_info.member_id, nickname)
         })
         .collect();
-    let titles: HashMap<MessageId, String> = messages
-        .iter()
-        .map(|message| {
-            let title = if message.title_text.trim().is_empty() {
-                if message.is_category {
-                    message.category_name.clone().unwrap_or_default()
-                } else {
-                    "Untitled".to_string()
-                }
-            } else {
-                message.title_text.clone()
-            };
-            (message.message_id, title)
-        })
-        .collect();
     let name = |id: &MemberId| names.get(id).cloned().unwrap_or_else(|| id.to_string());
-    let title = |id: &MessageId| {
-        titles
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| "a deleted post".to_string())
-    };
 
     let mut entries: Vec<(i64, String)> = Vec::new();
     for ban in &board.board_state.bans.0 {
@@ -128,78 +97,6 @@ pub fn AuditView() -> Element {
             ),
         ));
     }
-    for report in &board.board_state.reports.reports {
-        entries.push((
-            report.report.created_at,
-            format!(
-                "Reported {} for {} (by {})",
-                title(&report.report.target),
-                report.report.reason.label(),
-                name(&report.report.reporter)
-            ),
-        ));
-    }
-    for resolution in &board.board_state.reports.resolutions {
-        let target = board
-            .board_state
-            .reports
-            .reports
-            .iter()
-            .find(|report| report.id() == resolution.resolution.report_id)
-            .map(|report| title(&report.report.target))
-            .unwrap_or_else(|| "a deleted post".to_string());
-        entries.push((
-            0,
-            format!(
-                "Report on {} marked {}",
-                target,
-                resolution.resolution.status.label()
-            ),
-        ));
-    }
-    for approval in &board.board_state.approvals.approvals {
-        entries.push((
-            0,
-            format!(
-                "{} {}",
-                if approval.approval.approved {
-                    "Approved"
-                } else {
-                    "Rejected"
-                },
-                title(&approval.approval.target)
-            ),
-        ));
-    }
-    for flag in &board.board_state.moderation.feature_flags {
-        if !flag.flag.value {
-            continue;
-        }
-        let action = match flag.flag.kind {
-            plaza_core::board_state::moderation::FeatureKind::Pinned => "pinned",
-            plaza_core::board_state::moderation::FeatureKind::Closed => "closed",
-            plaza_core::board_state::moderation::FeatureKind::Announced => "announced",
-            plaza_core::board_state::moderation::FeatureKind::Merged => "merged",
-        };
-        entries.push((
-            flag.flag.created_at,
-            format!("{}: {}", title(&flag.flag.target), action),
-        ));
-    }
-    for change in &board.board_state.moderation.moves {
-        entries.push((
-            change.change.created_at,
-            format!(
-                "Moved {} to {}",
-                title(&change.change.target),
-                change
-                    .change
-                    .new_parent
-                    .map(|id| title(&id))
-                    .unwrap_or_else(|| "the board root".to_string())
-            ),
-        ));
-    }
     for retirement in &board.board_state.image_retirements.retirements {
         let instance: String = retirement
             .retirement
@@ -242,7 +139,6 @@ pub fn AuditView() -> Element {
         entries.push((0, format!("Role {} defined", role.role.name)));
     }
 
-    let mut purge_filter = use_signal(String::new);
     let blocked_hashes = BOARDS.read().blocked_image_hashes.clone();
     let unblock = move |hash: [u8; 32]| {
         BOARDS.with_mut(|boards| {
@@ -252,37 +148,6 @@ pub fn AuditView() -> Element {
             let _ = crate::components::app::chat_delegate::save_boards_to_delegate().await;
         });
     };
-    let mut purges: Vec<(i64, String, String)> = board
-        .board_state
-        .moderation
-        .illegal_purges
-        .iter()
-        .map(|entry| {
-            let code = format!("{:?}", entry.purge.reason_code).to_lowercase();
-            (
-                entry.purge.acted_at,
-                code.clone(),
-                format!(
-                    "Purged illegal thread {} · {} messages · {}{}",
-                    title(&entry.purge.topic),
-                    entry.purge.message_ids.len(),
-                    entry.purge.reason,
-                    entry
-                        .purge
-                        .content_hash
-                        .map(|hash| format!(
-                            " · hash {}",
-                            hash.iter()
-                                .take(4)
-                                .map(|byte| format!("{byte:02x}"))
-                                .collect::<String>()
-                        ))
-                        .unwrap_or_default()
-                ),
-            )
-        })
-        .collect();
-    purges.sort_by_key(|(timestamp, _, _)| std::cmp::Reverse(*timestamp));
 
     entries.sort_by_key(|(timestamp, _)| std::cmp::Reverse(*timestamp));
     entries.truncate(100);
@@ -290,34 +155,6 @@ pub fn AuditView() -> Element {
     rsx! {
         div { class: "bg-surface rounded-lg p-4",
             h2 { class: "text-lg font-semibold text-text mb-3", "Moderation history" }
-            div { class: "bg-panel border border-border rounded-lg p-3 mb-4 space-y-2",
-                div { class: "flex items-center justify-between",
-                    h3 { class: "text-sm font-semibold text-text", "Illegal purges" }
-                    select {
-                        class: "bg-panel border border-border rounded-md px-2 py-1 text-xs text-text",
-                        onchange: move |event| purge_filter.set(event.value()),
-                        option { value: "", "All reasons" }
-                        option { value: "severe", "Severe rule violation" }
-                        option { value: "spam", "Spam" }
-                        option { value: "harassment", "Harassment" }
-                        option { value: "off_topic", "Off-topic" }
-                        option { value: "rules", "Other rule violation" }
-                        option { value: "other", "Other" }
-                    }
-                }
-                if purges.is_empty() {
-                    p { class: "text-xs text-text-muted", "No illegal purges on record." }
-                } else {
-                    for (timestamp, code, text) in purges.iter() {
-                        if purge_filter.read().is_empty() || purge_filter.read().as_str() == code {
-                            div { class: "flex gap-3 text-xs border-b border-border/50 py-1 last:border-0",
-                                span { class: "text-text-muted w-32 flex-shrink-0", "{format_utc_as_local_time(*timestamp)}" }
-                                span { class: "text-text", "{text}" }
-                            }
-                        }
-                    }
-                }
-            }
             p { class: "text-text-muted text-xs mb-3",
                 "Built from the signed records in board state. Records without a timestamp appear at the end."
             }

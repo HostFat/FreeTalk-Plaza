@@ -104,7 +104,8 @@ pub async fn fetch_pending_spectator_boards() {
             .filter(|(_, board)| board.spectator)
             .filter(|(_, board)| {
                 board.board_state.members.members.is_empty()
-                    && board.board_state.recent_messages.messages.is_empty()
+                    && board.board_state.topics.entries.is_empty()
+                    && board.board_state.sections.sections.is_empty()
             })
             .filter(|(key, _)| {
                 let (last, count) = attempts.get(*key).copied().unwrap_or((0.0, 0));

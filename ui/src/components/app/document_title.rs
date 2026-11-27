@@ -110,43 +110,42 @@ fn get_current_board_name() -> Option<String> {
     }
 }
 
-/// Count unread messages in a board.
-/// Only counts display messages (non-action, non-deleted) from other users.
+/// Count unread topics in a board (0 when muted).
 pub fn count_unread_messages_in_board(board_owner: &ed25519_dalek::VerifyingKey) -> usize {
     let boards = BOARDS.read();
     let Some(board_data) = boards.map.get(board_owner) else {
         return 0;
     };
-
-    let self_member_id: MemberId = board_data.self_sk.verifying_key().into();
-    let last_read_id = board_data.last_read_message_id.as_ref();
-
-    // If no messages have been read, count all messages from others
-    // If we have a last read ID, count messages after it from others
-    let mut found_last_read = last_read_id.is_none();
-    let mut unread_count = 0;
-
-    for msg in board_data.board_state.recent_messages.display_messages() {
-        let msg_id = msg.id();
-
-        // Check if this is the last read message
-        if let Some(last_id) = last_read_id {
-            if &msg_id == last_id {
-                found_last_read = true;
-                continue; // Don't count the last read message itself
-            }
-        }
-
-        // Count messages after the last read message from other users
-        if found_last_read && msg.message.author != self_member_id {
-            unread_count += 1;
-        }
+    if board_data.notification_mode == crate::board_data::NotificationMode::Muted {
+        return 0;
     }
-
-    unread_count
+    let board = board_data.clone().with_merged_topics();
+    board
+        .board_state
+        .topics
+        .entries
+        .iter()
+        .filter(|entry| {
+            !board.board_state.topics.is_hidden(&entry.entry.topic_id)
+                && board
+                    .board_state
+                    .topics
+                    .merged_into(&entry.entry.topic_id)
+                    .is_none()
+        })
+        .filter(|entry| {
+            let last_at = board
+                .board_state
+                .topics
+                .activity_for(&entry.entry.topic_id)
+                .map(|activity| activity.activity.last_activity)
+                .unwrap_or(entry.entry.created_at);
+            last_at > board.topic_last_read(&entry.entry.topic_id)
+        })
+        .count()
 }
 
-/// Count total unread messages across all boards
+/// Count total unread topics across all boards
 pub fn count_total_unread_messages() -> usize {
     let boards = BOARDS.read();
     boards.map.keys().map(count_unread_messages_in_board).sum()
@@ -166,73 +165,23 @@ pub fn update_document_title() {
         (Some(name), true, _) => format!("{name} · {APP_NAME}"),
         (Some(name), false, 0) => format!("{name} · {APP_NAME}"),
 
-        // Board selected, tab hidden with unread messages - show count.
+        // Board selected, tab hidden with unread topics - show count.
         (Some(name), false, count) => format!("({count}) {name} · {APP_NAME}"),
 
         // No board selected, tab visible (or no unread) - show app name
         (None, true, _) => APP_NAME.to_string(),
         (None, false, 0) => APP_NAME.to_string(),
 
-        // No board selected, tab hidden with unread messages - show count
+        // No board selected, tab hidden with unread topics - show count
         (None, false, count) => format!("({}) {}", count, APP_NAME),
     };
 
     set_document_title(&title);
 }
 
-/// Mark all messages in the current board as read
+/// Update document title when the tab becomes visible.
+/// Per-topic read state is marked when opening each topic or via "Mark all read".
 pub fn mark_current_board_as_read() {
-    let current_board = CURRENT_BOARD.read();
-    let Some(owner_key) = current_board.owner_key else {
-        return;
-    };
-
-    // Get the latest message ID
-    let latest_message_id = {
-        let boards = BOARDS.read();
-        let Some(board_data) = boards.map.get(&owner_key) else {
-            return;
-        };
-
-        // Get the last display message ID
-        board_data
-            .board_state
-            .recent_messages
-            .display_messages()
-            .last()
-            .map(|msg| msg.id())
-    };
-
-    let Some(new_last_read_id) = latest_message_id else {
-        return; // No messages to mark as read
-    };
-
-    // Check if we need to update
-    {
-        let boards = BOARDS.read();
-        if let Some(board_data) = boards.map.get(&owner_key) {
-            if board_data.last_read_message_id.as_ref() == Some(&new_last_read_id) {
-                return; // Already marked as read
-            }
-        }
-    }
-
-    // Update the last read message ID
-    BOARDS.with_mut(|boards| {
-        if let Some(board_data) = boards.map.get_mut(&owner_key) {
-            info!("Marking board as read up to message {:?}", new_last_read_id);
-            board_data.last_read_message_id = Some(new_last_read_id);
-        }
-    });
-
-    // Save to delegate
-    wasm_bindgen_futures::spawn_local(async {
-        if let Err(e) = save_boards_to_delegate().await {
-            warn!("Failed to save boards after marking as read: {}", e);
-        }
-    });
-
-    // Update title
     update_document_title();
 }
 
