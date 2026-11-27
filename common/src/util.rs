@@ -1,11 +1,23 @@
 use base64::{engine::general_purpose, Engine as _};
 use data_encoding::BASE32;
 use ed25519_dalek::{Signature, SignatureError, Signer, SigningKey, Verifier, VerifyingKey};
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+/// Serialize a value to canonical CBOR bytes.
+pub fn encode_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes).map_err(|error| error.to_string())?;
+    Ok(bytes)
+}
+
+/// Deserialize a CBOR byte slice into `T`.
+pub fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    ciborium::de::from_reader(bytes).map_err(|error| error.to_string())
+}
+
 pub fn sign_struct<T: Serialize>(message: T, signing_key: &SigningKey) -> Signature {
-    let mut data_to_sign = Vec::new();
-    ciborium::ser::into_writer(&message, &mut data_to_sign).expect("Serialization should not fail");
+    let data_to_sign = encode_cbor(&message).expect("Serialization should not fail");
     signing_key.sign(&data_to_sign)
 }
 
@@ -14,8 +26,7 @@ pub fn verify_struct<T: Serialize>(
     signature: &Signature,
     verifying_key: &VerifyingKey,
 ) -> Result<(), SignatureError> {
-    let mut data_to_sign = Vec::new();
-    ciborium::ser::into_writer(message, &mut data_to_sign).expect("Serialization should not fail");
+    let data_to_sign = encode_cbor(message).expect("Serialization should not fail");
     verifying_key.verify(&data_to_sign, signature)
 }
 

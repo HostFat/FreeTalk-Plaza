@@ -45,13 +45,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - uses: cachix/install-nix-action@v31
       with:
         nix_path: nixpkgs=channel:nixos-unstable
         github_access_token: ${{ secrets.GITHUB_TOKEN }}
-    - uses: nix-community/cache-nix-action@v6
+    - uses: nix-community/cache-nix-action@v7
       with:
         primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
         restore-prefixes-first-match: nix-${{ runner.os }}-
@@ -77,27 +77,27 @@ jobs:
         nix develop --command npm --prefix ui run build:css
 
     - name: Upload plaza_contract.wasm
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: plaza_contract.wasm
         path: ui/public/contracts/plaza_contract.wasm
     - name: Upload plaza_delegate.wasm
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: plaza_delegate.wasm
         path: ui/public/contracts/plaza_delegate.wasm
     - name: Upload contract bundle
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: contracts
         path: ui/public/contracts
     - name: Upload target WASMs
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: wasm-target
         path: target/wasm32-unknown-unknown/release/*.wasm
     - name: Upload stylesheet
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: styles
         path: ui/assets/styles.css
@@ -108,13 +108,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - uses: cachix/install-nix-action@v31
       with:
         nix_path: nixpkgs=channel:nixos-unstable
         github_access_token: ${{ secrets.GITHUB_TOKEN }}
-    - uses: nix-community/cache-nix-action@v6
+    - uses: nix-community/cache-nix-action@v7
       with:
         primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
         restore-prefixes-first-match: nix-${{ runner.os }}-
@@ -126,17 +126,17 @@ jobs:
     - uses: taiki-e/install-action@nextest
 
     - name: Download contract bundle
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: contracts
         path: ui/public/contracts
     - name: Download target WASMs
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: wasm-target
         path: target/wasm32-unknown-unknown/release
     - name: Download stylesheet
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: styles
         path: ui/assets
@@ -157,13 +157,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - uses: cachix/install-nix-action@v31
       with:
         nix_path: nixpkgs=channel:nixos-unstable
         github_access_token: ${{ secrets.GITHUB_TOKEN }}
-    - uses: nix-community/cache-nix-action@v6
+    - uses: nix-community/cache-nix-action@v7
       with:
         primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
         restore-prefixes-first-match: nix-${{ runner.os }}-
@@ -174,17 +174,17 @@ jobs:
         cache-on-failure: true
 
     - name: Download contract bundle
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: contracts
         path: ui/public/contracts
     - name: Download target WASMs
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: wasm-target
         path: target/wasm32-unknown-unknown/release
     - name: Download stylesheet
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: styles
         path: ui/assets
@@ -207,7 +207,7 @@ jobs:
         echo "public_dir=$PUBLIC_DIR" >> "$GITHUB_OUTPUT"
 
     - name: Upload UI dist
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: plaza-ui
         path: ${{ steps.build-ui.outputs.public_dir }}
@@ -222,19 +222,19 @@ jobs:
     timeout-minutes: 45
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - uses: cachix/install-nix-action@v31
       with:
         nix_path: nixpkgs=channel:nixos-unstable
         github_access_token: ${{ secrets.GITHUB_TOKEN }}
-    - uses: nix-community/cache-nix-action@v6
+    - uses: nix-community/cache-nix-action@v7
       with:
         primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
         restore-prefixes-first-match: nix-${{ runner.os }}-
         gc-max-store-size-linux: 2G
 
-    - uses: actions/setup-node@v4
+    - uses: actions/setup-node@v6
       with:
         node-version: 22
         cache: npm
@@ -250,7 +250,7 @@ jobs:
         fi
 
     - name: Cache Playwright browsers
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ~/.cache/ms-playwright
         key: playwright-${{ runner.os }}-${{ steps.matrix.outputs.full }}-${{ hashFiles('ui/tests/package-lock.json') }}
@@ -269,7 +269,7 @@ jobs:
         fi
 
     - name: Cache the Dioxus build
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: |
           ~/.cargo/registry
@@ -279,17 +279,17 @@ jobs:
         restore-keys: e2e-${{ runner.os }}-
 
     - name: Download contract bundle
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: contracts
         path: ui/public/contracts
     - name: Download target WASMs
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: wasm-target
         path: target/wasm32-unknown-unknown/release
     - name: Download stylesheet
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: styles
         path: ui/assets
@@ -318,7 +318,7 @@ jobs:
 
     - name: Upload Playwright report
       if: failure()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: playwright-report
         path: |

@@ -396,13 +396,11 @@ use crate::constants::BOARD_CONTRACT_WASM;
 use plaza_core::board_state::ChatBoardParametersV1;
 
 pub fn to_cbor_vec<T: serde::Serialize>(value: &T) -> Vec<u8> {
-    let mut buffer = Vec::new();
-    ciborium::ser::into_writer(value, &mut buffer).unwrap();
-    buffer
+    plaza_core::util::encode_cbor(value).expect("CBOR serialization should not fail")
 }
 
 pub fn try_from_cbor_slice<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T, String> {
-    ciborium::de::from_reader(data).map_err(|e| format!("CBOR decode error: {e}"))
+    plaza_core::util::decode_cbor(data).map_err(|e| format!("CBOR decode error: {e}"))
 }
 
 pub fn owner_vk_to_contract_key(owner_vk: &VerifyingKey) -> ContractKey {
