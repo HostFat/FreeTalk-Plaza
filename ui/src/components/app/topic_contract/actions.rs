@@ -621,7 +621,7 @@ pub(super) fn delete_authority(
                 && entry.role.can_delete_posts
         }) {
             return Some(AuthorityProof {
-                admin,
+                admin: admin.clone(),
                 grant: Some(Box::new(RoleGrantProof {
                     role: role.clone(),
                     assignment: assignment.clone(),
