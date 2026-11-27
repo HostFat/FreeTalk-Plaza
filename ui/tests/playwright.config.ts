@@ -22,6 +22,9 @@ export default defineConfig({
   timeout: 60_000,
   retries: 1,
   fullyParallel: true,
+  reporter: process.env.CI
+    ? [["github"], ["list"], ["html", { open: "never" }]]
+    : "list",
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:8082",
     navigationTimeout: 30_000,
