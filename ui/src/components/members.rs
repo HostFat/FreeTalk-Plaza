@@ -641,7 +641,6 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     },
                     profile_id: profile_id.clone(),
                     contract_key,
-                    last_read_message_id: None,
                     secrets: export
                         .board_secrets
                         .iter()
@@ -650,19 +649,11 @@ pub fn ImportIdentityModal(is_active: Signal<bool>) -> Element {
                     category_secrets,
                     old_category_secrets: HashMap::new(),
 
-                    trash_secret: None,
-                    trash_secrets: HashMap::new(),
-
                     collapsed_groups: Vec::new(),
                     last_visit: 0,
-                    read_categories: HashMap::new(),
                     topic_read: HashMap::new(),
                     topic_drafts: HashMap::new(),
-                    draft: None,
-                    drafts: Vec::new(),
-                    trash_retention_days: 0,
                     pending_uploads: Vec::new(),
-                    pending_send: None,
                     subscribed_categories: Vec::new(),
                     notification_mode: crate::board_data::NotificationMode::All,
                     mail_visibility: crate::util::mail::MailVisibility::Hidden,

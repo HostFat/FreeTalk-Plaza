@@ -6,10 +6,8 @@
 //! `boards_data` would make the board list slow to load.
 
 use crate::board_data::PendingUpload;
-use crate::components::app::chat_delegate::{
-    save_boards_to_delegate, send_delegate_request, PENDING_UPLOADS_STORAGE_KEY,
-};
-use crate::components::app::{BOARDS, BOARDS_LOADED, CURRENT_BOARD};
+use crate::components::app::chat_delegate::{send_delegate_request, PENDING_UPLOADS_STORAGE_KEY};
+use crate::components::app::{BOARDS, BOARDS_LOADED};
 use dioxus::logger::tracing::{info, warn};
 use dioxus::prelude::*;
 use ed25519_dalek::VerifyingKey;
@@ -20,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
-use wasm_bindgen_futures::spawn_local;
 
 /// The stored value of `pending_uploads_data`.
 ///
@@ -47,19 +44,6 @@ fn is_removed(board: &VerifyingKey, id: &str) -> bool {
     lock_removed()
         .get(board)
         .is_some_and(|ids| ids.contains(id))
-}
-
-fn note_removed(board: &VerifyingKey, id: &str) {
-    lock_removed()
-        .entry(*board)
-        .or_default()
-        .insert(id.to_string());
-}
-
-fn clear_removed(board: &VerifyingKey, id: &str) {
-    if let Some(ids) = lock_removed().get_mut(board) {
-        ids.remove(id);
-    }
 }
 
 /// Decode the current envelope, or the raw map written before tombstones.
@@ -93,8 +77,6 @@ pub const MAX_PENDING_BYTES: usize = 24 * 1024 * 1024;
 static PENDING_UPLOADS_DIRTY: AtomicBool = AtomicBool::new(false);
 /// The board map still carried the queue when it was loaded.
 static LEGACY_PENDING: AtomicBool = AtomicBool::new(false);
-/// A read of the separate key is in flight.
-static PENDING_LOADING: AtomicBool = AtomicBool::new(false);
 
 pub fn mark_dirty() {
     PENDING_UPLOADS_DIRTY.store(true, Ordering::SeqCst);
@@ -137,7 +119,9 @@ pub fn apply_store(store: Option<PendingUploadsStoreV1>) {
             let Some(board) = boards.map.get_mut(key) else {
                 continue;
             };
-            board.pending_uploads.retain(|pending| !is_removed(key, &pending.id));
+            board
+                .pending_uploads
+                .retain(|pending| !is_removed(key, &pending.id));
             for entry in entries {
                 if board
                     .pending_uploads
@@ -163,35 +147,6 @@ pub fn apply_store(store: Option<PendingUploadsStoreV1>) {
         .map(|board| board.pending_uploads.len())
         .sum();
     info!("Pending upload queue now holds {total} record(s)");
-}
-
-/// Read the queue from the delegate. The composer calls this on every open so
-/// an upload added by another tab shows up without a reload.
-pub async fn ensure_loaded() {
-    if PENDING_LOADING.swap(true, Ordering::SeqCst) {
-        // Wait for the request already in flight; the caller can then list the
-        // queue that request applied.
-        for _ in 0..40 {
-            crate::util::sleep(std::time::Duration::from_millis(50)).await;
-            if !PENDING_LOADING.load(Ordering::SeqCst) {
-                return;
-            }
-        }
-        return;
-    }
-    match send_delegate_request(ChatDelegateRequestMsg::GetRequest {
-        key: ChatDelegateKey::new(PENDING_UPLOADS_STORAGE_KEY.to_vec()),
-    })
-    .await
-    {
-        Ok(ChatDelegateResponseMsg::GetResponse { value, .. }) => {
-            let store = value.and_then(|bytes| decode_store(&bytes));
-            apply_store(store);
-        }
-        Ok(other) => warn!("Unexpected response for pending uploads: {other:?}"),
-        Err(error) => warn!("Could not load the pending uploads: {error}"),
-    }
-    PENDING_LOADING.store(false, Ordering::SeqCst);
 }
 
 /// Write the composer queues to their own key when they changed. The caller
@@ -270,159 +225,6 @@ pub async fn save_if_dirty() -> Result<(), String> {
             Err(error)
         }
     }
-}
-
-/// Insert the placeholder for a new attachment immediately, before the file is
-/// prepared, so a Send during preparation still has a record to point at.
-pub fn insert(record: PendingUpload) {
-    let Some(key) = CURRENT_BOARD.read().owner_key else {
-        return;
-    };
-    clear_removed(&key, &record.id);
-    BOARDS.with_mut(|boards| {
-        let Some(board) = boards.map.get_mut(&key) else {
-            return;
-        };
-        if board
-            .pending_uploads
-            .iter()
-            .any(|pending| pending.id == record.id)
-        {
-            return;
-        }
-        let total: usize = board
-            .pending_uploads
-            .iter()
-            .map(|pending| pending.bytes.len())
-            .sum();
-        if total + record.bytes.len() <= MAX_PENDING_BYTES {
-            board.pending_uploads.push(record);
-            crate::components::app::PENDING_QUEUE_FULL.with_mut(|full| *full = false);
-        } else {
-            warn!("Pending image kept in memory only: the delegate queue is full");
-            crate::components::app::PENDING_QUEUE_FULL.with_mut(|full| *full = true);
-        }
-    });
-    mark_dirty();
-}
-
-/// Fill in the prepared bytes of a placeholder.
-pub fn update(id: &str, change: impl FnOnce(&mut PendingUpload)) {
-    let Some(key) = CURRENT_BOARD.read().owner_key else {
-        return;
-    };
-    BOARDS.with_mut(|boards| {
-        if let Some(board) = boards.map.get_mut(&key) {
-            if let Some(pending) = board.pending_uploads.iter_mut().find(|pending| pending.id == id) {
-                change(pending);
-            }
-        }
-    });
-    mark_dirty();
-}
-
-/// Write the current board, including the pending uploads, to the delegate.
-pub async fn persist_now() -> Result<(), String> {
-    save_boards_to_delegate().await
-}
-
-pub fn remove(id: &str) {
-    let Some(key) = CURRENT_BOARD.read().owner_key else {
-        return;
-    };
-    note_removed(&key, id);
-    BOARDS.with_mut(|boards| {
-        if let Some(board) = boards.map.get_mut(&key) {
-            board.pending_uploads.retain(|pending| pending.id != id);
-        }
-    });
-    mark_dirty();
-    persist();
-}
-
-/// Drop several queued uploads after their post is published.
-pub fn remove_many(ids: &[String]) {
-    let Some(key) = CURRENT_BOARD.read().owner_key else {
-        return;
-    };
-    for id in ids {
-        note_removed(&key, id);
-    }
-    BOARDS.with_mut(|boards| {
-        if let Some(board) = boards.map.get_mut(&key) {
-            board
-                .pending_uploads
-                .retain(|pending| !ids.iter().any(|id| id == &pending.id));
-        }
-    });
-    mark_dirty();
-    persist();
-}
-
-/// Drop one queued upload of a board that is not necessarily current, used by
-/// the background resume.
-pub fn remove_for(key: &ed25519_dalek::VerifyingKey, id: &str) {
-    note_removed(key, id);
-    BOARDS.with_mut(|boards| {
-        if let Some(board) = boards.map.get_mut(key) {
-            board.pending_uploads.retain(|pending| pending.id != id);
-        }
-    });
-    mark_dirty();
-    persist();
-}
-
-/// Remember the blob of a queued upload of any board, used by the resume.
-pub fn set_image_for(
-    key: &ed25519_dalek::VerifyingKey,
-    id: &str,
-    image: &plaza_core::board_state::images::ImageRef,
-) {
-    BOARDS.with_mut(|boards| {
-        if let Some(board) = boards.map.get_mut(key) {
-            if let Some(pending) = board.pending_uploads.iter_mut().find(|pending| pending.id == id) {
-                pending.image = Some(image.clone());
-            }
-        }
-    });
-    mark_dirty();
-    persist();
-}
-
-/// Remember the blob of a queued upload so a reload does not PUT it again.
-pub fn set_image(id: &str, image: &plaza_core::board_state::images::ImageRef) {
-    let Some(key) = CURRENT_BOARD.read().owner_key else {
-        return;
-    };
-    BOARDS.with_mut(|boards| {
-        if let Some(board) = boards.map.get_mut(&key) {
-            if let Some(pending) = board.pending_uploads.iter_mut().find(|pending| pending.id == id) {
-                pending.image = Some(image.clone());
-            }
-        }
-    });
-    mark_dirty();
-    persist();
-}
-
-pub fn list() -> Vec<PendingUpload> {
-    let Some(key) = CURRENT_BOARD.read().owner_key else {
-        return Vec::new();
-    };
-    BOARDS
-        .read()
-        .map
-        .get(&key)
-        .map(|board| board.pending_uploads.clone())
-        .unwrap_or_default()
-}
-
-fn persist() {
-    spawn_local(async {
-        if let Err(error) = save_boards_to_delegate().await {
-            warn!("Could not persist the pending image queue: {error}");
-        }
-    });
 }
 
 #[cfg(test)]

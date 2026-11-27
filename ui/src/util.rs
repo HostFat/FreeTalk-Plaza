@@ -2,7 +2,6 @@
 
 pub mod access;
 pub mod avatar;
-pub mod crop_math;
 pub mod feedback;
 pub mod highlight;
 pub mod ecies;
@@ -10,7 +9,6 @@ pub mod image_meta;
 pub mod image_processing;
 pub mod image_retire;
 pub mod backup;
-pub mod image_tags;
 pub mod images;
 pub mod mail;
 pub mod markdown;

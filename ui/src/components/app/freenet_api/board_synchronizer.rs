@@ -64,7 +64,6 @@ impl BoardSynchronizer {
                     Ok(_) => {
                         board_data.decrypt_board_secrets();
                         board_data.decrypt_category_secrets();
-                        board_data.decrypt_pq_trash_secret();
 
                         // Keep cached self membership data up to date
                         board_data.capture_self_membership_data(&params);
@@ -635,7 +634,6 @@ impl BoardSynchronizer {
                         };
                         board_data.decrypt_board_secrets();
                         board_data.decrypt_category_secrets();
-                        board_data.decrypt_pq_trash_secret();
 
                         // Keep cached self membership data up to date
                         board_data.capture_self_membership_data(&params);

@@ -14,7 +14,6 @@ pub fn handle_update_response(key: ContractKey, summary: Vec<u8>) {
         // network. Defer the signal writes like every other response handler.
         crate::util::defer(move || {
             SYNC_INFO.with_mut(|info| info.mark_acked(&owner));
-            crate::components::app::confirm_pending_posts(owner);
         });
     }
 }

@@ -28,7 +28,6 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
             "moderation" => format!("/board/{board_id}/admin/moderation"),
             "structure" => format!("/board/{board_id}/admin/structure"),
             "audit" => format!("/board/{board_id}/admin/audit"),
-            "trash" => format!("/board/{board_id}/admin/trash"),
             _ => format!("/board/{board_id}/admin"),
         };
         if let Some(win) = web_sys::window() {
@@ -98,17 +97,6 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
             .read()
             .as_ref()
             .map(|board_data| board_data.is_active_admin())
-            .unwrap_or(false)
-    });
-
-    let can_manage_trash = use_memo(move || {
-        current_board_data
-            .read()
-            .as_ref()
-            .map(|board_data| {
-                let self_id = MemberId::from(&board_data.self_sk.verifying_key());
-                board_data.board_state.roles.can_manage_trash(&self_id)
-            })
             .unwrap_or(false)
     });
     let show_all = move || *is_owner.read() || *is_admin.read();
@@ -540,7 +528,7 @@ pub fn AdminView(#[props(default)] tab: String) -> Element {
                         }
                     }
                 }
-            } else if active == "moderation" || active == "structure" || active == "trash" {
+            } else if active == "moderation" || active == "structure" {
                 ModerationView {}
             } else if active == "audit" {
                 AuditView {}
