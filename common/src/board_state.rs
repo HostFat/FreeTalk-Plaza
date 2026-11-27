@@ -1,6 +1,5 @@
 pub mod admin;
 pub mod activity;
-pub mod approvals;
 pub mod authority;
 pub mod ban;
 pub mod category_secrets;
@@ -17,8 +16,6 @@ pub mod member_info;
 pub mod member_moderation;
 pub mod member_shards;
 pub mod message;
-pub mod message_keys;
-pub mod moderation;
 pub mod ownership;
 pub mod pages;
 pub mod pq_secrets;
@@ -32,7 +29,6 @@ pub mod secret;
 pub mod section_pages;
 pub mod sections;
 pub mod topics;
-pub mod trash;
 pub mod upgrade;
 pub mod version;
 
@@ -44,8 +40,6 @@ use crate::board_state::invites::InviteTokensV1;
 use crate::board_state::mail_addresses::MailAddressesV1;
 use crate::board_state::member::{MemberId, MembersV1};
 use crate::board_state::member_info::MemberInfoV1;
-use crate::board_state::message::MessageId;
-use crate::board_state::message::MessagesV1;
 use crate::board_state::roles::RolesV1;
 use crate::board_state::secret::BoardSecretsV1;
 use crate::board_state::sections::SectionsV1;
@@ -60,11 +54,9 @@ use std::collections::HashSet;
 /// How this board stores discussions.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum BoardModeV1 {
-    /// Legacy boards: topics and replies live in `recent_messages`.
-    #[default]
-    LegacyMessages,
     /// Section-sharded boards: the parent keeps sections and authority, each
     /// section is a child board with its own topic index and compact pages.
+    #[default]
     SectionedTopicIndex,
 }
 
@@ -125,8 +117,8 @@ impl ComposableState for BoardModeV1 {
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
 pub struct ChatBoardStateV1 {
     // WARNING: The order of these fields is important for the purposes of the #[composable] macro.
-    // `configuration` must be first, followed by `bans`, `members`, `member_info`, `secrets`,
-    // and then `recent_messages`.
+    // `configuration` must be first, followed by `admin`, `ownership`, `bans`, `ban_revocations`,
+    // `roles`, `invites`, `members`, `member_info`, `category_secrets`, `secrets`, etc.
     // This is due to interdependencies between the fields and the order in which they must be applied in
     // the `apply_delta` function. DO NOT reorder fields without fully understanding the implications.
     /// Configures things like maximum message length, can be updated by the owner.
@@ -166,39 +158,14 @@ pub struct ChatBoardStateV1 {
     /// Metadata about members like their nickname, can be updated by members themselves.
     pub member_info: MemberInfoV1,
 
-    /// Per-category secrets for restricted categories. Must come before
-    /// recent_messages so message validation can check the category version.
+    /// Per-category secrets for restricted sections.
     #[serde(default)]
     pub category_secrets: CategorySecretsV1,
 
-    /// Secret distribution for private boards. Must come before recent_messages so message
-    /// validation can check secret version consistency.
+    /// Secret distribution for private boards.
     pub secrets: BoardSecretsV1,
 
-    /// The most recent messages in the chat board, the number is limited by the board configuration.
-    pub recent_messages: MessagesV1,
-
-    /// Encrypted moderator trash. References messages in `recent_messages`.
-    #[serde(default)]
-    pub trash: crate::board_state::trash::TrashV1,
-
-    /// Per-message content keys wrapped for each section.
-    #[serde(default)]
-    pub message_keys: crate::board_state::message_keys::MessageKeysV1,
-
-    /// Public routing and post flags used by the contract to verify moderation.
-    #[serde(default)]
-    pub moderation: crate::board_state::moderation::ModerationV1,
-
-    /// Reports for moderators, with reason codes and resolutions.
-    #[serde(default)]
-    pub reports: crate::board_state::reports::ReportsV1,
-
-    /// Approvals for posts by new members.
-    #[serde(default)]
-    pub approvals: crate::board_state::approvals::ApprovalsV1,
-
-    /// PQ KEM keys and sealed board/category secrets (contract v2 prototype).
+    /// PQ KEM keys and sealed board/category secrets.
     #[serde(default)]
     pub pq_secrets: crate::board_state::pq_secrets::PqSecretsV1,
 
@@ -230,8 +197,7 @@ pub struct ChatBoardStateV1 {
     #[serde(default)]
     pub mail_addresses: MailAddressesV1,
 
-    /// Legacy boards keep discussions in `recent_messages`; new boards keep
-    /// only an index and one contract per topic.
+    /// Layout mode for this board (`SectionedTopicIndex`).
     #[serde(default)]
     pub mode: BoardModeV1,
 
@@ -239,7 +205,7 @@ pub struct ChatBoardStateV1 {
     #[serde(default)]
     pub sections: SectionsV1,
 
-    /// Topic index for index boards.
+    /// Topic index for section child boards.
     #[serde(default)]
     pub topics: TopicIndexV1,
 
@@ -315,12 +281,6 @@ impl ChatBoardStateV1 {
         self.verify_uncovered_authority_records(parameters)?;
         self.category_secrets.verify(self, parameters)?;
         self.secrets.verify(self, parameters)?;
-        self.recent_messages.verify(self, parameters)?;
-        self.trash.verify(self, parameters)?;
-        self.message_keys.verify(self, parameters)?;
-        self.moderation.verify(self, parameters)?;
-        self.reports.verify(self, parameters)?;
-        self.approvals.verify(self, parameters)?;
         self.pq_secrets.verify(self, parameters)?;
         self.warnings.verify(self, parameters)?;
         self.image_retirements.verify(self, parameters)?;
@@ -431,9 +391,6 @@ impl ChatBoardStateV1 {
         _parameters: &ChatBoardParametersV1,
         section: Option<crate::board_state::sections::SectionId>,
     ) -> Result<(), String> {
-        if self.mode != BoardModeV1::SectionedTopicIndex {
-            return Ok(());
-        }
         match section {
             Some(section_id) => {
                 if !self
@@ -443,9 +400,6 @@ impl ChatBoardStateV1 {
                     .any(|entry| entry.section.id == section_id)
                 {
                     return Err("a section board must contain its own section".to_string());
-                }
-                if !self.recent_messages.messages.is_empty() {
-                    return Err("a section board cannot carry legacy messages".to_string());
                 }
                 for entry in &self.topics.entries {
                     if entry.entry.section != Some(section_id) {
@@ -463,9 +417,6 @@ impl ChatBoardStateV1 {
                     return Err(
                         "a sectioned board keeps topics in its section boards".to_string()
                     );
-                }
-                if !self.recent_messages.messages.is_empty() {
-                    return Err("a sectioned board cannot carry legacy messages".to_string());
                 }
             }
         }
@@ -525,24 +476,6 @@ impl ChatBoardStateV1 {
         if delta.category_secrets.is_some() {
             self.category_secrets.verify(self, parameters)?;
         }
-        if delta.recent_messages.is_some() {
-            self.recent_messages.verify(self, parameters)?;
-        }
-        if delta.trash.is_some() {
-            self.trash.verify(self, parameters)?;
-        }
-        if delta.message_keys.is_some() {
-            self.message_keys.verify(self, parameters)?;
-        }
-        if delta.moderation.is_some() {
-            self.moderation.verify(self, parameters)?;
-        }
-        if delta.reports.is_some() {
-            self.reports.verify(self, parameters)?;
-        }
-        if delta.approvals.is_some() {
-            self.approvals.verify(self, parameters)?;
-        }
         if delta.pq_secrets.is_some() {
             self.pq_secrets.verify(self, parameters)?;
         }
@@ -580,9 +513,9 @@ impl ChatBoardStateV1 {
 }
 
 impl ChatBoardStateV1Delta {
-    /// A delta that only changes the topic index has no cross-part authority,
-    /// member or message changes. The contract can verify it without
-    /// re-verifying the whole board.
+    /// A delta that only changes the topic index has no cross-part authority
+    /// or member changes. The contract can verify it without re-verifying the
+    /// whole board.
     pub fn is_topics_only(&self) -> bool {
         self.configuration.is_none()
             && self.admin.is_none()
@@ -595,12 +528,6 @@ impl ChatBoardStateV1Delta {
             && self.member_info.is_none()
             && self.category_secrets.is_none()
             && self.secrets.is_none()
-            && self.recent_messages.is_none()
-            && self.trash.is_none()
-            && self.message_keys.is_none()
-            && self.moderation.is_none()
-            && self.reports.is_none()
-            && self.approvals.is_none()
             && self.pq_secrets.is_none()
             && self.warnings.is_none()
             && self.suspensions.is_none()
@@ -626,103 +553,10 @@ impl ChatBoardStateV1Delta {
 }
 
 impl ChatBoardStateV1 {
-    /// Fixpoint for members and messages after invite-cap removal or any
-    /// cleanup that drops a member. Messages by absent members are removed,
-    /// then members without messages or invite-chain descendants are pruned.
-    fn renormalize_members_and_messages(&mut self, parameters: &ChatBoardParametersV1) {
-        let owner_id = parameters.owner_id();
-        // A founding owner who handed the board over is an ordinary member: its
-        // record must not be pruned for lack of messages.
-        let founder_is_member = self.ownership.current_owner(parameters) != owner_id;
-        for _ in 0..8 {
-            let before = self.members.members.len() + self.recent_messages.messages.len();
-            let members_by_id = self.members.members_by_member_id();
-            self.recent_messages.messages.retain(|message| {
-                message.message.author == owner_id
-                    || members_by_id.contains_key(&message.message.author)
-            });
-
-            let mut required: HashSet<MemberId> = self
-                .recent_messages
-                .messages
-                .iter()
-                .map(|message| message.message.author)
-                .filter(|author| *author != owner_id)
-                .collect();
-            for item in &self.trash.items {
-                if self.trash.active_item(&item.item.id).is_some() {
-                    required.extend(
-                        item.item
-                            .authors
-                            .iter()
-                            .copied()
-                            .filter(|author| *author != owner_id),
-                    );
-                }
-            }
-            // Token-joined members must survive cleanup even before their first
-            // message; otherwise publishing the membership alone is pruned and
-            // the client can never reach the state where it may post.
-            required.extend(
-                self.members
-                    .members
-                    .iter()
-                    .filter(|member| member.member.join_proof.is_some())
-                    .map(|member| member.member.id())
-                    .filter(|author| *author != owner_id),
-            );
-            // An identity the owner invited directly survives the same way
-            // once it has joined and published a nickname: the invitation is a
-            // deliberate act and the invitee has to post before any message can
-            // keep the record.
-            let current_owner = self.ownership.current_owner(parameters);
-            let with_info: HashSet<MemberId> = self
-                .member_info
-                .member_info
-                .iter()
-                .map(|info| info.member_info.member_id)
-                .collect();
-            required.extend(
-                self.members
-                    .members
-                    .iter()
-                    .filter(|member| {
-                        with_info.contains(&member.member.id())
-                            && (member.member.invited_by == owner_id
-                                || member.member.invited_by == current_owner)
-                    })
-                    .map(|member| member.member.id())
-                    .filter(|id| *id != owner_id),
-            );
-            let mut to_process: Vec<MemberId> = required.iter().copied().collect();
-            while let Some(member_id) = to_process.pop() {
-                if let Some(member) = members_by_id.get(&member_id) {
-                    let inviter = member.member.invited_by;
-                    if inviter != owner_id && required.insert(inviter) {
-                        to_process.push(inviter);
-                    }
-                }
-            }
-            self.members.members.retain(|member| {
-                required.contains(&member.member.id())
-                    || (founder_is_member && member.member.id() == owner_id)
-            });
-
-            if before == self.members.members.len() + self.recent_messages.messages.len() {
-                break;
-            }
-        }
-    }
-
-    /// Post-apply cleanup: prune members who have no recent messages, clean up
-    /// member_info for pruned members, and remove orphaned bans.
-    ///
-    /// Members are only kept if they have at least one message in recent_messages,
-    /// or are in the invite chain of someone who does. The owner is never in the
-    /// members list (they're implicit via parameters).
-    ///
-    /// Bans are only removed if the banner was themselves BANNED (orphaned ban).
-    /// If the banner was merely pruned for inactivity, their bans persist.
+    /// Post-apply cleanup: enforce invite caps, remove orphaned bans, clean up
+    /// revoked admins/roles, category secrets, PQ secrets, warnings,
+    /// suspensions, retirements, sections, and topic index, and keep records
+    /// canonically sorted for deterministic CRDT convergence.
     fn post_apply_cleanup(&mut self, parameters: &ChatBoardParametersV1) -> Result<(), String> {
         let owner_id = MemberId::from(&parameters.owner);
 
@@ -732,111 +566,14 @@ impl ChatBoardStateV1 {
         ownership.cleanup(self, parameters);
         self.ownership = ownership;
 
-        // 0. Enforce invite-link use caps first, so members dropped here do not
-        // keep their messages alive in the steps below.
+        // 0. Enforce invite-link use caps first.
         self.enforce_invite_caps();
 
-        // Both index layouts keep their members in the topic index rather than
-        // in legacy messages. A section child has no messages at all; pruning
-        // members here would drop the authors it needs to verify its entries.
-        let index_mode = self.mode.is_topic_index();
-        if !index_mode {
-            // 1. Collect message author IDs
-            let message_authors: HashSet<MemberId> = self
-                .recent_messages
-                .messages
-                .iter()
-                .map(|m| m.message.author)
-                .collect();
-
-            // 2. Compute required members: authors + their invite chains
-            let required_ids = {
-                let members_by_id = self.members.members_by_member_id();
-                let mut required_ids: HashSet<MemberId> = HashSet::new();
-
-                for author_id in &message_authors {
-                    if *author_id != owner_id && members_by_id.contains_key(author_id) {
-                        required_ids.insert(*author_id);
-                    }
-                }
-
-                // Token-joined members keep their record before their first
-                // message. Without this the membership delta is applied and then
-                // pruned by this same cleanup, so the join never reaches the
-                // contract.
-                required_ids.extend(
-                    members_by_id
-                        .values()
-                        .filter(|member| member.member.join_proof.is_some())
-                        .map(|member| member.member.id())
-                        .filter(|member_id| *member_id != owner_id),
-                );
-
-                // The same for identities the owner invited directly, once they
-                // have joined and published a nickname: the invitation is
-                // deliberate and its first message may take a while.
-                let current_owner = self.ownership.current_owner(parameters);
-                let with_info: HashSet<MemberId> = self
-                    .member_info
-                    .member_info
-                    .iter()
-                    .map(|info| info.member_info.member_id)
-                    .collect();
-                required_ids.extend(
-                    members_by_id
-                        .values()
-                        .filter(|member| {
-                            with_info.contains(&member.member.id())
-                                && (member.member.invited_by == owner_id
-                                    || member.member.invited_by == current_owner)
-                        })
-                        .map(|member| member.member.id())
-                        .filter(|member_id| *member_id != owner_id),
-                );
-
-                // Walk invite chains upward, adding all ancestors (stop at owner)
-                let mut to_process: Vec<MemberId> = required_ids.iter().cloned().collect();
-                while let Some(member_id) = to_process.pop() {
-                    if let Some(member) = members_by_id.get(&member_id) {
-                        let inviter_id = member.member.invited_by;
-                        if inviter_id != owner_id && !required_ids.contains(&inviter_id) {
-                            required_ids.insert(inviter_id);
-                            to_process.push(inviter_id);
-                        }
-                    }
-                }
-
-                required_ids
-            };
-
-            // 3. Prune members not in required set. A founding owner who handed the
-            // board over stays as an ordinary member, like any other former owner.
-            let founder_is_member = self.ownership.current_owner(parameters) != owner_id;
-            self.members
-                .members
-                .retain(|m| {
-                    required_ids.contains(&m.member.id())
-                        || (founder_is_member && m.member.id() == owner_id)
-                });
-
-            // 4. Clean member_info for pruned members
-            self.member_info.member_info.retain(|info| {
-                info.member_info.member_id == owner_id
-                    || required_ids.contains(&info.member_info.member_id)
-            });
-        }
-
-        // 5. Clean orphaned bans: only remove if banner was BANNED (not just pruned)
-        // A ban is orphaned when:
-        // - The banner is not the owner AND
-        // - The banner is not in the current members list AND
-        // - The banner IS in the banned users set (i.e., they were banned, not pruned)
+        // 5. Clean orphaned bans: keep only bans whose banner is still available
+        // to sign/verify them.
         let current_member_ids: HashSet<MemberId> =
             self.members.members.iter().map(|m| m.member.id()).collect();
 
-        // Keep only bans whose banner is still available to sign/verify them.
-        // A ban whose banner was pruned can no longer be authenticated, so it
-        // is dropped instead of being accepted without a signature check.
         self.bans.0.retain(|ban| {
             ban.ban.banned_user != owner_id
                 && (ban.banned_by == owner_id || current_member_ids.contains(&ban.banned_by))
@@ -940,28 +677,15 @@ impl ChatBoardStateV1 {
             .categories
             .retain(|set| !set.versions.is_empty() || !set.encrypted_secrets.is_empty());
 
-        // 5e. Reports and approvals lose their target or their signer when a
-        // message is pruned or a moderator loses the power. Dropping them here
-        // keeps the state verifiable and converges on every peer.
-        let mut reports = std::mem::take(&mut self.reports);
-        reports.cleanup(self, parameters);
-        self.reports = reports;
-
-        let mut approvals = std::mem::take(&mut self.approvals);
-        approvals.cleanup(self, parameters);
-        self.approvals = approvals;
+        // Index sections run before PQ secrets so PqScope::Category resolves
+        // against the cleaned section set.
+        let mut sections = std::mem::take(&mut self.sections);
+        sections.cleanup(self, parameters);
+        self.sections = sections;
 
         let mut pq = std::mem::take(&mut self.pq_secrets);
         pq.cleanup(self, parameters);
         self.pq_secrets = pq;
-
-        let mut trash = std::mem::take(&mut self.trash);
-        trash.cleanup(self, parameters);
-        self.trash = trash;
-
-        let mut moderation = std::mem::take(&mut self.moderation);
-        moderation.cleanup(self, parameters);
-        self.moderation = moderation;
 
         let mut warnings = std::mem::take(&mut self.warnings);
         warnings.cleanup(self, parameters);
@@ -980,43 +704,6 @@ impl ChatBoardStateV1 {
         retirements.cleanup(self, parameters);
         self.image_retirements = retirements;
 
-        // 5g. Invite-cap removal happens before the message cleanup. Re-run
-        // the members/messages fixpoint so removed invitees do not leave
-        // messages or orphaned descendants behind.
-        if !index_mode {
-            self.renormalize_members_and_messages(parameters);
-
-            // 5h. Remove hidden messages from the live list. The encrypted trash
-            // bundle is the only copy until a restore re-adds it.
-            let trashed: HashSet<MessageId> = self
-                .trash
-                .items
-                .iter()
-                .filter(|item| self.trash.active_item(&item.item.id).is_some())
-                .flat_map(|item| item.item.messages.iter().copied())
-                .collect();
-            let purged: HashSet<MessageId> = self
-                .moderation
-                .illegal_purges
-                .iter()
-                .flat_map(|entry| entry.purge.message_ids.iter().copied())
-                .collect();
-            let hidden: HashSet<MessageId> = trashed.union(&purged).copied().collect();
-            if !hidden.is_empty() {
-                self.recent_messages
-                    .messages
-                    .retain(|message| !hidden.contains(&message.id()));
-                self.moderation
-                    .routes
-                    .retain(|route| !hidden.contains(&route.route.message_id));
-            }
-        }
-
-        // Index cleanup runs after members, bans and roles, because the topic
-        // entries resolve their author and moderation authority against them.
-        let mut sections = std::mem::take(&mut self.sections);
-        sections.cleanup(self, parameters);
-        self.sections = sections;
         let mut topics = std::mem::take(&mut self.topics);
         topics.cleanup(self, parameters);
         self.topics = topics;
@@ -1171,7 +858,6 @@ mod tests {
     use crate::board_state::configuration::Configuration;
     use crate::board_state::member::{AuthorizedMember, Member};
     use crate::board_state::member_info::{AuthorizedMemberInfo, MemberInfo};
-    use crate::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
     use ed25519_dalek::SigningKey;
     use std::fmt::Debug;
     use std::time::SystemTime;
@@ -1181,19 +867,16 @@ mod tests {
         let (mut state, parameters, owner_key) = create_empty_chat_board_state();
         let owner_id = parameters.owner_id();
 
-        // A member with no messages and no owner invitation is pruned by
-        // cleanup.
         let member_key = SigningKey::generate(&mut rand::thread_rng());
         let member_id = MemberId::from(member_key.verifying_key());
-        let inviter_key = SigningKey::generate(&mut rand::thread_rng());
         state.members.members.push(AuthorizedMember::new(
             Member {
                 owner_member_id: owner_id,
-                invited_by: MemberId::from(inviter_key.verifying_key()),
+                invited_by: owner_id,
                 member_vk: member_key.verifying_key(),
                 join_proof: None,
             },
-            &inviter_key,
+            &owner_key,
         ));
 
         // Two bans over a cap of one, the owner's being the newest.
@@ -1236,10 +919,6 @@ mod tests {
         twice.normalize(&parameters).unwrap();
 
         assert_eq!(once, twice, "cleanup must be a fixpoint");
-        assert!(
-            once.members.members.is_empty(),
-            "a member without messages is pruned"
-        );
         assert_eq!(once.bans.0.len(), 1, "the cap is enforced during cleanup");
         assert_eq!(
             once.bans.0[0].banned_by, owner_id,
@@ -1360,7 +1039,6 @@ mod tests {
                 member_info: MemberInfoV1::default(),
                 category_secrets: CategorySecretsV1::default(),
                 secrets: BoardSecretsV1::default(),
-                recent_messages: MessagesV1::default(),
                 upgrade: OptionalUpgradeV1(None),
                 ..Default::default()
             },
@@ -1517,368 +1195,6 @@ mod tests {
     }
 
     #[test]
-    fn test_member_pruned_when_no_messages() {
-        let rng = &mut rand::thread_rng();
-        let owner_sk = SigningKey::generate(rng);
-        let owner_vk = owner_sk.verifying_key();
-        let owner_id = MemberId::from(&owner_vk);
-        let params = ChatBoardParametersV1 { owner: owner_vk };
-
-        let a_sk = SigningKey::generate(rng);
-        let a_vk = a_sk.verifying_key();
-        let a_id = MemberId::from(&a_vk);
-
-        let b_sk = SigningKey::generate(rng);
-        let b_vk = b_sk.verifying_key();
-
-        let member_a = AuthorizedMember::new(
-            Member {
-                owner_member_id: owner_id,
-                invited_by: owner_id,
-                member_vk: a_vk,
-                join_proof: None,
-            },
-            &owner_sk,
-        );
-        let member_b = AuthorizedMember::new(
-            Member {
-                owner_member_id: owner_id,
-                invited_by: owner_id,
-                member_vk: b_vk,
-                join_proof: None,
-            },
-            &owner_sk,
-        );
-
-        // Only A has a message
-        let msg_a = AuthorizedMessageV1::new(
-            MessageV1 {
-                images: Vec::new(),
-                board_owner: owner_id,
-                author: a_id,
-                time: SystemTime::now(),
-                content: BoardMessageBody::public(String::new(), "Hello from A".to_string()),
-                reply_to: None,
-                topic_id: None,
-                topic_public_key: None,
-                topic_proof: None,
-                section_id: None,
-                section_auto_moderated: None,
-                auto_moderated: false,
-            },
-            &a_sk,
-        );
-
-        let config = Configuration::default();
-        let auth_config = AuthorizedConfigurationV1::new(config, &owner_sk);
-
-        let mut state = ChatBoardStateV1 {
-            configuration: auth_config,
-            members: MembersV1 {
-                members: vec![member_a, member_b],
-            },
-            recent_messages: MessagesV1 {
-                messages: vec![msg_a],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        state.post_apply_cleanup(&params).unwrap();
-
-        assert_eq!(state.members.members.len(), 1, "Only A should remain");
-        assert_eq!(state.members.members[0].member.id(), a_id);
-    }
-
-    #[test]
-    fn test_invite_chain_preserved_for_active_member() {
-        let rng = &mut rand::thread_rng();
-        let owner_sk = SigningKey::generate(rng);
-        let owner_vk = owner_sk.verifying_key();
-        let owner_id = MemberId::from(&owner_vk);
-        let params = ChatBoardParametersV1 { owner: owner_vk };
-
-        let a_sk = SigningKey::generate(rng);
-        let a_vk = a_sk.verifying_key();
-        let a_id = MemberId::from(&a_vk);
-
-        let b_sk = SigningKey::generate(rng);
-        let b_vk = b_sk.verifying_key();
-        let b_id = MemberId::from(&b_vk);
-
-        // Owner → A → B
-        let member_a = AuthorizedMember::new(
-            Member {
-                owner_member_id: owner_id,
-                invited_by: owner_id,
-                member_vk: a_vk,
-                join_proof: None,
-            },
-            &owner_sk,
-        );
-        let member_b = AuthorizedMember::new(
-            Member {
-                owner_member_id: owner_id,
-                invited_by: a_id,
-                member_vk: b_vk,
-                join_proof: None,
-            },
-            &a_sk,
-        );
-
-        // Only B has a message
-        let msg_b = AuthorizedMessageV1::new(
-            MessageV1 {
-                images: Vec::new(),
-                board_owner: owner_id,
-                author: b_id,
-                time: SystemTime::now(),
-                content: BoardMessageBody::public(String::new(), "Hello from B".to_string()),
-                reply_to: None,
-                topic_id: None,
-                topic_public_key: None,
-                topic_proof: None,
-                section_id: None,
-                section_auto_moderated: None,
-                auto_moderated: false,
-            },
-            &b_sk,
-        );
-
-        let config = Configuration::default();
-        let auth_config = AuthorizedConfigurationV1::new(config, &owner_sk);
-
-        let mut state = ChatBoardStateV1 {
-            configuration: auth_config,
-            members: MembersV1 {
-                members: vec![member_a, member_b],
-            },
-            recent_messages: MessagesV1 {
-                messages: vec![msg_b],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        state.post_apply_cleanup(&params).unwrap();
-
-        // Both A and B should remain (A is in B's invite chain)
-        assert_eq!(state.members.members.len(), 2);
-        let member_ids: HashSet<MemberId> = state
-            .members
-            .members
-            .iter()
-            .map(|m| m.member.id())
-            .collect();
-        assert!(
-            member_ids.contains(&a_id),
-            "A should be kept (in B's invite chain)"
-        );
-        assert!(
-            member_ids.contains(&b_id),
-            "B should be kept (has messages)"
-        );
-    }
-
-    #[test]
-    fn test_ban_dropped_after_banner_pruned() {
-        let rng = &mut rand::thread_rng();
-        let owner_sk = SigningKey::generate(rng);
-        let owner_vk = owner_sk.verifying_key();
-        let owner_id = MemberId::from(&owner_vk);
-        let params = ChatBoardParametersV1 { owner: owner_vk };
-
-        let a_sk = SigningKey::generate(rng);
-        let a_vk = a_sk.verifying_key();
-        let a_id = MemberId::from(&a_vk);
-
-        let c_sk = SigningKey::generate(rng);
-        let c_vk = c_sk.verifying_key();
-        let c_id = MemberId::from(&c_vk);
-
-        // A is a member (invited by owner)
-        let member_a = AuthorizedMember::new(
-            Member {
-                owner_member_id: owner_id,
-                invited_by: owner_id,
-                member_vk: a_vk,
-                join_proof: None,
-            },
-            &owner_sk,
-        );
-
-        // A bans C
-        let ban_c_by_a = AuthorizedUserBan::new(
-            UserBan {
-                owner_member_id: owner_id,
-                banned_at: SystemTime::now(),
-                banned_user: c_id,
-                expires_at: None,
-                target_member: None,
-                invite_chain: Vec::new(),
-            },
-            a_id,
-            &a_sk,
-        );
-
-        let config = Configuration {
-            max_user_bans: 10,
-            updated_at: std::time::SystemTime::UNIX_EPOCH,
-            ..Default::default()
-        };
-        let auth_config = AuthorizedConfigurationV1::new(config, &owner_sk);
-
-        // A has no messages → will be pruned
-        let mut state = ChatBoardStateV1 {
-            configuration: auth_config,
-            members: MembersV1 {
-                members: vec![member_a],
-            },
-            bans: BansV1(vec![ban_c_by_a]),
-            ..Default::default()
-        };
-
-        state.post_apply_cleanup(&params).unwrap();
-
-        // A should be pruned (no messages)
-        assert!(state.members.members.is_empty(), "A should be pruned");
-
-        // Without A's key the ban signature cannot be verified, so the ban is
-        // dropped rather than accepted unauthenticated.
-        assert!(state.bans.0.is_empty(), "Ban should be dropped");
-        let _ = (c_id, a_id);
-    }
-
-    #[test]
-    fn test_member_re_added_with_message() {
-        let rng = &mut rand::thread_rng();
-        let owner_sk = SigningKey::generate(rng);
-        let owner_vk = owner_sk.verifying_key();
-        let owner_id = MemberId::from(&owner_vk);
-        let params = ChatBoardParametersV1 { owner: owner_vk };
-
-        let a_sk = SigningKey::generate(rng);
-        let a_vk = a_sk.verifying_key();
-        let a_id = MemberId::from(&a_vk);
-
-        let member_a = AuthorizedMember::new(
-            Member {
-                owner_member_id: owner_id,
-                invited_by: owner_id,
-                member_vk: a_vk,
-                join_proof: None,
-            },
-            &owner_sk,
-        );
-
-        let config = Configuration::default();
-        let auth_config = AuthorizedConfigurationV1::new(config, &owner_sk);
-
-        // State with A but no messages
-        let mut state = ChatBoardStateV1 {
-            configuration: auth_config,
-            members: MembersV1 {
-                members: vec![member_a.clone()],
-            },
-            ..Default::default()
-        };
-
-        // Cleanup prunes A
-        state.post_apply_cleanup(&params).unwrap();
-        assert!(state.members.members.is_empty(), "A should be pruned");
-
-        // Re-add A with a message
-        state.members.members.push(member_a);
-        let msg = AuthorizedMessageV1::new(
-            MessageV1 {
-                images: Vec::new(),
-                board_owner: owner_id,
-                author: a_id,
-                time: SystemTime::now(),
-                content: BoardMessageBody::public(String::new(), "Hello again!".to_string()),
-                reply_to: None,
-                topic_id: None,
-                topic_public_key: None,
-                topic_proof: None,
-                section_id: None,
-                section_auto_moderated: None,
-                auto_moderated: false,
-            },
-            &a_sk,
-        );
-        state.recent_messages.messages.push(msg);
-
-        // Cleanup should keep A now
-        state.post_apply_cleanup(&params).unwrap();
-        assert_eq!(state.members.members.len(), 1, "A should be kept");
-        assert_eq!(state.members.members[0].member.id(), a_id);
-    }
-
-    #[test]
-    fn test_member_info_cleaned_after_pruning() {
-        let rng = &mut rand::thread_rng();
-        let owner_sk = SigningKey::generate(rng);
-        let owner_vk = owner_sk.verifying_key();
-        let owner_id = MemberId::from(&owner_vk);
-        let params = ChatBoardParametersV1 { owner: owner_vk };
-
-        let a_sk = SigningKey::generate(rng);
-        let a_vk = a_sk.verifying_key();
-        let a_id = MemberId::from(&a_vk);
-        // Invited by another member, so the owner-invitation rule does not
-        // keep the record.
-        let inviter_sk = SigningKey::generate(rng);
-
-        let member_a = AuthorizedMember::new(
-            Member {
-                owner_member_id: owner_id,
-                invited_by: MemberId::from(inviter_sk.verifying_key()),
-                member_vk: a_vk,
-                join_proof: None,
-            },
-            &inviter_sk,
-        );
-
-        // Create member_info for A and owner
-        let a_info = AuthorizedMemberInfo::new_with_member_key(
-            MemberInfo::new_public(a_id, 1, "Alice".to_string()),
-            &a_sk,
-        );
-        let owner_info = AuthorizedMemberInfo::new(
-            MemberInfo::new_public(owner_id, 1, "Owner".to_string()),
-            &owner_sk,
-        );
-
-        let config = Configuration::default();
-        let auth_config = AuthorizedConfigurationV1::new(config, &owner_sk);
-
-        let mut state = ChatBoardStateV1 {
-            configuration: auth_config,
-            members: MembersV1 {
-                members: vec![member_a],
-            },
-            member_info: MemberInfoV1 {
-                member_info: vec![owner_info, a_info],
-            },
-            ..Default::default()
-        };
-
-        // A has no messages → gets pruned along with their member_info
-        state.post_apply_cleanup(&params).unwrap();
-
-        assert!(state.members.members.is_empty(), "A should be pruned");
-        assert_eq!(
-            state.member_info.member_info.len(),
-            1,
-            "Only owner's info should remain"
-        );
-        assert_eq!(
-            state.member_info.member_info[0].member_info.member_id, owner_id,
-            "Remaining info should be owner's"
-        );
-    }
-
-    #[test]
     fn test_state_with_none_deltas() {
         let (state, parameters, owner_signing_key) = create_empty_chat_board_state();
 
@@ -1920,10 +1236,8 @@ mod tests {
             delta.member_info.is_none(),
             "Member info delta should be None"
         );
-        assert!(
-            delta.recent_messages.is_none(),
-            "Recent messages delta should be None"
-        );
+        assert!(delta.sections.is_none(), "Sections delta should be None");
+        assert!(delta.topics.is_none(), "Topics delta should be None");
         assert!(delta.upgrade.is_none(), "Upgrade delta should be None");
 
         // Apply the partial delta

@@ -43,9 +43,6 @@ fn verify_section_layout(
     {
         return Err("a section board must contain its own section".to_string());
     }
-    if !state.recent_messages.messages.is_empty() {
-        return Err("a section board cannot carry legacy messages".to_string());
-    }
     if let Some(pages) = &state.topic_pages.0 {
         if page != 0 {
             return Err("only the section manifest can list topic pages".to_string());

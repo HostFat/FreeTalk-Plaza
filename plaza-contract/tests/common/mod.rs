@@ -80,7 +80,6 @@ impl BoardTestState {
             members,
             member_info: plaza_core::board_state::member_info::MemberInfoV1::default(),
             secrets: plaza_core::board_state::secret::BoardSecretsV1::default(),
-            recent_messages: plaza_core::board_state::message::MessagesV1::default(),
             upgrade: plaza_core::board_state::upgrade::OptionalUpgradeV1(None),
             ..Default::default()
         };
@@ -112,7 +111,7 @@ pub fn river_states_equal(a: &ChatBoardStateV1, b: &ChatBoardStateV1) -> bool {
         && a.bans == b.bans
         && a.members == b.members
         && a.member_info == b.member_info
-        && a.recent_messages == b.recent_messages
+        && a.sections == b.sections
         && a.upgrade == b.upgrade
 }
 
@@ -413,38 +412,42 @@ pub async fn send_test_message(
     message_content: String,
     signing_key: &SigningKey,
 ) -> Result<()> {
-    println!("--> [UPDATE] Sending test message: '{}'", message_content);
+    println!("--> [UPDATE] Sending test member_info update: '{}'", message_content);
 
-    let message = plaza_core::board_state::message::MessageV1 {
-        images: Vec::new(),
-        board_owner: parameters.owner_id(),
-        author: signing_key.verifying_key().into(),
-        content: plaza_core::board_state::message::BoardMessageBody::public(
-            String::new(),
-            message_content.clone(),
-        ),
-        time: std::time::SystemTime::now(),
-        reply_to: None,
-        topic_id: None,
-        topic_public_key: None,
-        topic_proof: None,
-        section_id: None,
-        section_auto_moderated: None,
-        auto_moderated: false,
+    let member_id: plaza_core::board_state::member::MemberId = signing_key.verifying_key().into();
+    let next_version = board_state
+        .member_info
+        .member_info
+        .iter()
+        .filter(|info| info.member_info.member_id == member_id)
+        .map(|info| info.member_info.version)
+        .max()
+        .map(|v| v + 1)
+        .unwrap_or(1);
+
+    let info = plaza_core::board_state::member_info::MemberInfo::new_public(
+        member_id,
+        next_version,
+        message_content,
+    );
+    let auth_info = if member_id == parameters.owner_id() {
+        plaza_core::board_state::member_info::AuthorizedMemberInfo::new(info, signing_key)
+    } else {
+        plaza_core::board_state::member_info::AuthorizedMemberInfo::new_with_member_key(
+            info,
+            signing_key,
+        )
     };
 
-    let auth_message =
-        plaza_core::board_state::message::AuthorizedMessageV1::new(message, signing_key);
-
     let delta = plaza_core::board_state::ChatBoardStateV1Delta {
-        recent_messages: Some(vec![auth_message.clone()]),
+        member_info: Some(vec![auth_info]),
         ..Default::default()
     };
 
     let mut test_state = board_state.clone();
     test_state
         .apply_delta(board_state, parameters, &Some(delta.clone()))
-        .map_err(|e| anyhow::anyhow!("Failed to apply message delta locally: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to apply member_info delta locally: {:?}", e))?;
 
     let mut delta_bytes = Vec::new();
     ciborium::ser::into_writer(&delta, &mut delta_bytes)

@@ -1633,12 +1633,6 @@ pub async fn create_section_board(
     child.topics = TopicIndexV1::default();
     child.authority_root = Default::default();
     child.topic_pages = plaza_core::board_state::pages::TopicPageListV1(topic_pages);
-    child.recent_messages = Default::default();
-    child.trash = Default::default();
-    child.message_keys = Default::default();
-    child.moderation = Default::default();
-    child.reports = Default::default();
-    child.approvals = Default::default();
     child.invites = Default::default();
     child.member_info = Default::default();
     // Only retain the tiny subset of members/invites/roles required to verify

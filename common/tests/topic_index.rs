@@ -255,26 +255,6 @@ fn a_newer_topic_entry_generation_wins() {
 }
 
 #[test]
-fn the_legacy_mode_still_verifies_with_empty_index_fields() {
-    let owner = owner();
-    let owner_id = MemberId::from(&owner.verifying_key());
-    let mut state = ChatBoardStateV1 {
-        configuration: AuthorizedConfigurationV1::new(
-            Configuration {
-                owner_member_id: owner_id,
-                ..Configuration::default()
-            },
-            &owner,
-        ),
-        ..Default::default()
-    };
-    state.mode = BoardModeV1::LegacyMessages;
-    state.verify(&state, &params()).unwrap();
-    assert!(state.sections.sections.is_empty());
-    assert!(state.topics.entries.is_empty());
-}
-
-#[test]
 fn an_entry_with_the_wrong_section_chain_is_rejected() {
     let mut state = indexed_board();
     state.topics.entries[0].entry.section_chain = vec![MessageId::from_bytes([6u8; 32])];

@@ -686,7 +686,7 @@ mod tests {
     }
 
     /// Cleanup drops blobs for members who left the board, so the state keeps
-    /// verifying after pruning.
+    /// verifying after removal.
     #[test]
     fn cleanup_drops_blobs_of_pruned_members() {
         let owner = owner();
@@ -697,11 +697,9 @@ mod tests {
             1
         );
 
+        // Simulate the recipient being removed from the board (e.g. banned).
+        state.members.members.clear();
         state.normalize(&params).unwrap();
-        assert!(
-            state.members.members.is_empty(),
-            "the recipient has no messages and is pruned"
-        );
         assert!(
             state.category_secrets.categories[0]
                 .encrypted_secrets

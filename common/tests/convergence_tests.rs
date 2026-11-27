@@ -16,9 +16,7 @@ use plaza_core::board_state::ban::{AuthorizedUserBan, BansV1, UserBan};
 use plaza_core::board_state::member::{
     AuthorizedMember, Member, MemberId, MembersDelta, MembersV1,
 };
-use plaza_core::board_state::message::{
-    AuthorizedMessageV1, BoardMessageBody, MessageId, MessageV1, MessagesV1,
-};
+use plaza_core::board_state::message::MessageId;
 use plaza_core::board_state::{ChatBoardParametersV1, ChatBoardStateV1};
 use rand::rngs::OsRng;
 use std::time::SystemTime;
@@ -39,33 +37,6 @@ fn create_test_member(owner_id: MemberId, invited_by: MemberId) -> (Member, Sign
 /// Helper to create a properly signed authorized member
 fn create_authorized_member(member: Member, inviter_signing_key: &SigningKey) -> AuthorizedMember {
     AuthorizedMember::new(member, inviter_signing_key)
-}
-
-/// Helper to create a test message from a member.
-/// Members need messages to survive post_apply_cleanup pruning.
-fn create_test_msg(
-    owner_id: MemberId,
-    author_id: MemberId,
-    author_sk: &SigningKey,
-    time_offset_secs: u64,
-) -> AuthorizedMessageV1 {
-    AuthorizedMessageV1::new(
-        MessageV1 {
-            images: Vec::new(),
-            board_owner: owner_id,
-            author: author_id,
-            time: SystemTime::now() + std::time::Duration::from_secs(time_offset_secs),
-            content: BoardMessageBody::public(String::new(), format!("msg from {:?}", author_id)),
-            reply_to: None,
-            topic_id: None,
-            topic_public_key: None,
-            topic_proof: None,
-            section_id: None,
-            section_auto_moderated: None,
-            auto_moderated: false,
-        },
-        author_sk,
-    )
 }
 
 // =============================================================================
@@ -349,135 +320,6 @@ fn test_ban_excess_order_convergence() {
 }
 
 // =============================================================================
-// MESSAGE PRUNE ORDER CONVERGENCE TEST
-// =============================================================================
-//
-// BUG LOCATION: message.rs:190-197
-//
-// Messages are sorted by time and oldest are removed when exceeding max:
-//
-//     self.messages.sort_by(|a, b| a.message.time.cmp(&b.message.time));
-//
-//     if self.messages.len() > max_recent_messages {
-//         self.messages.drain(0..self.messages.len() - max_recent_messages);
-//     }
-//
-// When multiple messages have the same timestamp, their relative order after
-// sorting is undefined (sort_by is not stable in the presence of equal keys
-// without additional tie-breaking).
-//
-// Messages are no longer pruned - all messages are kept regardless of max_recent_messages
-
-#[test]
-fn test_message_order_convergence() {
-    // Create owner
-    let owner_signing_key = SigningKey::generate(&mut OsRng);
-    let owner_verifying_key = owner_signing_key.verifying_key();
-    let owner_id: MemberId = owner_verifying_key.into();
-
-    // Use the SAME timestamp for all messages
-    let same_time = SystemTime::now();
-
-    // Create three messages with identical timestamps
-    let msg_a = AuthorizedMessageV1::new(
-        MessageV1 {
-            images: Vec::new(),
-            board_owner: owner_id,
-            author: owner_id,
-            time: same_time,
-            content: BoardMessageBody::public(String::new(), "Message A".to_string()),
-            reply_to: None,
-            topic_id: None,
-            topic_public_key: None,
-            topic_proof: None,
-            section_id: None,
-            section_auto_moderated: None,
-            auto_moderated: false,
-        },
-        &owner_signing_key,
-    );
-
-    let msg_b = AuthorizedMessageV1::new(
-        MessageV1 {
-            images: Vec::new(),
-            board_owner: owner_id,
-            author: owner_id,
-            time: same_time,
-            content: BoardMessageBody::public(String::new(), "Message B".to_string()),
-            reply_to: None,
-            topic_id: None,
-            topic_public_key: None,
-            topic_proof: None,
-            section_id: None,
-            section_auto_moderated: None,
-            auto_moderated: false,
-        },
-        &owner_signing_key,
-    );
-
-    let msg_c = AuthorizedMessageV1::new(
-        MessageV1 {
-            images: Vec::new(),
-            board_owner: owner_id,
-            author: owner_id,
-            time: same_time,
-            content: BoardMessageBody::public(String::new(), "Message C".to_string()),
-            reply_to: None,
-            topic_id: None,
-            topic_public_key: None,
-            topic_proof: None,
-            section_id: None,
-            section_auto_moderated: None,
-            auto_moderated: false,
-        },
-        &owner_signing_key,
-    );
-
-    let mut parent_state = ChatBoardStateV1::default();
-    parent_state.configuration.configuration.max_message_size = 1000;
-
-    let parameters = ChatBoardParametersV1 {
-        owner: owner_verifying_key,
-    };
-
-    // State A: Messages in order [A, B, C]
-    let mut state_a = MessagesV1 {
-        messages: vec![msg_a.clone(), msg_b.clone(), msg_c.clone()],
-        ..Default::default()
-    };
-    state_a
-        .apply_delta(&parent_state, &parameters, &None)
-        .expect("apply_delta should succeed");
-
-    // State B: Messages in order [C, B, A] (reversed)
-    let mut state_b = MessagesV1 {
-        messages: vec![msg_c.clone(), msg_b.clone(), msg_a.clone()],
-        ..Default::default()
-    };
-    state_b
-        .apply_delta(&parent_state, &parameters, &None)
-        .expect("apply_delta should succeed");
-
-    // All messages should be kept (no pruning)
-    assert_eq!(state_a.messages.len(), 3, "State A should have 3 messages");
-    assert_eq!(state_b.messages.len(), 3, "State B should have 3 messages");
-
-    // CONVERGENCE CHECK: Both states should have the SAME messages
-    let mut ids_a: Vec<_> = state_a.messages.iter().map(|m| m.id()).collect();
-    let mut ids_b: Vec<_> = state_b.messages.iter().map(|m| m.id()).collect();
-    ids_a.sort();
-    ids_b.sort();
-
-    assert_eq!(
-        ids_a, ids_b,
-        "CONVERGENCE FAILURE: Different message orders produced different message sets!\n\
-         State A messages: {:?}\n\
-         State B messages: {:?}",
-        ids_a, ids_b
-    );
-}
-
-// =============================================================================
 // ADDITIONAL CONVERGENCE TESTS
 // =============================================================================
 
@@ -530,61 +372,6 @@ fn test_member_delta_idempotency() {
             .map(|m| m.member.id())
             .collect::<Vec<_>>(),
         "Applying delta twice should produce identical state"
-    );
-}
-
-/// Test that message delta application is idempotent
-#[test]
-fn test_message_delta_idempotency() {
-    let owner_signing_key = SigningKey::generate(&mut OsRng);
-    let owner_verifying_key = owner_signing_key.verifying_key();
-    let owner_id: MemberId = owner_verifying_key.into();
-
-    let msg = AuthorizedMessageV1::new(
-        MessageV1 {
-            images: Vec::new(),
-            board_owner: owner_id,
-            author: owner_id,
-            time: SystemTime::now(),
-            content: BoardMessageBody::public(String::new(), "Test message".to_string()),
-            reply_to: None,
-            topic_id: None,
-            topic_public_key: None,
-            topic_proof: None,
-            section_id: None,
-            section_auto_moderated: None,
-            auto_moderated: false,
-        },
-        &owner_signing_key,
-    );
-
-    let mut parent_state = ChatBoardStateV1::default();
-    parent_state.configuration.configuration.max_message_size = 1000;
-
-    let parameters = ChatBoardParametersV1 {
-        owner: owner_verifying_key,
-    };
-
-    let mut state = MessagesV1::default();
-    let delta = vec![msg.clone()];
-
-    // Apply delta first time
-    state
-        .apply_delta(&parent_state, &parameters, &Some(delta.clone()))
-        .expect("first apply_delta should succeed");
-
-    let state_after_first = state.clone();
-
-    // Apply same delta again
-    state
-        .apply_delta(&parent_state, &parameters, &Some(delta))
-        .expect("second apply_delta should succeed");
-
-    // State should be unchanged (idempotent)
-    assert_eq!(
-        state.messages.len(),
-        state_after_first.messages.len(),
-        "Applying delta twice should be idempotent"
     );
 }
 
@@ -754,107 +541,6 @@ fn test_member_convergence_stress_50_members() {
     assert_eq!(
         ids_b, ids_c,
         "CONVERGENCE FAILURE: State B and C have different members"
-    );
-}
-
-/// Stress test: 100+ messages with mixed timestamps
-#[test]
-fn test_message_convergence_stress_100_messages() {
-    let owner_signing_key = SigningKey::generate(&mut OsRng);
-    let owner_verifying_key = owner_signing_key.verifying_key();
-    let owner_id: MemberId = owner_verifying_key.into();
-
-    let base_time = SystemTime::now();
-    let mut messages: Vec<AuthorizedMessageV1> = Vec::new();
-
-    // Create 100 messages with various timestamps
-    // Some will have the same timestamp to test tie-breaking
-    for i in 0..100 {
-        // Create groups of messages with same timestamp
-        let time_offset = (i / 5) as u64; // 5 messages per timestamp
-        let time = base_time + std::time::Duration::from_secs(time_offset);
-
-        let msg = AuthorizedMessageV1::new(
-            MessageV1 {
-                images: Vec::new(),
-                board_owner: owner_id,
-                author: owner_id,
-                time,
-                content: BoardMessageBody::public(String::new(), format!("Message {}", i)),
-                reply_to: None,
-                topic_id: None,
-                topic_public_key: None,
-                topic_proof: None,
-                section_id: None,
-                section_auto_moderated: None,
-                auto_moderated: false,
-            },
-            &owner_signing_key,
-        );
-        messages.push(msg);
-    }
-
-    // No pruning - all messages kept
-    let mut parent_state = ChatBoardStateV1::default();
-    parent_state.configuration.configuration.max_message_size = 1000;
-
-    let parameters = ChatBoardParametersV1 {
-        owner: owner_verifying_key,
-    };
-
-    // State A: Original order
-    let mut state_a = MessagesV1 {
-        messages: messages.clone(),
-        ..Default::default()
-    };
-    state_a
-        .apply_delta(&parent_state, &parameters, &None)
-        .expect("apply_delta should succeed");
-
-    // State B: Reversed order
-    let mut reversed = messages.clone();
-    reversed.reverse();
-    let mut state_b = MessagesV1 {
-        messages: reversed,
-        ..Default::default()
-    };
-    state_b
-        .apply_delta(&parent_state, &parameters, &None)
-        .expect("apply_delta should succeed");
-
-    // State C: Shuffled (interleaved)
-    let mut interleaved: Vec<AuthorizedMessageV1> = Vec::new();
-    let half = messages.len() / 2;
-    for i in 0..half {
-        interleaved.push(messages[i].clone());
-        interleaved.push(messages[half + i].clone());
-    }
-    let mut state_c = MessagesV1 {
-        messages: interleaved,
-        ..Default::default()
-    };
-    state_c
-        .apply_delta(&parent_state, &parameters, &None)
-        .expect("apply_delta should succeed");
-
-    // All states should have all 100 messages (no pruning)
-    assert_eq!(state_a.messages.len(), 100);
-    assert_eq!(state_b.messages.len(), 100);
-    assert_eq!(state_c.messages.len(), 100);
-
-    // All states should have the SAME messages
-    let ids_a: Vec<_> = state_a.messages.iter().map(|m| m.id()).collect();
-    let ids_b: Vec<_> = state_b.messages.iter().map(|m| m.id()).collect();
-    let ids_c: Vec<_> = state_c.messages.iter().map(|m| m.id()).collect();
-
-    // Messages should be in the same order (sorted by time, then by id)
-    assert_eq!(
-        ids_a, ids_b,
-        "CONVERGENCE FAILURE: State A and B have different message order"
-    );
-    assert_eq!(
-        ids_b, ids_c,
-        "CONVERGENCE FAILURE: State B and C have different message order"
     );
 }
 
@@ -1090,84 +776,6 @@ fn test_random_operation_sequence_convergence() {
     }
 }
 
-/// Property test: Messages should converge regardless of order (no pruning)
-#[test]
-fn test_message_varying_limits_convergence() {
-    let owner_signing_key = SigningKey::generate(&mut OsRng);
-    let owner_verifying_key = owner_signing_key.verifying_key();
-    let owner_id: MemberId = owner_verifying_key.into();
-
-    // Create 30 messages with distinct timestamps
-    let base_time = SystemTime::now();
-    let mut messages: Vec<AuthorizedMessageV1> = Vec::new();
-    for i in 0..30 {
-        let msg = AuthorizedMessageV1::new(
-            MessageV1 {
-                images: Vec::new(),
-                board_owner: owner_id,
-                author: owner_id,
-                time: base_time + std::time::Duration::from_secs(i as u64),
-                content: BoardMessageBody::public(String::new(), format!("Message {}", i)),
-                reply_to: None,
-                topic_id: None,
-                topic_public_key: None,
-                topic_proof: None,
-                section_id: None,
-                section_auto_moderated: None,
-                auto_moderated: false,
-            },
-            &owner_signing_key,
-        );
-        messages.push(msg);
-    }
-
-    let parameters = ChatBoardParametersV1 {
-        owner: owner_verifying_key,
-    };
-
-    let mut parent_state = ChatBoardStateV1::default();
-    parent_state.configuration.configuration.max_message_size = 1000;
-
-    // Apply messages in different orders
-    let mut state_forward = MessagesV1 {
-        messages: messages.clone(),
-        ..Default::default()
-    };
-    state_forward
-        .apply_delta(&parent_state, &parameters, &None)
-        .expect("apply_delta should succeed");
-
-    let mut reversed = messages.clone();
-    reversed.reverse();
-    let mut state_backward = MessagesV1 {
-        messages: reversed,
-        ..Default::default()
-    };
-    state_backward
-        .apply_delta(&parent_state, &parameters, &None)
-        .expect("apply_delta should succeed");
-
-    // All 30 messages should be kept (no pruning)
-    assert_eq!(
-        state_forward.messages.len(),
-        30,
-        "Forward state should have 30 messages"
-    );
-    assert_eq!(
-        state_backward.messages.len(),
-        30,
-        "Backward state should have 30 messages"
-    );
-
-    let ids_forward: Vec<_> = state_forward.messages.iter().map(|m| m.id()).collect();
-    let ids_backward: Vec<_> = state_backward.messages.iter().map(|m| m.id()).collect();
-
-    assert_eq!(
-        ids_forward, ids_backward,
-        "Both states should converge to the same order"
-    );
-}
-
 // =============================================================================
 // EDGE CASE TESTS
 // =============================================================================
@@ -1268,87 +876,6 @@ fn test_member_one_over_capacity() {
     ids_b.sort();
 
     assert_eq!(ids_a, ids_b, "All members should be preserved");
-}
-
-/// Edge case: All messages with identical timestamps
-#[test]
-fn test_messages_all_identical_timestamps() {
-    let owner_signing_key = SigningKey::generate(&mut OsRng);
-    let owner_verifying_key = owner_signing_key.verifying_key();
-    let owner_id: MemberId = owner_verifying_key.into();
-
-    let same_time = SystemTime::now();
-
-    // Create 10 messages all with the same timestamp
-    let mut messages: Vec<AuthorizedMessageV1> = Vec::new();
-    for i in 0..10 {
-        let msg = AuthorizedMessageV1::new(
-            MessageV1 {
-                images: Vec::new(),
-                board_owner: owner_id,
-                author: owner_id,
-                time: same_time,
-                content: BoardMessageBody::public(String::new(), format!("Message {}", i)),
-                reply_to: None,
-                topic_id: None,
-                topic_public_key: None,
-                topic_proof: None,
-                section_id: None,
-                section_auto_moderated: None,
-                auto_moderated: false,
-            },
-            &owner_signing_key,
-        );
-        messages.push(msg);
-    }
-
-    let mut parent_state = ChatBoardStateV1::default();
-    parent_state.configuration.configuration.max_message_size = 1000;
-
-    let parameters = ChatBoardParametersV1 {
-        owner: owner_verifying_key,
-    };
-
-    // Multiple orderings
-    let orderings: Vec<Vec<AuthorizedMessageV1>> = vec![
-        messages.clone(),
-        messages.iter().rev().cloned().collect(),
-        {
-            let mut r = messages.clone();
-            r.rotate_left(3);
-            r
-        },
-        {
-            let mut r = messages.clone();
-            r.rotate_right(7);
-            r
-        },
-    ];
-
-    let mut results: Vec<Vec<MessageId>> = Vec::new();
-    for ordering in orderings {
-        let mut state = MessagesV1 {
-            messages: ordering,
-            ..Default::default()
-        };
-        state
-            .apply_delta(&parent_state, &parameters, &None)
-            .expect("apply_delta should succeed");
-
-        // Messages should be in deterministic order (by MessageId since timestamps are equal)
-        let ids: Vec<_> = state.messages.iter().map(|m| m.id()).collect();
-        results.push(ids);
-    }
-
-    // All results should be identical
-    let first = &results[0];
-    for (i, result) in results.iter().enumerate().skip(1) {
-        assert_eq!(
-            first, result,
-            "CONVERGENCE FAILURE: Ordering {} produced different result with identical timestamps",
-            i
-        );
-    }
 }
 
 /// Edge case: Deep invite chains (10+ levels) - all kept now
@@ -1693,86 +1220,6 @@ fn test_regression_ban_excess_identification() {
     assert_eq!(first.len(), 3, "Should identify exactly 3 excess bans");
 }
 
-/// Regression test: Message pruning order
-/// Before fix: sort_by on timestamp without secondary key was order-dependent
-/// After fix: Secondary sort by MessageId provides deterministic pruning
-#[test]
-fn test_regression_message_pruning_order() {
-    let owner_signing_key = SigningKey::generate(&mut OsRng);
-    let owner_verifying_key = owner_signing_key.verifying_key();
-    let owner_id: MemberId = owner_verifying_key.into();
-
-    // Create 20 messages in groups of 4 with same timestamp
-    let base_time = SystemTime::now();
-    let mut messages: Vec<AuthorizedMessageV1> = Vec::new();
-    for i in 0..20 {
-        let time_offset = (i / 4) as u64; // 4 messages per timestamp
-        let time = base_time + std::time::Duration::from_secs(time_offset);
-        let msg = AuthorizedMessageV1::new(
-            MessageV1 {
-                images: Vec::new(),
-                board_owner: owner_id,
-                author: owner_id,
-                time,
-                content: BoardMessageBody::public(String::new(), format!("Message {}", i)),
-                reply_to: None,
-                topic_id: None,
-                topic_public_key: None,
-                topic_proof: None,
-                section_id: None,
-                section_auto_moderated: None,
-                auto_moderated: false,
-            },
-            &owner_signing_key,
-        );
-        messages.push(msg);
-    }
-
-    let mut parent_state = ChatBoardStateV1::default();
-    parent_state.configuration.configuration.max_message_size = 1000;
-
-    let parameters = ChatBoardParametersV1 {
-        owner: owner_verifying_key,
-    };
-
-    // OLD BEHAVIOR (before fix):
-    // Messages with same timestamp would have undefined relative order after sorting,
-    // leading to non-deterministic pruning.
-
-    // NEW BEHAVIOR (after fix):
-    // Messages with same timestamp are sorted by MessageId as secondary key,
-    // ensuring deterministic pruning.
-
-    let mut first_result: Option<Vec<MessageId>> = None;
-
-    for rotation in 0..10 {
-        let mut rotated = messages.clone();
-        rotated.rotate_left(rotation * 2);
-
-        let mut state = MessagesV1 {
-            messages: rotated,
-            ..Default::default()
-        };
-        state
-            .apply_delta(&parent_state, &parameters, &None)
-            .expect("apply_delta should succeed");
-
-        let ids: Vec<_> = state.messages.iter().map(|m| m.id()).collect();
-
-        if let Some(ref first) = first_result {
-            assert_eq!(
-                first,
-                &ids,
-                "REGRESSION: Message pruning is non-deterministic!\n\
-                 Rotation {} produced different message order. This would have failed before the fix.",
-                rotation
-            );
-        } else {
-            first_result = Some(ids);
-        }
-    }
-}
-
 // =============================================================================
 // SERIALIZED COMMUTATIVITY TEST
 // =============================================================================
@@ -1816,80 +1263,19 @@ fn test_full_state_merge_commutativity() {
         &owner_signing_key,
     );
 
-    // Create messages with different timestamps
-    let time_1 = SystemTime::now();
-    let time_2 = time_1 + std::time::Duration::from_secs(1);
-    let time_3 = time_1 + std::time::Duration::from_secs(2);
-
-    let msg_1 = AuthorizedMessageV1::new(
-        MessageV1 {
-            images: Vec::new(),
-            board_owner: owner_id,
-            author: owner_id,
-            time: time_1,
-            content: BoardMessageBody::public(String::new(), "Hello from owner".to_string()),
-            reply_to: None,
-            topic_id: None,
-            topic_public_key: None,
-            topic_proof: None,
-            section_id: None,
-            section_auto_moderated: None,
-            auto_moderated: false,
-        },
-        &owner_signing_key,
-    );
-    let msg_2 = AuthorizedMessageV1::new(
-        MessageV1 {
-            images: Vec::new(),
-            board_owner: owner_id,
-            author: member_a.id(),
-            time: time_2,
-            content: BoardMessageBody::public(String::new(), "Hello from Alice".to_string()),
-            reply_to: None,
-            topic_id: None,
-            topic_public_key: None,
-            topic_proof: None,
-            section_id: None,
-            section_auto_moderated: None,
-            auto_moderated: false,
-        },
-        &member_a_sk,
-    );
-    let msg_3 = AuthorizedMessageV1::new(
-        MessageV1 {
-            images: Vec::new(),
-            board_owner: owner_id,
-            author: member_b.id(),
-            time: time_3,
-            content: BoardMessageBody::public(String::new(), "Hello from Bob".to_string()),
-            reply_to: None,
-            topic_id: None,
-            topic_public_key: None,
-            topic_proof: None,
-            section_id: None,
-            section_auto_moderated: None,
-            auto_moderated: false,
-        },
-        &member_b_sk,
-    );
-
-    // ---- State A: has members [A, C], messages [1, 2], info [owner, A] ----
+    // ---- State A: has members [A, C], info [owner, A] ----
     let mut state_a = ChatBoardStateV1::default();
     state_a.configuration.configuration.max_message_size = 1000;
     state_a.members.members.push(auth_member_a.clone());
     state_a.members.members.push(auth_member_c.clone());
-    state_a.recent_messages.messages.push(msg_1.clone());
-    state_a.recent_messages.messages.push(msg_2.clone());
     state_a.member_info.member_info.push(owner_info.clone());
     state_a.member_info.member_info.push(info_a.clone());
 
-    // ---- State B: has members [B, C], messages [1, 3], info [owner, B] ----
+    // ---- State B: has members [B, C], info [owner, B] ----
     let mut state_b = ChatBoardStateV1::default();
     state_b.configuration.configuration.max_message_size = 1000;
     state_b.members.members.push(auth_member_b.clone());
     state_b.members.members.push(auth_member_c.clone());
-    state_b.recent_messages.messages.push(msg_1.clone());
-    state_b.recent_messages.messages.push(msg_3.clone());
     state_b.member_info.member_info.push(owner_info.clone());
     state_b.member_info.member_info.push(info_b.clone());
 
@@ -1918,8 +1304,6 @@ fn test_full_state_merge_commutativity() {
         "COMMUTATIVITY FAILURE: merge(A,B) != merge(B,A) at byte level!\n\
          merged_ab members: {:?}\n\
          merged_ba members: {:?}\n\
-         merged_ab messages: {:?}\n\
-         merged_ba messages: {:?}\n\
          merged_ab member_info: {:?}\n\
          merged_ba member_info: {:?}",
         merged_ab
@@ -1933,18 +1317,6 @@ fn test_full_state_merge_commutativity() {
             .members
             .iter()
             .map(|m| m.member.id())
-            .collect::<Vec<_>>(),
-        merged_ab
-            .recent_messages
-            .messages
-            .iter()
-            .map(|m| m.id())
-            .collect::<Vec<_>>(),
-        merged_ba
-            .recent_messages
-            .messages
-            .iter()
-            .map(|m| m.id())
             .collect::<Vec<_>>(),
         merged_ab
             .member_info
@@ -1975,8 +1347,7 @@ fn test_regression_combined_scenario() {
 
     // Create a realistic board state with:
     // - 30 members with varying invite depths
-    // - 50 messages with some having same timestamps
-    // - 8 bans with some having same timestamps
+    // - 3 bans with same timestamps
 
     // Create member hierarchy
     let mut members: Vec<(AuthorizedMember, SigningKey)> = Vec::new();
@@ -2007,33 +1378,6 @@ fn test_regression_combined_scenario() {
     }
 
     assert_eq!(members.len(), 30);
-
-    // Create messages
-    let base_time = SystemTime::now();
-    let mut messages: Vec<AuthorizedMessageV1> = Vec::new();
-    for i in 0..50 {
-        let time_offset = (i / 3) as u64; // Groups of 3 with same timestamp
-        let time = base_time + std::time::Duration::from_secs(time_offset);
-        let author_idx = i % members.len();
-        let msg = AuthorizedMessageV1::new(
-            MessageV1 {
-                images: Vec::new(),
-                board_owner: owner_id,
-                author: members[author_idx].0.member.id(),
-                time,
-                content: BoardMessageBody::public(String::new(), format!("Message {}", i)),
-                reply_to: None,
-                topic_id: None,
-                topic_public_key: None,
-                topic_proof: None,
-                section_id: None,
-                section_auto_moderated: None,
-                auto_moderated: false,
-            },
-            &members[author_idx].1,
-        );
-        messages.push(msg);
-    }
 
     // Create bans (ban some level-2 members)
     let ban_time = SystemTime::now();
@@ -2068,46 +1412,26 @@ fn test_regression_combined_scenario() {
     let member_list: Vec<AuthorizedMember> = members.iter().map(|(m, _)| m.clone()).collect();
 
     let orderings = vec![
-        (member_list.clone(), messages.clone()),
-        (
-            member_list.iter().rev().cloned().collect(),
-            messages.iter().rev().cloned().collect(),
-        ),
-        (
-            {
-                let mut m = member_list.clone();
-                m.rotate_left(11);
-                m
-            },
-            {
-                let mut msgs = messages.clone();
-                msgs.rotate_left(17);
-                msgs
-            },
-        ),
+        member_list.clone(),
+        member_list.iter().rev().cloned().collect(),
+        {
+            let mut m = member_list.clone();
+            m.rotate_left(11);
+            m
+        },
     ];
 
-    let mut final_states: Vec<(Vec<MemberId>, Vec<MessageId>)> = Vec::new();
+    let mut final_states: Vec<Vec<MemberId>> = Vec::new();
 
-    for (member_ordering, msg_ordering) in orderings {
-        // Update parent state with ordered members for message validation
+    for member_ordering in orderings {
         let mut local_parent = parent_state.clone();
         local_parent.members = MembersV1 {
-            members: member_ordering.clone(),
+            members: member_ordering,
         };
         local_parent
             .members
             .apply_delta(&parent_state, &parameters, &None)
             .expect("members apply_delta should succeed");
-
-        // Apply messages
-        let mut msg_state = MessagesV1 {
-            messages: msg_ordering,
-            ..Default::default()
-        };
-        msg_state
-            .apply_delta(&local_parent, &parameters, &None)
-            .expect("messages apply_delta should succeed");
 
         let mut member_ids: Vec<_> = local_parent
             .members
@@ -2117,22 +1441,15 @@ fn test_regression_combined_scenario() {
             .collect();
         member_ids.sort();
 
-        let msg_ids: Vec<_> = msg_state.messages.iter().map(|m| m.id()).collect();
-
-        final_states.push((member_ids, msg_ids));
+        final_states.push(member_ids);
     }
 
     // All final states should be identical
-    let (first_members, first_messages) = &final_states[0];
-    for (i, (members_result, messages_result)) in final_states.iter().enumerate().skip(1) {
+    let first_members = &final_states[0];
+    for (i, members_result) in final_states.iter().enumerate().skip(1) {
         assert_eq!(
             first_members, members_result,
             "REGRESSION: Combined scenario - members don't converge for ordering {}",
-            i
-        );
-        assert_eq!(
-            first_messages, messages_result,
-            "REGRESSION: Combined scenario - messages don't converge for ordering {}",
             i
         );
     }
@@ -2200,7 +1517,7 @@ fn test_merge_with_bans_from_member_not_in_other_state() {
     let auth_member_y = create_authorized_member(member_y.clone(), &member_x_sk);
 
     // Member Z (invited by owner, present in both states)
-    let (member_z, member_z_sk) = create_test_member(owner_id, owner_id);
+    let (member_z, _member_z_sk) = create_test_member(owner_id, owner_id);
     let auth_member_z = create_authorized_member(member_z.clone(), &owner_sk);
 
     // X bans Y (X is in Y's invite chain since X invited Y)
@@ -2217,19 +1534,11 @@ fn test_merge_with_bans_from_member_not_in_other_state() {
         &member_x_sk,
     );
 
-    // Messages so members survive post_apply_cleanup
-    let msg_x = create_test_msg(owner_id, member_x_id, &member_x_sk, 0);
-    let msg_z = create_test_msg(owner_id, member_z.id(), &member_z_sk, 1);
-
     // ---- State A (stale): has Z only, no bans, never saw X or Y ----
     let state_a = ChatBoardStateV1 {
         configuration: config.clone(),
         members: MembersV1 {
             members: vec![auth_member_z.clone()],
-        },
-        recent_messages: MessagesV1 {
-            messages: vec![msg_z.clone()],
-            ..Default::default()
         },
         ..Default::default()
     };
@@ -2241,10 +1550,6 @@ fn test_merge_with_bans_from_member_not_in_other_state() {
             members: vec![auth_member_x.clone(), auth_member_z.clone()],
         },
         bans: BansV1(vec![ban_y_by_x.clone()]),
-        recent_messages: MessagesV1 {
-            messages: vec![msg_x, msg_z],
-            ..Default::default()
-        },
         ..Default::default()
     };
 
@@ -2303,17 +1608,17 @@ fn test_merge_commutativity_with_owner_bans() {
     let config = create_test_config(&owner_sk);
 
     // All members invited by owner
-    let (member_a, member_a_sk) = create_test_member(owner_id, owner_id);
+    let (member_a, _member_a_sk) = create_test_member(owner_id, owner_id);
     let member_a_id = member_a.id();
     let auth_member_a = create_authorized_member(member_a.clone(), &owner_sk);
 
-    let (member_b, member_b_sk) = create_test_member(owner_id, owner_id);
+    let (member_b, _member_b_sk) = create_test_member(owner_id, owner_id);
     let auth_member_b = create_authorized_member(member_b.clone(), &owner_sk);
 
-    let (member_c, member_c_sk) = create_test_member(owner_id, owner_id);
+    let (member_c, _member_c_sk) = create_test_member(owner_id, owner_id);
     let auth_member_c = create_authorized_member(member_c.clone(), &owner_sk);
 
-    let (member_d, member_d_sk) = create_test_member(owner_id, owner_id);
+    let (member_d, _member_d_sk) = create_test_member(owner_id, owner_id);
     let member_d_id = member_d.id();
     let auth_member_d = create_authorized_member(member_d.clone(), &owner_sk);
 
@@ -2345,12 +1650,6 @@ fn test_merge_commutativity_with_owner_bans() {
         &owner_sk,
     );
 
-    // Messages so members survive post_apply_cleanup
-    let msg_a = create_test_msg(owner_id, member_a_id, &member_a_sk, 0);
-    let msg_b = create_test_msg(owner_id, member_b.id(), &member_b_sk, 1);
-    let msg_c = create_test_msg(owner_id, member_c.id(), &member_c_sk, 2);
-    let msg_d = create_test_msg(owner_id, member_d_id, &member_d_sk, 3);
-
     // ---- State 1: has A, B, C; owner banned D (D removed) ----
     let state_1 = ChatBoardStateV1 {
         configuration: config.clone(),
@@ -2362,10 +1661,6 @@ fn test_merge_commutativity_with_owner_bans() {
             ],
         },
         bans: BansV1(vec![ban_d.clone()]),
-        recent_messages: MessagesV1 {
-            messages: vec![msg_a.clone(), msg_b.clone(), msg_c.clone()],
-            ..Default::default()
-        },
         ..Default::default()
     };
 
@@ -2380,10 +1675,6 @@ fn test_merge_commutativity_with_owner_bans() {
             ],
         },
         bans: BansV1(vec![ban_a.clone()]),
-        recent_messages: MessagesV1 {
-            messages: vec![msg_b, msg_c, msg_d],
-            ..Default::default()
-        },
         ..Default::default()
     };
 
@@ -2475,11 +1766,11 @@ fn test_merge_cascade_ban_cleanup() {
     let member_a_id = member_a.id();
     let auth_member_a = create_authorized_member(member_a.clone(), &owner_sk);
 
-    let (member_b, member_b_sk) = create_test_member(owner_id, member_a_id);
+    let (member_b, _member_b_sk) = create_test_member(owner_id, member_a_id);
     let member_b_id = member_b.id();
     let auth_member_b = create_authorized_member(member_b.clone(), &member_a_sk);
 
-    let (member_c, member_c_sk) = create_test_member(owner_id, owner_id);
+    let (member_c, _member_c_sk) = create_test_member(owner_id, owner_id);
     let auth_member_c = create_authorized_member(member_c.clone(), &owner_sk);
 
     // A bans B
@@ -2510,12 +1801,6 @@ fn test_merge_cascade_ban_cleanup() {
         &owner_sk,
     );
 
-    // Messages so members survive post_apply_cleanup (A and B will be banned/cascade-removed,
-    // but C needs a message to survive pruning)
-    let msg_a = create_test_msg(owner_id, member_a_id, &member_a_sk, 0);
-    let msg_b = create_test_msg(owner_id, member_b_id, &member_b_sk, 1);
-    let msg_c = create_test_msg(owner_id, member_c.id(), &member_c_sk, 2);
-
     // ---- State old: A, B, C present, A banned B ----
     let state_old = ChatBoardStateV1 {
         configuration: config.clone(),
@@ -2527,10 +1812,6 @@ fn test_merge_cascade_ban_cleanup() {
             ],
         },
         bans: BansV1(vec![ban_b_by_a.clone()]),
-        recent_messages: MessagesV1 {
-            messages: vec![msg_a.clone(), msg_b.clone(), msg_c.clone()],
-            ..Default::default()
-        },
         ..Default::default()
     };
 
@@ -2545,10 +1826,6 @@ fn test_merge_cascade_ban_cleanup() {
             ],
         },
         bans: BansV1(vec![ban_b_by_a.clone(), ban_a_by_owner.clone()]),
-        recent_messages: MessagesV1 {
-            messages: vec![msg_a, msg_b, msg_c],
-            ..Default::default()
-        },
         ..Default::default()
     };
 
@@ -2755,11 +2032,11 @@ fn test_merge_owner_ban_across_diverged_states() {
     let parameters = ChatBoardParametersV1 { owner: owner_vk };
     let config = create_test_config(&owner_sk);
 
-    let (member_a, member_a_sk) = create_test_member(owner_id, owner_id);
+    let (member_a, _member_a_sk) = create_test_member(owner_id, owner_id);
     let member_a_id = member_a.id();
     let auth_member_a = create_authorized_member(member_a.clone(), &owner_sk);
 
-    let (member_b, member_b_sk) = create_test_member(owner_id, owner_id);
+    let (member_b, _member_b_sk) = create_test_member(owner_id, owner_id);
     let auth_member_b = create_authorized_member(member_b.clone(), &owner_sk);
 
     // Owner bans A
@@ -2776,19 +2053,11 @@ fn test_merge_owner_ban_across_diverged_states() {
         &owner_sk,
     );
 
-    // Messages so members survive post_apply_cleanup
-    let msg_a = create_test_msg(owner_id, member_a_id, &member_a_sk, 0);
-    let msg_b = create_test_msg(owner_id, member_b.id(), &member_b_sk, 1);
-
     // State 1: has A and B (hasn't seen ban yet)
     let state_1 = ChatBoardStateV1 {
         configuration: config.clone(),
         members: MembersV1 {
             members: vec![auth_member_a.clone(), auth_member_b.clone()],
-        },
-        recent_messages: MessagesV1 {
-            messages: vec![msg_a.clone(), msg_b.clone()],
-            ..Default::default()
         },
         ..Default::default()
     };
@@ -2800,10 +2069,6 @@ fn test_merge_owner_ban_across_diverged_states() {
             members: vec![auth_member_b.clone()],
         },
         bans: BansV1(vec![ban_a.clone()]),
-        recent_messages: MessagesV1 {
-            messages: vec![msg_a, msg_b],
-            ..Default::default()
-        },
         ..Default::default()
     };
 
@@ -2926,14 +2191,18 @@ fn test_member_can_be_added_as_admin() {
 #[test]
 fn moderation_record_with_historical_authority_converges() {
     use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
-    use plaza_core::board_state::moderation::{
-        AuthorizedFeatureFlag, FeatureFlag, FeatureKind, ModerationDelta,
-    };
+    use plaza_core::board_state::privacy::SealedBytes;
     use plaza_core::board_state::roles::{
         moderation_authority_proof, AuthorizedRole, AuthorizedRoleAssignment, ModerationPower,
         Role, RoleAssignment, RolesDelta,
     };
+    use plaza_core::board_state::sections::{AuthorizedSectionV1, SectionV1, SectionsV1};
+    use plaza_core::board_state::topics::{
+        AuthorizedTopicEntryV1, AuthorizedTopicFlagV1, TopicEntryV1, TopicFlagKind, TopicFlagV1,
+        TopicIndexDelta, TopicIndexV1, TOPIC_PROTOCOL_VERSION,
+    };
     use plaza_core::board_state::ChatBoardStateV1Delta;
+    use plaza_core::util::sign_struct;
 
     let owner_sk = SigningKey::generate(&mut OsRng);
     let owner_vk = owner_sk.verifying_key();
@@ -2947,8 +2216,46 @@ fn moderation_record_with_historical_authority_converges() {
     let author_record = create_authorized_member(author, &owner_sk);
     let moderator_record = create_authorized_member(moderator, &owner_sk);
 
-    let post = create_test_msg(owner_id, author_id, &author_sk, 0);
-    let post_id: MessageId = post.id();
+    let section_id = MessageId::from_bytes([5u8; 32]);
+    let topic_id = MessageId::from_bytes([9u8; 32]);
+    let section = AuthorizedSectionV1::new(
+        SectionV1 {
+            id: section_id,
+            parent: None,
+            name: "General".to_string(),
+            description: None,
+            icon: None,
+            color: "#6366f1".to_string(),
+            allowed_roles: Vec::new(),
+            sealed_name: None,
+            hidden: false,
+            is_group: false,
+            images_allowed: true,
+            auto_moderated_topics: None,
+            generation: 1,
+            deleted: false,
+            contract: None,
+            signed_at: std::time::SystemTime::UNIX_EPOCH,
+        },
+        &owner_sk,
+        None,
+    );
+    let topic = AuthorizedTopicEntryV1::new(
+        TopicEntryV1 {
+            topic_id,
+            part: 0,
+            protocol_version: TOPIC_PROTOCOL_VERSION,
+            author: author_id,
+            section: Some(section_id),
+            section_chain: vec![section_id],
+            title: SealedBytes::public(b"Hello".to_vec()),
+            preview: SealedBytes::public(b"World".to_vec()),
+            header_hash: [1u8; 32],
+            created_at: 1,
+            generation: 1,
+        },
+        &author_sk,
+    );
 
     let role_id = [7u8; 16];
     let role = AuthorizedRole::new(
@@ -2990,8 +2297,11 @@ fn moderation_record_with_historical_authority_converges() {
         members: MembersV1 {
             members: vec![author_record, moderator_record],
         },
-        recent_messages: MessagesV1 {
-            messages: vec![post],
+        sections: SectionsV1 {
+            sections: vec![section],
+        },
+        topics: TopicIndexV1 {
+            entries: vec![topic],
             ..Default::default()
         },
         roles: plaza_core::board_state::roles::RolesV1 {
@@ -3001,30 +2311,34 @@ fn moderation_record_with_historical_authority_converges() {
         ..Default::default()
     };
 
-    let proof = moderation_authority_proof(&base, &moderator_id, ModerationPower::Pin, &[])
-        .expect("the role grants pinning");
-    let flag = AuthorizedFeatureFlag::new(
-        FeatureFlag {
-            target: post_id,
-            kind: FeatureKind::Pinned,
-            value: true,
-            scope_chain: Vec::new(),
-            destination: None,
-            destination_scope_chain: Vec::new(),
-            generation: 1,
-            created_at: 1,
-        },
-        &moderator_sk,
-    )
-    .with_optional_authority(Some(proof));
+    let proof =
+        moderation_authority_proof(&base, &moderator_id, ModerationPower::Pin, &[section_id])
+            .expect("the role grants pinning");
+    let flag_value = TopicFlagV1 {
+        topic_id,
+        kind: TopicFlagKind::Pinned,
+        value: true,
+        destination: None,
+        section: None,
+        section_chain: Vec::new(),
+        destination_sections: Vec::new(),
+        part: None,
+        scope_chain: vec![section_id],
+        generation: 1,
+        created_at: 1,
+    };
+    let flag = AuthorizedTopicFlagV1 {
+        signature: sign_struct(&flag_value, &moderator_sk),
+        flag: flag_value,
+        signer: Some(moderator_id),
+        signer_key: Some(moderator_sk.verifying_key()),
+        authority: Some(Box::new(proof)),
+    };
 
     let pin_delta = ChatBoardStateV1Delta {
-        moderation: Some(ModerationDelta {
-            routes: Vec::new(),
-            feature_flags: vec![flag],
-            thread_moves: Vec::new(),
-            illegal_purges: Vec::new(),
-            moves: Vec::new(),
+        topics: Some(TopicIndexDelta {
+            flags: vec![flag],
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -3065,7 +2379,7 @@ fn moderation_record_with_historical_authority_converges() {
         .expect("peer B state verifies");
 
     assert_eq!(
-        peer_a.moderation.feature_flags, peer_b.moderation.feature_flags,
+        peer_a.topics.flags, peer_b.topics.flags,
         "both peers keep the same pin"
     );
     assert_eq!(
