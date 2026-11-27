@@ -1,5 +1,6 @@
 //! Data model types for `plaza-topic` contract state, deltas, and summaries.
 
+use crate::merge::merge_authority;
 use crate::pages::AuthorizedTopicPageSealV1;
 use crate::{
     default_true, value_hash, AuthorizedAuthorityRootV1, MemberStatusProofV1, SectionId,
