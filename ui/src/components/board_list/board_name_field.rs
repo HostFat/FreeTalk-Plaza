@@ -46,7 +46,9 @@ pub fn BoardNameField(config: Configuration, is_owner: bool) -> Element {
             board_name.set(new_name.clone());
 
             // Get the owner key first
-            let owner_key = CURRENT_BOARD.read().owner_key.expect("No owner key");
+            let Some(owner_key) = CURRENT_BOARD.read().owner_key else {
+                return;
+            };
 
             // Get signing data and encryption info from board
             let signing_data = BOARDS.with(|boards| {
@@ -54,6 +56,7 @@ pub fn BoardNameField(config: Configuration, is_owner: bool) -> Element {
                     Some((
                         board_data.owner_key().clone(),
                         board_data.board_state.clone(),
+                        board_data.is_private(),
                         board_data.get_secret().map(|(s, v)| (*s, v)),
                     ))
                 } else {
@@ -62,15 +65,22 @@ pub fn BoardNameField(config: Configuration, is_owner: bool) -> Element {
                 }
             });
 
-            let Some((self_sk, board_state_clone, board_secret_opt)) = signing_data
+            let Some((self_sk, board_state_clone, is_private, board_secret_opt)) = signing_data
             else {
                 return;
             };
 
-            // Encrypt name if board is private and we have a secret
-            let sealed_name = match board_secret_opt {
-                Some((secret, version)) => seal_bytes(new_name.as_bytes(), &secret, version),
-                _ => SealedBytes::public(new_name.clone().into_bytes()),
+            // Encrypt name if board is private; never fall back to plaintext on a private board.
+            let sealed_name = if is_private {
+                let Some((secret, version)) = board_secret_opt else {
+                    crate::components::app::toasts::show_error(
+                        "Cannot update a private board name without the board encryption key.",
+                    );
+                    return;
+                };
+                seal_bytes(new_name.as_bytes(), &secret, version)
+            } else {
+                SealedBytes::public(new_name.clone().into_bytes())
             };
 
             let mut new_config = config.clone();

@@ -204,8 +204,7 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
             });
         }
         ContractResponse::PutResponse { key }
-        | ContractResponse::UpdateResponse { key, .. }
-        | ContractResponse::SubscribeResponse { key, .. } => {
+        | ContractResponse::UpdateResponse { key, .. } => {
             PROFILE_SHARDS.with_mut(|shards| {
                 if let Some(board) = shards.get_mut(key.id()) {
                     board.synced = true;
@@ -213,6 +212,7 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 }
             });
         }
+        ContractResponse::SubscribeResponse { .. } => {}
         ContractResponse::UpdateNotification { key, update } => {
             let (params, mut state) = PROFILE_SHARDS
                 .read()

@@ -420,135 +420,166 @@ pub(super) async fn sync_section_page_authority(
     let board_params = ChatBoardParametersV1 { owner };
     let ids = section_member_ids(&child, parent);
 
-    // Admin and ownership changes are rare and touch the whole chain; keep the
-    // full-state path for them, but prune members/roles/bans/suspensions to
-    // only the records this manifest and its ownership chain actually need.
-    let full_state = parent.admin != child.admin || parent.ownership != child.ownership;
-    let mut state = child.clone();
-    let data = if full_state {
-        state.configuration = parent.configuration.clone();
-        state.admin = parent.admin.clone();
-        state.ownership = parent.ownership.clone();
-        state.sections = parent.sections.chain_only(&section);
-        state.authority_root = Default::default();
-        let members = collect_members_with_ancestors(owner, parent, &ids, &HashSet::new());
-        let invites = relevant_invites_for_members(owner, parent, &HashSet::new(), &members);
-        let mut roles = relevant_roles(parent, &ids);
-        add_token_roles(parent, &invites, &mut roles);
-        state.members = plaza_core::board_state::member::MembersV1 { members };
-        state.invites = plaza_core::board_state::invites::InviteTokensV1 { tokens: invites };
-        state.roles = plaza_core::board_state::roles::RolesV1 {
-            roles: roles.roles,
-            assignments: roles.assignments,
-        };
-        state.bans = plaza_core::board_state::ban::BansV1(relevant_bans(parent, &ids));
-        state.ban_revocations = plaza_core::board_state::ban::BanRevocationsV1 {
-            revocations: relevant_revocations(parent, &ids),
-        };
-        state.suspensions = plaza_core::board_state::member_moderation::SuspensionsV1 {
-            suspensions: relevant_suspensions(parent, &ids),
-        };
-        state
-            .verify_with_section(&board_params, Some(section))
-            .map_err(|error| format!("section authority does not verify: {error}"))?;
-        UpdateData::State(to_cbor_vec(&state).into())
-    } else {
-        let mut delta = ChatBoardStateV1Delta::default();
-        if parent.configuration != child.configuration {
-            delta.configuration = Some(parent.configuration.clone());
-        }
-        let wanted_sections = parent.sections.chain_only(&section);
-        if wanted_sections != child.sections {
-            delta.sections = Some(SectionsDelta {
-                sections: wanted_sections.sections,
-            });
-        }
-        let known: HashSet<MemberId> = child
-            .members
-            .members
-            .iter()
-            .map(|member| member.member.id())
-            .collect();
-        let added = collect_members_with_ancestors(owner, parent, &ids, &known);
-        let invites = relevant_invites(owner, parent, &child, &ids, &added);
-        if !added.is_empty() {
-            delta.members = Some(MembersDelta::new(added));
-        }
-        let mut roles = relevant_roles(parent, &ids);
-        add_token_roles(parent, &invites, &mut roles);
-        if !invites.is_empty() {
-            delta.invites = Some(InviteTokensDelta { tokens: invites });
-        }
-        let new_roles: Vec<_> = roles
-            .roles
-            .into_iter()
-            .filter(|role| {
-                !child.roles.roles.iter().any(|known| {
-                    known.role.id == role.role.id
-                        && known.role.generation == role.role.generation
-                        && known.role.deleted == role.role.deleted
+    // Prepare the update payload in a closure so any error path resets
+    // `board.syncing = false` instead of deadlocking future syncs.
+    enum PreparedAuthority {
+        NoChange,
+        State(ChatBoardStateV1, Vec<u8>),
+        Delta(ChatBoardStateV1, Vec<u8>),
+    }
+    let prepared: Result<PreparedAuthority, String> = (|| {
+        // Admin and ownership changes are rare and touch the whole chain; keep the
+        // full-state path for them, but prune members/roles/bans/suspensions to
+        // only the records this manifest and its ownership chain actually need.
+        let full_state = parent.admin != child.admin || parent.ownership != child.ownership;
+        let mut state = child.clone();
+        if full_state {
+            state.configuration = parent.configuration.clone();
+            state.admin = parent.admin.clone();
+            state.ownership = parent.ownership.clone();
+            state.sections = parent.sections.chain_only(&section);
+            state.authority_root = Default::default();
+            let members = collect_members_with_ancestors(owner, parent, &ids, &HashSet::new());
+            let invites = relevant_invites_for_members(owner, parent, &HashSet::new(), &members);
+            let mut roles = relevant_roles(parent, &ids);
+            add_token_roles(parent, &invites, &mut roles);
+            state.members = plaza_core::board_state::member::MembersV1 { members };
+            state.invites = plaza_core::board_state::invites::InviteTokensV1 { tokens: invites };
+            state.roles = plaza_core::board_state::roles::RolesV1 {
+                roles: roles.roles,
+                assignments: roles.assignments,
+            };
+            state.bans = plaza_core::board_state::ban::BansV1(relevant_bans(parent, &ids));
+            state.ban_revocations = plaza_core::board_state::ban::BanRevocationsV1 {
+                revocations: relevant_revocations(parent, &ids),
+            };
+            state.suspensions = plaza_core::board_state::member_moderation::SuspensionsV1 {
+                suspensions: relevant_suspensions(parent, &ids),
+            };
+            state
+                .verify_with_section(&board_params, Some(section))
+                .map_err(|error| format!("section authority does not verify: {error}"))?;
+            let bytes = to_cbor_vec(&state);
+            Ok(PreparedAuthority::State(state, bytes))
+        } else {
+            let mut delta = ChatBoardStateV1Delta::default();
+            if parent.configuration != child.configuration {
+                delta.configuration = Some(parent.configuration.clone());
+            }
+            let wanted_sections = parent.sections.chain_only(&section);
+            if wanted_sections != child.sections {
+                delta.sections = Some(SectionsDelta {
+                    sections: wanted_sections.sections,
+                });
+            }
+            let known: HashSet<MemberId> = child
+                .members
+                .members
+                .iter()
+                .map(|member| member.member.id())
+                .collect();
+            let added = collect_members_with_ancestors(owner, parent, &ids, &known);
+            let invites = relevant_invites(owner, parent, &child, &ids, &added);
+            if !added.is_empty() {
+                delta.members = Some(MembersDelta::new(added));
+            }
+            let mut roles = relevant_roles(parent, &ids);
+            add_token_roles(parent, &invites, &mut roles);
+            if !invites.is_empty() {
+                delta.invites = Some(InviteTokensDelta { tokens: invites });
+            }
+            let new_roles: Vec<_> = roles
+                .roles
+                .into_iter()
+                .filter(|role| {
+                    !child.roles.roles.iter().any(|known| {
+                        known.role.id == role.role.id
+                            && known.role.generation == role.role.generation
+                            && known.role.deleted == role.role.deleted
+                    })
                 })
-            })
-            .collect();
-        let new_assignments: Vec<_> = roles
-            .assignments
-            .into_iter()
-            .filter(|assignment| {
-                !child.roles.assignments.iter().any(|known| {
-                    known.assignment.role_id == assignment.assignment.role_id
-                        && known.assignment.member_id == assignment.assignment.member_id
-                        && known.assignment.generation == assignment.assignment.generation
-                        && known.assignment.revoked == assignment.assignment.revoked
+                .collect();
+            let new_assignments: Vec<_> = roles
+                .assignments
+                .into_iter()
+                .filter(|assignment| {
+                    !child.roles.assignments.iter().any(|known| {
+                        known.assignment.role_id == assignment.assignment.role_id
+                            && known.assignment.member_id == assignment.assignment.member_id
+                            && known.assignment.generation == assignment.assignment.generation
+                            && known.assignment.revoked == assignment.assignment.revoked
+                    })
                 })
-            })
-            .collect();
-        if !new_roles.is_empty() || !new_assignments.is_empty() {
-            delta.roles = Some(RolesDelta {
-                roles: new_roles,
-                assignments: new_assignments,
-            });
-        }
-        let bans: Vec<_> = relevant_bans(parent, &ids)
-            .into_iter()
-            .filter(|ban| !child.bans.0.iter().any(|known| known.id() == ban.id()))
-            .collect();
-        if !bans.is_empty() {
-            delta.bans = Some(bans);
-        }
-        let revocations: Vec<_> = relevant_revocations(parent, &ids)
-            .into_iter()
-            .filter(|revocation| {
-                !child
-                    .ban_revocations
-                    .revocations
-                    .iter()
-                    .any(|known| known.revocation.ban_id == revocation.revocation.ban_id)
-            })
-            .collect();
-        if !revocations.is_empty() {
-            delta.ban_revocations = Some(revocations);
-        }
-        let suspensions: Vec<_> = relevant_suspensions(parent, &ids)
-            .into_iter()
-            .filter(|suspension| {
-                !child.suspensions.suspensions.iter().any(|known| {
-                    known.suspension.target == suspension.suspension.target
-                        && known.suspension.generation == suspension.suspension.generation
+                .collect();
+            if !new_roles.is_empty() || !new_assignments.is_empty() {
+                delta.roles = Some(RolesDelta {
+                    roles: new_roles,
+                    assignments: new_assignments,
+                });
+            }
+            let bans: Vec<_> = relevant_bans(parent, &ids)
+                .into_iter()
+                .filter(|ban| !child.bans.0.iter().any(|known| known.id() == ban.id()))
+                .collect();
+            if !bans.is_empty() {
+                delta.bans = Some(bans);
+            }
+            let revocations: Vec<_> = relevant_revocations(parent, &ids)
+                .into_iter()
+                .filter(|revocation| {
+                    !child
+                        .ban_revocations
+                        .revocations
+                        .iter()
+                        .any(|known| known.revocation.ban_id == revocation.revocation.ban_id)
                 })
-            })
-            .collect();
-        if !suspensions.is_empty() {
-            delta.suspensions = Some(SuspensionsDelta { suspensions });
+                .collect();
+            if !revocations.is_empty() {
+                delta.ban_revocations = Some(revocations);
+            }
+            let suspensions: Vec<_> = relevant_suspensions(parent, &ids)
+                .into_iter()
+                .filter(|suspension| {
+                    !child.suspensions.suspensions.iter().any(|known| {
+                        known.suspension.target == suspension.suspension.target
+                            && known.suspension.generation == suspension.suspension.generation
+                    })
+                })
+                .collect();
+            if !suspensions.is_empty() {
+                delta.suspensions = Some(SuspensionsDelta { suspensions });
+            }
+            let has_changes = delta.configuration.is_some()
+                || delta.sections.is_some()
+                || delta.members.is_some()
+                || delta.invites.is_some()
+                || delta.roles.is_some()
+                || delta.bans.is_some()
+                || delta.ban_revocations.is_some()
+                || delta.suspensions.is_some();
+            if !has_changes {
+                return Ok(PreparedAuthority::NoChange);
+            }
+            state
+                .apply_delta(&child, &board_params, &Some(delta.clone()))
+                .map_err(|error| format!("apply section authority: {error}"))?;
+            state
+                .verify_delta(&delta, &board_params)
+                .map_err(|error| format!("section authority does not verify: {error}"))?;
+            if state
+                .topics
+                .entries
+                .iter()
+                .any(|entry| entry.entry.section != Some(section))
+            {
+                return Err("section authority put a topic in another section".to_string());
+            }
+            Ok(PreparedAuthority::Delta(state, to_cbor_vec(&delta)))
         }
-        let has_changes = delta.configuration.is_some()
-            || delta.sections.is_some()
-            || delta.members.is_some()
-            || delta.invites.is_some()
-            || delta.roles.is_some()
-            || delta.bans.is_some()
-            || delta.ban_revocations.is_some()
-            || delta.suspensions.is_some();
-        if !has_changes {
+    })();
+
+    let (state, data) = match prepared {
+        Ok(PreparedAuthority::NoChange) => {
             SECTION_BOARDS.with_mut(|boards| {
                 if let Some(board) = boards.get_mut(&contract_id) {
                     board.syncing = false;
@@ -558,21 +589,16 @@ pub(super) async fn sync_section_page_authority(
             });
             return Ok(());
         }
-        state
-            .apply_delta(&child, &board_params, &Some(delta.clone()))
-            .map_err(|error| format!("apply section authority: {error}"))?;
-        state
-            .verify_delta(&delta, &board_params)
-            .map_err(|error| format!("section authority does not verify: {error}"))?;
-        if state
-            .topics
-            .entries
-            .iter()
-            .any(|entry| entry.entry.section != Some(section))
-        {
-            return Err("section authority put a topic in another section".to_string());
+        Ok(PreparedAuthority::State(state, bytes)) => (state, UpdateData::State(bytes.into())),
+        Ok(PreparedAuthority::Delta(state, bytes)) => (state, UpdateData::Delta(bytes.into())),
+        Err(error) => {
+            SECTION_BOARDS.with_mut(|boards| {
+                if let Some(board) = boards.get_mut(&contract_id) {
+                    board.syncing = false;
+                }
+            });
+            return Err(error);
         }
-        UpdateData::Delta(to_cbor_vec(&delta).into())
     };
 
     SECTION_BOARDS.with_mut(|boards| {

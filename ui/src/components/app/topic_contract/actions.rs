@@ -162,12 +162,10 @@ pub fn poll_votes(
     state: &TopicPartState,
     poll_id: MessageId,
 ) -> Vec<Vec<MemberId>> {
-    let Some(post) = state.posts().get(&poll_id) else {
+    let Some(content) = effective_post_content(board, state, poll_id) else {
         return Vec::new();
     };
-    let Some(TopicPostContentV1::Poll(poll)) =
-        read_post_content(board, &post.post.content)
-    else {
+    let Some(TopicPostContentV1::Poll(poll)) = read_post_content(board, &content) else {
         return Vec::new();
     };
     let mut latest: BTreeMap<MemberId, (u64, PollVoteV1)> = BTreeMap::new();
@@ -215,14 +213,9 @@ pub async fn vote(
 ) -> Result<(), String> {
     let board = board_for(owner)?;
     let conversation = conversation_for(owner, topic_id, part)?;
-    let post = conversation
-        .state
-        .posts()
-        .get(&poll_id)
+    let content = effective_post_content(&board, &conversation.state, poll_id)
         .ok_or("the poll is not in this topic")?;
-    let Some(TopicPostContentV1::Poll(poll)) =
-        read_post_content(&board, &post.post.content)
-    else {
+    let Some(TopicPostContentV1::Poll(poll)) = read_post_content(&board, &content) else {
         return Err("the target is not a poll".to_string());
     };
     let now = system_time_ms(get_current_system_time());
@@ -609,12 +602,19 @@ pub(super) fn delete_authority(
         .admin
         .admins
         .iter()
-        .find(|entry| entry.admin.id() == *signer)
+        .find(|entry| {
+            entry.admin.id() == *signer
+                && !state.admin.revoked.iter().any(|rev| {
+                    rev.id() == *signer && rev.revocation.generation >= entry.admin.generation
+                })
+        })
         .cloned();
-    let assignment = state.roles.assignments.iter().find(|entry| {
-        entry.assignment.member_id == *signer && !entry.assignment.revoked
-    });
-    if let Some(assignment) = assignment {
+    for assignment in state
+        .roles
+        .assignments
+        .iter()
+        .filter(|entry| entry.assignment.member_id == *signer && !entry.assignment.revoked)
+    {
         if let Some(role) = state.roles.roles.iter().find(|entry| {
             entry.role.id == assignment.assignment.role_id
                 && !entry.role.deleted

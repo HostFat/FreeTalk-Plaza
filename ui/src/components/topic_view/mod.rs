@@ -26,7 +26,6 @@ use plaza_core::board_state::topics::TopicFlagKind;
 use plaza_topic_core::{TopicPostContentV1, MAX_IMAGES_PER_POST};
 use std::collections::{BTreeMap, HashMap};
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::spawn_local;
 
 const REACTIONS: [&str; 5] = ["👍", "❤️", "😂", "🎉", "🤔"];
 const TOPIC_REPLY_INPUT_ID: &str = "topic-reply-input";
@@ -63,7 +62,24 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
         };
     };
     let topic_id_value = MessageId::from_bytes(bytes);
+    let route_key = format!("{board_id}:{topic_id}");
+    // Rendering via a single-element keyed loop triggers Dioxus's keyed diff,
+    // cleanly unmounting the previous topic (cancelling its spawned tasks and
+    // resetting all local signals) when navigating directly from Topic A to B.
+    rsx! {
+        for key in [route_key] {
+            TopicViewInner {
+                key: "{key}",
+                board_id: board_id.clone(),
+                topic_id_value,
+            }
+        }
+    }
+}
 
+#[component]
+fn TopicViewInner(board_id: String, topic_id_value: MessageId) -> Element {
+    let navigator = navigator();
     let board = use_memo(move || {
         let current = CURRENT_BOARD.read();
         let Some(key) = current.owner_key else {
@@ -76,18 +92,7 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
             .cloned()
             .map(|board| board.with_merged_topics())
     });
-    let Some(board_data) = board.read().clone() else {
-        return rsx! {
-            div { class: "max-w-3xl mx-auto px-4 py-8 text-text-muted", "Loading board…" }
-        };
-    };
 
-    let owner = board_data.owner_vk;
-    let part = crate::components::app::section_contract::merged_index(
-        owner,
-        &board_data.board_state.topics,
-    )
-    .part_of(&topic_id_value);
     let mut error = use_signal(|| None::<String>);
     let mut reply = use_signal(String::new);
     let mut busy = use_signal(|| false);
@@ -95,6 +100,7 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     let mut synced_authority = use_signal(|| None::<(u32, i64)>);
     let mut marked_read = use_signal(|| 0i64);
     let mut draft_loaded = use_signal(|| false);
+    let mut draft_save_seq = use_signal(|| 0u64);
     let mut earlier_parts = use_signal(Vec::<u32>::new);
     let mut editing_topic = use_signal(|| false);
     let mut edit_title = use_signal(String::new);
@@ -118,6 +124,9 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
         if *autoscrolled.read() {
             return;
         }
+        let Some(owner) = board.read().as_ref().map(|b| b.owner_vk) else {
+            return;
+        };
         let has_posts = topic_contract::topic_head(owner, topic_id_value)
             .is_some_and(|head| !head.posts.is_empty());
         if !has_posts {
@@ -126,7 +135,7 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
         autoscrolled.set(true);
         #[cfg(target_arch = "wasm32")]
         {
-            spawn_local(async {
+            spawn(async {
                 crate::util::sleep(std::time::Duration::from_millis(60)).await;
                 crate::util::scroll_conversation_to_bottom("message-scroll");
                 crate::util::sleep(std::time::Duration::from_millis(120)).await;
@@ -137,7 +146,9 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
 
     use_effect(move || {
         let _ = BOARDS.read().map.len();
-        let owner = board_data.owner_vk;
+        let Some(owner) = board.read().as_ref().map(|b| b.owner_vk) else {
+            return;
+        };
         let (last_read, at) = {
             let boards = BOARDS.read();
             let Some(board) = boards.map.get(&owner) else {
@@ -179,10 +190,13 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
         if *draft_loaded.read() {
             return;
         }
+        let Some(owner) = board.read().as_ref().map(|b| b.owner_vk) else {
+            return;
+        };
         let draft = BOARDS
             .read()
             .map
-            .get(&board_data.owner_vk)
+            .get(&owner)
             .map(|board| board.topic_draft(&topic_id_value))
             .unwrap_or_default();
         if !draft.is_empty() {
@@ -193,7 +207,9 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
 
     use_effect(move || {
         let _ = BOARDS.read().map.len();
-        let owner = board_data.owner_vk;
+        let Some(owner) = board.read().as_ref().map(|b| b.owner_vk) else {
+            return;
+        };
         let index = BOARDS
             .read()
             .map
@@ -254,6 +270,9 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     // board's authority snapshot changes while this topic is open, push the
     // updated root/proofs to this topic's head (and active page) in O(1).
     use_effect(move || {
+        let Some(owner) = board.read().as_ref().map(|b| b.owner_vk) else {
+            return;
+        };
         let Some(auth_hash) = BOARDS
             .read()
             .map
@@ -292,6 +311,10 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     // participants present in this topic head, active page, and loaded earlier
     // parts.
     use_effect(move || {
+        let Some(owner) = board.read().as_ref().map(|b| b.owner_vk) else {
+            return;
+        };
+        let part = (*loaded_part.read()).unwrap_or(0);
         let mut ids: Vec<MemberId> = Vec::new();
         if let Some(head) = topic_contract::topic_head(owner, topic_id_value) {
             if let Some(header) = &head.header {
@@ -333,6 +356,19 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
             crate::components::app::profile_contract::load_profile_shards_for(owner, ids).await;
         });
     });
+
+    let Some(board_data) = board.read().clone() else {
+        return rsx! {
+            div { class: "max-w-3xl mx-auto px-4 py-8 text-text-muted", "Loading board…" }
+        };
+    };
+
+    let owner = board_data.owner_vk;
+    let part = crate::components::app::section_contract::merged_index(
+        owner,
+        &board_data.board_state.topics,
+    )
+    .part_of(&topic_id_value);
 
     let head = topic_contract::topic_head(owner, topic_id_value);
     let Some(head) = head else {
@@ -441,13 +477,13 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
             state.post_is_visible(post, head_trusted)
                 || post.post.author == self_id
                 || is_owner
+                || can_moderate
         })
         .collect();
 
     let reply_text = reply.clone();
     let board_for_reply = board_data.clone();
     let topic_for_reply = topic_id_value;
-    let navigator = navigator();
     let split_navigator = navigator.clone();
     let branch = board_id.clone();
 
@@ -1494,8 +1530,13 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                                             board.set_topic_draft(topic_id_value, &value);
                                         }
                                     });
-                                    spawn(async {
-                                        let _ = crate::components::app::chat_delegate::save_boards_to_delegate().await;
+                                    let seq = draft_save_seq.peek().wrapping_add(1);
+                                    draft_save_seq.set(seq);
+                                    spawn(async move {
+                                        crate::util::sleep(std::time::Duration::from_millis(600)).await;
+                                        if *draft_save_seq.peek() == seq {
+                                            let _ = crate::components::app::chat_delegate::save_boards_to_delegate().await;
+                                        }
                                     });
                                 },
                                 onclick: move |_| refresh_topic_reply_mentions(mention_autocomplete),

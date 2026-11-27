@@ -19,28 +19,29 @@ pub fn NicknameField(member_info: AuthorizedMemberInfo) -> Element {
         .owner_key
         .and_then(|key| BOARDS.read().map.get(&key).cloned());
 
+    let initial_nickname = board
+        .as_ref()
+        .and_then(|b| b.display_nickname(member_id))
+        .unwrap_or_else(|| "Unknown".to_string());
+    let mut temp_nickname = use_signal(|| initial_nickname.clone());
+    let mut input_element = use_signal(|| None as Option<Rc<MountedData>>);
+    let mut requesting = use_signal(|| false);
+    let mut requested_name = use_signal(String::new);
+
     let Some(board) = board else {
         return rsx! {};
     };
 
     let viewer_id = MemberId::from(&board.self_sk.verifying_key());
     let is_owner = board.is_active_owner();
-    let is_admin = board
-        .board_state
-        .admin
-        .admins
-        .iter()
-        .any(|admin| admin.admin.id() == viewer_id);
+    let is_admin = board.is_active_admin();
     // Normal members cannot change their own name; the owner and admins can,
     // for any member. The override leaves the member's own record untouched.
     let can_edit =
         !crate::components::app::view_as_member() && (is_owner || is_admin);
     let is_self = viewer_id == member_id;
 
-    let initial_nickname = board
-        .display_nickname(member_id)
-        .unwrap_or_else(|| "Unknown".to_string());
-    let original_nickname = initial_nickname.clone();
+    let original_nickname = initial_nickname;
     let mut existing_names: Vec<String> = board
         .board_state
         .member_info
@@ -49,15 +50,11 @@ pub fn NicknameField(member_info: AuthorizedMemberInfo) -> Element {
         .filter(|info| info.member_info.member_id != member_id)
         .filter_map(|info| board.display_nickname(info.member_info.member_id))
         .collect();
-    if let Some(owner) = board.display_nickname(MemberId::from(&board.owner_vk)) {
+    if let Some(owner) = board.display_nickname(board.current_owner_id()) {
         if !existing_names.contains(&owner) {
             existing_names.push(owner);
         }
     }
-    let mut temp_nickname = use_signal(|| initial_nickname);
-    let mut input_element = use_signal(|| None as Option<Rc<MountedData>>);
-    let mut requesting = use_signal(|| false);
-    let mut requested_name = use_signal(String::new);
     let candidate_name = if can_edit {
         temp_nickname.read().clone()
     } else {

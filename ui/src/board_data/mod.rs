@@ -559,12 +559,10 @@ impl BoardData {
     /// or suspension records changed. Members cannot sign it; they receive the
     /// owner's root through the board state.
     pub fn refresh_authority_root(&mut self) {
-        let Some(owner_sk) = self.owner_sk.as_ref() else {
-            return;
-        };
-        if owner_sk.verifying_key() != self.current_owner_key() {
+        if !self.is_current_owner() {
             return;
         }
+        let owner_sk = self.owner_key().clone();
         let tree = plaza_core::board_state::authority::AuthorityTreeV1::from_board(
             &self.board_state,
         );
@@ -589,7 +587,7 @@ impl BoardData {
         self.board_state.authority_root =
             plaza_core::board_state::authority::AuthorityRootStateV1(Some(
                 plaza_core::board_state::authority::AuthorizedAuthorityRootV1::new(
-                    root, owner_sk,
+                    root, &owner_sk,
                 ),
             ));
     }
@@ -602,10 +600,22 @@ impl BoardData {
         if self.self_sk.verifying_key() == self.current_owner_key() {
             return true;
         }
-        match (&self.owner_profile_id, &self.profile_id) {
-            (Some(owner), Some(current)) => owner == current,
-            _ => false,
-        }
+        self.is_current_owner()
+            && match (&self.owner_profile_id, &self.profile_id) {
+                (Some(owner), Some(current)) => owner == current,
+                _ => false,
+            }
+    }
+
+    /// Whether the visible identity holds a non-revoked board admin appointment.
+    pub fn is_active_admin(&self) -> bool {
+        let self_id = MemberId::from(&self.self_sk.verifying_key());
+        self.board_state.admin.admins.iter().any(|admin| {
+            admin.admin.id() == self_id
+                && !self.board_state.admin.revoked.iter().any(|rev| {
+                    rev.id() == self_id && rev.revocation.generation >= admin.admin.generation
+                })
+        })
     }
 
     /// Legacy boards stored no owner profile. The creator profile is the first
@@ -1174,6 +1184,10 @@ impl BoardData {
             .map(|b| b.ban.banned_user)
             .collect();
 
+        let founding_owner_id = MemberId::from(&self.owner_vk);
+        let current_owner_vk = self.current_owner_key();
+        let current_owner_id = MemberId::from(&current_owner_vk);
+
         let mut current_members: Vec<MemberId> = self
             .board_state
             .members
@@ -1182,8 +1196,8 @@ impl BoardData {
             .map(|m| MemberId::from(&m.member.member_vk))
             .filter(|id| !banned_members.contains(id))
             .collect();
-        // The owner is not a Member record, but needs the new board secret too.
-        current_members.push(MemberId::from(&self.owner_vk));
+        // The owner may not have a Member record, but needs the new board secret too.
+        current_members.push(current_owner_id);
         current_members.sort_by_key(|member| member.0 .0);
         current_members.dedup();
 
@@ -1202,16 +1216,20 @@ impl BoardData {
         let mut new_encrypted_secrets = Vec::new();
 
         for member_id in current_members {
-            // Find the member's verifying key
-            if let Some(member) = self
-                .board_state
-                .members
-                .members
-                .iter()
-                .find(|m| MemberId::from(&m.member.member_vk) == member_id)
-            {
-                let member_vk = member.member.member_vk;
-
+            // Find the member's verifying key (including owner keys not in members list)
+            let member_vk = if member_id == current_owner_id {
+                Some(current_owner_vk)
+            } else if member_id == founding_owner_id {
+                Some(self.owner_vk)
+            } else {
+                self.board_state
+                    .members
+                    .members
+                    .iter()
+                    .find(|m| MemberId::from(&m.member.member_vk) == member_id)
+                    .map(|m| m.member.member_vk)
+            };
+            if let Some(member_vk) = member_vk {
                 // Encrypt the board secret for this member
                 let Ok((ciphertext, nonce, ephemeral_key)) =
                     crate::util::ecies::try_encrypt_secret_for_member(&new_secret, &member_vk)
@@ -1229,7 +1247,7 @@ impl BoardData {
                     ciphertext,
                     nonce,
                     sender_ephemeral_public_key: ephemeral_key.to_bytes(),
-                    provider: self.owner_vk.into(),
+                    provider: current_owner_id,
                     category_id: None,
                 };
 

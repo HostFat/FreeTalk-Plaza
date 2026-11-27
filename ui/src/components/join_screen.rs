@@ -205,7 +205,7 @@ pub fn JoinScreen(token: String) -> Element {
                                         timed_out.set(false);
                                         error.set(None);
                                         if let Some(key) = board_key {
-                                            wasm_bindgen_futures::spawn_local(async move {
+                                            spawn(async move {
                                                 futures_timer::Delay::new(std::time::Duration::from_secs(25)).await;
                                                 if !BOARDS.read().map.contains_key(&key) {
                                                     timed_out.set(true);

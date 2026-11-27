@@ -253,8 +253,7 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
             });
         }
         ContractResponse::PutResponse { key }
-        | ContractResponse::UpdateResponse { key, .. }
-        | ContractResponse::SubscribeResponse { key, .. } => {
+        | ContractResponse::UpdateResponse { key, .. } => {
             MODERATION_BOARDS.with_mut(|boards| {
                 if let Some(board) = boards.get_mut(key.id()) {
                     board.synced = true;
@@ -262,6 +261,7 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                 }
             });
         }
+        ContractResponse::SubscribeResponse { .. } => {}
         ContractResponse::UpdateNotification { key, update } => {
             let Some((params, mut state)) = MODERATION_BOARDS
                 .read()

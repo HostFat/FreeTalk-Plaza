@@ -308,6 +308,9 @@ pub async fn load_persisted_section_boards() {
             }
             let key = section_page_key(entry.owner, entry.section, entry.page);
             let contract_id = *key.id();
+            if boards.contains_key(&contract_id) {
+                continue;
+            }
             let activity = entry
                 .state
                 .as_manifest()
@@ -1115,8 +1118,7 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
             }
         }
         ContractResponse::PutResponse { key }
-        | ContractResponse::UpdateResponse { key, .. }
-        | ContractResponse::SubscribeResponse { key, .. } => {
+        | ContractResponse::UpdateResponse { key, .. } => {
             SECTION_BOARDS.with_mut(|boards| {
                 if let Some(board) = boards.get_mut(key.id()) {
                     board.synced = true;
@@ -1126,6 +1128,13 @@ pub async fn handle_contract_response(response: ContractResponse) -> Result<(), 
                     }
                     board.last_used = now_ms();
                     board.last_fetch = 0;
+                }
+            });
+        }
+        ContractResponse::SubscribeResponse { key, .. } => {
+            SECTION_BOARDS.with_mut(|boards| {
+                if let Some(board) = boards.get_mut(key.id()) {
+                    board.last_used = now_ms();
                 }
             });
         }
