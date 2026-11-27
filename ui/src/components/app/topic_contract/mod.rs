@@ -957,7 +957,10 @@ pub async fn delete_post(
     } else if board.is_active_owner() {
         (board.owner_key().clone(), None)
     } else {
-        (board.self_sk.clone(), delete_authority(&board, &self_id))
+        (
+            board.self_sk.clone(),
+            delete_authority(&board, &self_id).map(Box::new),
+        )
     };
     let signer = MemberId::from(&signing_key.verifying_key());
     let action = plaza_topic_core::TopicActionV1 {

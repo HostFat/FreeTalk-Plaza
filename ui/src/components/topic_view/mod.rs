@@ -68,10 +68,11 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     // resetting all local signals) when navigating directly from Topic A to B.
     rsx! {
         for key in [route_key] {
-            TopicViewInner {
-                key: "{key}",
-                board_id: board_id.clone(),
-                topic_id_value,
+            div { key: "{key}", class: "contents",
+                TopicViewInner {
+                    board_id: board_id.clone(),
+                    topic_id_value,
+                }
             }
         }
     }
