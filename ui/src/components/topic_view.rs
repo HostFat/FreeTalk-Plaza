@@ -118,12 +118,10 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
         #[cfg(target_arch = "wasm32")]
         {
             spawn_local(async {
-                crate::util::sleep(std::time::Duration::from_millis(50)).await;
-                if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-                    if let Some(el) = doc.get_element_by_id("message-scroll") {
-                        el.set_scroll_top(el.scroll_height());
-                    }
-                }
+                crate::util::sleep(std::time::Duration::from_millis(60)).await;
+                crate::util::scroll_conversation_to_bottom("message-scroll");
+                crate::util::sleep(std::time::Duration::from_millis(120)).await;
+                crate::util::scroll_conversation_to_bottom("message-scroll");
             });
         }
     });
@@ -372,7 +370,9 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     let pinned = head.is_pinned();
     let announced = head.is_announced();
     let hidden = head.is_hidden();
-    let is_owner = board_data.is_current_owner();
+    let is_owner = !crate::components::app::view_as_member()
+        && !board_data.spectator
+        && board_data.is_active_owner();
     let now_ms = plaza_core::board_state::rate_limit::system_time_ms(
         crate::util::get_current_system_time(),
     );
@@ -457,7 +457,8 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     rsx! {
         div {
             id: "message-scroll",
-            class: "max-w-3xl mx-auto px-4 py-6 flex flex-col gap-5 max-h-[calc(100vh-4.5rem)] overflow-y-auto",
+            class: "flex-1 min-h-0 w-full overflow-y-auto",
+            div { class: "max-w-3xl mx-auto px-4 py-6 flex flex-col gap-5",
             if let Some(message) = error.read().as_ref() {
                 p { class: "text-sm text-red-400", "{message}" }
             }
@@ -1639,6 +1640,7 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                         }
                     }
                 }
+            }
             }
         }
     }
