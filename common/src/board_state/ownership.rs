@@ -894,7 +894,6 @@ mod tests {
     };
     use crate::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
     use crate::board_state::member::{AuthorizedMember, Member, MembersDelta};
-    use crate::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
     use crate::board_state::roles::verify_admin_authority;
     use crate::board_state::ChatBoardStateV1Delta;
     use crate::ChatBoardStateV1;
@@ -931,27 +930,6 @@ mod tests {
             },
             &owner_sk,
         ));
-        // A message keeps the admin member from being pruned by the cleanup.
-        state
-            .recent_messages
-            .messages
-            .push(AuthorizedMessageV1::new(
-                MessageV1 {
-                    images: Vec::new(),
-                    board_owner: owner_id,
-                    author: admin_id,
-                    time: SystemTime::UNIX_EPOCH,
-                    content: BoardMessageBody::public("t".to_string(), "b".to_string()),
-                    reply_to: None,
-                    topic_id: None,
-                    topic_public_key: None,
-                    topic_proof: None,
-                    section_id: None,
-                    section_auto_moderated: None,
-                    auto_moderated: false,
-                },
-                &admin_sk,
-            ));
         state.admin.admins.push(AuthorizedAdmin::new(
             Admin {
                 member_id: admin_id,
@@ -1053,8 +1031,8 @@ mod tests {
         );
         // Configuration, members and admins written before the transfer stay.
         assert_eq!(
-            fixture.state.recent_messages.messages.len(),
-            state_before.recent_messages.messages.len()
+            fixture.state.members.members.len(),
+            state_before.members.members.len()
         );
         assert_eq!(fixture.state.admin.admins.len(), 1);
         fixture
@@ -1561,27 +1539,6 @@ mod tests {
             },
             &fixture.admin_sk,
         ));
-        fixture
-            .state
-            .recent_messages
-            .messages
-            .push(AuthorizedMessageV1::new(
-                MessageV1 {
-                    images: Vec::new(),
-                    board_owner: fixture.owner_id,
-                    author: second_id,
-                    time: SystemTime::UNIX_EPOCH,
-                    content: BoardMessageBody::public("t2".to_string(), "b".to_string()),
-                    reply_to: None,
-                    topic_id: None,
-                    topic_public_key: None,
-                    topic_proof: None,
-                    section_id: None,
-                    section_auto_moderated: None,
-                    auto_moderated: false,
-                },
-                &second_sk,
-            ));
 
         apply(
             &mut fixture.state,
@@ -1767,27 +1724,6 @@ mod tests {
             },
             &fixture.owner_sk,
         ));
-        fixture
-            .state
-            .recent_messages
-            .messages
-            .push(AuthorizedMessageV1::new(
-                MessageV1 {
-                    images: Vec::new(),
-                    board_owner: fixture.owner_id,
-                    author: id,
-                    time: SystemTime::UNIX_EPOCH,
-                    content: BoardMessageBody::public("t".to_string(), "b".to_string()),
-                    reply_to: None,
-                    topic_id: None,
-                    topic_public_key: None,
-                    topic_proof: None,
-                    section_id: None,
-                    section_auto_moderated: None,
-                    auto_moderated: false,
-                },
-                &sk,
-            ));
         fixture.state.admin.admins.push(AuthorizedAdmin::new(
             Admin {
                 member_id: id,

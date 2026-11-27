@@ -314,17 +314,7 @@ fn verify_set(
     }
     if let PqScope::Category(category_id) = &entry.set.scope {
         if !state.sections.exists(category_id) {
-            let category = state
-                .recent_messages
-                .messages
-                .iter()
-                .find(|message| message.id() == *category_id)
-                .ok_or("PQ secret set targets a missing category")?;
-            if category.message.content.content_type()
-                != crate::board_state::content::CONTENT_TYPE_CATEGORY
-            {
-                return Err("PQ secret scope is not a category".to_string());
-            }
+            return Err("PQ secret set targets a missing category".to_string());
         }
     }
 

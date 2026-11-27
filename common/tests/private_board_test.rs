@@ -3,7 +3,6 @@ use freenet_scaffold::ComposableState;
 use plaza_core::board_state::ban::{AuthorizedUserBan, UserBan};
 use plaza_core::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
 use plaza_core::board_state::member::{AuthorizedMember, Member, MemberId};
-use plaza_core::board_state::message::{AuthorizedMessageV1, BoardMessageBody, MessageV1};
 use plaza_core::board_state::privacy::{
     BoardCipherSpec, BoardDisplayMetadata, PrivacyMode, SealedBytes,
 };
@@ -626,73 +625,4 @@ fn test_ban_member_excludes_from_new_secrets() {
         .encrypted_secrets
         .iter()
         .any(|s| s.secret.member_id == member1_id && s.secret.secret_version == 0));
-}
-
-#[test]
-fn test_encrypted_messages_in_private_board() {
-    // Create owner
-    let owner_sk = SigningKey::generate(&mut OsRng);
-    let owner_vk = owner_sk.verifying_key();
-    let owner_id = MemberId::from(&owner_vk);
-
-    // Create private board
-    let mut board_state = ChatBoardStateV1 {
-        configuration: AuthorizedConfigurationV1::new(
-            Configuration {
-                privacy_mode: PrivacyMode::Private,
-                display: BoardDisplayMetadata {
-                    name: SealedBytes::public("Private Board".to_string().into_bytes()),
-                    description: None,
-                },
-                owner_member_id: owner_id,
-                updated_at: std::time::SystemTime::UNIX_EPOCH,
-                ..Default::default()
-            },
-            &owner_sk,
-        ),
-        ..Default::default()
-    };
-
-    // Add encrypted message
-    let message = MessageV1 {
-        images: Vec::new(),
-        board_owner: owner_id,
-        author: owner_id,
-        content: BoardMessageBody::private_text(
-            vec![1, 2, 3, 4, 5], // Mock encrypted content
-            [0u8; 12],
-            0,
-        ),
-        time: SystemTime::now(),
-        reply_to: None,
-        topic_id: None,
-        topic_public_key: None,
-        topic_proof: None,
-        section_id: None,
-        section_auto_moderated: None,
-        auto_moderated: false,
-    };
-
-    board_state
-        .recent_messages
-        .messages
-        .push(AuthorizedMessageV1::new(message, &owner_sk));
-
-    let parameters = ChatBoardParametersV1 { owner: owner_vk };
-
-    // Verify the board state with encrypted message
-    board_state
-        .verify(&board_state, &parameters)
-        .expect("Operation should succeed");
-
-    // Verify message is encrypted
-    assert_eq!(board_state.recent_messages.messages.len(), 1);
-    match &board_state.recent_messages.messages[0].message.content {
-        BoardMessageBody::Private { secret_version, .. } => {
-            assert_eq!(*secret_version, 0);
-        }
-        BoardMessageBody::Public { .. } => {
-            panic!("Expected encrypted message in private board");
-        }
-    }
 }

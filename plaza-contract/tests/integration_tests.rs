@@ -295,22 +295,14 @@ async fn test_invitation_message_propagation() -> TestResult {
             let final_states = get_all_board_states(&mut all_clients, contract_key).await?;
             let (alice_final_state, bob_final_state) = (&final_states[0], &final_states[1]);
 
-            println!("   - Alice sees {} messages", alice_final_state.recent_messages.messages.len());
-            println!("   - Bob sees {} messages", bob_final_state.recent_messages.messages.len());
+            println!("   - Alice sees {} member_info records", alice_final_state.member_info.member_info.len());
+            println!("   - Bob sees {} member_info records", bob_final_state.member_info.member_info.len());
 
-            for (i, msg) in alice_final_state.recent_messages.messages.iter().enumerate() {
-                println!("     Alice msg {}: '{}'", i+1, msg.message.content);
-            }
-
-            for (i, msg) in bob_final_state.recent_messages.messages.iter().enumerate() {
-                println!("     Bob msg {}: '{}'", i+1, msg.message.content);
-            }
-
-            if alice_final_state.recent_messages.messages.len() != bob_final_state.recent_messages.messages.len() {
-                println!("   Alice has {} messages, Bob has {} messages",
-                    alice_final_state.recent_messages.messages.len(),
-                    bob_final_state.recent_messages.messages.len());
-                return Err("Inconsistent message propagation detected".into());
+            if alice_final_state.member_info.member_info.len() != bob_final_state.member_info.member_info.len() {
+                println!("   Alice has {} member_info records, Bob has {} member_info records",
+                    alice_final_state.member_info.member_info.len(),
+                    bob_final_state.member_info.member_info.len());
+                return Err("Inconsistent state propagation detected".into());
             }
 
             if !river_states_equal(alice_final_state, bob_final_state) {
@@ -318,9 +310,9 @@ async fn test_invitation_message_propagation() -> TestResult {
                 return Err("Board state inconsistency detected".into());
             }
 
-            println!("SUCCESS: Both Alice and Bob see all {} messages consistently!",
-                alice_final_state.recent_messages.messages.len());
-            println!("TEST PASSED - Message propagation works correctly!");
+            println!("SUCCESS: Both Alice and Bob see all {} member_info records consistently!",
+                alice_final_state.member_info.member_info.len());
+            println!("TEST PASSED - State propagation works correctly!");
 
             Ok(())
         }).instrument(span!(Level::INFO, "test_invitation_message_propagation_network_test"));

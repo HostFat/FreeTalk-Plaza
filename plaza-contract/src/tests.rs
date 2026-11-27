@@ -39,8 +39,8 @@ mod tests {
         SigningKey::from_bytes(&[seed; 32])
     }
 
-    /// A board with a member who has written nothing must be pruned, so the
-    /// state as given is not a fixpoint and must be rejected.
+    /// A board whose member list is not in canonical order would be rewritten
+    /// by `post_apply_cleanup`, so it is not a fixpoint and must be rejected.
     #[test]
     fn validate_state_rejects_a_state_cleanup_would_change() {
         let owner = key(1);
@@ -49,20 +49,36 @@ mod tests {
         };
         let owner_id = owner_params.owner_id();
 
-        let member_key = key(2);
+        let member_a = AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk: key(2).verifying_key(),
+                join_proof: None,
+            },
+            &owner,
+        );
+        let member_b = AuthorizedMember::new(
+            Member {
+                owner_member_id: owner_id,
+                invited_by: owner_id,
+                member_vk: key(3).verifying_key(),
+                join_proof: None,
+            },
+            &owner,
+        );
         let mut state = ChatBoardStateV1 {
             configuration: AuthorizedConfigurationV1::new(Configuration::default(), &owner),
             ..Default::default()
         };
-        state.members.members.push(AuthorizedMember::new(
-            Member {
-                owner_member_id: owner_id,
-                invited_by: owner_id,
-                member_vk: member_key.verifying_key(),
-                join_proof: None,
-            },
-            &owner,
-        ));
+        // Push members in deliberately descending (non-canonical) order.
+        if member_a.member.id() < member_b.member.id() {
+            state.members.members.push(member_b);
+            state.members.members.push(member_a);
+        } else {
+            state.members.members.push(member_a);
+            state.members.members.push(member_b);
+        }
 
         let params = parameters(&owner);
         let result = <Contract as ContractInterface>::validate_state(

@@ -905,7 +905,6 @@ mod tests {
             members: MembersV1::default(),
             member_info: Default::default(),
             secrets: Default::default(),
-            recent_messages: Default::default(),
             upgrade: Default::default(),
             ..Default::default()
         }
@@ -1473,7 +1472,6 @@ mod revocation_tests {
     use crate::board_state::configuration::{AuthorizedConfigurationV1, Configuration};
     use crate::board_state::member::{AuthorizedMember, Member, MembersV1};
     use crate::board_state::member_info::MemberInfoV1;
-    use crate::board_state::message::MessagesV1;
     use crate::board_state::secret::BoardSecretsV1;
     use std::time::Duration;
 
@@ -1527,7 +1525,6 @@ mod revocation_tests {
             },
             member_info: MemberInfoV1::default(),
             secrets: BoardSecretsV1::default(),
-            recent_messages: MessagesV1::default(),
             ..Default::default()
         };
 
@@ -1584,9 +1581,6 @@ mod revocation_tests {
     #[test]
     fn an_admin_ban_applies_and_stays() {
         use crate::board_state::admin::{Admin, AuthorizedAdmin};
-        use crate::board_state::message::{
-            AuthorizedMessageV1, BoardMessageBody, MessageV1,
-        };
         use crate::board_state::roles::{
             admin_authority_proof, AuthorizedRole, AuthorizedRoleAssignment, Role, RoleAssignment,
             RolesDelta,
@@ -1624,29 +1618,6 @@ mod revocation_tests {
                 },
                 &owner_sk,
             ));
-            // A member with no message and no token join is pruned by the
-            // cleanup, which would drop the ban with its banner.
-            let author = MemberId::from(&sk.verifying_key());
-            state
-                .recent_messages
-                .messages
-                .push(AuthorizedMessageV1::new(
-                    MessageV1 {
-                        images: Vec::new(),
-                        board_owner: owner_id,
-                        author,
-                        time: SystemTime::now(),
-                        content: BoardMessageBody::public("t".to_string(), "b".to_string()),
-                        reply_to: None,
-                        topic_id: None,
-                        topic_public_key: None,
-                        topic_proof: None,
-                        section_id: None,
-                        section_auto_moderated: None,
-                        auto_moderated: false,
-                    },
-                    sk,
-                ));
         }
         state.admin.admins.push(AuthorizedAdmin::new(
             Admin {
