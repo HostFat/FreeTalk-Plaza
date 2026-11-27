@@ -89,6 +89,15 @@ pub fn TopicIndexView(board_id: String) -> Element {
         .iter()
         .filter(|entry| !board_data.board_state.topics.is_hidden(&entry.entry.topic_id))
         .filter(|entry| {
+            topic_contract::topic_head(board_data.owner_vk, entry.entry.topic_id)
+                .and_then(|head| {
+                    head.header
+                        .as_ref()
+                        .map(|h| !head.is_deleted(h.header.id()))
+                })
+                .unwrap_or(true)
+        })
+        .filter(|entry| {
             board_data
                 .board_state
                 .topics
@@ -98,7 +107,9 @@ pub fn TopicIndexView(board_id: String) -> Element {
         .cloned()
         .collect();
 
-    let is_owner = board_data.is_current_owner();
+    let is_owner = !crate::components::app::view_as_member()
+        && !board_data.spectator
+        && board_data.is_active_owner();
     let sections: Vec<_> = board_data
         .board_state
         .sections
@@ -188,7 +199,8 @@ pub fn TopicIndexView(board_id: String) -> Element {
     let submit_body = body.clone();
 
     rsx! {
-        div { class: "max-w-4xl mx-auto px-4 py-6 flex flex-col gap-5",
+        div { class: "flex-1 min-h-0 w-full overflow-y-auto",
+            div { class: "max-w-4xl mx-auto px-4 py-6 flex flex-col gap-5",
             div { class: "flex items-center justify-between gap-3 flex-wrap",
                 h1 { class: "text-xl font-semibold text-text", "Topics" }
                 span { class: "text-xs text-text-muted", "{total} discussions" }
@@ -670,6 +682,7 @@ pub fn TopicIndexView(board_id: String) -> Element {
                         if *loading_more.read() { "Loading older topics…" } else { "Load older topics" }
                     }
                 }
+            }
             }
         }
     }

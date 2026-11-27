@@ -367,6 +367,38 @@ impl SectionBoard {
 pub static SECTION_BOARDS: GlobalSignal<HashMap<ContractInstanceId, SectionBoard>> =
     Global::new(HashMap::new);
 
+/// Seed a pre-built section manifest (page 0) into `SECTION_BOARDS` for the
+/// static `example-data` build.
+#[cfg(feature = "example-data")]
+pub fn seed_section_manifest(
+    owner: VerifyingKey,
+    section: SectionId,
+    state: ChatBoardStateV1,
+) {
+    let key = section_key(owner, section);
+    let contract_id = *key.id();
+    let now = now_ms();
+    SECTION_BOARDS.with_mut(|boards| {
+        boards.insert(
+            contract_id,
+            SectionBoard {
+                params: SectionParametersV1 {
+                    owner,
+                    section,
+                    page: 0,
+                },
+                state: SectionBoardState::Manifest(state),
+                synced: true,
+                ready: true,
+                syncing: false,
+                dirty: false,
+                last_used: now,
+                last_fetch: now,
+            },
+        );
+    });
+}
+
 const MAX_SECTION_ACTIVITY_RETRIES: u8 = 5;
 
 struct PendingSectionActivity {
@@ -1516,11 +1548,27 @@ pub async fn apply_section_delta(
     SECTION_BOARDS.with_mut(|boards| {
         if let Some(board) = boards.get_mut(&contract_id) {
             board.state = SectionBoardState::Manifest(state);
-            board.synced = false;
-            board.dirty = true;
+            #[cfg(feature = "no-sync")]
+            {
+                board.synced = true;
+                board.ready = true;
+                board.dirty = false;
+            }
+            #[cfg(not(feature = "no-sync"))]
+            {
+                board.synced = false;
+                board.dirty = true;
+            }
             board.last_used = now_ms();
         }
     });
+    #[cfg(feature = "no-sync")]
+    {
+        let _ = (key, delta);
+        return Ok(());
+    }
+    #[cfg(not(feature = "no-sync"))]
+    {
     schedule_section_save();
     if delta.is_activity_only() {
         if let Some(topics) = delta.topics.as_ref() {
@@ -1540,6 +1588,7 @@ pub async fn apply_section_delta(
         }
     });
     result.map_err(|error| format!("send section delta: {error}"))
+    }
 }
 
 pub fn is_section_contract_response(response: &ContractResponse) -> bool {
@@ -1647,11 +1696,23 @@ pub async fn create_section_board(
     )));
     let state = WrappedState::new(to_cbor_vec(&child));
     SECTION_BOARDS.with_mut(|boards| {
-        boards.insert(
-            child_id,
-            SectionBoard::new(params.clone(), SectionBoardState::Manifest(child), true),
-        );
+        #[allow(unused_mut)]
+        let mut entry = SectionBoard::new(params.clone(), SectionBoardState::Manifest(child), true);
+        #[cfg(feature = "no-sync")]
+        {
+            entry.synced = true;
+            entry.ready = true;
+            entry.dirty = false;
+        }
+        boards.insert(child_id, entry);
     });
+    #[cfg(feature = "no-sync")]
+    {
+        let _ = (contract, state);
+        return Ok(key);
+    }
+    #[cfg(not(feature = "no-sync"))]
+    {
     schedule_section_save();
     send_client_request(ClientRequest::ContractOp(ContractRequest::Put {
         contract,
@@ -1663,6 +1724,7 @@ pub async fn create_section_board(
     .await
     .map_err(|error| format!("put section board: {error}"))?;
     Ok(key)
+    }
 }
 
 /// Resolve the signing key and optional admin proof for creating or sealing a

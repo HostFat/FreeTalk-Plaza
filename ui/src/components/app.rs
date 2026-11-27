@@ -15,10 +15,7 @@ pub mod receive_times;
 pub mod sync_info;
 pub mod toasts;
 
-use super::{
-    admin_view::AdminView, board_list::BoardList, conversation::Conversation, members::MembersView,
-    top_bar::TopBar,
-};
+use super::{admin_view::AdminView, board_list::BoardList, members::MembersView, top_bar::TopBar};
 use crate::board_data::{Boards, CurrentBoard};
 use crate::components::about_modal::AboutModal;
 use crate::components::app::document_title::DocumentTitleUpdater;
@@ -28,12 +25,10 @@ use crate::components::app::freenet_api::FreenetSynchronizer;
 use crate::components::board_list::create_board_modal::CreateBoardModal;
 use crate::components::board_list::edit_board_modal::EditBoardModal;
 use crate::components::board_list::receive_invitation_modal::ReceiveInvitationModal;
-use crate::components::category_create_modal::CategoryCreateModal;
 use crate::components::members::member_info_modal::MemberInfoModal;
 use crate::components::members::Invitation;
 use crate::components::messages_view::{DM_JOIN_PREFILL, MESSAGES_OPEN};
 use crate::components::notifications_view::NotificationsView;
-use crate::components::posts_view::{PostsView, SinglePostView};
 use crate::components::profile_view::ProfileView;
 use crate::components::search_view::SearchView;
 use crate::invites::PendingInvites;
@@ -388,7 +383,10 @@ pub fn App() -> Element {
     crate::util::capture_runtime();
     crate::components::app::topic_contract::start_topic_outbox();
     #[cfg(all(feature = "example-data", target_arch = "wasm32"))]
-    crate::test_hooks::install();
+    {
+        crate::example_data::seed_example_caches();
+        crate::test_hooks::install();
+    }
 
     // Chips are raw HTML inside message bodies, so delegate clicks at the
     // document level. Idempotent; safe on every render.
@@ -718,7 +716,6 @@ pub fn App() -> Element {
             EditBoardModal {}
             MemberInfoModal {}
             CreateBoardModal {}
-            CategoryCreateModal {}
             AboutModal {}
             crate::components::device_drawer::DeviceDrawer {}
             crate::components::messages_view::MessagesModal {}
@@ -962,7 +959,7 @@ fn ViewOnly(board_id: String) -> Element {
                 p { class: "text-red-300", "{error}" }
             }
         } else if *opened.read() {
-            BoardGate { board_id: board_id.clone(), PostsView {} }
+            BoardGate { board_id: board_id.clone(), BoardPosts { board_id } }
         } else {
             div { class: "flex items-center justify-center min-h-screen p-6",
                 p { class: "text-text-muted", "Opening the board in read-only mode..." }
@@ -1046,6 +1043,14 @@ fn BoardGate(board_id: String, children: Element) -> Element {
             .map
             .get(&key)
             .is_some_and(|board| board.is_private() && board.get_secret().is_none())
+    });
+
+    use_effect(move || {
+        let intercepted = INTERCEPTED_JOIN_TOKEN.read().clone();
+        if let Some(token) = intercepted {
+            *INTERCEPTED_JOIN_TOKEN.write() = None;
+            navigator().push(Route::JoinBoard { token });
+        }
     });
 
     if exists() {
@@ -1163,83 +1168,27 @@ fn Topic(board_id: String, topic_id: String) -> Element {
     }
 }
 
-/// The board home uses the topic index for new boards and the legacy message
-/// view for old ones.
+/// The board home always uses the section-sharded topic index view.
 #[component]
 fn BoardPosts(board_id: String) -> Element {
-    let index_mode = use_memo(move || {
-        CURRENT_BOARD
-            .read()
-            .owner_key
-            .and_then(|key| {
-                BOARDS
-                    .read()
-                    .map
-                    .get(&key)
-                    .map(|board| board.board_state.mode.is_topic_index())
-            })
-            .unwrap_or(false)
-    });
-    if index_mode() {
-        rsx! { crate::components::topic_index_view::TopicIndexView { board_id } }
-    } else {
-        rsx! { PostsView {} }
-    }
+    rsx! { crate::components::topic_index_view::TopicIndexView { board_id } }
 }
 
 #[component]
 fn BoardPost(board_id: String, post_id: String) -> Element {
-    let index_mode = use_memo(move || {
-        CURRENT_BOARD
-            .read()
-            .owner_key
-            .and_then(|key| {
-                BOARDS
-                    .read()
-                    .map
-                    .get(&key)
-                    .map(|board| board.board_state.mode.is_topic_index())
-            })
-            .unwrap_or(false)
-    });
-    if index_mode() {
-        rsx! {
-            crate::components::topic_view::TopicView {
-                board_id,
-                topic_id: post_id
-            }
+    rsx! {
+        crate::components::topic_view::TopicView {
+            board_id,
+            topic_id: post_id
         }
-    } else {
-        rsx! { SinglePostView { post_id } }
     }
 }
 
-/// Route component for category view (uses PostsView with category_id)
+/// Legacy category route: opens the board's topic index view.
 #[component]
 fn PostsInCategory(board_id: String, category_id: String) -> Element {
-    let index_mode = use_memo(move || {
-        CURRENT_BOARD
-            .read()
-            .owner_key
-            .and_then(|key| {
-                BOARDS
-                    .read()
-                    .map
-                    .get(&key)
-                    .map(|board| board.board_state.mode.is_topic_index())
-            })
-            .unwrap_or(false)
-    });
-    if index_mode() {
-        rsx! { BoardGate { board_id: board_id.clone(), BoardPosts { board_id } } }
-    } else {
-        rsx! {
-            BoardGate {
-                board_id: board_id.clone(),
-                PostsView { category_id: Some(category_id) }
-            }
-        }
-    }
+    let _ = category_id;
+    rsx! { BoardGate { board_id: board_id.clone(), BoardPosts { board_id } } }
 }
 
 /// Route component for local search
@@ -1268,7 +1217,7 @@ fn Profile(board_id: String, member_key: String) -> Element {
 /// Route component for conversation view
 #[component]
 fn ConversationView(board_id: String) -> Element {
-    rsx! { BoardGate { board_id: board_id.clone(), Conversation {} } }
+    rsx! { BoardGate { board_id: board_id.clone(), BoardPosts { board_id } } }
 }
 
 /// Route component for admin management view

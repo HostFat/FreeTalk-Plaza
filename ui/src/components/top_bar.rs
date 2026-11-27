@@ -1,25 +1,18 @@
 //! Top bar component showing user profile, admin controls, and post input.
 
 use crate::board_data::SendMessageError;
-use crate::components::app::{
-    ABOUT_MODAL, BOARDS, COMPOSE_REQUEST, CURRENT_BOARD, CURRENT_CATEGORY, CURRENT_HASH,
-    CURRENT_POST, QUOTE_COLLECTION,
-};
+use crate::components::app::{ABOUT_MODAL, BOARDS, CURRENT_BOARD, CURRENT_HASH};
 use crate::components::board_sync_chip::BoardSyncChip;
-use crate::components::conversation::message_input::PostInput;
 use crate::components::device_drawer::{open as open_device, DeviceTab};
 use crate::components::messages_view::MESSAGES_OPEN;
 use crate::util::avatar::get_avatar;
-use crate::util::messaging::{prepare_message, publish_prepared, PollDraft, ReplyContext};
 use dioxus::prelude::*;
 use dioxus_free_icons::{icons::fa_solid_icons::FaBars, Icon};
 use plaza_core::board_state::member::MemberId;
-use plaza_core::board_state::privacy::PrivacyMode;
 
-/// Top bar component displaying the current user's profile, admin controls, and post input.
+/// Top bar component displaying the current user's profile and navigation controls.
 #[component]
 pub fn TopBar() -> Element {
-    let replying_to = use_signal(|| None::<ReplyContext>);
     let mut menu_open = use_signal(|| false);
 
     // Housekeeping for bans: the owner lifts expired bans, and a member who is
@@ -75,16 +68,6 @@ pub fn TopBar() -> Element {
         }
     });
 
-    // Quotes belong to the board they were picked on.
-    let mut quote_board = use_signal(|| CURRENT_BOARD.read().owner_key);
-    use_effect(move || {
-        let current = CURRENT_BOARD.read().owner_key;
-        if current != *quote_board.peek() {
-            quote_board.set(current);
-            QUOTE_COLLECTION.write().clear();
-        }
-    });
-
     // Unread notifications for the bell badge.
     let unread_notifications = use_memo(move || {
         let Some(key) = CURRENT_BOARD.read().owner_key else {
@@ -123,136 +106,6 @@ pub fn TopBar() -> Element {
             crate::util::notifications::unread_count(&board)
         }
     });
-
-    // Get category context for default reply (when viewing a category)
-    let category_reply_context = use_memo(move || {
-        let cat_ctx = CURRENT_CATEGORY.read();
-        if let (Some(cat_id), Some(cat_name), Some(author)) = (
-            cat_ctx.category_id.clone(),
-            cat_ctx.category_name.clone(),
-            cat_ctx.author_name.clone(),
-        ) {
-            Some(ReplyContext {
-                message_id: cat_id,
-                author_name: author,
-                content_preview: format!("[Category] {}", cat_name),
-            })
-        } else {
-            None
-        }
-    });
-
-    // When a single post is open, the top-bar composer replies to it.
-    let post_reply_context = use_memo(move || {
-        let post = CURRENT_POST.read();
-        post.message_id.map(|message_id| ReplyContext {
-            message_id,
-            author_name: post.author_name.clone().unwrap_or_default(),
-            content_preview: post.preview.clone().unwrap_or_default(),
-        })
-    });
-
-    // Message sending handler. The result covers the local checks, so the
-    // composer can keep the text; the publish outcome is reported from the
-    // spawned task.
-    let handle_send_message = move |(title_text, message_text, reply_ctx, poll, images, auto_moderated): (
-        String,
-        String,
-        Option<ReplyContext>,
-        Option<PollDraft>,
-        Vec<plaza_core::board_state::images::ImageRef>,
-        bool,
-    )| -> Result<(), String> {
-        if message_text.is_empty() && poll.is_none() {
-            return Err("The message is empty".to_string());
-        }
-
-        // Get board data for sending
-        let board_info = {
-            let current_board = CURRENT_BOARD.read();
-            if let Some(key) = current_board.owner_key {
-                let boards = BOARDS.read();
-                if let Some(board_data) = boards.map.get(&key) {
-                    let is_private = board_data
-                        .board_state
-                        .configuration
-                        .configuration
-                        .privacy_mode
-                        == PrivacyMode::Private;
-                    let secret_opt = if is_private {
-                        board_data
-                            .secrets
-                            .iter()
-                            .max_by_key(|(v, _)| *v)
-                            .map(|(v, s)| (*s, *v))
-                    } else {
-                        None
-                    };
-                    Some((
-                        key,
-                        board_data.board_key(),
-                        board_data.self_sk.clone(),
-                        board_data.board_state.clone(),
-                        is_private,
-                        secret_opt,
-                        board_data.clone(),
-                    ))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        let Some((
-            current_board,
-            board_key,
-            self_sk,
-            board_state_clone,
-            is_private,
-            secret_opt,
-            snapshot,
-        )) = board_info
-        else {
-            return Err("No board selected".to_string());
-        };
-        // A composer opened inside a restricted category carries its id.
-        let category_secret = reply_ctx
-            .as_ref()
-            .and_then(|reply| snapshot.posting_secret_for(&reply.message_id));
-        let category_id = CURRENT_CATEGORY.read().category_id.clone();
-        let prepared = prepare_message(
-            current_board,
-            board_key,
-            self_sk,
-            board_state_clone,
-            is_private,
-            secret_opt,
-            category_secret,
-            category_id,
-            title_text,
-            message_text,
-            reply_ctx,
-            images,
-            poll,
-            auto_moderated,
-            None,
-        )?;
-        spawn(async move {
-            match publish_prepared(prepared).await {
-                Ok(()) => crate::components::app::toasts::show(
-                    "Published. Syncing with the network…",
-                ),
-                Err(error) => {
-                    crate::components::app::toasts::show_error(format!(
-                        "Could not publish: {error}"
-                    ));
-                }
-            }
-        });
-        Ok(())
-    };
 
     // Don't render if no board is selected
     let Some(board_data) = current_board_data.read().clone() else {
@@ -582,61 +435,23 @@ pub fn TopBar() -> Element {
                     }
                 }
 
-                // Post input
+                // Participation status hint
                 match can_participate {
                     Ok(()) => {
-                        let index_mode = current_board_data
-                            .read()
-                            .as_ref()
-                            .map(|board| board.board_state.mode.is_topic_index())
-                            .unwrap_or(false);
-                        if index_mode {
-                            rsx! {
-                                div { class: "px-4 py-2 bg-surface border border-border rounded-lg text-xs text-text-muted",
-                                    "Open a topic to reply, or create one from the board page."
-                                }
-                            }
-                        } else if let Some(until) = suspended_until {
+                        if let Some(until) = suspended_until {
                             rsx! {
                                 div { class: "px-4 py-2 bg-error-bg text-red-700 dark:text-red-400 rounded-lg text-sm",
                                     "You are suspended until {crate::util::format_utc_as_local_time(until)} and cannot post."
                                 }
                             }
                         } else {
-                            let max_title = current_board_data.read().as_ref()
-                                .map(|bd| bd.board_state.configuration.configuration.max_title_size)
-                                .unwrap_or(100);
-                            let max_message = current_board_data.read().as_ref()
-                                .map(|bd| bd.board_state.configuration.configuration.max_message_size)
-                                .unwrap_or(10000);
-                            let in_post = CURRENT_POST.read().message_id.is_some();
-                            let in_category = category_reply_context.read().is_some() && !in_post;
-                            // A category starts a new topic, so its context is
-                            // already carried by CURRENT_CATEGORY. Only an open
-                            // post presets a reply target.
-                            let default_reply = post_reply_context.read().clone();
                             rsx! {
-                                PostInput {
-                                    in_category,
-                                    in_post,
-                                    hide_button: true,
-                                    handle_send_message: move |msg: (
-                                        String,
-                                        String,
-                                        Option<ReplyContext>,
-                                        Option<PollDraft>,
-                                        Vec<plaza_core::board_state::images::ImageRef>,
-                                        bool,
-                                    )| { handle_send_message(msg) },
-                                    replying_to: replying_to,
-                                    on_request_edit_last: move |_| {},
-                                    default_reply_to: default_reply,
-                                    max_title_size: max_title,
-                                    max_message_size: max_message,
+                                div { class: "px-4 py-2 bg-surface border border-border rounded-lg text-xs text-text-muted",
+                                    "Open a topic to reply, or create one from the board page."
                                 }
                             }
                         }
-                    },
+                    }
                     Err(SendMessageError::UserNotMember) => rsx! {},
                     Err(SendMessageError::UserSuspended) => rsx! {
                         div { class: "px-4 py-2 bg-error-bg text-red-700 dark:text-red-400 rounded-lg text-sm",
@@ -648,35 +463,6 @@ pub fn TopBar() -> Element {
                             "You have been banned from this board."
                         }
                     },
-                }
-            }
-
-            // Quotes picked from the post list wait here until the user opens
-            // the composer. Several posts can be collected before replying.
-            if !QUOTE_COLLECTION.read().is_empty() {
-                {
-                    let count = QUOTE_COLLECTION.read().len();
-                    rsx! {
-                        div { class: "fixed bottom-5 right-5 z-40 flex items-center gap-3 bg-panel border border-border shadow-xl rounded-xl px-4 py-3",
-                            span { class: "text-sm text-text", "❝ {count} quoted" }
-                            button {
-                                r#type: "button",
-                                class: "px-3 py-1.5 bg-accent hover:bg-accent-hover text-white text-xs font-medium rounded-lg transition-colors",
-                                onclick: move |_| {
-                                    *COMPOSE_REQUEST.write() += 1;
-                                },
-                                "Quote in reply"
-                            }
-                            button {
-                                r#type: "button",
-                                class: "px-2 py-1.5 text-text-muted hover:text-text text-xs transition-colors",
-                                onclick: move |_| {
-                                    QUOTE_COLLECTION.write().clear();
-                                },
-                                "Clear"
-                            }
-                        }
-                    }
                 }
             }
 

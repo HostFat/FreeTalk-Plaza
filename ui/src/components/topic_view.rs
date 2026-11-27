@@ -102,6 +102,29 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     let mut attachments = use_signal(Vec::<TopicAttachment>::new);
     let next_attachment_id = use_signal(|| 0u64);
     let mut mention_autocomplete = use_signal(|| None::<MentionAutocomplete>);
+    let mut autoscrolled = use_signal(|| false);
+
+    // Pin long topics to the latest reply on initial open.
+    use_effect(move || {
+        if *autoscrolled.read() {
+            return;
+        }
+        let has_posts = topic_contract::topic_head(owner, topic_id_value)
+            .is_some_and(|head| !head.posts.is_empty());
+        if !has_posts {
+            return;
+        }
+        autoscrolled.set(true);
+        #[cfg(target_arch = "wasm32")]
+        {
+            spawn_local(async {
+                crate::util::sleep(std::time::Duration::from_millis(60)).await;
+                crate::util::scroll_conversation_to_bottom("message-scroll");
+                crate::util::sleep(std::time::Duration::from_millis(120)).await;
+                crate::util::scroll_conversation_to_bottom("message-scroll");
+            });
+        }
+    });
 
     use_effect(move || {
         let _ = BOARDS.read().map.len();
@@ -347,7 +370,9 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     let pinned = head.is_pinned();
     let announced = head.is_announced();
     let hidden = head.is_hidden();
-    let is_owner = board_data.is_current_owner();
+    let is_owner = !crate::components::app::view_as_member()
+        && !board_data.spectator
+        && board_data.is_active_owner();
     let now_ms = plaza_core::board_state::rate_limit::system_time_ms(
         crate::util::get_current_system_time(),
     );
@@ -432,7 +457,8 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
     rsx! {
         div {
             id: "message-scroll",
-            class: "max-w-3xl mx-auto px-4 py-6 flex flex-col gap-5",
+            class: "flex-1 min-h-0 w-full overflow-y-auto",
+            div { class: "max-w-3xl mx-auto px-4 py-6 flex flex-col gap-5",
             if let Some(message) = error.read().as_ref() {
                 p { class: "text-sm text-red-400", "{message}" }
             }
@@ -643,15 +669,50 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                             }
                         }
                     } else {
-                        button {
-                            r#type: "button",
-                            class: "mt-3 text-xs text-accent hover:underline",
-                            onclick: move |_| {
-                                edit_title.set(title.clone());
-                                edit_body.set(body.clone());
-                                editing_topic.set(true);
-                            },
-                            "Edit topic"
+                        div { class: "mt-3 flex items-center gap-3",
+                            button {
+                                r#type: "button",
+                                class: "text-xs text-accent hover:underline",
+                                onclick: move |_| {
+                                    edit_title.set(title.clone());
+                                    edit_body.set(body.clone());
+                                    editing_topic.set(true);
+                                },
+                                "Edit topic"
+                            }
+                            if !deleted {
+                                button {
+                                    r#type: "button",
+                                    class: "text-xs text-red-400 hover:underline",
+                                    onclick: {
+                                        let header_id = header.header.id();
+                                        let delete_nav = split_navigator.clone();
+                                        let delete_board = board_id.clone();
+                                        move |_| {
+                                            let delete_nav = delete_nav.clone();
+                                            let delete_board = delete_board.clone();
+                                            spawn(async move {
+                                                match topic_contract::delete_post(
+                                                    owner,
+                                                    topic_id_value,
+                                                    0,
+                                                    header_id,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(()) => {
+                                                        delete_nav.push(Route::Posts {
+                                                            board_id: delete_board,
+                                                        });
+                                                    }
+                                                    Err(message) => error.set(Some(message)),
+                                                }
+                                            });
+                                        }
+                                    },
+                                    "Delete topic"
+                                }
+                            }
                         }
                     }
                 }
@@ -1580,6 +1641,7 @@ pub fn TopicView(board_id: String, topic_id: String) -> Element {
                     }
                 }
             }
+            }
         }
     }
 }
@@ -2141,6 +2203,7 @@ fn PollBlock(
                 }
                 p { class: "mt-2 text-[11px] text-text-muted",
                     "{total} votes"
+                    if !my_votes.is_empty() { " · Vote recorded." }
                     if poll.multiselect { " · multiple choice" }
                     if closed { " · closed" }
                     if edited { " · edited" }

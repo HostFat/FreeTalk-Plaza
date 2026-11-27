@@ -107,6 +107,13 @@ pub async fn load_activity(
     owner: VerifyingKey,
     section: Option<SectionId>,
 ) -> Result<(), String> {
+    #[cfg(feature = "no-sync")]
+    {
+        let _ = (owner, section);
+        return Ok(());
+    }
+    #[cfg(not(feature = "no-sync"))]
+    {
     let key = activity_key(owner, section);
     let contract_id = *key.id();
     let now = now_ms();
@@ -138,6 +145,7 @@ pub async fn load_activity(
     }))
     .await
     .map_err(|error| format!("get activity contract: {error}"))
+    }
 }
 
 pub async fn handle_contract_response(response: ContractResponse) -> Result<(), String> {
@@ -364,6 +372,18 @@ pub async fn record_activity(
     if let Some(error) = apply_err {
         return Err(format!("apply activity delta failed: {error}"));
     }
+    #[cfg(feature = "no-sync")]
+    {
+        ACTIVITY_BOARDS.with_mut(|boards| {
+            if let Some(board) = boards.get_mut(&contract_id) {
+                board.synced = true;
+                board.dirty = false;
+            }
+        });
+        let _ = (already_synced, key, owner, section);
+        return Ok(());
+    }
+    #[cfg(not(feature = "no-sync"))]
     if already_synced {
         send_client_request(ClientRequest::ContractOp(ContractRequest::Update {
             key,
