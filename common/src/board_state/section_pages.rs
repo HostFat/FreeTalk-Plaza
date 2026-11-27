@@ -124,8 +124,8 @@ impl AuthorizedSectionPageHeaderV1 {
         if self.header.page_size == 0 || self.header.page_size > MAX_TOPIC_PAGE_SIZE {
             return Err("section page size is out of range".to_string());
         }
-        if self.header.section_chain.last() != Some(&params.section) {
-            return Err("section page header chain does not end at its section".to_string());
+        if self.header.section_chain.first() != Some(&params.section) {
+            return Err("section page header chain does not start at its section".to_string());
         }
         let board_params = ChatBoardParametersV1 {
             owner: params.owner,
@@ -963,13 +963,17 @@ impl SectionPageStateV1 {
                         next.invites.push(token.clone());
                     }
                 }
-                next.compact_for_seal(params);
-                if !next.ownership.transfers.is_empty() {
+                if !next.admin.admins.is_empty()
+                    || !next.admin.revoked.is_empty()
+                    || !next.ownership.transfers.is_empty()
+                {
                     let board = next.verification_board();
                     board.admin.verify(&board, &board_params)?;
-                    board.invites.verify(&board, &board_params)?;
-                    board.members.verify(&board, &board_params)?;
-                    board.ownership.verify(&board, &board_params)?;
+                    if !next.ownership.transfers.is_empty() {
+                        board.invites.verify(&board, &board_params)?;
+                        board.members.verify(&board, &board_params)?;
+                        board.ownership.verify(&board, &board_params)?;
+                    }
                 }
                 header.verify_with_admins(params, &next.ownership, &next.admin)?;
                 incoming_seal.verify_with_admins(
@@ -979,6 +983,7 @@ impl SectionPageStateV1 {
                     &next.entries,
                 )?;
                 next.seal = Some(incoming_seal.clone());
+                next.compact_for_seal(params);
             }
             // Apply any edits included alongside or on top of the seal.
             for edit in &delta.entry_edits {
@@ -1120,6 +1125,9 @@ impl SectionPageStateV1 {
             let owner_id = board_params.owner_id();
             let has_transferred = !board.ownership.transfers.is_empty();
             for member in &new_authors {
+                if member.member.owner_member_id != owner_id {
+                    return Err("Author belongs to a different board".to_string());
+                }
                 if member.member.id() == owner_id && !has_transferred {
                     return Err("Owner should not be included in the members list".to_string());
                 }

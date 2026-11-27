@@ -530,6 +530,8 @@ pub struct DmStateDeltaV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DmStateSummaryV1 {
     pub state_version: u32,
+    #[serde(default)]
+    pub state_hash: [u8; 32],
 }
 
 impl DmStateV1 {
@@ -670,6 +672,7 @@ impl DmStateV1 {
             return Err("too many members".to_string());
         }
         let mut identities = HashSet::new();
+        let mut devices = HashSet::new();
         let mut creators = 0usize;
         for authorized in &self.members.members {
             authorized.verify()?;
@@ -688,7 +691,6 @@ impl DmStateV1 {
             if member.devices.len() > MAX_DEVICES_PER_MEMBER {
                 return Err("too many devices for a member".to_string());
             }
-            let mut devices = HashSet::new();
             for device in &member.devices {
                 if !devices.insert(device.device.device_id) {
                     return Err("duplicate device id".to_string());
@@ -877,9 +879,23 @@ impl DmStateV1 {
         generation.verify(&vk)
     }
 
+    pub fn content_hash(&self) -> [u8; 32] {
+        let payload = (
+            &self.members,
+            &self.invites,
+            &self.keys,
+            &self.messages,
+            &self.read,
+            &self.generation,
+        );
+        let bytes = encode(&payload).unwrap_or_default();
+        *blake3::hash(&bytes).as_bytes()
+    }
+
     pub fn summarize(&self) -> DmStateSummaryV1 {
         DmStateSummaryV1 {
             state_version: self.meta.state_version,
+            state_hash: self.content_hash(),
         }
     }
 
@@ -899,7 +915,13 @@ impl DmStateV1 {
     }
 
     pub fn delta(&self, summary: &DmStateSummaryV1) -> Option<DmStateDeltaV1> {
-        if summary.state_version >= self.meta.state_version {
+        let current_hash = self.content_hash();
+        let matches_content = if summary.state_hash != [0u8; 32] {
+            summary.state_hash == current_hash
+        } else {
+            summary.state_version >= self.meta.state_version
+        };
+        if matches_content {
             None
         } else {
             Some(self.full_delta(self.meta.state_version))
@@ -931,27 +953,15 @@ impl DmStateV1 {
             if meta.created_at != self.meta.created_at {
                 return Err("conversation created_at is immutable".to_string());
             }
-            if meta.state_version <= self.meta.state_version {
-                return Err("state version must increase".to_string());
+            if meta.name != self.meta.name {
+                return Err("conversation name is immutable".to_string());
             }
-            if meta.state_version == u32::MAX
-                || meta.state_version - self.meta.state_version > MAX_STATE_VERSION_JUMP
-            {
-                return Err("state version jump is too large".to_string());
+            if meta.state_version == u32::MAX {
+                return Err("state version exhausted".to_string());
             }
         }
 
         let mut next = self.clone();
-        if let Some(meta) = &delta.meta {
-            next.meta = meta.clone();
-        } else {
-            next.meta.state_version = next
-                .meta
-                .state_version
-                .checked_add(1)
-                .filter(|v| *v < u32::MAX)
-                .ok_or_else(|| "state version overflow".to_string())?;
-        }
         if let Some(members) = &delta.members {
             next.merge_members(members)?;
         }
@@ -970,6 +980,20 @@ impl DmStateV1 {
         if let Some(generation) = &delta.generation {
             next.merge_generation(generation)?;
         }
+        let changed = next.members != self.members
+            || next.invites != self.invites
+            || next.keys != self.keys
+            || next.messages != self.messages
+            || next.read != self.read
+            || next.generation != self.generation;
+        if changed {
+            next.meta.state_version = self
+                .meta
+                .state_version
+                .checked_add(1)
+                .filter(|v| *v < u32::MAX)
+                .ok_or_else(|| "state version overflow".to_string())?;
+        }
         next.verify(params)?;
         *self = next;
         Ok(())
@@ -979,14 +1003,7 @@ impl DmStateV1 {
         if other.meta.conversation_id != self.meta.conversation_id {
             return Err("conversation id mismatch".to_string());
         }
-        let version = self
-            .meta
-            .state_version
-            .max(other.meta.state_version)
-            .checked_add(1)
-            .filter(|v| *v < u32::MAX)
-            .ok_or_else(|| "state version overflow".to_string())?;
-        let delta = other.full_delta(version);
+        let delta = other.full_delta(other.meta.state_version);
         self.apply_delta(params, &delta)
     }
 
@@ -1041,7 +1058,18 @@ impl DmStateV1 {
                 } else if authorized.member.version == existing.member.version
                     && authorized.member != existing.member
                 {
-                    return Err("conflicting member versions".to_string());
+                    if authorized.member.role != existing.member.role {
+                        return Err("member role is immutable".to_string());
+                    }
+                    if authorized.member.joined_at != existing.member.joined_at {
+                        return Err("member joined_at is immutable".to_string());
+                    }
+                    if authorized.member.conversation_id != existing.member.conversation_id {
+                        return Err("member conversation_id is immutable".to_string());
+                    }
+                    if authorized.signature.to_bytes() < existing.signature.to_bytes() {
+                        *existing = authorized.clone();
+                    }
                 }
             } else {
                 self.members.members.push(authorized.clone());
@@ -1065,13 +1093,31 @@ impl DmStateV1 {
                 .iter_mut()
                 .find(|existing| existing.invite_id == invite.invite_id)
             {
-                if existing.used_at.is_some() {
-                    continue;
+                match (existing.used_at, invite.used_at) {
+                    (Some(existing_at), Some(incoming_at)) => {
+                        let incoming_wins = (
+                            incoming_at,
+                            invite.used_by,
+                            invite.signature.to_bytes(),
+                        ) < (
+                            existing_at,
+                            existing.used_by,
+                            existing.signature.to_bytes(),
+                        );
+                        if incoming_wins {
+                            *existing = invite.clone();
+                        }
+                    }
+                    (Some(_), None) => {}
+                    (None, Some(_)) => {
+                        *existing = invite.clone();
+                    }
+                    (None, None) => {
+                        if invite.signature.to_bytes() < existing.signature.to_bytes() {
+                            *existing = invite.clone();
+                        }
+                    }
                 }
-                let mut merged = invite.clone();
-                merged.used_at = existing.used_at.or(invite.used_at);
-                merged.used_by = existing.used_by.or(invite.used_by);
-                *existing = merged;
             } else {
                 self.invites.invites.push(invite.clone());
             }
@@ -1085,11 +1131,14 @@ impl DmStateV1 {
             let record = &authorized.record;
             let signer_vk = self.device_vk_any(&authorized.signer, record.sealed_at)?;
             authorized.verify(&signer_vk)?;
-            if self.keys.keys.iter().any(|existing| {
+            if let Some(existing) = self.keys.keys.iter_mut().find(|existing| {
                 existing.record.key_version == record.key_version
                     && existing.record.member == record.member
                     && existing.record.device == record.device
             }) {
+                if authorized.signature.to_bytes() < existing.signature.to_bytes() {
+                    *existing = authorized.clone();
+                }
                 continue;
             }
             if self.keys.keys.len() >= MAX_KEYS {
@@ -1164,7 +1213,10 @@ impl DmStateV1 {
         let at = incoming.closed_at.unwrap_or(i64::MAX);
         let vk = self.device_vk_any(&incoming.signer, at)?;
         incoming.verify(&vk)?;
-        if incoming.generation > self.generation.generation {
+        if incoming.generation > self.generation.generation
+            || (incoming.generation == self.generation.generation
+                && incoming.signature.to_bytes() < self.generation.signature.to_bytes())
+        {
             self.generation = incoming.clone();
         }
         Ok(())

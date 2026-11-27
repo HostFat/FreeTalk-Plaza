@@ -45,7 +45,8 @@ fn main() {
         1,
         1,
         IMAGE.to_vec(),
-    );
+    )
+    .sign_live(&parameters, &uploader);
     let retired = state
         .retire(&parameters, &uploader)
         .expect("uploader can retire");

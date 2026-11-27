@@ -29,6 +29,16 @@ fn state_bytes(state: &DmStateV1) -> Result<Vec<u8>, ContractError> {
     Ok(bytes)
 }
 
+fn check_size(bytes: &[u8], label: &str) -> Result<(), ContractError> {
+    if bytes.len() > MAX_STATE_BYTES {
+        return Err(contract_error(format!(
+            "{label} exceeds {} bytes",
+            MAX_STATE_BYTES
+        )));
+    }
+    Ok(())
+}
+
 #[contract]
 impl ContractInterface for Contract {
     fn validate_state(
@@ -39,6 +49,7 @@ impl ContractInterface for Contract {
         if state.as_ref().is_empty() {
             return Ok(ValidateResult::Valid);
         }
+        check_size(state.as_ref(), "state")?;
         let params = decode_params(parameters.as_ref()).map_err(ContractError::Deser)?;
         let state = decode_state(state.as_ref()).map_err(ContractError::Deser)?;
         state.verify(&params).map_err(contract_error)?;
@@ -54,6 +65,7 @@ impl ContractInterface for Contract {
         let params = decode_params(parameters.as_ref()).map_err(ContractError::Deser)?;
         let mut initialized = !state.as_ref().is_empty();
         let mut current = if initialized {
+            check_size(state.as_ref(), "state")?;
             decode_state(state.as_ref()).map_err(ContractError::Deser)?
         } else {
             DmStateV1::default()
@@ -65,6 +77,7 @@ impl ContractInterface for Contract {
                     if new_state.as_ref().is_empty() {
                         continue;
                     }
+                    check_size(new_state.as_ref(), "incoming state")?;
                     let incoming =
                         decode_state(new_state.as_ref()).map_err(ContractError::Deser)?;
                     if !initialized {
@@ -78,6 +91,7 @@ impl ContractInterface for Contract {
                     if delta.as_ref().is_empty() {
                         continue;
                     }
+                    check_size(delta.as_ref(), "delta")?;
                     let delta = decode_delta(delta.as_ref()).map_err(ContractError::Deser)?;
                     current
                         .apply_delta(&params, &delta)
@@ -89,6 +103,7 @@ impl ContractInterface for Contract {
                     delta: delta_bytes,
                 } => {
                     if !state_bytes.as_ref().is_empty() {
+                        check_size(state_bytes.as_ref(), "incoming state")?;
                         let incoming =
                             decode_state(state_bytes.as_ref()).map_err(ContractError::Deser)?;
                         if !initialized {
@@ -99,6 +114,7 @@ impl ContractInterface for Contract {
                         }
                     }
                     if !delta_bytes.as_ref().is_empty() {
+                        check_size(delta_bytes.as_ref(), "delta")?;
                         let delta =
                             decode_delta(delta_bytes.as_ref()).map_err(ContractError::Deser)?;
                         current

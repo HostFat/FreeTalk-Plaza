@@ -55,19 +55,21 @@ pub(crate) fn build_board_view(
         .iter()
         .map(|p| p.record.certificate.member.clone())
         .collect();
-    for proof in &authority.member_proofs {
-        view.roles.roles.extend(proof.status.roles.iter().cloned());
-        view.roles
-            .assignments
-            .extend(proof.status.assignments.iter().cloned());
-        view.bans.0.extend(proof.status.bans.iter().cloned());
-        view.ban_revocations
-            .revocations
-            .extend(proof.status.revocations.iter().cloned());
-        view.suspensions
-            .suspensions
-            .extend(proof.status.suspensions.iter().cloned());
-        members.push(proof.status.member.clone());
+    if authority.root.is_some() {
+        for proof in &authority.member_proofs {
+            view.roles.roles.extend(proof.status.roles.iter().cloned());
+            view.roles
+                .assignments
+                .extend(proof.status.assignments.iter().cloned());
+            view.bans.0.extend(proof.status.bans.iter().cloned());
+            view.ban_revocations
+                .revocations
+                .extend(proof.status.revocations.iter().cloned());
+            view.suspensions
+                .suspensions
+                .extend(proof.status.suspensions.iter().cloned());
+            members.push(proof.status.member.clone());
+        }
     }
     let mut seen_members = HashSet::new();
     members.retain(|member| seen_members.insert(member.member.id()));
@@ -397,6 +399,8 @@ pub(crate) fn verify_authority_records(
         proof_bans.verify(view, board_params)?;
         proof_revocations.verify(view, board_params)?;
         proof_suspensions.verify(view, board_params)?;
+    } else if !authority.member_proofs.is_empty() {
+        return Err("member proofs require an authority root".to_string());
     }
     if authority.source_configuration.is_none() && authority.policy.is_none() {
         return Err("the topic has no policy".to_string());
@@ -425,14 +429,18 @@ pub(crate) fn is_member_banned(
     member: MemberId,
     at_ms: i64,
 ) -> bool {
+    let proofs = if authority.root.is_some() {
+        authority.member_proofs.as_slice()
+    } else {
+        &[]
+    };
     let revoked: HashSet<_> = authority
         .ban_revocations
         .revocations
         .iter()
         .map(|revocation| revocation.revocation.ban_id.clone())
         .chain(
-            authority
-                .member_proofs
+            proofs
                 .iter()
                 .flat_map(|proof| proof.status.revocations.iter())
                 .map(|revocation| revocation.revocation.ban_id.clone()),
@@ -442,12 +450,7 @@ pub(crate) fn is_member_banned(
         .bans
         .0
         .iter()
-        .chain(
-            authority
-                .member_proofs
-                .iter()
-                .flat_map(|proof| proof.status.bans.iter()),
-        )
+        .chain(proofs.iter().flat_map(|proof| proof.status.bans.iter()))
         .any(|ban| {
             if ban.ban.banned_user != member {
                 return false;
@@ -467,13 +470,17 @@ pub(crate) fn is_member_suspended(
     member: MemberId,
     at_ms: i64,
 ) -> bool {
+    let proofs = if authority.root.is_some() {
+        authority.member_proofs.as_slice()
+    } else {
+        &[]
+    };
     authority
         .suspensions
         .suspensions
         .iter()
         .chain(
-            authority
-                .member_proofs
+            proofs
                 .iter()
                 .flat_map(|proof| proof.status.suspensions.iter()),
         )

@@ -303,7 +303,15 @@ impl ChatBoardStateV1 {
         parameters: &ChatBoardParametersV1,
     ) -> Result<(), String> {
         let mut covered: std::collections::HashSet<MemberId> =
-            self.members.members.iter().map(|m| m.member.id()).collect();
+            std::collections::HashSet::with_capacity(self.members.members.len());
+        for member in &self.members.members {
+            if !covered.insert(member.member.id()) {
+                return Err(format!(
+                    "Duplicate member ID in members list: {:?}",
+                    member.member.id()
+                ));
+            }
+        }
         for ban in &self.bans.0 {
             if let Some(target) = &ban.ban.target_member {
                 covered.insert(target.member.id());
@@ -386,7 +394,7 @@ impl ChatBoardStateV1 {
             .verify_records(self, parameters, &uncovered)
     }
 
-    fn verify_sectioned_layout(
+    pub fn verify_sectioned_layout(
         &self,
         _parameters: &ChatBoardParametersV1,
         section: Option<crate::board_state::sections::SectionId>,
@@ -650,7 +658,9 @@ impl ChatBoardStateV1 {
         // by the owner or by a current key-distribution role. Dropping the
         // others keeps the state valid after a member is pruned or a role
         // loses the permission.
+        let current_owner = self.ownership.current_owner(parameters);
         let authorized_signers: HashSet<MemberId> = std::iter::once(owner_id)
+            .chain(std::iter::once(current_owner))
             .chain(
                 self.members
                     .members
@@ -665,6 +675,7 @@ impl ChatBoardStateV1 {
                 let signer = blob.signer.unwrap_or(owner_id);
                 authorized_signers.contains(&signer)
                     && (blob.secret.member_id == owner_id
+                        || blob.secret.member_id == current_owner
                         || current_member_ids.contains(&blob.secret.member_id))
                     && blob.secret.secret_version <= current_version
                     && !blob.secret.ciphertext.is_empty()
@@ -695,11 +706,6 @@ impl ChatBoardStateV1 {
         suspensions.cleanup(self, parameters);
         self.suspensions = suspensions;
 
-        // Deterministic long-term pruning of expired suspensions and expired/
-        // deleted unreferenced invite tokens, anchored to the state's own max
-        // signed timestamp (never wall clock) so all peers converge identically.
-        self.prune_expired_records(parameters);
-
         let mut retirements = std::mem::take(&mut self.image_retirements);
         retirements.cleanup(self, parameters);
         self.image_retirements = retirements;
@@ -708,17 +714,21 @@ impl ChatBoardStateV1 {
         topics.cleanup(self, parameters);
         self.topics = topics;
 
-        // 6. Re-sort for deterministic ordering
-        self.members.members.sort_by_key(|m| m.member.id());
+        // 6. Re-sort and deduplicate deterministically before checking the
+        // authority root and deterministic pruning watermark.
+        self.members
+            .members
+            .sort_by(|a, b| a.member.id().cmp(&b.member.id()).then_with(|| a.signature.to_bytes().cmp(&b.signature.to_bytes())));
+        self.members.members.dedup_by_key(|m| m.member.id());
         self.member_info
             .member_info
             .sort_by_key(|info| info.member_info.member_id);
 
         // The root is a commitment, not the authority itself. A member-driven
         // delta, member cleanup, or ownership transfer can invalidate it
-        // without a new owner signature; drop the stale root and let the
-        // current owner sign a new one on the next sync. Topics then use the
-        // full authority lists.
+        // without a new owner signature; drop the stale root BEFORE computing
+        // `deterministic_watermark_ms` so stale root epochs cannot cause
+        // non-convergent pruning across peers.
         if let Some(root) = &self.authority_root.0 {
             let superseded_by_transfer = self.ownership.transfers.last().is_some_and(|t| {
                 root.root.epoch
@@ -727,6 +737,22 @@ impl ChatBoardStateV1 {
             let tree = crate::board_state::authority::AuthorityTreeV1::from_board(self);
             if superseded_by_transfer
                 || tree.root(root.root.epoch).digest != root.root.digest
+                || tree.content_hash() != root.root.content_hash
+            {
+                self.authority_root.0 = None;
+            }
+        }
+
+        // Deterministic long-term pruning of expired suspensions and expired/
+        // deleted unreferenced invite tokens, anchored to the state's own max
+        // signed timestamp (never wall clock) so all peers converge identically.
+        self.prune_expired_records(parameters);
+
+        // If pruning removed expired suspensions, re-check the authority root
+        // so it still commits to the post-prune authority tree.
+        if let Some(root) = &self.authority_root.0 {
+            let tree = crate::board_state::authority::AuthorityTreeV1::from_board(self);
+            if tree.root(root.root.epoch).digest != root.root.digest
                 || tree.content_hash() != root.root.content_hash
             {
                 self.authority_root.0 = None;

@@ -973,7 +973,7 @@ impl ComposableState for TopicIndexV1 {
                 old_state_summary
                     .activity
                     .get(&entry.activity.topic_id)
-                    .map(|known| known.generation != entry.activity.generation)
+                    .map(|known| known.generation < entry.activity.generation)
                     .unwrap_or(true)
             })
             .cloned()

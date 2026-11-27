@@ -156,8 +156,9 @@ impl WarningsV1 {
     }
 
     pub fn cleanup(&mut self, state: &ChatBoardStateV1, parameters: &ChatBoardParametersV1) {
+        let current_owner = state.ownership.current_owner(parameters);
         self.warnings.retain(|entry| {
-            entry.warning.target != parameters.owner_id()
+            entry.warning.target != current_owner
                 && state
                     .members
                     .members
@@ -237,14 +238,22 @@ impl ComposableState for WarningsV1 {
         &self,
         _parent_state: &Self::ParentState,
         _parameters: &Self::Parameters,
-        _old_state: &Self::Summary,
+        old_state: &Self::Summary,
     ) -> Option<Self::Delta> {
-        if self.warnings.is_empty() {
+        let current = warning_map(&self.warnings);
+        let warnings: Vec<AuthorizedWarning> = self
+            .warnings
+            .iter()
+            .filter(|entry| {
+                old_state.warnings.get(&entry.warning.target)
+                    != current.get(&entry.warning.target)
+            })
+            .cloned()
+            .collect();
+        if warnings.is_empty() {
             None
         } else {
-            Some(WarningsDelta {
-                warnings: self.warnings.clone(),
-            })
+            Some(WarningsDelta { warnings })
         }
     }
 
@@ -414,8 +423,9 @@ impl SuspensionsV1 {
     }
 
     pub fn cleanup(&mut self, state: &ChatBoardStateV1, parameters: &ChatBoardParametersV1) {
+        let current_owner = state.ownership.current_owner(parameters);
         self.suspensions.retain(|entry| {
-            entry.suspension.target != parameters.owner_id()
+            entry.suspension.target != current_owner
                 && state
                     .members
                     .members
@@ -427,7 +437,7 @@ impl SuspensionsV1 {
             (
                 entry.suspension.target.0 .0,
                 std::cmp::Reverse(entry.suspension.generation),
-                entry.signer_id(parameters).0 .0,
+                record_digest(&entry.suspension),
             )
         });
         self.suspensions

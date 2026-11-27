@@ -25,6 +25,7 @@ fn verify_member_proof(
     parameters: &ChatBoardParametersV1,
     ban: &AuthorizedUserBan,
 ) -> Result<(), String> {
+    let owner_id = parameters.owner_id();
     let target = ban
         .ban
         .target_member
@@ -42,11 +43,17 @@ fn verify_member_proof(
     by_id.insert(target.member.id(), target);
 
     for member in by_id.values() {
+        if member.member.owner_member_id != owner_id {
+            return Err("Membership proof belongs to another board".to_string());
+        }
         if member.member.join_proof.is_some() {
             return Err("Token-joined target needs the owner or an admin".to_string());
         }
         let inviter = member.member.invited_by;
-        if inviter == parameters.owner_id() {
+        if inviter == member.member.id() {
+            return Err("Self-invitation detected in membership proof".to_string());
+        }
+        if inviter == owner_id {
             member.verify_signature(&parameters.owner)?;
         } else if let Some(parent) = by_id.get(&inviter) {
             member.verify_signature(&parent.member.member_vk)?;
@@ -56,12 +63,21 @@ fn verify_member_proof(
     }
 
     let mut current = target.member.id();
+    let mut visited = HashSet::new();
+    let mut saw_banner = false;
     for _ in 0..64 {
-        if current == parameters.owner_id() {
-            return Err("The banner is not in the target's invite chain".to_string());
+        if current == owner_id {
+            return if saw_banner {
+                Ok(())
+            } else {
+                Err("The banner is not in the target's invite chain".to_string())
+            };
+        }
+        if !visited.insert(current) {
+            return Err("Invite chain is cyclic".to_string());
         }
         if current == ban.banned_by {
-            return Ok(());
+            saw_banner = true;
         }
         let member = by_id
             .get(&current)
@@ -359,17 +375,14 @@ impl BansV1 {
 
         if extra_bans > 0 {
             // Add oldest extra bans to invalid bans
-            // Sort by timestamp (newest first), with BanId as tie-breaker
+            // Sort by timestamp (oldest first), with BanId as tie-breaker
             let mut extra_bans_vec = self.0.clone();
             extra_bans_vec.sort_by(|a, b| {
-                // Primary: sort by timestamp (will be reversed, so older = later in list)
-                // Secondary: sort by BanId for deterministic tie-breaking
                 a.ban
                     .banned_at
                     .cmp(&b.ban.banned_at)
                     .then_with(|| a.id().cmp(&b.id()))
             });
-            extra_bans_vec.reverse();
 
             for ban in extra_bans_vec.iter().take(extra_bans) {
                 invalid_bans.insert(ban.id(), BanValidationError::ExceededMaximumBans);
@@ -395,6 +408,13 @@ impl ComposableState for BansV1 {
         parent_state: &Self::ParentState,
         parameters: &Self::Parameters,
     ) -> Result<(), String> {
+        let mut seen_ids = HashSet::with_capacity(self.0.len());
+        for ban in &self.0 {
+            if !seen_ids.insert(ban.id()) {
+                return Err(format!("Duplicate ban ID in bans list: {:?}", ban.id()));
+            }
+        }
+
         let invalid_bans = self.get_invalid_bans(parent_state, parameters, false);
         if !invalid_bans.is_empty() {
             let error_messages: Vec<String> = invalid_bans
@@ -579,6 +599,7 @@ impl BansV1 {
         parameters: &ChatBoardParametersV1,
     ) {
         let owner_id = parameters.owner_id();
+        let current_owner = parent_state.ownership.current_owner(parameters);
         let max_bans = parent_state.configuration.configuration.max_user_bans;
 
         self.0.sort_by(|a, b| {
@@ -595,7 +616,7 @@ impl BansV1 {
         let mut to_remove = self.0.len() - max_bans;
         let mut kept = Vec::with_capacity(max_bans.min(self.0.len()));
         for ban in std::mem::take(&mut self.0) {
-            if to_remove > 0 && ban.banned_by != owner_id {
+            if to_remove > 0 && ban.banned_by != owner_id && ban.banned_by != current_owner {
                 to_remove -= 1;
                 continue;
             }
