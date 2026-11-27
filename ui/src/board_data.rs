@@ -4823,7 +4823,7 @@ mod tests {
         use plaza_core::board_state::roles::{
             AuthorizedRole, AuthorizedRoleAssignment, Role, RoleAssignment, RolesDelta,
         };
-        use plaza_core::board_state::sections::{AuthorizedSection, SectionV1, SectionsDelta};
+        use plaza_core::board_state::sections::{AuthorizedSectionV1, SectionV1, SectionsDelta};
         use plaza_core::board_state::ChatBoardStateV1Delta;
 
         let mut rng = rand::thread_rng();
@@ -4925,7 +4925,7 @@ mod tests {
             "#6366f1".to_string(),
         )
         .with_allowed_roles(vec![role_id], sealed_name.clone(), true);
-        let authorized_section = AuthorizedSection::new(
+        let authorized_section = AuthorizedSectionV1::new(
             SectionV1 {
                 id: category_id,
                 parent: None,
@@ -4945,6 +4945,7 @@ mod tests {
                 signed_at: get_current_system_time(),
             },
             &owner_sk,
+            None,
         );
 
         let readers = board.category_readers(&category);
@@ -5413,8 +5414,8 @@ mod tests {
 
         // Synced board with members pruned but sections present: NOT awaiting sync
         let mut pruned_board = make_board(invitee_sk, vec![]);
-        use plaza_core::board_state::sections::{AuthorizedSection, SectionV1};
-        let dummy_section = AuthorizedSection::new(
+        use plaza_core::board_state::sections::{AuthorizedSectionV1, SectionV1};
+        let dummy_section = AuthorizedSectionV1::new(
             SectionV1 {
                 id: plaza_core::board_state::message::MessageId::from_bytes([1u8; 32]),
                 parent: None,
@@ -5434,6 +5435,7 @@ mod tests {
                 signed_at: std::time::SystemTime::UNIX_EPOCH,
             },
             &owner_sk,
+            None,
         );
         pruned_board
             .board_state
