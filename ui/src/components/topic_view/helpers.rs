@@ -70,7 +70,7 @@ pub(super) fn attach_topic_files(
             });
         });
         let board_for_upload = board_data.clone();
-        spawn_local(async move {
+        spawn(async move {
             match prepare_image(&file, ImageMode::StripMetadata).await {
                 Ok(prepared) => {
                     let record = PendingUpload {
