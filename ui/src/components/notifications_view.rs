@@ -310,46 +310,52 @@ fn TopicNotificationsView() -> Element {
         return rsx! {};
     };
     let owner = board_data.owner_vk;
+    let mode = board_data.notification_mode;
+    let mode_value = mode.as_str();
 
-    let mut unread: Vec<_> = board_data
-        .board_state
-        .topics
-        .entries
-        .iter()
-        .filter(|entry| {
-            !board_data.board_state.topics.is_hidden(&entry.entry.topic_id)
-                && board_data
+    let mut unread: Vec<_> = if mode == crate::board_data::NotificationMode::Muted {
+        Vec::new()
+    } else {
+        board_data
+            .board_state
+            .topics
+            .entries
+            .iter()
+            .filter(|entry| {
+                !board_data.board_state.topics.is_hidden(&entry.entry.topic_id)
+                    && board_data
+                        .board_state
+                        .topics
+                        .merged_into(&entry.entry.topic_id)
+                        .is_none()
+            })
+            .filter_map(|entry| {
+                let topic_id = entry.entry.topic_id;
+                let last_at = board_data
                     .board_state
                     .topics
-                    .merged_into(&entry.entry.topic_id)
-                    .is_none()
-        })
-        .filter_map(|entry| {
-            let topic_id = entry.entry.topic_id;
-            let last_at = board_data
-                .board_state
-                .topics
-                .activity_for(&topic_id)
-                .map(|activity| activity.activity.last_activity)
-                .unwrap_or(entry.entry.created_at);
-            if last_at <= board_data.topic_last_read(&topic_id) {
-                return None;
-            }
-            let title = crate::components::app::topic_contract::read_text(
-                &board_data,
-                &entry.entry.title,
-            )
-            .unwrap_or_else(|| "Untitled".to_string());
-            let author = board_data
-                .display_nickname(entry.entry.author)
-                .unwrap_or_else(|| entry.entry.author.to_string());
-            let (section, _) = board_data.board_state.topics.section_of(&topic_id);
-            let section = section.and_then(|id| {
-                crate::components::app::topic_contract::section_name(&board_data, &id)
-            });
-            Some((topic_id, title, author, last_at, section, entry.entry.author))
-        })
-        .collect();
+                    .activity_for(&topic_id)
+                    .map(|activity| activity.activity.last_activity)
+                    .unwrap_or(entry.entry.created_at);
+                if last_at <= board_data.topic_last_read(&topic_id) {
+                    return None;
+                }
+                let title = crate::components::app::topic_contract::read_text(
+                    &board_data,
+                    &entry.entry.title,
+                )
+                .unwrap_or_else(|| "Untitled".to_string());
+                let author = board_data
+                    .display_nickname(entry.entry.author)
+                    .unwrap_or_else(|| entry.entry.author.to_string());
+                let (section, _) = board_data.board_state.topics.section_of(&topic_id);
+                let section = section.and_then(|id| {
+                    crate::components::app::topic_contract::section_name(&board_data, &id)
+                });
+                Some((topic_id, title, author, last_at, section, entry.entry.author))
+            })
+            .collect()
+    };
     unread.sort_by_key(|entry| std::cmp::Reverse(entry.3));
 
     // Lazily fetch member/profile shards only for authors of visible unread topics.
@@ -399,7 +405,7 @@ fn TopicNotificationsView() -> Element {
 
     rsx! {
         div { class: "flex-1 flex flex-col min-w-0 min-h-0 bg-bg",
-            div { class: "flex items-center gap-2 px-6 py-3 border-b border-border",
+            div { class: "flex flex-wrap items-center gap-2 px-6 py-3 border-b border-border",
                 button {
                     r#type: "button",
                     class: "text-accent hover:text-accent/80 text-sm font-medium",
@@ -412,41 +418,67 @@ fn TopicNotificationsView() -> Element {
                     "← Back to topics"
                 }
                 h1 { class: "text-lg font-semibold text-text ml-2", "Notifications" }
-                div { class: "flex-1" }
-                if has_more_pages {
-                    button {
-                        r#type: "button",
-                        disabled: *loading_pages.read(),
-                        class: "px-3 py-1.5 bg-surface border border-border rounded-lg text-xs text-accent hover:border-accent/50 disabled:opacity-50",
-                        onclick: move |_| {
-                            loading_pages.set(true);
-                            spawn(async move {
-                                let _ = crate::components::app::section_contract::load_next_pages(
-                                    owner, 4,
-                                )
-                                .await;
-                                loading_pages.set(false);
+                div { class: "ml-auto flex flex-wrap items-center gap-2",
+                    label { class: "text-xs text-text-muted", r#for: "notification-mode",
+                        "Notify"
+                    }
+                    select {
+                        id: "notification-mode",
+                        class: "px-2 py-1.5 bg-surface border border-border text-text text-xs rounded-lg",
+                        value: "{mode_value}",
+                        onchange: move |event| {
+                            let mode = crate::board_data::NotificationMode::from_str(&event.value());
+                            BOARDS.with_mut(|boards| {
+                                if let Some(board) = boards.map.get_mut(&owner) {
+                                    board.notification_mode = mode;
+                                }
+                            });
+                            spawn_local(async {
+                                let _ = save_boards_to_delegate().await;
                             });
                         },
-                        if *loading_pages.read() {
-                            "Loading older pages…"
-                        } else {
-                            "Check older pages"
+                        option { value: "all", "All activity" }
+                        option { value: "mentions", "Mentions & replies" }
+                        option { value: "muted", "Muted" }
+                    }
+                    NotificationPermissionStatus {}
+                    if has_more_pages {
+                        button {
+                            r#type: "button",
+                            disabled: *loading_pages.read(),
+                            class: "px-3 py-1.5 bg-surface border border-border rounded-lg text-xs text-accent hover:border-accent/50 disabled:opacity-50",
+                            onclick: move |_| {
+                                loading_pages.set(true);
+                                spawn(async move {
+                                    let _ = crate::components::app::section_contract::load_next_pages(
+                                        owner, 4,
+                                    )
+                                    .await;
+                                    loading_pages.set(false);
+                                });
+                            },
+                            if *loading_pages.read() {
+                                "Loading older pages…"
+                            } else {
+                                "Check older pages"
+                            }
                         }
                     }
-                }
-                if !unread.is_empty() {
-                    button {
-                        r#type: "button",
-                        class: "px-3 py-1.5 bg-surface border border-border rounded-lg text-xs text-text",
-                        onclick: mark_all,
-                        "Mark all read"
+                    if !unread.is_empty() {
+                        button {
+                            r#type: "button",
+                            class: "px-3 py-1.5 bg-surface border border-border rounded-lg text-xs text-text",
+                            onclick: mark_all,
+                            "Mark all read"
+                        }
                     }
                 }
             }
             div { class: "flex-1 overflow-y-auto",
                 div { class: "max-w-4xl mx-auto px-4 py-6",
-                    if unread.is_empty() {
+                    if mode == crate::board_data::NotificationMode::Muted {
+                        p { class: "text-text-muted text-sm", "Notifications are muted for this board." }
+                    } else if unread.is_empty() {
                         p { class: "text-text-muted text-sm", "No unread topics." }
                     } else {
                         p { class: "text-xs text-text-muted mb-2", "{unread.len()} unread topic(s)" }

@@ -1045,6 +1045,14 @@ fn BoardGate(board_id: String, children: Element) -> Element {
             .is_some_and(|board| board.is_private() && board.get_secret().is_none())
     });
 
+    use_effect(move || {
+        let intercepted = INTERCEPTED_JOIN_TOKEN.read().clone();
+        if let Some(token) = intercepted {
+            *INTERCEPTED_JOIN_TOKEN.write() = None;
+            navigator().push(Route::JoinBoard { token });
+        }
+    });
+
     if exists() {
         if key_missing() {
             return rsx! {
