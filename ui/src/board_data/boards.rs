@@ -869,9 +869,11 @@ impl Boards {
                 .find(|existing| existing.image.instance == entry.image.instance)
             {
                 Some(existing) => {
+                    let was_published = existing.published || entry.published;
                     if entry.renewed_at > existing.renewed_at {
                         *existing = entry;
                     }
+                    existing.published = was_published;
                 }
                 None => self.owned_images.push(entry),
             }

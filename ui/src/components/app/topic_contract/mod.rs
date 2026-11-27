@@ -837,6 +837,7 @@ pub async fn send_reply_with_images(
     text: String,
     images: Vec<plaza_core::board_state::images::ImageRef>,
 ) -> Result<(), String> {
+    let published_images = images.clone();
     let part = ensure_part_for_new_post(owner, topic_id, part).await?;
     let prepared = prepare_reply(
         owner,
@@ -845,7 +846,9 @@ pub async fn send_reply_with_images(
         TopicPostContentV1::Text(text),
         images,
     )?;
-    publish_prepared_reply(owner, prepared).await
+    publish_prepared_reply(owner, prepared).await?;
+    crate::util::owned_images::mark_published(&published_images);
+    Ok(())
 }
 
 /// Create a poll reply. Votes are separate signed actions.

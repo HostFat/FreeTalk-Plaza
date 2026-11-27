@@ -177,6 +177,10 @@ pub struct OwnedChunkCopy {
     pub state: Vec<u8>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// One image this device uploaded, with what is needed to renew it and to
 /// attach it again without uploading.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -189,6 +193,11 @@ pub struct OwnedImage {
     pub uploaded_at: i64,
     #[serde(default)]
     pub renewed_at: i64,
+    /// Set once the image has been published in a topic post. Defaults to `true`
+    /// when deserializing older records so pre-existing published uploads are
+    /// never mistaken for unreferenced drafts.
+    #[serde(default = "default_true")]
+    pub published: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
@@ -1204,8 +1213,14 @@ impl BoardData {
                 let member_vk = member.member.member_vk;
 
                 // Encrypt the board secret for this member
-                let (ciphertext, nonce, ephemeral_key) =
-                    encrypt_secret_for_member(&new_secret, &member_vk);
+                let Ok((ciphertext, nonce, ephemeral_key)) =
+                    crate::util::ecies::try_encrypt_secret_for_member(&new_secret, &member_vk)
+                else {
+                    dioxus::logger::tracing::warn!(
+                        "Skipping rotated board secret for member with invalid public key"
+                    );
+                    continue;
+                };
 
                 // Create the encrypted secret record
                 let encrypted_secret = EncryptedSecretForMemberV1 {
@@ -1332,8 +1347,14 @@ impl BoardData {
                 let member_vk = member.member.member_vk;
 
                 // Encrypt the board secret for this member
-                let (ciphertext, nonce, ephemeral_key) =
-                    encrypt_secret_for_member(board_secret, &member_vk);
+                let Ok((ciphertext, nonce, ephemeral_key)) =
+                    crate::util::ecies::try_encrypt_secret_for_member(board_secret, &member_vk)
+                else {
+                    dioxus::logger::tracing::warn!(
+                        "Skipping board secret for member with invalid public key"
+                    );
+                    continue;
+                };
 
                 // Create the encrypted secret record
                 let encrypted_secret = EncryptedSecretForMemberV1 {
@@ -1368,8 +1389,17 @@ impl BoardData {
                 if already_has {
                     continue;
                 }
-                let (ciphertext, nonce, ephemeral_key) =
-                    encrypt_secret_for_member(secret, &member.member.member_vk);
+                let Ok((ciphertext, nonce, ephemeral_key)) =
+                    crate::util::ecies::try_encrypt_secret_for_member(
+                        secret,
+                        &member.member.member_vk,
+                    )
+                else {
+                    dioxus::logger::tracing::warn!(
+                        "Skipping historical board secret for member with invalid public key"
+                    );
+                    continue;
+                };
                 let encrypted_secret = EncryptedSecretForMemberV1 {
                     member_id,
                     secret_version: *version,
