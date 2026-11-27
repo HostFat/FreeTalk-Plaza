@@ -498,7 +498,7 @@ pub enum TopicActionKind {
 }
 
 impl TopicActionKind {
-    fn power(self) -> Option<ModerationPower> {
+    pub(crate) fn power(self) -> Option<ModerationPower> {
         match self {
             TopicActionKind::Edit => Some(ModerationPower::Edit),
             TopicActionKind::Delete
